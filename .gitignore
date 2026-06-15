@@ -17,6 +17,11 @@ build/
 # Qdrant локальные данные
 qdrant_storage/
 
+# Локальные модели и кэш HuggingFace (большие, хранить локально)
+models/
+hf-cache/
+downloads/
+
 # Загруженные пользователями файлы
 uploads/
 
