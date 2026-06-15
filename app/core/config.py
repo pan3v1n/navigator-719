@@ -9,6 +9,9 @@ class Settings(BaseSettings):
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_COLLECTION: str = "pp719"
 
+    EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large"
+    EMBEDDING_DIM: int = 1024
+
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
