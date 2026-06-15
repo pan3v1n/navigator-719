@@ -10,11 +10,12 @@
 **Срок**: 1–2 дня  
 
 - [~] Создать репозиторий на GitHub
-- [~] CLAUDE.md — полный контекст проекта
-- [~] ROADMAP.md — план фаз
-- [ ] `.env.example`, `.gitignore`, `requirements.txt` (скелет)
-- [ ] Базовая структура папок (`app/`, `knowledge_base/`, `scripts/`)
-- [ ] `main.py` — заглушка FastAPI с healthcheck `/ping`
+- [x] CLAUDE.md — полный контекст проекта
+- [x] ROADMAP.md — план фаз
+- [x] `.env.example`, `.gitignore`, `requirements.txt` (скелет)
+- [x] Базовая структура папок (`app/`, `knowledge_base/`, `scripts/`)
+- [x] `main.py` — заглушка FastAPI с healthcheck `/ping`
+- [x] Установить зависимости, проверить `GET /ping` локально
 - [ ] Загрузить в `knowledge_base/pp719/` текст ПП №719 с приложениями (PDF)
 - [ ] Проверить: клонировать репо на втором устройстве и запустить
 
