@@ -1,0 +1,37 @@
+# Секреты
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+
+# База данных (dev)
+*.db
+*.sqlite
+
+# Qdrant локальные данные
+qdrant_storage/
+
+# Загруженные пользователями файлы
+uploads/
+
+# IDE
+.vscode/
+.idea/
+*.iml
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Логи
+*.log
+logs/
+
+# Jupyter
+.ipynb_checkpoints/
