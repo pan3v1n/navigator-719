@@ -20,6 +20,7 @@ aiosqlite==0.20.0
 # Document parsing
 pdfplumber==0.11.4
 python-docx==1.1.2
+striprtf==0.0.32
 # easyocr==1.7.1        # OCR для сканов — добавить в V2 (требует PyTorch)
 
 # Settings & validation

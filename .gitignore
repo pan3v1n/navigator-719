@@ -35,3 +35,6 @@ logs/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Исходный RTF — большой файл, в репо не нужен (хранить локально)
+*.rtf
