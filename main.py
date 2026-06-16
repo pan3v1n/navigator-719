@@ -1,4 +1,5 @@
 from fastapi import FastAPI
+from app.api.routes import router as navigate_router
 from app.core.config import settings
 
 app = FastAPI(
@@ -6,6 +7,8 @@ app = FastAPI(
     version=settings.APP_VERSION,
     description="Навигатор по ПП РФ №719 для Курской ТПП",
 )
+
+app.include_router(navigate_router, tags=["navigator"])
 
 
 @app.get("/ping")
