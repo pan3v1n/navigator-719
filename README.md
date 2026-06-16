@@ -30,7 +30,9 @@ git clone https://github.com/pan3v1n/navigator-719.git
 cd navigator-719
 ```
 
-Подробная инструкция по настройке на новом устройстве — в файле [SETUP.md](SETUP.md).
+- **Запуск MVP** (Qdrant → индексация → Streamlit/API) — [docs/ЗАПУСК.md](docs/ЗАПУСК.md)
+- **Настройка окружения с нуля** — [SETUP.md](SETUP.md)
+- **Тестирование с экспертом ТПП** — [docs/ТЕСТИРОВАНИЕ.md](docs/ТЕСТИРОВАНИЕ.md)
 
 ## Структура проекта
 
