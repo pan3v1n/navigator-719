@@ -1,0 +1,141 @@
+"""Гибридный поиск по базе знаний ПП №719 в Qdrant (dense e5 + sparse BM25, RRF).
+
+Возвращает наиболее релевантные позиции приложения для запроса. Если передан код
+ОКПД2 — позиции с совпадающим (по иерархии) кодом поднимаются наверх (буст), а при
+наличии точных совпадений гарантированно добавляются в выдачу (жёсткая подстраховка).
+
+См. docs/V1_SPEC.md, Шаг 2–3. Используется из app/rag/pipeline.py и API.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from functools import lru_cache
+
+from app.core.config import settings
+from app.rag.embeddings import embed_query
+from app.rag.sparse import query_vector
+
+DENSE = "dense"
+SPARSE = "bm25"
+
+
+@dataclass
+class Hit:
+    score: float
+    section_roman: str
+    product_name: str
+    okpd2_codes: list[str]
+    min_threshold: str | None
+    requirement_blocks: list[dict]
+    source_anchor: str | None
+    okpd2_match: bool = False
+    payload: dict = field(default_factory=dict)
+
+
+# --------------------------------------------------------------------------- #
+# ОКПД2: иерархическое сопоставление кодов
+# --------------------------------------------------------------------------- #
+def _segments(code: str) -> list[str]:
+    return [s for s in code.strip().replace(" ", "").split(".") if s]
+
+
+def okpd2_match(rec_codes: list[str], query_code: str) -> bool:
+    """True, если код записи и код запроса лежат на одной ветке ОКПД2 (один — префикс
+    другого посегментно). Так «29.20.23.110» матчит группу «29.20.23», а «29.20» —
+    более частную «29.20.23»."""
+    q = _segments(query_code)
+    if not q:
+        return False
+    for rc in rec_codes:
+        r = _segments(rc)
+        n = min(len(q), len(r))
+        if n and q[:n] == r[:n]:
+            return True
+    return False
+
+
+def _prefixes(code: str) -> list[str]:
+    segs = _segments(code)
+    return [".".join(segs[: i + 1]) for i in range(len(segs))]
+
+
+# --------------------------------------------------------------------------- #
+# Поиск
+# --------------------------------------------------------------------------- #
+@lru_cache(maxsize=1)
+def _client():
+    from qdrant_client import QdrantClient
+
+    return QdrantClient(url=settings.QDRANT_URL, timeout=30)
+
+
+def _to_hit(p) -> Hit:
+    pl = p.payload or {}
+    return Hit(
+        score=p.score,
+        section_roman=pl.get("section_roman", "?"),
+        product_name=pl.get("product_name", ""),
+        okpd2_codes=pl.get("okpd2_codes") or [],
+        min_threshold=pl.get("min_threshold"),
+        requirement_blocks=pl.get("requirement_blocks") or [],
+        source_anchor=pl.get("source_anchor"),
+        payload=pl,
+    )
+
+
+def _hybrid(query: str, limit: int, qfilter=None):
+    from qdrant_client import models
+
+    dvec = embed_query(query)
+    idx, val = query_vector(query)
+    res = _client().query_points(
+        collection_name=settings.QDRANT_COLLECTION,
+        prefetch=[
+            models.Prefetch(query=dvec, using=DENSE, limit=max(limit, 20), filter=qfilter),
+            models.Prefetch(
+                query=models.SparseVector(indices=idx, values=val),
+                using=SPARSE,
+                limit=max(limit, 20),
+                filter=qfilter,
+            ),
+        ],
+        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        limit=limit,
+        with_payload=True,
+    )
+    return res.points
+
+
+def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40) -> list[Hit]:
+    """Гибридный поиск. При наличии okpd2 — буст совпадающих по коду позиций и
+    жёсткая подстраховка (отдельный фильтрованный запрос по префиксам кода)."""
+    from qdrant_client import models
+
+    hits = [_to_hit(p) for p in _hybrid(query, pool)]
+
+    if okpd2:
+        for h in hits:
+            h.okpd2_match = okpd2_match(h.okpd2_codes, okpd2)
+
+        # Подстраховка: если в пуле нет совпадений по коду — отдельный жёсткий запрос
+        # по записям, чьи коды лежат на ветке запрашиваемого кода (MatchAny по префиксам).
+        if not any(h.okpd2_match for h in hits):
+            prefixes = _prefixes(okpd2)
+            if prefixes:
+                qfilter = models.Filter(
+                    must=[models.FieldCondition(
+                        key="okpd2_codes", match=models.MatchAny(any=prefixes)
+                    )]
+                )
+                seen = {h.source_anchor for h in hits}
+                for p in _hybrid(query, limit, qfilter=qfilter):
+                    h = _to_hit(p)
+                    if h.source_anchor not in seen:
+                        h.okpd2_match = True
+                        hits.append(h)
+
+        # Стабильная пересортировка: совпавшие по коду — выше, далее по score.
+        hits.sort(key=lambda h: (not h.okpd2_match, -h.score))
+
+    return hits[:limit]
