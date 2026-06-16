@@ -71,7 +71,7 @@ docker run -d --name qdrant --restart unless-stopped -p 6333:6333 -v D:/qdrant_s
 .venv\Scripts\python scripts\load_kb.py
 
 # 2) запустить интерфейс
-.venv\Scripts\python -m streamlit run frontend\app.py      # → http://localhost:8501
+.venv\Scripts\python -m streamlit run frontend\streamlit_app.py      # → http://localhost:8501
 ```
 
 📘 Подробно: **[docs/ЗАПУСК.md](docs/ЗАПУСК.md)** · настройка с нуля — **[SETUP.md](SETUP.md)**
@@ -121,7 +121,7 @@ navigator-719/
 │   ├── pp719/     chunks/ (исходные секции) · structured/ (9 разделов, 1601 продукт)
 │   ├── cases/     верифицированные кейсы эксперта (петля обучения)
 │   └── templates/ шаблоны актов (V3)
-├── frontend/app.py               Streamlit UI
+├── frontend/streamlit_app.py               Streamlit UI
 ├── scripts/
 │   ├── structure_kb.py           чанки → структурированный JSON (DeepSeek)
 │   ├── verify_structured.py      контроль качества (галлюцинации/потери)

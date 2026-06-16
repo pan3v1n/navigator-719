@@ -5,7 +5,7 @@
 (in-process), отдельный API-сервер для MVP не нужен.
 
 Запуск (нужен поднятый Qdrant и DEEPSEEK_API_KEY в .env):
-  .venv/Scripts/streamlit run frontend/app.py
+  .venv/Scripts/streamlit run frontend/streamlit_app.py
 """
 
 from __future__ import annotations

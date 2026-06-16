@@ -59,7 +59,7 @@
 - **RAG-пайплайн:** `app/rag/retriever.py` (гибрид + буст по ОКПД2), `app/rag/pipeline.py`
   (поиск → DeepSeek → ответ с обязательной пометкой эксперта), промпт навигатора в `prompts.py`.
 - **Навигатор + API:** `app/tools/navigator.py`, `POST /navigate` (`app/api/routes.py`+`schemas.py`).
-- **Интерфейс:** `frontend/app.py` (Streamlit MVP).
+- **Интерфейс:** `frontend/streamlit_app.py` (Streamlit MVP).
 - **Петля обучения:** `knowledge_base/cases/` + `scripts/seed_cases.py` + коллекция
   `verified_cases` — подтверждённые экспертом кейсы идут в контекст с высшим приоритетом.
 - **Документация запуска/теста:** `docs/ЗАПУСК.md`, `docs/ТЕСТИРОВАНИЕ.md`.
@@ -140,7 +140,7 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
 
 1. **Поднять и проверить MVP** — по [docs/ЗАПУСК.md](docs/ЗАПУСК.md): Docker→Qdrant,
    `.env` с ключом, разово `scripts/load_kb.py` (если коллекция пуста) + `scripts/seed_cases.py`,
-   затем `streamlit run frontend/app.py`. Прогнать 2–3 запроса для самопроверки.
+   затем `streamlit run frontend/streamlit_app.py`. Прогнать 2–3 запроса для самопроверки.
 2. **Тест с экспертом** — по [docs/ТЕСТИРОВАНИЕ.md](docs/ТЕСТИРОВАНИЕ.md): 5–10 реальных
    кейсов, оценка, критерий приёмки V1 — точность ≥ 70%.
 3. **Петля обучения** — исправления эксперта оформить в `knowledge_base/cases/*.json` →

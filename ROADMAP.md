@@ -63,7 +63,7 @@
 - [x] Базовый чек-лист документов (`build_checklist`): база ТПП + условные пункты (расчёт баллов при `points/mixed`, подтверждение порога при `min_threshold`, права на КД/ТД).
 
 ### 1.4 Интерфейс MVP ✅
-- [x] `frontend/app.py` — Streamlit UI: форма (описание + код ОКПД2 + число позиций) → анализ, источники, чек-лист, пометка эксперта. Вызывает `navigate()` in-process (API-сервер не нужен), кэш `st.cache_data`. Запуск: `.venv/Scripts/streamlit run frontend/app.py`. Headless-проверка: HTTP 200, health ok.
+- [x] `frontend/streamlit_app.py` — Streamlit UI: форма (описание + код ОКПД2 + число позиций) → анализ, источники, чек-лист, пометка эксперта. Вызывает `navigate()` in-process (API-сервер не нужен), кэш `st.cache_data`. Запуск: `.venv/Scripts/streamlit run frontend/streamlit_app.py`. Headless-проверка: HTTP 200, health ok.
 - [x] Отображение источника: раздел, наименование, коды ОКПД2, порог, ключевые операции с баллами, `source_anchor`; бейдж «совпадение по коду».
 
 ### 1.5 Тестирование с экспертом
