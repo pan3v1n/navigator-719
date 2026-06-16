@@ -58,8 +58,17 @@ def check(roman: str) -> None:
     json_int: set[float] = set()
     texts: list[str] = []
     total = nulls = 0
+    metho_count = 0  # прозовые пороги из секционной записи-методички (раздельный учёт)
     halluc_ops = 0  # операции, чей балл вообще не встречается в законе как "N балл"
     for p in data:
+        # Секционная запись-методичка: прозовые пороги раздела (потолки НИОКР, ступенчатые
+        # минимумы). Учитываем их тексты, но считаем ОТДЕЛЬНО — не как операции продукта.
+        if p.get("record_type") == "section_methodology":
+            metho_lines = p.get("methodology_thresholds") or []
+            texts.extend(metho_lines)
+            texts.append(p.get("notes") or "")
+            metho_count += len(metho_lines)
+            continue
         # текст всех полей JSON — для проверки «потерь» (вкл. порог и примечания)
         texts.append(p.get("min_threshold") or "")
         texts.append(p.get("notes") or "")
@@ -90,12 +99,15 @@ def check(roman: str) -> None:
     ]
 
     flag = "⚠" if (hallucinated or lost) else "✅"
-    print(f"=== Раздел {roman} {flag}: {len(data)} продуктов, {total} операций (null={nulls}) ===")
+    n_products = sum(1 for p in data if p.get("record_type") != "section_methodology")
+    print(f"=== Раздел {roman} {flag}: {n_products} продуктов, {total} операций (null={nulls}) ===")
     print(
         f"  Выдуманные баллы (нет в законе): {hallucinated or 'НЕТ'}"
         + (f"  → в {halluc_ops} операциях ({halluc_ops*100//max(total,1)}%)" if hallucinated else "")
     )
     print(f"  Потеряно полностью (нет нигде в JSON): {lost or 'НЕТ'}")
+    if metho_count:
+        print(f"  Прозовые пороги раздела в записи-методичке (V2-доразбор): {metho_count}")
     print(
         f"  уник.баллов: закон={len(src_points)}, JSON-int={len(json_int)}; "
         f"из {len(missing)} недостающих сохранено в тексте/порогах: {len(missing) - len(lost)}"
