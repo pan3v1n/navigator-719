@@ -1,0 +1,286 @@
+"""Загрузка структурированной базы знаний ПП №719 в Qdrant (гибрид dense + sparse).
+
+Схема (см. docs/V1_SPEC.md, Шаг 0–3):
+  • один вид продукции = одна точка (чанк);
+  • dense-вектор — multilingual-e5-large (1024d, косинус);
+  • sparse-вектор — локальный BM25 (app/rag/sparse, Modifier.IDF на коллекции);
+  • payload — ВСЯ структура записи из structured/*.json (чтобы не перепарсивать) +
+    служебные поля для фильтра (okpd2_codes, section_roman, text).
+
+Запуск (из корня, через venv; нужен поднятый Qdrant на :6333):
+  .venv/Scripts/python.exe scripts/load_kb.py            # пересоздать коллекцию и загрузить всё
+  .venv/Scripts/python.exe scripts/load_kb.py --smoke    # + прогнать smoke-запросы
+  .venv/Scripts/python.exe scripts/load_kb.py --smoke-only  # только запросы (без перезагрузки)
+"""
+
+from __future__ import annotations
+
+import argparse
+import hashlib
+import json
+import sys
+from pathlib import Path
+from uuid import NAMESPACE_URL, uuid5
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.core.config import settings  # noqa: E402
+from app.rag.embeddings import embed_passages, embed_query  # noqa: E402
+from app.rag.sparse import doc_length, document_vector, query_vector  # noqa: E402
+
+STRUCT_DIR = ROOT / "knowledge_base" / "pp719" / "structured"
+CACHE_DIR = ROOT / ".emb_cache"
+DENSE = "dense"
+SPARSE = "bm25"
+
+# Примеры для smoke-теста: (запрос, ожидаемый раздел/тема для глазами-проверки)
+SMOKE_QUERIES = [
+    ("производим прицепы и полуприцепы для легковых автомобилей", "29.20.23"),
+    ("сварка и окраска кузова легкового автомобиля", None),
+    ("станки металлорежущие с числовым программным управлением", None),
+    ("таблетки и капсулы, фармацевтическое производство", None),
+    ("чиллеры и компрессорно-конденсаторные блоки", None),
+]
+
+
+# --------------------------------------------------------------------------- #
+# Текст записи для эмбеддинга (общий для dense и sparse)
+# --------------------------------------------------------------------------- #
+def build_text(rec: dict) -> str:
+    parts: list[str] = [rec.get("product_name") or ""]
+    title = rec.get("section_title")
+    if title:
+        parts.append(f"Раздел {rec.get('section_roman', '')}: {title}")
+    codes = rec.get("okpd2_codes") or []
+    if codes:
+        parts.append("ОКПД2: " + ", ".join(codes))
+    mt = rec.get("min_threshold")
+    if mt:
+        parts.append(str(mt))
+    for b in rec.get("requirement_blocks") or []:
+        comp = b.get("component")
+        if comp:
+            parts.append(comp)
+        for o in b.get("operations") or []:
+            t = o.get("text")
+            if t:
+                parts.append(t)
+    for ln in rec.get("methodology_thresholds") or []:  # запись-методичка
+        parts.append(ln)
+    notes = rec.get("notes")
+    if notes:
+        parts.append(str(notes))
+    return "\n".join(p for p in parts if p)
+
+
+def load_records() -> list[dict]:
+    recs: list[dict] = []
+    for f in sorted(STRUCT_DIR.glob("*.json")):
+        recs.extend(json.loads(f.read_text(encoding="utf-8")))
+    if not recs:
+        sys.exit(f"Нет записей в {STRUCT_DIR} — сначала структуризация (structure_kb.py)")
+    return recs
+
+
+def point_id(rec: dict, i: int) -> str:
+    anchor = rec.get("source_anchor") or f"{rec.get('section_roman')}|{i}"
+    return str(uuid5(NAMESPACE_URL, f"pp719|{anchor}|{rec.get('product_name', '')}"))
+
+
+# --------------------------------------------------------------------------- #
+# Qdrant
+# --------------------------------------------------------------------------- #
+def make_client():
+    from qdrant_client import QdrantClient
+
+    return QdrantClient(url=settings.QDRANT_URL, timeout=60)
+
+
+def recreate_collection(client) -> None:
+    from qdrant_client import models
+
+    name = settings.QDRANT_COLLECTION
+    if client.collection_exists(name):
+        client.delete_collection(name)
+    client.create_collection(
+        collection_name=name,
+        vectors_config={
+            DENSE: models.VectorParams(
+                size=settings.EMBEDDING_DIM, distance=models.Distance.COSINE
+            )
+        },
+        sparse_vectors_config={
+            SPARSE: models.SparseVectorParams(modifier=models.Modifier.IDF)
+        },
+    )
+    # индекс по кодам ОКПД2 — для жёсткого фильтра/буста в retriever
+    client.create_payload_index(name, "okpd2_codes", models.PayloadSchemaType.KEYWORD)
+    client.create_payload_index(name, "section_roman", models.PayloadSchemaType.KEYWORD)
+
+
+def _text_key(text: str) -> str:
+    return hashlib.sha1(text.encode("utf-8")).hexdigest()
+
+
+def _cache_file() -> Path:
+    safe = settings.EMBEDDING_MODEL.replace("/", "_")
+    return CACHE_DIR / f"dense_{safe}.npz"
+
+
+def dense_vectors_cached(texts: list[str], batch: int = 128) -> list[list[float]]:
+    """Dense-векторы с диск-кэшем: e5 считаем только для новых/изменённых текстов.
+
+    Ключ — sha1(текст). Кэш привязан к модели (имя в имени файла). Повторные загрузки
+    после правок схемы переиндексируют лишь изменённые чанки — экономия минут на CPU.
+    """
+    import numpy as np
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
+
+    cache: dict[str, "np.ndarray"] = {}
+    f = _cache_file()
+    if f.exists():
+        data = np.load(f, allow_pickle=True)
+        cache = {k: v for k, v in zip(data["keys"], data["vecs"])}
+
+    keys = [_text_key(t) for t in texts]
+    missing = [i for i, k in enumerate(keys) if k not in cache]
+    print(f"Кэш эмбеддингов: {len(texts) - len(missing)}/{len(texts)} готовы, считаем {len(missing)} новых")
+
+    if missing:
+        bar = tqdm(total=len(missing), unit="чанк", desc="Эмбеддинг e5") if tqdm else None
+        for s in range(0, len(missing), batch):
+            idxs = missing[s : s + batch]
+            vecs = embed_passages([texts[i] for i in idxs])
+            for i, v in zip(idxs, vecs):
+                cache[keys[i]] = np.asarray(v, dtype=np.float32)
+            if bar:
+                bar.update(len(idxs))
+        if bar:
+            bar.close()
+        CACHE_DIR.mkdir(exist_ok=True)
+        all_keys = list(cache.keys())
+        np.savez(
+            f,
+            keys=np.array(all_keys, dtype=object),
+            vecs=np.stack([cache[k] for k in all_keys]),
+        )
+
+    return [cache[k].tolist() for k in keys]
+
+
+def index_all(client, recs: list[dict], batch: int = 128) -> None:
+    from qdrant_client import models
+
+    try:
+        from tqdm import tqdm
+    except ImportError:
+        tqdm = None
+
+    name = settings.QDRANT_COLLECTION
+    texts = [build_text(r) for r in recs]
+    # средняя длина документа в токенах — для нормировки BM25 по длине
+    lengths = [doc_length(t) for t in texts]
+    avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
+    print(f"avgdl (токенов на чанк): {avgdl:.1f}  | макс={max(lengths)}  мин={min(lengths)}")
+
+    dense_all = dense_vectors_cached(texts, batch=batch)
+
+    bar = tqdm(total=len(recs), unit="чанк", desc="Апсерт в Qdrant") if tqdm else None
+    for start in range(0, len(recs), batch):
+        points = []
+        for k in range(start, min(start + batch, len(recs))):
+            rec, text = recs[k], texts[k]
+            idx, val = document_vector(text, avgdl)
+            payload = dict(rec)
+            payload["text"] = text
+            points.append(
+                models.PointStruct(
+                    id=point_id(rec, k),
+                    vector={
+                        DENSE: dense_all[k],
+                        SPARSE: models.SparseVector(indices=idx, values=val),
+                    },
+                    payload=payload,
+                )
+            )
+        client.upsert(collection_name=name, points=points)
+        if bar:
+            bar.update(len(points))
+    if bar:
+        bar.close()
+
+
+# --------------------------------------------------------------------------- #
+# Smoke-поиск (мини-гибрид: dense + sparse, слияние RRF)
+# --------------------------------------------------------------------------- #
+def hybrid_search(client, query: str, limit: int = 5):
+    from qdrant_client import models
+
+    dvec = embed_query(query)
+    idx, val = query_vector(query)
+    res = client.query_points(
+        collection_name=settings.QDRANT_COLLECTION,
+        prefetch=[
+            models.Prefetch(query=dvec, using=DENSE, limit=20),
+            models.Prefetch(
+                query=models.SparseVector(indices=idx, values=val),
+                using=SPARSE,
+                limit=20,
+            ),
+        ],
+        query=models.FusionQuery(fusion=models.Fusion.RRF),
+        limit=limit,
+        with_payload=True,
+    )
+    return res.points
+
+
+def run_smoke(client) -> None:
+    print("\n" + "=" * 70)
+    print("SMOKE-ТЕСТ ГИБРИДНОГО ПОИСКА (dense e5 + sparse BM25, RRF)")
+    print("=" * 70)
+    for query, okpd2 in SMOKE_QUERIES:
+        print(f"\n🔎 «{query}»" + (f"  [ОКПД2 {okpd2}]" if okpd2 else ""))
+        for i, p in enumerate(hybrid_search(client, query), 1):
+            pl = p.payload or {}
+            codes = ", ".join(pl.get("okpd2_codes") or []) or "—"
+            print(
+                f"  {i}. [{pl.get('section_roman', '?')}] "
+                f"{(pl.get('product_name') or '')[:70]}  "
+                f"(score={p.score:.4f}, ОКПД2 {codes})"
+            )
+
+
+# --------------------------------------------------------------------------- #
+# CLI
+# --------------------------------------------------------------------------- #
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Загрузка базы знаний ПП №719 в Qdrant")
+    ap.add_argument("--smoke", action="store_true", help="после загрузки прогнать smoke-запросы")
+    ap.add_argument("--smoke-only", action="store_true", help="только smoke-запросы (без перезагрузки)")
+    ap.add_argument("--batch", type=int, default=128, help="размер батча апсерта")
+    args = ap.parse_args()
+
+    client = make_client()
+
+    if not args.smoke_only:
+        recs = load_records()
+        n_prod = sum(1 for r in recs if r.get("record_type") != "section_methodology")
+        print(f"Записей к загрузке: {len(recs)} (продуктов {n_prod} + методичек {len(recs) - n_prod})")
+        recreate_collection(client)
+        index_all(client, recs, batch=args.batch)
+        info = client.get_collection(settings.QDRANT_COLLECTION)
+        print(f"\n✅ Коллекция '{settings.QDRANT_COLLECTION}': точек = {info.points_count}")
+
+    if args.smoke or args.smoke_only:
+        run_smoke(client)
+
+
+if __name__ == "__main__":
+    main()
