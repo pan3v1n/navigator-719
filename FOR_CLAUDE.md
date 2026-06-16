@@ -43,8 +43,8 @@
    `scripts/parse_rtf.py` → `knowledge_base/pp719/pp719_full.txt` + 16 секций-чанков
    в `knowledge_base/pp719/chunks/` (по разделам приложения: автомобилестроение,
    радиоэлектроника, медизделия, стройматериалы и т.д.). RTF в репо НЕ хранится (в `.gitignore`).
-6. **Документация.** README.md, SETUP.md, РАБОТА_НА_ДРУГОМ_ПК.md, docs/V1_SPEC.md
-   (детальная техспека V1), docs/БЮДЖЕТ.md (смета по фазам).
+6. **Документация.** README.md, SETUP.md, WORK_ON_OTHER_PC.md, docs/V1_SPEC.md
+   (детальная техспека V1), docs/BUDGET.md (смета по фазам).
 7. **Проверка.** `GET /ping` → `{"status":"ok","version":"0.1.0"}` — работает.
 
 **Фаза V1 (RAG-навигатор, MVP) — сделано:**
@@ -62,7 +62,7 @@
 - **Интерфейс:** `frontend/streamlit_app.py` (Streamlit MVP).
 - **Петля обучения:** `knowledge_base/cases/` + `scripts/seed_cases.py` + коллекция
   `verified_cases` — подтверждённые экспертом кейсы идут в контекст с высшим приоритетом.
-- **Документация запуска/теста:** `docs/ЗАПУСК.md`, `docs/ТЕСТИРОВАНИЕ.md`.
+- **Документация запуска/теста:** `docs/LAUNCH.md`, `docs/TESTING.md`.
 
 **Принятые технические решения:**
 - **LLM:** DeepSeek V3 (`deepseek-chat`) — доступен из РФ, дёшев, понимает русский и юр. текст.
@@ -126,7 +126,7 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
 После всех шагов — окружение готово. Сообщи пользователю результат каждого шага.
 
 > Чтобы запустить **весь MVP** (индексация в Qdrant + Streamlit/API), а не только `/ping` —
-> см. [docs/ЗАПУСК.md](docs/ЗАПУСК.md). Структурированная база уже в репозитории, повторно
+> см. [docs/LAUNCH.md](docs/LAUNCH.md). Структурированная база уже в репозитории, повторно
 > парсить через DeepSeek не нужно — достаточно `scripts/load_kb.py`.
 
 ---
@@ -138,10 +138,10 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
 
 **Что делать дальше (по приоритету):**
 
-1. **Поднять и проверить MVP** — по [docs/ЗАПУСК.md](docs/ЗАПУСК.md): Docker→Qdrant,
+1. **Поднять и проверить MVP** — по [docs/LAUNCH.md](docs/LAUNCH.md): Docker→Qdrant,
    `.env` с ключом, разово `scripts/load_kb.py` (если коллекция пуста) + `scripts/seed_cases.py`,
    затем `streamlit run frontend/streamlit_app.py`. Прогнать 2–3 запроса для самопроверки.
-2. **Тест с экспертом** — по [docs/ТЕСТИРОВАНИЕ.md](docs/ТЕСТИРОВАНИЕ.md): 5–10 реальных
+2. **Тест с экспертом** — по [docs/TESTING.md](docs/TESTING.md): 5–10 реальных
    кейсов, оценка, критерий приёмки V1 — точность ≥ 70%.
 3. **Петля обучения** — исправления эксперта оформить в `knowledge_base/cases/*.json` →
    `scripts/seed_cases.py` → ответы начинают учитывать кейсы с приоритетом.

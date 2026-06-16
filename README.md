@@ -74,7 +74,7 @@ docker run -d --name qdrant --restart unless-stopped -p 6333:6333 -v D:/qdrant_s
 .venv\Scripts\python -m streamlit run frontend\streamlit_app.py      # → http://localhost:8501
 ```
 
-📘 Подробно: **[docs/ЗАПУСК.md](docs/ЗАПУСК.md)** · настройка с нуля — **[SETUP.md](SETUP.md)**
+📘 Подробно: **[docs/LAUNCH.md](docs/LAUNCH.md)** · настройка с нуля — **[SETUP.md](SETUP.md)**
 
 ### Пример через API
 
@@ -108,7 +108,7 @@ curl -X POST http://localhost:8000/navigate \
 
 Платный только вызов DeepSeek (эмбеддинг и поиск — локальные, бесплатные). Один запрос ≈
 **3 000 токенов ≈ $0.0013 ≈ ¥0.009 ≈ ₽0.11** (~11 копеек), то есть **~₽110 за 1000 запросов**.
-Постоянных расходов на запрос нет. Подробный расчёт и сметы по фазам — в [docs/БЮДЖЕТ.md](docs/БЮДЖЕТ.md).
+Постоянных расходов на запрос нет. Подробный расчёт и сметы по фазам — в [docs/BUDGET.md](docs/BUDGET.md).
 
 ---
 
@@ -133,7 +133,7 @@ navigator-719/
 │   ├── verify_structured.py      контроль качества (галлюцинации/потери)
 │   ├── load_kb.py                JSON → Qdrant (гибрид dense+sparse)
 │   └── seed_cases.py             кейсы эксперта → коллекция verified_cases
-└── docs/          ЗАПУСК.md · ТЕСТИРОВАНИЕ.md · V1_SPEC.md · БЮДЖЕТ.md
+└── docs/          LAUNCH.md · TESTING.md · V1_SPEC.md · BUDGET.md
 ```
 
 ---
@@ -166,8 +166,8 @@ navigator-719/
 
 | Документ | О чём |
 |---|---|
-| [docs/ЗАПУСК.md](docs/ЗАПУСК.md) | Запуск MVP: Qdrant → индексация → Streamlit/API |
-| [docs/ТЕСТИРОВАНИЕ.md](docs/ТЕСТИРОВАНИЕ.md) | Протокол приёмочного теста с экспертом ТПП |
+| [docs/LAUNCH.md](docs/LAUNCH.md) | Запуск MVP: Qdrant → индексация → Streamlit/API |
+| [docs/TESTING.md](docs/TESTING.md) | Протокол приёмочного теста с экспертом ТПП |
 | [docs/V1_SPEC.md](docs/V1_SPEC.md) | Техническая спецификация V1 |
 | [ROADMAP.md](ROADMAP.md) | Фазы и статус |
 | [CLAUDE.md](CLAUDE.md) | Полный контекст проекта |

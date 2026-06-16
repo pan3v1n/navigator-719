@@ -122,7 +122,7 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 **V1-MVP функционально готов** (код пунктов 1.0–1.5): база в Qdrant (1602 позиции),
 гибрид-поиск + буст по ОКПД2, навигатор, `POST /navigate`, Streamlit UI, петля кейсов
 (`verified_cases`). Остался приёмочный тест с экспертом ТПП (критерий ≥70%) — не код.
-Запуск: [docs/ЗАПУСК.md](docs/ЗАПУСК.md). Детальный статус по пунктам — в **ROADMAP.md**.
+Запуск: [docs/LAUNCH.md](docs/LAUNCH.md). Детальный статус по пунктам — в **ROADMAP.md**.
 
 ---
 
