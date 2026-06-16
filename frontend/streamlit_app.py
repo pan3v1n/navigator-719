@@ -68,7 +68,9 @@ if submitted:
         st.subheader("Найденные позиции 719")
         for i, h in enumerate(nav.sources, 1):
             mark = "✅ совпадение по коду" if h.okpd2_match else f"score {h.score:.2f}"
-            with st.expander(f"{i}. [Раздел {h.section_roman}] {h.product_name[:80]} — {mark}"):
+            with st.expander(f"{i}. {h.product_name[:80]} — {mark}"):
+                if h.section_title:
+                    st.caption(f"Раздел: {h.section_title}")
                 if h.okpd2_codes:
                     st.write("**ОКПД2:** " + ", ".join(h.okpd2_codes))
                 if h.min_threshold:

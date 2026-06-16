@@ -13,6 +13,7 @@ class NavigateRequest(BaseModel):
 
 class SourceItem(BaseModel):
     section_roman: str
+    section_title: str = ""
     product_name: str
     okpd2_codes: list[str]
     min_threshold: str | None = None

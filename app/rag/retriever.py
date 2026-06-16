@@ -24,6 +24,7 @@ SPARSE = "bm25"
 class Hit:
     score: float
     section_roman: str
+    section_title: str
     product_name: str
     okpd2_codes: list[str]
     min_threshold: str | None
@@ -75,6 +76,7 @@ def _to_hit(p) -> Hit:
     return Hit(
         score=p.score,
         section_roman=pl.get("section_roman", "?"),
+        section_title=pl.get("section_title", ""),
         product_name=pl.get("product_name", ""),
         okpd2_codes=pl.get("okpd2_codes") or [],
         min_threshold=pl.get("min_threshold"),

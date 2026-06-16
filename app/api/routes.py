@@ -29,6 +29,7 @@ def navigate_endpoint(req: NavigateRequest) -> NavigateResponse:
         sources=[
             SourceItem(
                 section_roman=h.section_roman,
+                section_title=h.section_title,
                 product_name=h.product_name,
                 okpd2_codes=h.okpd2_codes,
                 min_threshold=h.min_threshold,

@@ -32,7 +32,8 @@ class Answer:
 def format_context(hits: list[Hit]) -> str:
     blocks: list[str] = []
     for i, h in enumerate(hits, 1):
-        lines = [f"[{i}] Раздел {h.section_roman} — {h.product_name}"]
+        sect = f"«{h.section_title}»" if h.section_title else f"Раздел {h.section_roman}"
+        lines = [f"[{i}] {h.product_name} (раздел {sect})"]
         if h.okpd2_codes:
             lines.append(f"    ОКПД2: {', '.join(h.okpd2_codes)}")
         if h.min_threshold:
