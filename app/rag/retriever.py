@@ -84,13 +84,13 @@ def _to_hit(p) -> Hit:
     )
 
 
-def _hybrid(query: str, limit: int, qfilter=None):
+def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None):
     from qdrant_client import models
 
     dvec = embed_query(query)
     idx, val = query_vector(query)
     res = _client().query_points(
-        collection_name=settings.QDRANT_COLLECTION,
+        collection_name=collection or settings.QDRANT_COLLECTION,
         prefetch=[
             models.Prefetch(query=dvec, using=DENSE, limit=max(limit, 20), filter=qfilter),
             models.Prefetch(
@@ -139,3 +139,24 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40)
         hits.sort(key=lambda h: (not h.okpd2_match, -h.score))
 
     return hits[:limit]
+
+
+def search_cases(query: str, limit: int = 3) -> list[dict]:
+    """Поиск по подтверждённым экспертом кейсам (коллекция verified_cases).
+
+    Возвращает список payload'ов кейсов со score в `_score`. Если коллекции нет или
+    она пуста — пустой список (петля кейсов опциональна, база работает и без неё)."""
+    client = _client()
+    name = settings.QDRANT_CASES_COLLECTION
+    try:
+        if not client.collection_exists(name):
+            return []
+    except Exception:  # noqa: BLE001 — Qdrant недоступен: не валим основной поиск
+        return []
+    points = _hybrid(query, limit, collection=name)
+    out: list[dict] = []
+    for p in points:
+        pl = dict(p.payload or {})
+        pl["_score"] = p.score
+        out.append(pl)
+    return out

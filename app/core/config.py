@@ -11,6 +11,7 @@ class Settings(BaseSettings):
     DATABASE_URL: str = "sqlite+aiosqlite:///./navigator.db"
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_COLLECTION: str = "pp719"
+    QDRANT_CASES_COLLECTION: str = "verified_cases"  # кейсы, подтверждённые экспертом ТПП
 
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large"
     EMBEDDING_DIM: int = 1024

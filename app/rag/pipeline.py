@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from app.core.config import settings
 from app.core.prompts import (
@@ -16,15 +16,17 @@ from app.core.prompts import (
     NAVIGATOR_SYSTEM_PROMPT,
     build_navigator_user_prompt,
 )
-from app.rag.retriever import Hit, search
+from app.rag.retriever import Hit, search, search_cases
 
 MAX_OPS_PER_HIT = 12  # ограничиваем контекст: у некоторых продуктов сотни операций
+MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
 
 
 @dataclass
 class Answer:
     text: str
     hits: list[Hit]
+    cases: list[dict] = field(default_factory=list)
 
 
 def format_context(hits: list[Hit]) -> str:
@@ -52,6 +54,18 @@ def format_context(hits: list[Hit]) -> str:
     return "\n\n".join(blocks)
 
 
+def format_cases(cases: list[dict]) -> str:
+    blocks: list[str] = []
+    for i, c in enumerate(cases, 1):
+        lines = [f"[Кейс {i}] {c.get('product_name', '')} (ОКПД2 {c.get('okpd2', '—')})"]
+        lines.append(f"    Ситуация: {c.get('query', '')}")
+        lines.append(f"    Ответ эксперта: {c.get('expert_answer', '')}")
+        if c.get("source"):
+            lines.append(f"    Источник: {c['source']}")
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)
+
+
 def _client():
     from openai import OpenAI
 
@@ -66,14 +80,20 @@ def _ensure_disclaimer(text: str) -> str:
 
 def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     hits = search(query, okpd2=okpd2, limit=limit)
-    if not hits:
+    cases = search_cases(query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
+    if not hits and not cases:
         return Answer(
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "
             "наименование продукции или укажите код ОКПД2.\n\n" + EXPERT_DISCLAIMER,
             hits=[],
         )
 
-    user = build_navigator_user_prompt(query, format_context(hits), okpd2)
+    user = build_navigator_user_prompt(
+        query,
+        format_context(hits),
+        okpd2,
+        cases=format_cases(cases) if cases else None,
+    )
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
         messages=[
@@ -82,7 +102,9 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
         ],
         temperature=0.1,
     )
-    return Answer(text=_ensure_disclaimer(resp.choices[0].message.content), hits=hits)
+    return Answer(
+        text=_ensure_disclaimer(resp.choices[0].message.content), hits=hits, cases=cases
+    )
 
 
 def main() -> None:
