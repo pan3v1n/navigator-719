@@ -146,19 +146,12 @@ git push
 
 ### Автопуш после каждого коммита (настраивается один раз на каждом ПК):
 
-**Windows PowerShell:**
-```powershell
-Set-Content .git\hooks\post-commit "#!/bin/sh`ngit push origin main"
-```
+Хук `post-commit` пушит **текущую ветку** (`git push origin HEAD`) и пропускает
+экспериментальные `exp/*`. Канонический текст хука, модель веток и важное предупреждение
+«не затирать блок graphify при переустановке» — в **[docs/BRANCHING.md](docs/BRANCHING.md)**.
 
-**Linux / macOS:**
-```bash
-echo '#!/bin/sh
-git push origin main' > .git/hooks/post-commit
-chmod +x .git/hooks/post-commit
-```
-
-После этого `git push` будет выполняться автоматически при каждом `git commit`.
+> ⚠️ Старый вариант `git push origin main` устарел: на ветке `dev` он бы не пушил твои
+> изменения. Используй версию из BRANCHING.md (push `HEAD`).
 
 ---
 

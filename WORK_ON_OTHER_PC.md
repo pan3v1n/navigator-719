@@ -42,9 +42,9 @@ copy .env.example .env
 > синхронизируются git** (как и `.env`) — на новом ПК они скачиваются/строятся заново.
 
 ### 4. Включить автопуш (чтобы изменения сами улетали на GitHub)
-```powershell
-Set-Content .git\hooks\post-commit "#!/bin/sh`ngit push origin main"
-```
+Хук `post-commit` пушит **текущую ветку** и пропускает экспериментальные `exp/*`.
+Канонический текст хука — в [docs/BRANCHING.md](docs/BRANCHING.md) (там же — модель веток
+`main`/`dev`/`exp` и предупреждение «не затирать блок graphify»).
 
 ### 5. Запустить Claude Code
 ```powershell

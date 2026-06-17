@@ -199,6 +199,7 @@ pip install graphifyy        # разово
 | [SETUP.md](SETUP.md) | Настройка окружения с нуля (вкл. provisioning модели e5) |
 | [docs/TESTING.md](docs/TESTING.md) | Протокол приёмочного теста с экспертом ТПП (+ готовая таблица `docs/test_cases.*`) |
 | [docs/IDEAS.md](docs/IDEAS.md) | Бэклог идей и гипотез по доработкам (LLM/RAG/бэкенд/фронт/инфра) |
+| [docs/BRANCHING.md](docs/BRANCHING.md) | Модель веток (main/dev/exp), PR-флоу, worktree, изоляция данных |
 | [docs/V1_SPEC.md](docs/V1_SPEC.md) | Техническая спецификация V1 |
 | [ROADMAP.md](ROADMAP.md) | Фазы и статус |
 | [CLAUDE.md](CLAUDE.md) | Полный контекст проекта |
