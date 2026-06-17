@@ -1,8 +1,17 @@
+from pathlib import Path
+
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Корень репозитория (app/core/config.py → app/core → app → корень).
+# Путь к .env делаем абсолютным, чтобы конфиг грузился независимо от cwd
+# (иначе запуск не из корня молча откатывает настройки к дефолтам).
+_ROOT = Path(__file__).resolve().parents[2]
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
+    model_config = SettingsConfigDict(
+        env_file=_ROOT / ".env", env_file_encoding="utf-8"
+    )
 
     DEEPSEEK_API_KEY: str = ""
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
