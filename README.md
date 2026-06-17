@@ -74,6 +74,11 @@ docker run -d --name qdrant --restart unless-stopped -p 6333:6333 -v D:/qdrant_s
 .venv\Scripts\python -m streamlit run frontend\streamlit_app.py      # → http://localhost:8501
 ```
 
+> 💡 При первом `load_kb.py` скачивается модель эмбеддингов **e5 (~2 ГБ)** с HuggingFace.
+> На нестабильной сети / из РФ: пакет `hf_xet` (уже в зависимостях) даёт устойчивую
+> чанковую докачку; либо зеркало `HF_ENDPOINT=https://hf-mirror.com`; либо скачать модель
+> вручную в `models/` и указать путь в `EMBEDDING_MODEL`. Подробности — в [SETUP.md](SETUP.md).
+
 📘 Подробно: **[docs/LAUNCH.md](docs/LAUNCH.md)** · настройка с нуля — **[SETUP.md](SETUP.md)**
 
 ### Пример через API
@@ -132,8 +137,9 @@ navigator-719/
 │   ├── structure_kb.py           чанки → структурированный JSON (DeepSeek)
 │   ├── verify_structured.py      контроль качества (галлюцинации/потери)
 │   ├── load_kb.py                JSON → Qdrant (гибрид dense+sparse)
-│   └── seed_cases.py             кейсы эксперта → коллекция verified_cases
-└── docs/          LAUNCH.md · TESTING.md · V1_SPEC.md · BUDGET.md
+│   ├── seed_cases.py             кейсы эксперта → коллекция verified_cases
+│   └── run_test_cases.py         прогон приёмочных кейсов → docs/test_cases.*
+└── docs/          LAUNCH.md · TESTING.md · IDEAS.md · V1_SPEC.md · BUDGET.md
 ```
 
 ---
@@ -190,7 +196,9 @@ pip install graphifyy        # разово
 | Документ | О чём |
 |---|---|
 | [docs/LAUNCH.md](docs/LAUNCH.md) | Запуск MVP: Qdrant → индексация → Streamlit/API |
-| [docs/TESTING.md](docs/TESTING.md) | Протокол приёмочного теста с экспертом ТПП |
+| [SETUP.md](SETUP.md) | Настройка окружения с нуля (вкл. provisioning модели e5) |
+| [docs/TESTING.md](docs/TESTING.md) | Протокол приёмочного теста с экспертом ТПП (+ готовая таблица `docs/test_cases.*`) |
+| [docs/IDEAS.md](docs/IDEAS.md) | Бэклог идей и гипотез по доработкам (LLM/RAG/бэкенд/фронт/инфра) |
 | [docs/V1_SPEC.md](docs/V1_SPEC.md) | Техническая спецификация V1 |
 | [ROADMAP.md](ROADMAP.md) | Фазы и статус |
 | [CLAUDE.md](CLAUDE.md) | Полный контекст проекта |

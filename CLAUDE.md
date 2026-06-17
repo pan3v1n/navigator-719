@@ -46,6 +46,12 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 - `QDRANT_URL` — адрес Qdrant (локально: http://localhost:6333)
 - `TELEGRAM_BOT_TOKEN` — если используется Telegram-интерфейс
 
+> **Модель эмбеддингов (provisioning).** По умолчанию e5-large качается с HuggingFace при
+> первом `load_kb`. На нестабильной сети / из РФ CDN рвётся — решения: `hf_xet` (уже в
+> requirements, чанковая докачка), зеркало `HF_ENDPOINT=https://hf-mirror.com`, либо ручная
+> папка `models/` + абсолютный путь в `EMBEDDING_MODEL`. Подробно — `SETUP.md` (Шаг 5),
+> бэклог по теме — `docs/IDEAS.md` (раздел Инфра). Сама модель и `models/` — в `.gitignore`.
+
 ---
 
 ## Структура репозитория
@@ -97,7 +103,13 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 │   └── test_tools.py
 │
 └── docs/
+    ├── LAUNCH.md          ← запуск MVP (Qdrant → индексация → UI)
+    ├── TESTING.md         ← протокол приёмки с экспертом ТПП
+    ├── IDEAS.md           ← бэклог идей/гипотез по доработкам
+    ├── test_cases.md/.csv ← готовые приёмочные кейсы с реальным выводом
     └── expert_guide.md    ← инструкция для эксперта ТПП
+
+(SETUP.md и WORK_ON_OTHER_PC.md — в корне репозитория.)
 ```
 
 ---

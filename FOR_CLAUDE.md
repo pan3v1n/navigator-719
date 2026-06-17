@@ -45,7 +45,7 @@
    радиоэлектроника, медизделия, стройматериалы и т.д.). RTF в репо НЕ хранится (в `.gitignore`).
 6. **Документация.** README.md, SETUP.md, WORK_ON_OTHER_PC.md, docs/V1_SPEC.md
    (детальная техспека V1), docs/BUDGET.md (смета по фазам).
-7. **Проверка.** `GET /ping` → `{"status":"ok","version":"0.1.0"}` — работает.
+7. **Проверка.** `GET /ping` → `{"status":"ok","app":"Навигатор ПП РФ №719","version":"0.1.0"}` — работает.
 
 **Фаза V1 (RAG-навигатор, MVP) — сделано:**
 - **Спринт 1 — инфраструктура:** Qdrant в Docker (:6333), `app/rag/embeddings.py` (e5-large, 1024d).
@@ -120,7 +120,7 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
 ```powershell
 .venv\Scripts\python main.py
 ```
-Открыть http://localhost:8000/ping → ожидается `{"status":"ok","version":"0.1.0"}`.
+Открыть http://localhost:8000/ping → ожидается `{"status":"ok","app":"Навигатор ПП РФ №719","version":"0.1.0"}`.
 Остановить сервер (Ctrl+C) после проверки.
 
 После всех шагов — окружение готово. Сообщи пользователю результат каждого шага.
@@ -128,6 +128,11 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
 > Чтобы запустить **весь MVP** (индексация в Qdrant + Streamlit/API), а не только `/ping` —
 > см. [docs/LAUNCH.md](docs/LAUNCH.md). Структурированная база уже в репозитории, повторно
 > парсить через DeepSeek не нужно — достаточно `scripts/load_kb.py`.
+>
+> ⚠️ Первый `load_kb.py` скачивает модель эмбеддингов **e5 (~2 ГБ)** с HuggingFace. На
+> нестабильной сети / из РФ CDN рвётся — используй `hf_xet` (уже в requirements, чанковая
+> докачка), зеркало `HF_ENDPOINT=https://hf-mirror.com` или ручную папку `models/` +
+> `EMBEDDING_MODEL` в `.env`. Подробно — [SETUP.md](SETUP.md), Шаг 5.
 
 ---
 
@@ -142,7 +147,9 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
    `.env` с ключом, разово `scripts/load_kb.py` (если коллекция пуста) + `scripts/seed_cases.py`,
    затем `streamlit run frontend/streamlit_app.py`. Прогнать 2–3 запроса для самопроверки.
 2. **Тест с экспертом** — по [docs/TESTING.md](docs/TESTING.md): 5–10 реальных
-   кейсов, оценка, критерий приёмки V1 — точность ≥ 70%.
+   кейсов, оценка, критерий приёмки V1 — точность ≥ 70%. Готовый набор из 12 кейсов с
+   реальным выводом сервиса уже собран — `docs/test_cases.csv` / `docs/test_cases.md`
+   (пересобрать: `scripts/run_test_cases.py`).
 3. **Петля обучения** — исправления эксперта оформить в `knowledge_base/cases/*.json` →
    `scripts/seed_cases.py` → ответы начинают учитывать кейсы с приоритетом.
 4. **Старт V2** (после приёмки V1) — валидатор документов + калькулятор баллов
@@ -171,7 +178,8 @@ docker run -d --name qdrant -p 6333:6333 -v ${PWD}\qdrant_storage:/qdrant/storag
 1. [CLAUDE.md](CLAUDE.md) — общий контекст и стек
 2. [ROADMAP.md](ROADMAP.md) — что сделано и что дальше
 3. [docs/V1_SPEC.md](docs/V1_SPEC.md) — детальный план V1
-4. [SETUP.md](SETUP.md) — полная инструкция по окружению
+4. [SETUP.md](SETUP.md) — полная инструкция по окружению (вкл. provisioning модели e5)
+5. [docs/IDEAS.md](docs/IDEAS.md) — бэклог идей/гипотез по доработкам (куда складывать новые)
 
 Начинай. Сначала — развёртывание (раздел 3), потом — Спринт 1 (раздел 4).
 ```

@@ -6,7 +6,7 @@
 
 ## Требования
 
-- Python 3.11 или новее (`py -3 --version`)
+- Python 3.12 (рекомендуется; 3.11+ тоже работает) (`py -3 --version`)
 - Git (`git --version`)
 - Доступ к интернету (для установки пакетов и DeepSeek API)
 - Docker — для Qdrant (опционально, можно заменить локальным бинарником)
@@ -57,6 +57,7 @@ QDRANT_URL=http://localhost:6333
 ```
 
 Остальные поля можно оставить по умолчанию для локальной разработки.
+Модель эмбеддингов (`EMBEDDING_MODEL`) — см. **Шаг 5** (важно при нестабильной сети / из РФ).
 
 ---
 
@@ -74,7 +75,35 @@ docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 
 ---
 
-## Шаг 5 — Восстановить исходный RTF-файл ПП №719
+## Шаг 5 — Модель эмбеддингов e5 и индексация базы знаний
+
+Гибридный поиск использует локальную модель **multilingual-e5-large** (~2 ГБ). По умолчанию
+она скачивается с HuggingFace при первом запуске индексации.
+
+```powershell
+.venv\Scripts\python scripts\load_kb.py        # JSON → Qdrant, ~1602 точки (разово, ~15–25 мин на CPU)
+.venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases (на старте пусто)
+```
+
+**Если скачивание модели рвётся (нестабильная сеть / из РФ)** — три способа:
+
+1. **hf_xet** (уже в `requirements.txt`) — чанковая докачка, устойчива к обрывам. Обычно
+   достаточно просто повторить запуск.
+2. **Зеркало** — добавить в `.env`: `HF_ENDPOINT=https://hf-mirror.com`.
+3. **Скачать вручную** в папку `models/` (gitignored) и указать абсолютный путь в `.env`:
+   ```env
+   EMBEDDING_MODEL=D:/navigator-719/models/multilingual-e5-large
+   ```
+   Нужны файлы: `model.safetensors`, `tokenizer.json`, `sentencepiece.bpe.model`,
+   `config.json`, `tokenizer_config.json`, `special_tokens_map.json`, `modules.json`,
+   `sentence_bert_config.json` и `1_Pooling/config.json`
+   (источник: `huggingface.co/intfloat/multilingual-e5-large` или зеркало `hf-mirror.com`).
+
+Коллекции Qdrant хранятся постоянно — индексацию повторять только при смене данных/схемы.
+
+---
+
+## Шаг 6 — Восстановить исходный RTF-файл ПП №719
 
 RTF-файл не хранится в репозитории (слишком большой, исключён в `.gitignore`).  
 Текст уже распарсен и лежит в `knowledge_base/pp719/` — **этот шаг нужен только если хотите перепарсить**.
@@ -90,14 +119,14 @@ RTF-файл не хранится в репозитории (слишком б�
 
 ---
 
-## Шаг 6 — Проверить что сервис запускается
+## Шаг 7 — Проверить что сервис запускается
 
 ```powershell
 .venv\Scripts\python main.py
 ```
 
 Открыть в браузере: [http://localhost:8000/ping](http://localhost:8000/ping)  
-Ожидаемый ответ: `{"status":"ok","version":"0.1.0"}`
+Ожидаемый ответ: `{"status":"ok","app":"Навигатор ПП РФ №719","version":"0.1.0"}`
 
 ---
 
