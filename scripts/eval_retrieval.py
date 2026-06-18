@@ -72,6 +72,7 @@ def evaluate(limit: int):
             "okpd2": c.get("okpd2") or "",
             "top_sec": top_sec,
             "rank": rank,
+            "okpd2_match": any(h.okpd2_match for h in hits),
             "dense_top1": dense_top1_cosine(c["query"]),
             "query": c["query"],
         })
@@ -116,6 +117,23 @@ def summarize(rows, limit: int) -> list[str]:
             lines.append(f"  → ПЕРЕСЕЧЕНИЕ (out_max={out_max:.3f} ≥ in_min={in_min:.3f}). "
                          f"Порог компромиссный — смотри таблицу, какие кейсы в зоне перекрытия.")
         lines.append("")
+
+        # симуляция первого слоя guard (как порог из pipeline ведёт себя на golden set)
+        try:
+            from app.rag.pipeline import RELEVANCE_SOFT
+
+            def flagged(r):  # как в pipeline: нет совпадения по коду И dense top-1 ниже порога
+                return (not r["okpd2_match"]) and r["dense_top1"] < RELEVANCE_SOFT
+
+            f_out = sum(1 for r in out if flagged(r))
+            f_in = sum(1 for r in ins if flagged(r))
+            lines.append(f"Симуляция out-of-scope guard (порог RELEVANCE_SOFT={RELEVANCE_SOFT}):")
+            lines.append(f"  флаг на {f_out}/{len(out)} out-of-scope (хорошо — попадут под правило 1б),")
+            lines.append(f"  флаг на {f_in}/{len(ins)} in-scope (безвредный nudge: ответ НЕ блокируется,")
+            lines.append("       при совпадении смысла модель всё равно отвечает по позиции).")
+            lines.append("")
+        except Exception:  # noqa: BLE001 — симуляция опциональна
+            pass
 
     # таблица
     lines.append(f"{'id':>3} {'scope':<5} {'ожид':>5} {'top1':>5} {'ранг':>5} {'dT1':>6}  запрос")

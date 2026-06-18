@@ -143,6 +143,22 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40)
     return hits[:limit]
 
 
+def dense_top1(query: str, qvec: list[float] | None = None) -> float:
+    """Косинусное сходство top-1 по ЧИСТО dense-поиску (e5). Сигнал релевантности для
+    out-of-scope guard: на продукции вне 719 оно стабильно ниже, чем на профильной
+    (калибровка — `docs/eval_report.md`). `qvec` — заранее посчитанный вектор запроса
+    (чтобы не эмбедить дважды), иначе считаем сами."""
+    dvec = qvec if qvec is not None else embed_query(query)
+    res = _client().query_points(
+        collection_name=settings.QDRANT_COLLECTION,
+        query=dvec,
+        using=DENSE,
+        limit=1,
+        with_payload=False,
+    )
+    return float(res.points[0].score) if res.points else 0.0
+
+
 def search_cases(query: str, limit: int = 3) -> list[dict]:
     """Поиск по подтверждённым экспертом кейсам (коллекция verified_cases).
 

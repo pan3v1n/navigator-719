@@ -16,10 +16,15 @@ from app.core.prompts import (
     NAVIGATOR_SYSTEM_PROMPT,
     build_navigator_user_prompt,
 )
-from app.rag.retriever import Hit, search, search_cases
+from app.rag.retriever import Hit, dense_top1, search, search_cases
 
 MAX_OPS_PER_HIT = 12  # ограничиваем контекст: у некоторых продуктов сотни операций
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
+# Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
+# Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
+# полоса перекрытия узкая, поэтому порог НЕ режет жёстко, а лишь поднимает флаг для модели
+# (финальное решение «вне сферы» принимает LLM по смыслу контекста, см. правило 1б промпта).
+RELEVANCE_SOFT = 0.83
 
 
 @dataclass
@@ -27,6 +32,7 @@ class Answer:
     text: str
     hits: list[Hit]
     cases: list[dict] = field(default_factory=list)
+    low_relevance: bool = False  # сработал ли сигнал out-of-scope guard
 
 
 def format_context(hits: list[Hit]) -> str:
@@ -89,11 +95,20 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
             hits=[],
         )
 
+    # Out-of-scope guard: совпадение по коду ОКПД2 или подтверждённый кейс = высокая
+    # уверенность, флаг не поднимаем. Иначе смотрим dense top-1 (один лёгкий запрос).
+    low_rel = (
+        not cases
+        and not any(h.okpd2_match for h in hits)
+        and dense_top1(query) < RELEVANCE_SOFT
+    )
+
     user = build_navigator_user_prompt(
         query,
         format_context(hits),
         okpd2,
         cases=format_cases(cases) if cases else None,
+        low_relevance=low_rel,
     )
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
@@ -104,7 +119,10 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
         temperature=0.1,
     )
     return Answer(
-        text=_ensure_disclaimer(resp.choices[0].message.content), hits=hits, cases=cases
+        text=_ensure_disclaimer(resp.choices[0].message.content),
+        hits=hits,
+        cases=cases,
+        low_relevance=low_rel,
     )
 
 
