@@ -19,13 +19,22 @@
 | LLM | DeepSeek V3 (`deepseek-chat`) | API доступен из РФ, дёшево, качественно |
 | Embeddings | `sentence-transformers` (локально) | Без внешних API, бесплатно |
 | Vector DB | Qdrant (self-hosted Docker) | Open source, РФ-доступен, production-ready |
-| RAG | LlamaIndex | Python, open source, гибкий |
+| RAG | **рукописный** (прямо на `qdrant_client` + `sentence-transformers`) | Полный контроль, минимум зависимостей при рваной сети; LlamaIndex НЕ используется (кандидат на стадию 4 — parent/child, см. ниже) |
 | Backend | FastAPI (Python 3.11+) | Стандарт, async, хорошая документация |
 | База данных | SQLite (dev) → PostgreSQL (prod) | Простой старт, масштабируется |
 | Frontend MVP | Streamlit | Быстро, Python, без фронтенд-разработчика |
 | Frontend Prod | React + Vite (V3+) | Только если MVP подтвердит ценность |
 | Хостинг | Selectel / Timeweb / Yandex Cloud | РФ-юрисдикция, ФЗ-152 |
 | Telegram UI | aiogram 3 (опционально) | Быстрый доступ для экспертов ТПП |
+
+> **RAG реализован вручную, без фреймворка.** Гибрид-поиск собран напрямую: dense — `e5-large`
+> (`sentence-transformers`, локально), sparse — **локальный BM25** (`app/rag/sparse.py`, mmh3 +
+> Snowball, без скачивания моделей), слияние — нативный `FusionQuery(RRF)` Qdrant + доменный
+> ОКПД2-буст. Это осознанный выбор под условия проекта (RF-first, рваная сеть DPI/zapret, контроль
+> над анти-галлюцинациями), а не недоработка. **LlamaIndex не подключён**; его рассматриваем точечно
+> только на стадии 4 (parent/child auto-merging), если упрёмся в усечение операций. Полный разбор
+> архитектуры и план улучшений — [docs/RAG_EXPLAINED.md](docs/RAG_EXPLAINED.md) и раздел RAG в
+> [docs/IDEAS.md](docs/IDEAS.md).
 
 ### Запуск Python
 ```bash
