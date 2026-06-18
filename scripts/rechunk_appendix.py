@@ -29,6 +29,13 @@ CHUNKS = ROOT / "knowledge_base" / "pp719" / "chunks"
 # Заголовок раздела приложения: римское число (любой длины) + точка + название.
 HEADER_RE = re.compile(r"(?m)^([IVXLC]+)\.[ \t]+(\S[^\n]{3,})$")
 
+# Конец продуктовых таблиц приложения = строка «Примечания:» (в файле РОВНО одна).
+# После неё идут сквозные пункты-примечания 1–80 (методические правила, НЕ продукция),
+# которые иначе влились бы в последний раздел (XXIX) и наплодили ~270 фантомных «продуктов».
+NOTES_RE = re.compile(r"(?m)^Примечания:$")
+# Конец блока примечаний = начало утратившего силу блока «ПРАВИЛА ВЫДАЧИ ЗАКЛЮЧЕНИЯ».
+NOTES_END_RE = re.compile(r"(?m)^ПРАВИЛА ВЫДАЧИ ЗАКЛЮЧЕНИЯ")
+
 _ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
 
 
@@ -43,7 +50,11 @@ def roman_to_int(s: str) -> int:
 
 # Целевые разделы (что перечанковываем) → латинский слаг и числовой префикс файла.
 # Префикс 1NN выбран, чтобы не сталкиваться с существующими 00..15 чанками.
-TARGETS: dict[str, tuple[int, str]] = {
+TARGETS: dict[str, tuple[int | str, str]] = {
+    # IV перезаписываем по СУЩЕСТВУЮЩЕМУ префиксу «05»: старый parse_rtf-чанк 05_IV содержал
+    # ВЕСЬ раздел V внутри себя (+67 задвоенных продуктов) — V потерял свой заголовок и влился
+    # в IV. rechunk вычистил V (отдельный 105_V), но 05_IV остался грязным. Режем IV из исходника.
+    "IV": ("05", "IV_fotonika_svetotehnika"),
     "V": (105, "V_energomash_elektrotehnika"),
     "X": (110, "X_stroymaterialy"),
     "XI": (111, "XI_mebel_derevoobrabotka"),
@@ -68,6 +79,8 @@ TARGETS: dict[str, tuple[int, str]] = {
 }
 # Старый сломанный чанк, который нужно удалить (X склеивал XI–XXIX).
 OLD_X = CHUNKS / "10_X_stroymaterialy.txt"
+# Отдельный чанк сквозных примечаний приложения (пункты 1–80) — doc_type='appendix_notes'.
+NOTES_CHUNK = CHUNKS / "130_PRIMECHANIYA_prilozheniya.txt"
 
 
 def find_appendix_sections(text: str):
@@ -83,16 +96,34 @@ def find_appendix_sections(text: str):
         if roman_to_int(roman) == expected:
             run.append([roman, title, m.start(), None])
             expected += 1
+    notes = NOTES_RE.search(text)
     for i, item in enumerate(run):
         if i + 1 < len(run):
             item[3] = run[i + 1][2]
         else:
-            # конец ПОСЛЕДНЕГО раздела (XXIX) = старт СЛЕДУЮЩЕГО заголовка после него.
-            # Это «I. Общие положения» тела постановления — иначе XXIX проглотил бы
-            # весь хвост документа (тот же баг, что был у X). Fallback — конец файла.
-            nxt = [s for s in starts if s > item[2]]
-            item[3] = nxt[0] if nxt else len(text)
+            # Конец ПОСЛЕДНЕГО раздела (XXIX) = строка «Примечания:» (конец продуктовых
+            # таблиц). НЕ следующий римский заголовок: между XXIX и «I. Общие положения»
+            # Правил лежат сквозные пункты-примечания 1–80 — они не продукция и иначе
+            # влились бы в XXIX (~270 фантомных «продуктов»: краны, медизделия и т.п.).
+            # Fallback — следующий заголовок / конец файла.
+            if notes and notes.start() > item[2]:
+                item[3] = notes.start()
+            else:
+                nxt = [s for s in starts if s > item[2]]
+                item[3] = nxt[0] if nxt else len(text)
     return [(r, t, text[s:e].strip()) for r, t, s, e in run]
+
+
+def find_notes_block(text: str) -> str | None:
+    """Блок сквозных примечаний приложения (пункты 1–80): от строки «Примечания:» до
+    начала утратившего силу блока «ПРАВИЛА ВЫДАЧИ ЗАКЛЮЧЕНИЯ» (далее идёт тело Правил).
+    Это методические правила (классификация продукции по разделам, пороги господдержки),
+    индексируются отдельным doc_type='appendix_notes', НЕ как продукты."""
+    start = NOTES_RE.search(text)
+    if not start:
+        return None
+    end = NOTES_END_RE.search(text, start.end())
+    return text[start.start():(end.start() if end else len(text))].strip()
 
 
 def count_products(body: str) -> int:
@@ -130,10 +161,18 @@ def main() -> None:
     print("-" * 78)
     print(f"ИТОГО строк-продуктов в приложении: {total}")
 
+    notes = find_notes_block(text)
+    n_notes = len(re.findall(r"(?m)^\d{1,2}(?:\(\d\))?\.\s", notes)) if notes else 0
+    print(f"\nБлок примечаний приложения: "
+          + (f"{n_notes} пунктов, {len(notes)} символов → {NOTES_CHUNK.name}" if notes else "НЕ найден"))
+
     if args.write:
         if OLD_X.exists():
             OLD_X.unlink()
             print(f"Удалён старый склеенный чанк: {OLD_X.name}")
+        if notes:
+            NOTES_CHUNK.write_text(f"# Примечания к приложению ПП №719\n\n{notes}\n", encoding="utf-8")
+            written.append(NOTES_CHUNK.name)
         print(f"Записано чанков: {len(written)}")
         for n in written:
             print("  +", n)
