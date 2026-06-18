@@ -388,9 +388,14 @@ def find_chunk(section: str | None, file_arg: str | None) -> Path:
     if not matches:
         sys.exit(f"Не нашёл чанк для раздела '{section}' в {CHUNKS_DIR}")
     if len(matches) > 1:
-        # Разделы-приложения с продукцией — файлы 02..10; процедурные части — 11+.
-        # Для структуризации нужны приложения, поэтому предпочитаем их.
-        appendix = [m for m in matches if (m.name[:2].isdigit() and 2 <= int(m.name[:2]) <= 10)]
+        # Разделы-приложения с продукцией: старые корректные чанки 02..10 ИЛИ
+        # перечанкованные (rechunk_appendix.py) с префиксом 1NN (105, 110..129).
+        # Процедурные части постановления (12_,13_,15_…) — пропускаем.
+        def _is_appendix(m: Path) -> bool:
+            mm = re.match(r"^(\d+)_", m.name)
+            return bool(mm) and (2 <= int(mm.group(1)) <= 10 or int(mm.group(1)) >= 100)
+
+        appendix = [m for m in matches if _is_appendix(m)]
         if len(appendix) == 1:
             return appendix[0]
         names = ", ".join(m.name for m in matches)

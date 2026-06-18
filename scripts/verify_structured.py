@@ -29,10 +29,11 @@ def _num(x) -> float:
 
 
 def chunk_for(roman: str) -> Path | None:
-    # приложения с продукцией — файлы 02..10
+    # приложения с продукцией: старые корректные чанки 02..10 ИЛИ перечанкованные
+    # (rechunk_appendix.py) с префиксом 1NN (105, 110..129). Процедурные части — пропуск.
     for f in sorted(CHUNKS.glob(f"*_{roman}_*.txt")):
-        prefix = f.name[:2]
-        if prefix.isdigit() and 2 <= int(prefix) <= 10:
+        m = re.match(r"^(\d+)_", f.name)
+        if m and (2 <= int(m.group(1)) <= 10 or int(m.group(1)) >= 100):
             return f
     return None
 
@@ -114,8 +115,15 @@ def check(roman: str) -> None:
     )
 
 
+ALL_ROMANS = [
+    "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII", "XIII",
+    "XIV", "XV", "XVI", "XVII", "XVIII", "XIX", "XX", "XXI", "XXII", "XXIII", "XXIV",
+    "XXV", "XXVI", "XXVII", "XXVIII", "XXIX",
+]
+
+
 def main() -> None:
-    romans = sys.argv[1:] or ["I", "II", "III", "IV", "VI", "VII", "VIII", "IX", "X"]
+    romans = sys.argv[1:] or ALL_ROMANS
     for r in romans:
         check(r)
         print()

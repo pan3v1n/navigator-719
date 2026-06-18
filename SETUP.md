@@ -81,7 +81,7 @@ docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 она скачивается с HuggingFace при первом запуске индексации.
 
 ```powershell
-.venv\Scripts\python scripts\load_kb.py        # JSON → Qdrant, ~1602 точки (разово, ~15–25 мин на CPU)
+.venv\Scripts\python scripts\load_kb.py        # JSON → Qdrant, ~1681 точка (разово, ~15–25 мин на CPU)
 .venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases (на старте пусто)
 ```
 

@@ -50,10 +50,10 @@
 **Фаза V1 (RAG-навигатор, MVP) — сделано:**
 - **Спринт 1 — инфраструктура:** Qdrant в Docker (:6333), `app/rag/embeddings.py` (e5-large, 1024d).
 - **Спринт 2 — структуризация:** `scripts/structure_kb.py` (регулярки + DeepSeek JSON) →
-  `knowledge_base/pp719/structured/*.json` — **9 разделов, 1601 продукт**. Контроль качества
-  `scripts/verify_structured.py` (галлюцинации/потери) → **чисто 9/9**. Фикс парсера X
+  `knowledge_base/pp719/structured/*.json` — **29 разделов, 1672 продукта**. Контроль качества
+  `scripts/verify_structured.py` (галлюцинации/потери) → **20/21 чисто, XXIX ⚠ (пороги вариантов кранов, V2)**. Фикс парсера X
   (многоколоночные пороги), запись-методичка прозовых порогов. Ускорение `--workers` + прогресс-бар.
-- **Спринт 3 — индексация:** `scripts/load_kb.py` → Qdrant (1602 точки, гибрид dense+sparse).
+- **Спринт 3 — индексация:** `scripts/load_kb.py` → Qdrant (1681 точка, гибрид dense+sparse).
   `app/rag/sparse.py` — локальный BM25 (mmh3+Snowball, без скачивания), нормировка по длине.
   Кэш эмбеддингов `.emb_cache/`, 18 потоков CPU.
 - **RAG-пайплайн:** `app/rag/retriever.py` (гибрид + буст по ОКПД2), `app/rag/pipeline.py`
