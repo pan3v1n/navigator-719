@@ -50,11 +50,23 @@ PRICE_IN_USD_PER_1M = 0.27
 PRICE_OUT_USD_PER_1M = 1.10
 USD_TO_CNY = 7.2
 
-OKPD2_RE = re.compile(r"\d{2}\.\d{2}(?:\.\d+)*")
-PRODUCT_START_RE = re.compile(r"^(из\s+)?\d{2}\.\d{2}")
-# Начало строки-продукта в таблице: код (возм. с «из») сразу перед разделителем ячеек `|`.
-# Используется в iter_rows как «жёсткий» старт логической строки (см. там).
-ROW_START_RE = re.compile(r"^(?:из\s+)?\d{2}\.\d{2}[\d.]*\s*\|")
+# Извлечение ОКПД2-кодов ИЗ ПОЛЯ-КОДА продукта (первая ячейка). Берём коды любой длины:
+# полные NN.NN.NN.NN и короткие классы NN / NN.N (напр. «Из 20» катализаторы XIV,
+# «Из 27.3» кабели V). Поле-код содержит только коды (+ «из»/запятые), поэтому годы/мусор
+# сюда не попадают. ВАЖНО: применять ТОЛЬКО к okpd2_field, не к тексту требований.
+OKPD2_RE = re.compile(r"\d{2}(?:\.\d+)*")
+# Сноски-маркеры в поле-коде: «19.20.31 <11>», «… <5>». Это ссылки на примечания
+# приложения, НЕ коды. Удаляем перед извлечением, иначе короткий OKPD2_RE ловит «11».
+FOOTNOTE_RE = re.compile(r"<[^>]*>")
+# Начало строки-продукта: код (возм. с «из/Из» — РЕГИСТРОНЕЗАВИСИМО) любой длины
+# (NN, NN.N, NN.NN…). `(?!\d)` не даёт «20» совпасть с годом «2018». Капитальное «Из» и
+# короткие коды встречались в разделах V, XIV, XV, XVII, XIX, XX, XXV — без этого их
+# строки-продукты молча терялись (уходили в component до первого продукта).
+PRODUCT_START_RE = re.compile(r"^(?:из\s+)?\d{2}(?:\.\d+)*(?!\d)", re.IGNORECASE)
+# Начало строки-продукта в таблице: код (возм. с «из/Из») сразу перед разделителем `|`.
+# Используется в iter_rows как «жёсткий» старт логической строки (см. там). Пайп после
+# кода сам отсекает годы («2018|» не матчит: после «20» идёт «18», а не `\s*\|`).
+ROW_START_RE = re.compile(r"^(?:из\s+)?\d{2}(?:\.\d+)*\s*\|", re.IGNORECASE)
 # Колонка-этап в таблицах пороговых баллов: «с 1 января 2026 г.», «до 30 июня 2023 г.»
 DATE_STAGE_RE = re.compile(r"(?:с|до)\s+\d{1,2}\s+\S+\s+\d{4}\s*г")
 BALL_RE = re.compile(r"\d+(?:[.,]\d+)?\s*балл")
@@ -190,7 +202,7 @@ def parse_section(text: str) -> tuple[str, list[Product]]:
             p = Product(
                 okpd2_field=payload["okpd2_field"],  # type: ignore[index]
                 name_raw=payload["name"],  # type: ignore[index]
-                okpd2_codes=OKPD2_RE.findall(payload["okpd2_field"]),  # type: ignore[index]
+                okpd2_codes=OKPD2_RE.findall(FOOTNOTE_RE.sub(" ", payload["okpd2_field"])),  # type: ignore[index]
                 position=len(products) + 1,
             )
             req_text = make_req_text(payload["req_cells"], stage_labels)  # type: ignore[index]
