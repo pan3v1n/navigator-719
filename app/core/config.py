@@ -31,7 +31,8 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     APP_TITLE: str = "Навигатор ПП РФ №719"
-    APP_VERSION: str = "0.1.0"
+    # 0.5.0 — движок навигатора готов; цель 1.0 = чат-ассистент по 719 (см. ROADMAP.md)
+    APP_VERSION: str = "0.5.0"
     ORG_NAME: str = "Курская ТПП"
 
 
