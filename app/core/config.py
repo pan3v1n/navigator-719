@@ -25,6 +25,10 @@ class Settings(BaseSettings):
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large"
     EMBEDDING_DIM: int = 1024
 
+    # LLM-реранкер top-k (стадия 2): +1 вызов DeepSeek на code-less запрос, поднял recall@1
+    # 0.95→0.98. Применяется только без совпадения по коду ОКПД2. Можно выключить для скорости.
+    RERANK_ENABLED: bool = True
+
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000

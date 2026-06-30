@@ -57,12 +57,16 @@ def first_rank(hits, expected_section: str) -> int | None:
     return None
 
 
-def evaluate(limit: int):
+def evaluate(limit: int, rerank_on: bool = False):
     data = json.loads(GOLDEN.read_text(encoding="utf-8"))
     cases = data["cases"]
     rows = []
     for c in cases:
         hits = search(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
+        # Реранкер (стадия 2): только при ОТСУТСТВИИ совпадения по коду (код авторитетнее).
+        if rerank_on and hits and not any(h.okpd2_match for h in hits):
+            from app.rag.reranker import rerank
+            hits = rerank(c["query"], hits)
         top_sec = hits[0].section_roman if hits else "—"
         rank = first_rank(hits, c["expected_section"]) if c["in_scope"] else None
         rows.append({
@@ -156,6 +160,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Eval-харнес ретрива навигатора 719")
     ap.add_argument("--limit", type=int, default=5, help="глубина выдачи (top-k)")
     ap.add_argument("--report", type=str, default="", help="путь для сохранения отчёта (markdown)")
+    ap.add_argument("--rerank", action="store_true",
+                    help="применить LLM-реранкер (DeepSeek) к code-less выдаче — замер стадии 2")
     args = ap.parse_args()
 
     try:
@@ -163,8 +169,10 @@ def main() -> None:
     except Exception as e:  # noqa: BLE001
         sys.exit(f"Qdrant недоступен ({e}).\nПодними Docker Desktop — коллекция pp719 встанет сама.")
 
-    rows = evaluate(args.limit)
+    rows = evaluate(args.limit, rerank_on=args.rerank)
     report = summarize(rows, args.limit)
+    if args.rerank:
+        report.insert(3, "  [РЕРАНКЕР ВКЛЮЧЁН: DeepSeek-rerank для code-less выдачи]")
     print("\n".join(report))
 
     if args.report:

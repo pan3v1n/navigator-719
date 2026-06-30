@@ -165,6 +165,11 @@ def _faithfulness_warning(nums: list[str]) -> str:
 
 def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     hits = search(query, okpd2=okpd2, limit=limit)
+    # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
+    # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
+    if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
+        from app.rag.reranker import rerank
+        hits = rerank(query, hits)
     cases = search_cases(query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
