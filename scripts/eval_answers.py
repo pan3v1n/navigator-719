@@ -52,6 +52,8 @@ DECLINE_RE = re.compile(
 )
 # Иероглифы (утечка DeepSeek): CJK + хирагана/катакана.
 CJK_RE = re.compile(r"[぀-ヿ一-鿿]")
+# Инлайн-цитата на позицию-источник: [1], [2]… (P1-промпт).
+CITE_RE = re.compile(r"\[\d+\]")
 
 
 def expected_section_title(hits, expected_roman: str) -> str | None:
@@ -100,6 +102,7 @@ def evaluate(limit: int, cases_limit: int):
             "guard_flagged": bool(ans.unverified_numbers),  # пометил ли рантайм-guard
             "attributed": attributed(text, c["expected_section"], ans.hits) if c["in_scope"] else None,
             "declined": bool(DECLINE_RE.search(text)),
+            "cited": bool(CITE_RE.search(text)),  # есть ли инлайн-ссылка [N] на позицию
             "disclaimer": EXPERT_DISCLAIMER[:40] in text,
             "cjk": bool(CJK_RE.search(text)),
             "low_relevance": ans.low_relevance,
@@ -125,6 +128,7 @@ def summarize(rows, limit: int) -> list[str]:
     if ins:
         f_ok, f_n = _rate(ins, lambda r: r["faithful"])
         a_ok, a_n = _rate(ins, lambda r: r["attributed"])
+        cit_ok, cit_n = _rate(ins, lambda r: r["cited"])
         d_ok, d_n = _rate(ins, lambda r: r["disclaimer"])
         c_ok, c_n = _rate(ins, lambda r: not r["cjk"])
         total_claims = sum(r["n_claims"] for r in ins)
@@ -138,6 +142,7 @@ def summarize(rows, limit: int) -> list[str]:
             L.append(f"      из них помечено рантайм-guard'ом эксперту: {g_ok}/{len(halluc_rows)} ответов "
                      f"(P0-постпроверка — незаземлённое число не уходит к эксперту незамеченным)")
         L.append(f"  Атрибуция раздела                   = {a_ok}/{a_n} = {a_ok / a_n:.2f}")
+        L.append(f"  Инлайн-цитаты [N] на позицию        = {cit_ok}/{cit_n} = {cit_ok / cit_n:.2f}")
         L.append(f"  Дисклеймер эксперта                 = {d_ok}/{d_n} = {d_ok / d_n:.2f}")
         L.append(f"  Без CJK-иероглифов                  = {c_ok}/{c_n} = {c_ok / c_n:.2f}")
         L.append("")
