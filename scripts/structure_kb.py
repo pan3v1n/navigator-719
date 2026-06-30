@@ -86,6 +86,9 @@ class Product:
     component_cells: list[str] = field(default_factory=list)
     amendments: list[str] = field(default_factory=list)
     position: int = 0
+    # Имя кодового продукта-родителя, если это бескодовая строка-вариант («Из …»-группа).
+    # Пусто для обычных кодовых продуктов. Нужно для пометки в notes (см. empty_stub).
+    parent_name: str = ""
 
     def raw_block(self) -> str:
         """Сырой текст продукта для подачи в LLM."""
@@ -159,6 +162,27 @@ def classify(fields: list[str]) -> tuple[str, object]:
     if f0.startswith("(") and ("ред." in f0 or "Постановлени" in f0):
         return "amendment", f0
     if f0 == "":
+        # Бескодовая СТРОКА-ПРОДУКТ: код пуст, но слот наименования (fields[1]) заполнен,
+        # напр. «|Катализаторы гидрокрекинга||», «|Насосы питательные и конденсатные||».
+        # Это варианты продукции под общим кодом предыдущего «Из …»-родителя. Отличаем от
+        # строки-ПРОДОЛЖЕНИЯ требований («||До 1 января…» / «| |…»), у которой слот имени
+        # ПУСТ. Требуем в имени хотя бы одну букву — иначе пунктуация-мусор («|,|», «|.|»)
+        # в некоторых чанках стала бы фантомным продуктом.
+        name = fields[1].strip() if len(fields) > 1 else ""
+        # Отсекаем НЕ-продукты, попавшие в слот имени из-за переносов нарезки:
+        #  • завершается на «;» — это пункт списка операций, обёрнутый на свою строку
+        #    (напр. XVIII «судовая система … <9>;»), а не наименование продукции;
+        #  • начинается с цифры — обрывок строки-исключения с кодом (XVII «15.20.14.143 "…")»).
+        # Реальные варианты (катализаторы, насосы питательные) — чистые именные группы.
+        is_variant = (
+            name
+            and re.search(r"[A-Za-zА-Яа-яЁё]", name)
+            and not name.endswith(";")
+            and not re.match(r"\d", name)
+        )
+        if is_variant:
+            req_cells = [c.strip() for c in fields[2:] if c.strip()]
+            return "variant_product", {"name": name, "req_cells": req_cells}
         req_cells = [c.strip() for c in fields[1:] if c.strip()]
         return ("component", req_cells) if req_cells else ("empty", None)
     # запасной случай: непустой первый столбец, но не код и не аннотация
@@ -192,6 +216,11 @@ def parse_section(text: str) -> tuple[str, list[Product]]:
     stage_labels: list[str] = []  # колонки-этапы текущей таблицы пороговых баллов
     warnings = 0
     excluded = 0  # строки-коды без имени и требований (исключённые позиции приложения)
+    variants = 0  # бескодовые строки-варианты, восстановленные как продукты группы «Из …»
+    # Последний КОДОВЫЙ продукт-родитель: бескодовые варианты ниже наследуют его код.
+    last_coded_field = ""
+    last_coded_codes: list[str] = []
+    last_coded_name = ""
 
     for row in iter_rows(text):
         kind, payload = classify(split_fields(row))
@@ -212,6 +241,36 @@ def parse_section(text: str) -> tuple[str, list[Product]]:
             p.amendments.extend(pending_amendments)
             pending_amendments = []
             products.append(p)
+            last_coded_field = p.okpd2_field
+            last_coded_codes = list(p.okpd2_codes)
+            last_coded_name = p.name_raw.strip()
+        elif kind == "variant_product":
+            # Бескодовая строка-вариант наследует код последнего кодового родителя
+            # («Из 20 Катализаторы гидроочистки» → «Катализаторы гидрокрекинга» = код 20).
+            # Становится самостоятельным продуктом → последующие строки-требования (||…)
+            # привязываются к нему. Без кодового родителя выше — деградируем к старому
+            # поведению (компонент последнего продукта), чтобы ничего не выдумать.
+            if last_coded_codes:
+                p = Product(
+                    okpd2_field=last_coded_field,
+                    name_raw=payload["name"],  # type: ignore[index]
+                    okpd2_codes=list(last_coded_codes),
+                    parent_name=last_coded_name,
+                    position=len(products) + 1,
+                )
+                req_text = make_req_text(payload["req_cells"], stage_labels)  # type: ignore[index]
+                if req_text:
+                    p.component_cells.append(req_text)
+                products.append(p)
+                variants += 1
+            elif products:
+                products[-1].component_cells.append(payload["name"])  # type: ignore[index]
+                if payload["req_cells"]:  # type: ignore[index]
+                    products[-1].component_cells.append(
+                        make_req_text(payload["req_cells"], stage_labels)  # type: ignore[index]
+                    )
+            else:
+                warnings += 1
         elif kind == "component":
             if products:
                 products[-1].component_cells.append(make_req_text(payload, stage_labels))  # type: ignore[arg-type]
@@ -242,6 +301,8 @@ def parse_section(text: str) -> tuple[str, list[Product]]:
         print(f"  ⚠ {warnings} строк-компонентов до первого продукта (пропущены)")
     if excluded:
         print(f"  ⓘ {excluded} пустых строк-кодов пропущено (исключённые позиции приложения)")
+    if variants:
+        print(f"  ⓘ {variants} бескодовых строк-вариантов восстановлено как продукты (наследуют код группы «Из …»)")
     return header, products
 
 
@@ -365,6 +426,17 @@ def methodology_record(roman: str, title: str, lines: list[str]) -> dict:
 def empty_stub(product: Product, roman: str, title: str) -> dict:
     """Продукт без требований во фрагменте — отдаём без вызова LLM (иначе модель
     дофантазирует несуществующие операции и баллы)."""
+    if product.parent_name:
+        # Бескодовый вариант группы «Из …» без собственных строк-требований: требования,
+        # как правило, заданы для группы у родительской позиции. Не выдумываем привязку —
+        # помечаем для доразбора, но делаем продукт находимым по имени (recall).
+        note = (
+            f"Вариант продукции в группе «{product.parent_name}» под общим кодом "
+            f"«{product.okpd2_field}». Отдельные требования к локализации во фрагменте не "
+            f"выделены — уточнить по родительской позиции группы (доразбор)."
+        )
+    else:
+        note = "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
     return {
         "section_roman": roman,
         "section_title": title,
@@ -376,7 +448,7 @@ def empty_stub(product: Product, roman: str, title: str) -> dict:
         "requirement_blocks": [],
         "amendments": product.amendments,
         "source_anchor": f"Приложение к ПП №719, Раздел {roman}, позиция {product.position}",
-        "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны.",
+        "notes": note,
     }
 
 
