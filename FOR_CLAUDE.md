@@ -71,7 +71,9 @@
 - **Vector DB:** Qdrant в Docker (у пользователя есть права администратора, выбран
   production-путь, а не встроенный режим). Конфиг гибкий — потом переключится на серверный
   Qdrant сменой `QDRANT_URL`.
-- **RAG:** LlamaIndex. **Backend:** FastAPI. **Frontend MVP:** Streamlit.
+- **RAG:** рукописный (qdrant_client + sentence-transformers напрямую; LlamaIndex НЕ используется —
+  RF-first, контроль над антигаллюцинациями). **Backend:** FastAPI. **Frontend MVP:** Streamlit
+  (вытесняется веб-чатом на FastAPI в 1.0).
 - **Поиск:** гибридный (dense e5 + sparse BM25 + RRF fusion) — чтобы точно ловить и
   смысловые описания, и коды ОКПД2.
 

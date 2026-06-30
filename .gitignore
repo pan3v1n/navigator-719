@@ -38,6 +38,9 @@ Thumbs.db
 *.log
 logs/
 
+# Дампы сессий Claude Code (выгрузки транскриптов в корень)
+*-navigator-719.txt
+
 # Jupyter
 .ipynb_checkpoints/
 

@@ -52,7 +52,7 @@ V1 = **навигация и консультация по тексту зако
 | **LLM** | DeepSeek V3 (`deepseek-chat`) | API | Доступен из РФ напрямую, дёшево (~$0.14/1M токенов), хорошо понимает русский и юридический текст |
 | **Embeddings** | `intfloat/multilingual-e5-large` | локально | Лучшее качество на русском, работает офлайн через `sentence-transformers`, без внешних API |
 | **Vector DB** | Qdrant | self-hosted Docker | Open source, РФ-доступен, поддерживает гибридный поиск (dense + sparse) |
-| **RAG-оркестрация** | LlamaIndex | 0.11+ | Гибкий, хорошо интегрируется с Qdrant и кастомными LLM |
+| **RAG-оркестрация** | рукописный (qdrant_client + sentence-transformers) | — | LlamaIndex НЕ используется — RAG собран вручную (RF-first, контроль над антигаллюцинациями). Историческая запись спека, см. CLAUDE.md |
 | **Backend** | FastAPI | 0.115+ | Async, автодокументация Swagger, стандарт индустрии |
 | **Frontend MVP** | Streamlit | 1.39+ | Быстрый UI на Python, без отдельного фронтенд-разработчика |
 | **Хранение данных** | SQLite | — | Логи запросов, кейсы экспертов (в V2 → PostgreSQL) |

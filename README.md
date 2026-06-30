@@ -114,7 +114,8 @@ curl -X POST http://localhost:8000/navigate \
 | Sparse | **BM25** (локально, mmh3 + Snowball) | точные термины и коды; без скачивания моделей |
 | Vector DB | **Qdrant** (Docker) | open source, РФ-доступен, гибридный поиск |
 | Backend | **FastAPI** (Python 3.12) | async, авто-документация |
-| Frontend MVP | **Streamlit** | быстрый UI без фронтенд-разработки |
+| Frontend 1.0 | **Лёгкий веб-фронт** (HTML/JS) на FastAPI | мультиюзер-чат + роли `user`/`expert`/`admin`, без React-сборки |
+| Frontend (ранний MVP) | **Streamlit** (форма) | навигатор-MVP; вытесняется чатом в 1.0 |
 
 Весь стек — RF-доступный и self-hosted; единственный внешний вызов — DeepSeek API.
 
