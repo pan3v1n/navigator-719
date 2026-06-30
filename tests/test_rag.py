@@ -117,6 +117,22 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn("Прицепы", out)
         self.assertIn("ответ эксперта", out)
 
+    def test_format_context_okpd2_match_marker(self):
+        # точный хит по коду помечается, чтобы модель отдала ему приоритет
+        self.assertIn("СОВПАДЕНИЕ ПО КОДУ ОКПД2", format_context([make_hit(okpd2_match=True)]))
+        self.assertNotIn("СОВПАДЕНИЕ ПО КОДУ ОКПД2", format_context([make_hit(okpd2_match=False)]))
+
+    def test_format_context_ranks_relevant_ops(self):
+        # мега-продукт: релевантная операция стоит ПОСЛЕ порога усечения
+        from app.rag.pipeline import MAX_OPS_PER_HIT
+        fillers = [{"text": f"операция номер {i}", "points": None} for i in range(MAX_OPS_PER_HIT)]
+        relevant = {"text": "сварка кузова автомобиля", "points": 400}
+        hit = make_hit(requirement_blocks=[{"operations": fillers + [relevant]}])
+        # без запроса последняя (релевантная) операция усекается
+        self.assertNotIn("сварка кузова автомобиля", format_context([hit]))
+        # с запросом она поднимается по релевантности и попадает в контекст
+        self.assertIn("сварка кузова автомобиля", format_context([hit], query="сварка кузова"))
+
 
 class TestUserPrompt(unittest.TestCase):
     def test_low_relevance_warning_present(self):

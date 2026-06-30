@@ -16,9 +16,10 @@ from app.core.prompts import (
     NAVIGATOR_SYSTEM_PROMPT,
     build_navigator_user_prompt,
 )
+from app.rag import sparse
 from app.rag.retriever import Hit, dense_top1, search, search_cases
 
-MAX_OPS_PER_HIT = 12  # ограничиваем контекст: у некоторых продуктов сотни операций
+MAX_OPS_PER_HIT = 15  # ограничиваем контекст: у некоторых продуктов сотни операций
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
 # Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
 # Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
@@ -35,26 +36,55 @@ class Answer:
     low_relevance: bool = False  # сработал ли сигнал out-of-scope guard
 
 
-def format_context(hits: list[Hit]) -> str:
+def _hit_operations(h: Hit) -> list[dict]:
+    """Плоский список операций хита (из всех requirement_blocks)."""
+    ops: list[dict] = []
+    for b in h.requirement_blocks:
+        ops.extend(b.get("operations") or [])
+    return ops
+
+
+def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
+    """Переставляет операции так, чтобы релевантные запросу шли первыми.
+
+    Нужно для мега-продуктов (сотни операций): усечение до MAX_OPS_PER_HIT иначе режет
+    нужное, оставляя первые попавшиеся. Скоринг — пересечение стем-токенов операции и
+    запроса (локальный токенизатор BM25, без сети/модели). Сортировка стабильна: при
+    равной релевантности исходный порядок сохраняется. Без запроса/совпадений — без изменений."""
+    qtok = set(sparse.tokenize(query)) if query else set()
+    if not qtok:
+        return ops
+    return sorted(ops, key=lambda o: -len(qtok & set(sparse.tokenize(o.get("text", "")))))
+
+
+def format_context(hits: list[Hit], query: str | None = None) -> str:
     blocks: list[str] = []
     for i, h in enumerate(hits, 1):
         sect = f"«{h.section_title}»" if h.section_title else f"Раздел {h.section_roman}"
-        lines = [f"[{i}] {h.product_name} (раздел {sect})"]
+        head = f"[{i}] {h.product_name} (раздел {sect})"
+        if h.okpd2_match:
+            head += "  ✓ СОВПАДЕНИЕ ПО КОДУ ОКПД2 (наиболее вероятная позиция)"
+        lines = [head]
         if h.okpd2_codes:
             lines.append(f"    ОКПД2: {', '.join(h.okpd2_codes)}")
         if h.min_threshold:
             lines.append(f"    Порог: {h.min_threshold}")
-        ops: list[str] = []
-        for b in h.requirement_blocks:
-            for o in b.get("operations") or []:
+        ops = _hit_operations(h)
+        total = len(ops)
+        if total > MAX_OPS_PER_HIT:
+            ops = _rank_operations(ops, query)
+        shown = ops[:MAX_OPS_PER_HIT]
+        if shown:
+            lines.append("    Ключевые операции:")
+            for o in shown:
                 pts = o.get("points")
                 ptxt = f" — {pts} балл." if pts is not None else " — балл зависит от условий/категории"
-                ops.append(f"      • {o.get('text', '')}{ptxt}")
-        if ops:
-            lines.append("    Ключевые операции:")
-            lines.extend(ops[:MAX_OPS_PER_HIT])
-            if len(ops) > MAX_OPS_PER_HIT:
-                lines.append(f"      … ещё {len(ops) - MAX_OPS_PER_HIT} операций")
+                lines.append(f"      • {o.get('text', '')}{ptxt}")
+            if total > MAX_OPS_PER_HIT:
+                tail = f"      … ещё {total - MAX_OPS_PER_HIT} операций"
+                if query:
+                    tail += " (показаны наиболее релевантные запросу)"
+                lines.append(tail)
         if h.source_anchor:
             lines.append(f"    Источник: {h.source_anchor}")
         blocks.append("\n".join(lines))
@@ -105,7 +135,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
 
     user = build_navigator_user_prompt(
         query,
-        format_context(hits),
+        format_context(hits, query),
         okpd2,
         cases=format_cases(cases) if cases else None,
         low_relevance=low_rel,

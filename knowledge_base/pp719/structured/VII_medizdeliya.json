@@ -675,23 +675,6 @@
   {
     "section_roman": "VII",
     "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.11.111"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 6",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
     "product_name": "Системы однофотонной эмиссионной компьютерной томографии (гамма-камеры)",
     "okpd2_codes": [
       "26.60.11.110"
@@ -722,74 +705,6 @@
     "amendments": [],
     "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 7",
     "notes": null
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.12.132"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 8",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.11.112"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 9",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.11.113"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 10",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.13.140"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 11",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
   },
   {
     "section_roman": "VII",
@@ -862,23 +777,6 @@
     "amendments": [],
     "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 12",
     "notes": null
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.11.119"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 13",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
   },
   {
     "section_roman": "VII",
@@ -2862,40 +2760,6 @@
   {
     "section_roman": "VII",
     "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.12.111"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 23",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.12.120"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 24",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
     "product_name": "Приборы для измерения кровяного давления (сфигмоманометры, тонометры, осциллометры)",
     "okpd2_codes": [
       "32.50.21.111"
@@ -2974,23 +2838,6 @@
   {
     "section_roman": "VII",
     "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.13.190"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 27",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
     "product_name": "Оборудование гемодиализное (искусственные почки, аппараты искусственной почки, диализаторы и др.)",
     "okpd2_codes": [
       "32.50.21.110"
@@ -3061,23 +2908,6 @@
   {
     "section_roman": "VII",
     "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "32.50.21.122"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 31",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
     "product_name": "Столы операционные",
     "okpd2_codes": [
       "32.50.30.110"
@@ -3103,23 +2933,6 @@
     "requirement_blocks": [],
     "amendments": [],
     "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 33",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "32.50.12"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 34",
     "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
   },
   {
@@ -4980,57 +4793,6 @@
   {
     "section_roman": "VII",
     "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "21.20.24.130"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 29.12.2022 N 2519)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 66",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "21.20.24.150"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 29.12.2022 N 2519)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 67",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "21.20.24.160"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 29.12.2022 N 2519)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 68",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
     "product_name": "Изделия стерильные одноразовые хирургические специальные из нетканых материалов для защиты пациента и медицинского персонала (белье стерильное одноразовое операционное из нетканых материалов, одежда стерильная одноразовая хирургическая из нетканых материалов, комплекты стерильные одноразовые специальные из нетканых материалов для защиты от патогенных биологических агентов)",
     "okpd2_codes": [
       "32.50.5"
@@ -5087,21 +4849,6 @@
     "amendments": [],
     "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 70",
     "notes": null
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "32.50.13.110"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 71",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
   },
   {
     "section_roman": "VII",
@@ -6655,23 +6402,6 @@
     "amendments": [],
     "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 99",
     "notes": null
-  },
-  {
-    "section_roman": "VII",
-    "section_title": "Медицинские изделия",
-    "product_name": "",
-    "okpd2_codes": [
-      "26.60.11.130"
-    ],
-    "tnved_codes": [],
-    "requirement_type": null,
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 08.08.2023 N 1293)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел VII, позиция 100",
-    "notes": "Во фрагменте приложения требования (операции/баллы) для этого вида продукции не указаны."
   },
   {
     "section_roman": "VII",

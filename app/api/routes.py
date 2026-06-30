@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import logging
+
 from fastapi import APIRouter, HTTPException
 
 from app.api.schemas import NavigateRequest, NavigateResponse, SourceItem
 from app.tools.navigator import navigate
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -19,8 +22,12 @@ def navigate_endpoint(req: NavigateRequest) -> NavigateResponse:
     """
     try:
         nav = navigate(req.query, okpd2=req.okpd2, limit=req.limit)
-    except Exception as e:  # noqa: BLE001 — наружу отдаём аккуратную 500
-        raise HTTPException(status_code=500, detail=f"Ошибка навигации: {e}") from e
+    except Exception as e:  # noqa: BLE001 — детали логируем, наружу только generic 500
+        logger.exception("Ошибка навигации (query=%r, okpd2=%r)", req.query, req.okpd2)
+        raise HTTPException(
+            status_code=500,
+            detail="Внутренняя ошибка при обработке запроса. Повторите попытку позже.",
+        ) from e
 
     return NavigateResponse(
         query=nav.query,

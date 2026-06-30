@@ -191,6 +191,7 @@ def parse_section(text: str) -> tuple[str, list[Product]]:
     pending_amendments: list[str] = []
     stage_labels: list[str] = []  # колонки-этапы текущей таблицы пороговых баллов
     warnings = 0
+    excluded = 0  # строки-коды без имени и требований (исключённые позиции приложения)
 
     for row in iter_rows(text):
         kind, payload = classify(split_fields(row))
@@ -223,8 +224,24 @@ def parse_section(text: str) -> tuple[str, list[Product]]:
                 pending_amendments.append(str(payload))
         # 'empty' игнорируем
 
+    # Исключённые позиции приложения («из 28.30.31 - Позиции исключены.», «… - Позиция
+    # исключена.») и осиротевшие коды: строка-код, к которой НЕ прицепилось ни наименования,
+    # ни строк-требований. Такой «продукт» пуст и лишь засоряет индекс (на запрос по коду
+    # всплывает хит с пустым именем). Отбрасываем — но ТОЛЬКО ПОСЛЕ привязки компонентов,
+    # иначе теряются реальные продукты с пустой ячейкой имени, но требованиями ниже
+    # (напр. «из 29.10.52.190|||» + последующие строки-компоненты).
+    kept: list[Product] = []
+    for p in products:
+        if not p.name_raw.strip() and not any(c.strip() for c in p.component_cells):
+            excluded += 1
+            continue
+        kept.append(p)
+    products = kept
+
     if warnings:
         print(f"  ⚠ {warnings} строк-компонентов до первого продукта (пропущены)")
+    if excluded:
+        print(f"  ⓘ {excluded} пустых строк-кодов пропущено (исключённые позиции приложения)")
     return header, products
 
 
