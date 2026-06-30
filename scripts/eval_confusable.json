@@ -1,0 +1,31 @@
+{
+  "_meta": {
+    "purpose": "Confusable-пары (P1 #5): запросы, склонные к КРОСС-СЕКЦИОННОМУ уводу. Источник — 24 кросс-секционные коллизии + 9 семантических дыр из eval_coverage/eval_paraphrase (сессия 2026-06-30). Цель: измерить РАЗЛИЧЕНИЕ — попадает ли верный раздел в top-1/top-3 и как часто соблазн-раздел перебивает верный. Прогон: scripts/eval_guard.py --mode confusable [--rerank] (после F1).",
+    "schema": "id, query, correct_section, tempting_section, note",
+    "ground_truth": "correct_section заземлён по фактическому разделу позиции в knowledge_base/pp719/structured/*.json; пары краны/экскаваторы III↔VI помечены как спорные (дубль-листинг)."
+  },
+  "cases": [
+    {"id": 1, "query": "электронный блок управления двигателем внутреннего сгорания", "correct_section": "IX", "tempting_section": "III", "note": "«двигатель» тянет в спецмаш III; ЭБУ — радиоэлектроника IX"},
+    {"id": 2, "query": "теплообменники и теплообменное оборудование", "correct_section": "XV", "tempting_section": "XXIII", "note": "перебивается конвекторами отопительными XXIII"},
+    {"id": 3, "query": "вакуумные насосы для промышленных установок", "correct_section": "XIX", "tempting_section": "XVIII", "note": "vs насосы вакуумные судовые XVIII"},
+    {"id": 4, "query": "стреловые грузоподъёмные краны", "correct_section": "VI", "tempting_section": "III", "note": "СПОРНО: краны дублируются III↔VI; также судовые XVIII (#14 реранкер чинил)"},
+    {"id": 5, "query": "одноковшовые экскаваторы", "correct_section": "III", "tempting_section": "VI", "note": "СПОРНО: golden #9, тяжмаш VI правдоподобен — сверить с экспертом"},
+    {"id": 6, "query": "контрольно-кассовая техника, кассовые аппараты", "correct_section": "IX", "tempting_section": "VII", "note": "«аппарат» тянет в медтехнику VII"},
+    {"id": 7, "query": "фильтры для очистки воздуха", "correct_section": "XVI", "tempting_section": "III", "note": "vs циклоны для очистки воздуха III"},
+    {"id": 8, "query": "буровые установки для бурения нефтяных и газовых скважин", "correct_section": "VI", "tempting_section": "XX", "note": "vs установки буровые в мобильном исполнении XX"},
+    {"id": 9, "query": "медицинские комплексы на автомобильном шасси", "correct_section": "VII", "tempting_section": "II", "note": "«шасси» тянет в автопром II"},
+    {"id": 10, "query": "прецизионные кондиционеры с точным контролем температуры и влажности", "correct_section": "XVI", "tempting_section": "IX", "note": "«контроль/датчик» тянет к датчикам влажности IX (семант. дыра)"},
+    {"id": 11, "query": "уровнемеры для резервуаров и ёмкостей", "correct_section": "XXII", "tempting_section": "XVIII", "note": "vs датчик уровня грузового (судовой) XVIII (семант. дыра)"},
+    {"id": 12, "query": "комбайны проходческие для проходки тоннелей и штолен", "correct_section": "VI", "tempting_section": "XVIII", "note": "семант. дыра: уходил в кабельные лотки XVIII"},
+    {"id": 13, "query": "трубоволочильные станы, оборудование для волочения труб", "correct_section": "VI", "tempting_section": "I", "note": "семант. дыра: уходил в станки токарные I / провода обмоточные V"},
+    {"id": 14, "query": "шестерённые гидравлические масляные насосы", "correct_section": "XIX", "tempting_section": "XVI", "note": "«зубчатые» тянет в части подшипников/шестерён XVI (семант. дыра)"},
+    {"id": 15, "query": "контейнеры-цистерны (танк-контейнеры) для перевозки сжиженных газов", "correct_section": "XV", "tempting_section": "XXI", "note": "путается с самим газом (пропан/бутан) XXI (семант. дыра)"},
+    {"id": 16, "query": "башня ветроэнергетической установки, ствол ветрогенератора", "correct_section": "XXIII", "tempting_section": "XVIII", "note": "«ствол/платформа» тянет в плавучие платформы XVIII (семант. дыра)"},
+    {"id": 17, "query": "радиолокационная и радионавигационная аппаратура", "correct_section": "IX", "tempting_section": "XVIII", "note": "vs приёмоиндикатор системы радионавигации (судовой) XVIII"},
+    {"id": 18, "query": "микрофоны и громкоговорители для аппаратуры связи", "correct_section": "IX", "tempting_section": "XXV", "note": "vs микрофоны для муз. инструментов XXV"},
+    {"id": 19, "query": "защитная обувь для рабочих на производстве", "correct_section": "XVII", "tempting_section": "III", "note": "«спецсредства» тянет в автотранспорт спецназначения III"},
+    {"id": 20, "query": "коммуникационная передающая аппаратура", "correct_section": "IX", "tempting_section": "IV", "note": "vs трансмиттеры/транспондеры для оптики IV"},
+    {"id": 21, "query": "компрессорные установки на смешанном хладагенте", "correct_section": "XXVI", "tempting_section": "XVI", "note": "vs компрессорные установки дыхательные XVI"},
+    {"id": 22, "query": "комплекты постельного белья: простыни, пододеяльники", "correct_section": "XVII", "tempting_section": "IX", "note": "семант. дыра: «комплекты» матчит «комплексы» IX лексически"}
+  ]
+}

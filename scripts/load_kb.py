@@ -6,6 +6,11 @@
   • sparse-вектор — локальный BM25 (app/rag/sparse, Modifier.IDF на коллекции);
   • payload — ВСЯ структура записи из structured/*.json (чтобы не перепарсивать) +
     служебные поля для фильтра (okpd2_codes, section_roman, text).
+  • текст для ЭМБЕДДИНГА (dense+sparse) ПО УМОЛЧАНИЮ — ИДЕНТИЧНОСТЬ записи
+    (build_embedding_text: имя/раздел/код/порог), БЕЗ операций; операции остаются в payload.
+    Это F1 (2026-06-30): полный текст топил дискриминативный сигнал имени бойлерплейтом →
+    product-level recall@1 0.886→0.972, перефраз raw 0.533→0.663 (см. docs/eval_coverage_report.md,
+    docs/eval_paraphrase_report.md). Откат к старому полному тексту — флаг --full-text.
 
 Запуск (из корня, через venv; нужен поднятый Qdrant на :6333):
   .venv/Scripts/python.exe scripts/load_kb.py            # пересоздать коллекцию и загрузить всё
@@ -72,6 +77,31 @@ def build_text(rec: dict) -> str:
     notes = rec.get("notes")
     if notes:
         parts.append(str(notes))
+    return "\n".join(p for p in parts if p)
+
+
+def build_embedding_text(rec: dict) -> str:
+    """F1: текст ДЛЯ ЭМБЕДДИНГА — только ИДЕНТИЧНОСТЬ продукта (имя/раздел/код/порог), БЕЗ
+    операций (рецепта локализации). Операции остаются в payload (для показа/генерации/расчёта
+    порога), но не топят дискриминативный сигнал имени в векторе.
+
+    Мотивация: `build_text` эмбеддит весь рецепт локализации (многословные generic операции
+    сборки/сварки + повсеместный бойлерплейт ЕАЭС) → dense-вектор схлопывается к centroid'у
+    «обобщённой машины», короткоотличительные записи становятся недостижимы даже отличительным
+    запросом (аномалия «Машины самоходные для добычи» → top-1 «Присадки к топливу»). Валидировано
+    e5-косинусами: identity-only поднял cos с отличительными запросами 0.78→0.84 и перевернул
+    результат. Попутно сокращает документ (≈×7) → снимает штраф BM25 за длину. См. memory
+    navigator-719-test-battery."""
+    parts: list[str] = [rec.get("product_name") or ""]
+    title = rec.get("section_title")
+    if title:
+        parts.append(f"Раздел {rec.get('section_roman', '')}: {title}")
+    codes = rec.get("okpd2_codes") or []
+    if codes:
+        parts.append("ОКПД2: " + ", ".join(codes))
+    mt = rec.get("min_threshold")
+    if mt:
+        parts.append(str(mt))
     return "\n".join(p for p in parts if p)
 
 
@@ -174,7 +204,7 @@ def dense_vectors_cached(texts: list[str], batch: int = 128) -> list[list[float]
     return [cache[k].tolist() for k in keys]
 
 
-def index_all(client, recs: list[dict], batch: int = 128) -> None:
+def index_all(client, recs: list[dict], batch: int = 128, text_fn=build_embedding_text) -> None:
     from qdrant_client import models
 
     try:
@@ -183,7 +213,7 @@ def index_all(client, recs: list[dict], batch: int = 128) -> None:
         tqdm = None
 
     name = settings.QDRANT_COLLECTION
-    texts = [build_text(r) for r in recs]
+    texts = [text_fn(r) for r in recs]
     # средняя длина документа в токенах — для нормировки BM25 по длине
     lengths = [doc_length(t) for t in texts]
     avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
@@ -265,6 +295,8 @@ def main() -> None:
     ap.add_argument("--smoke", action="store_true", help="после загрузки прогнать smoke-запросы")
     ap.add_argument("--smoke-only", action="store_true", help="только smoke-запросы (без перезагрузки)")
     ap.add_argument("--batch", type=int, default=128, help="размер батча апсерта")
+    ap.add_argument("--full-text", action="store_true",
+                    help="откат к эмбеддингу ВСЕГО текста с операциями; по умолчанию — identity (F1)")
     args = ap.parse_args()
 
     client = make_client()
@@ -273,8 +305,11 @@ def main() -> None:
         recs = load_records()
         n_prod = sum(1 for r in recs if r.get("record_type") != "section_methodology")
         print(f"Записей к загрузке: {len(recs)} (продуктов {n_prod} + методичек {len(recs) - n_prod})")
+        text_fn = build_text if args.full_text else build_embedding_text
+        mode = "FULL-TEXT (операции в векторе)" if args.full_text else "IDENTITY (F1: имя/раздел/код/порог; операции лишь в payload)"
+        print(f"Эмбеддинг: {mode}. Коллекция: {settings.QDRANT_COLLECTION}")
         recreate_collection(client)
-        index_all(client, recs, batch=args.batch)
+        index_all(client, recs, batch=args.batch, text_fn=text_fn)
         info = client.get_collection(settings.QDRANT_COLLECTION)
         print(f"\n✅ Коллекция '{settings.QDRANT_COLLECTION}': точек = {info.points_count}")
 
