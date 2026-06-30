@@ -17,7 +17,14 @@ if str(ROOT) not in sys.path:
 
 from app.core.prompts import EXPERT_DISCLAIMER, build_navigator_user_prompt  # noqa: E402
 from app.rag import sparse  # noqa: E402
-from app.rag.pipeline import _ensure_disclaimer, format_cases, format_context  # noqa: E402
+from app.rag.pipeline import (  # noqa: E402
+    _ensure_disclaimer,
+    claim_numbers,
+    format_cases,
+    format_context,
+    number_in_context,
+    unverified_numbers,
+)
 from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
 
 
@@ -147,6 +154,34 @@ class TestUserPrompt(unittest.TestCase):
         p = build_navigator_user_prompt("q", "ctx", okpd2="28.15.10", cases="КЕЙС-ТЕКСТ")
         self.assertIn("28.15.10", p)
         self.assertIn("КЕЙС-ТЕКСТ", p)
+
+
+class TestFaithfulness(unittest.TestCase):
+    def test_claim_numbers_balls_and_percent(self):
+        # числа рядом с «балл»/«процент»/«%» извлекаются; даты/сроки — нет
+        nums = claim_numbers("операция даёт 400 баллов, порог не менее 64 балла, доля 25 процентов")
+        self.assertIn("400", nums)
+        self.assertIn("64", nums)
+        self.assertIn("25", nums)
+
+    def test_claim_numbers_ignores_dates_and_terms(self):
+        # «5 лет», «2018 г.» — не баллы/проценты, не должны попасть
+        self.assertEqual(claim_numbers("на срок не менее 5 лет, с 1 января 2018 г."), [])
+
+    def test_number_in_context_boundaries(self):
+        ctx = "операция — 800 балл. ; ещё 1800 единиц"
+        self.assertTrue(number_in_context("800", ctx))
+        self.assertTrue(number_in_context("1800", ctx))
+        self.assertFalse(number_in_context("80", ctx))  # 80 не стоит отдельным токеном
+
+    def test_unverified_detects_hallucinated_number(self):
+        # в ответе «800 баллов», в контексте такого числа нет → незаземлено
+        ctx = "Ключевые операции:\n  • сборка — 400 балл."
+        self.assertEqual(unverified_numbers("начисляется 800 баллов", ctx), ["800"])
+
+    def test_unverified_empty_when_grounded(self):
+        ctx = "Порог: не менее 64 баллов\n  • сварка — 400 балл."
+        self.assertEqual(unverified_numbers("нужно 400 баллов при пороге 64 балла", ctx), [])
 
 
 if __name__ == "__main__":

@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from dataclasses import dataclass, field
 
@@ -34,6 +35,7 @@ class Answer:
     hits: list[Hit]
     cases: list[dict] = field(default_factory=list)
     low_relevance: bool = False  # сработал ли сигнал out-of-scope guard
+    unverified_numbers: list[str] = field(default_factory=list)  # числа баллов/% в ответе, не найденные в контексте
 
 
 def _hit_operations(h: Hit) -> list[dict]:
@@ -115,6 +117,52 @@ def _ensure_disclaimer(text: str) -> str:
     return text if EXPERT_DISCLAIMER in text else text.rstrip() + "\n\n" + EXPERT_DISCLAIMER
 
 
+# --- Faithfulness-постпроверка (P0 анти-галлюцинаций) ------------------------------
+# Число-претензия в ОТВЕТЕ — величина рядом с единицей «балл» или «процент/%». Именно такие
+# числа модель ОБЯЗАНА брать из контекста (правило 2 промпта); даты/сроки («5 лет», «2018 г.»)
+# другой единицы и сюда не попадают. Те же функции использует scripts/eval_answers.py —
+# рантайм и замер меряют ОДНО И ТО ЖЕ.
+_NUM = r"\d+(?:[.,]\d+)?"
+_BALL_CLAIM_RE = re.compile(rf"({_NUM})\s*балл", re.IGNORECASE)
+_PCT_CLAIM_RE = re.compile(rf"({_NUM})\s*(?:процент|%)", re.IGNORECASE)
+
+
+def claim_numbers(text: str) -> list[str]:
+    """Числа баллов/процентов, заявленные в ответе (нормализованы: запятая→точка)."""
+    return [n.replace(",", ".") for n in _BALL_CLAIM_RE.findall(text) + _PCT_CLAIM_RE.findall(text)]
+
+
+def number_in_context(num: str, context: str) -> bool:
+    """True, если числовой токен есть в контексте (граница — не-цифра; «,»≡«.»)."""
+    return any(
+        re.search(rf"(?<!\d){re.escape(v)}(?!\d)", context)
+        for v in {num, num.replace(".", ",")}
+    )
+
+
+def unverified_numbers(text: str, context: str) -> list[str]:
+    """Числа баллов/% из ОТВЕТА, которых НЕТ в контексте (кандидаты в галлюцинации).
+
+    Консервативно: число незаземлено, только если в контексте его НЕТ вовсе (это занижает,
+    а не завышает — ложноположительных нет). Уникальные значения в порядке появления."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in claim_numbers(text):
+        if n not in seen and not number_in_context(n, context):
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def _faithfulness_warning(nums: list[str]) -> str:
+    """Видимая пометка эксперту: эти числа в ответе не подтверждены контекстом. Текст
+    специально НЕ ставит числа рядом с «балл/процент», чтобы не зациклить постпроверку."""
+    return (
+        f"⚠ Проверьте показатели: значения [{', '.join(nums)}] в ответе не найдены среди "
+        f"требований и баллов найденных позиций базы — сверьте с первоисточником ПП №719."
+    )
+
+
 def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     hits = search(query, okpd2=okpd2, limit=limit)
     cases = search_cases(query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
@@ -133,12 +181,10 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
         and dense_top1(query) < RELEVANCE_SOFT
     )
 
+    ctx = format_context(hits, query)
+    cases_ctx = format_cases(cases) if cases else None
     user = build_navigator_user_prompt(
-        query,
-        format_context(hits, query),
-        okpd2,
-        cases=format_cases(cases) if cases else None,
-        low_relevance=low_rel,
+        query, ctx, okpd2, cases=cases_ctx, low_relevance=low_rel,
     )
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
@@ -148,11 +194,20 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
         ],
         temperature=0.1,
     )
+
+    # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с тем же контекстом,
+    # что видела модель. Незаземлённые НЕ удаляем (верное значение нам неизвестно) — а
+    # ВИДИМО помечаем эксперту (принцип «ИИ — черновик, вердикт за экспертом»).
+    raw = resp.choices[0].message.content or ""
+    grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
+    ungrounded = unverified_numbers(raw, grounding)
+    text = raw.rstrip() + "\n\n" + _faithfulness_warning(ungrounded) if ungrounded else raw
     return Answer(
-        text=_ensure_disclaimer(resp.choices[0].message.content),
+        text=_ensure_disclaimer(text),
         hits=hits,
         cases=cases,
         low_relevance=low_rel,
+        unverified_numbers=ungrounded,
     )
 
 

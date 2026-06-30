@@ -39,17 +39,12 @@ import json  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 from app.core.prompts import EXPERT_DISCLAIMER  # noqa: E402
-from app.rag.pipeline import answer, format_cases, format_context  # noqa: E402
+# Логику faithfulness берём ИЗ пайплайна — рантайм-постпроверка и этот замер меряют одно и то же.
+from app.rag.pipeline import answer, claim_numbers, format_cases, format_context, unverified_numbers  # noqa: E402
 from app.rag.retriever import _client  # noqa: E402
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
-# Число-претензия в ОТВЕТЕ: величина рядом с единицей «балл» или «процент/%». Именно такие
-# числа модель обязана брать из контекста (правило 2 промпта); даты/сроки («5 лет», «2018 г.»)
-# сюда НЕ попадают — у них другая единица.
-_NUM = r"\d+(?:[.,]\d+)?"
-BALL_CLAIM_RE = re.compile(rf"({_NUM})\s*балл", re.IGNORECASE)
-PCT_CLAIM_RE = re.compile(rf"({_NUM})\s*(?:процент|%)", re.IGNORECASE)
 # Отказ «вне сферы / не найдено» (правила 1, 1б промпта):
 DECLINE_RE = re.compile(
     r"вне сфер|не наш|не найден|не относ|уточнит|не подпад|не попад|не предусмотр|не явля",
@@ -57,20 +52,6 @@ DECLINE_RE = re.compile(
 )
 # Иероглифы (утечка DeepSeek): CJK + хирагана/катакана.
 CJK_RE = re.compile(r"[぀-ヿ一-鿿]")
-
-
-def claim_numbers(text: str) -> list[str]:
-    """Числа баллов/процентов из ответа (нормализованы: запятая→точка)."""
-    nums = BALL_CLAIM_RE.findall(text) + PCT_CLAIM_RE.findall(text)
-    return [n.replace(",", ".") for n in nums]
-
-
-def number_in_context(num: str, ctx: str) -> bool:
-    """True, если числовой токен есть в контексте (граница — не-цифра; «,» и «.» эквивалентны)."""
-    for v in {num, num.replace(".", ",")}:
-        if re.search(rf"(?<!\d){re.escape(v)}(?!\d)", ctx):
-            return True
-    return False
 
 
 def expected_section_title(hits, expected_roman: str) -> str | None:
@@ -106,17 +87,17 @@ def evaluate(limit: int, cases_limit: int):
         if ans.cases:
             ctx += "\n" + format_cases(ans.cases)
 
-        nums = claim_numbers(text)
-        hallucinated = sorted({n for n in nums if not number_in_context(n, ctx)})
+        hallucinated = unverified_numbers(text, ctx)  # та же логика, что в рантайм-постпроверке
 
         rows.append({
             "id": c["id"],
             "in_scope": c["in_scope"],
             "expected": c["expected_section"] or "—",
             "query": c["query"],
-            "n_claims": len(nums),
+            "n_claims": len(claim_numbers(text)),
             "hallucinated": hallucinated,
             "faithful": not hallucinated,
+            "guard_flagged": bool(ans.unverified_numbers),  # пометил ли рантайм-guard
             "attributed": attributed(text, c["expected_section"], ans.hits) if c["in_scope"] else None,
             "declined": bool(DECLINE_RE.search(text)),
             "disclaimer": EXPERT_DISCLAIMER[:40] in text,
@@ -148,9 +129,14 @@ def summarize(rows, limit: int) -> list[str]:
         c_ok, c_n = _rate(ins, lambda r: not r["cjk"])
         total_claims = sum(r["n_claims"] for r in ins)
         total_halluc = sum(len(r["hallucinated"]) for r in ins)
+        halluc_rows = [r for r in ins if r["hallucinated"]]
+        g_ok = sum(1 for r in halluc_rows if r["guard_flagged"])
         L.append("In-scope (качество ответа):")
         L.append(f"  FAITHFULNESS (нет выдуманных чисел) = {f_ok}/{f_n} = {f_ok / f_n:.2f}")
         L.append(f"      чисел баллов/% в ответах: {total_claims}; из них выдумано (нет в контексте): {total_halluc}")
+        if halluc_rows:
+            L.append(f"      из них помечено рантайм-guard'ом эксперту: {g_ok}/{len(halluc_rows)} ответов "
+                     f"(P0-постпроверка — незаземлённое число не уходит к эксперту незамеченным)")
         L.append(f"  Атрибуция раздела                   = {a_ok}/{a_n} = {a_ok / a_n:.2f}")
         L.append(f"  Дисклеймер эксперта                 = {d_ok}/{d_n} = {d_ok / d_n:.2f}")
         L.append(f"  Без CJK-иероглифов                  = {c_ok}/{c_n} = {c_ok / c_n:.2f}")
