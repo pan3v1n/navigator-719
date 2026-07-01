@@ -142,6 +142,30 @@ def _json_download(payload: dict, filename: str) -> Response:
     )
 
 
+def _download(content: str, media_type: str, filename: str) -> Response:
+    return Response(
+        content=content,
+        media_type=media_type,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+def _conv_to_markdown(title: str, msgs) -> str:
+    lines = [f"# {title}", ""]
+    for m in msgs:
+        who = "Эксперт" if m.role == "user" else "Ассистент"
+        lines += [f"**{who}:**", "", m.content, ""]
+    return "\n".join(lines)
+
+
+def _conv_to_text(title: str, msgs) -> str:
+    lines = [title, "=" * min(len(title), 60), ""]
+    for m in msgs:
+        who = "Эксперт" if m.role == "user" else "Ассистент"
+        lines += [f"{who}:", m.content, ""]
+    return "\n".join(lines)
+
+
 @router.get("/api/export")
 def export_conversations(user: User = Depends(require_user)) -> Response:
     """Скачать ВСЕ беседы пользователя одним JSON (переносимость данных из сервиса)."""
@@ -158,13 +182,18 @@ def export_conversations(user: User = Depends(require_user)) -> Response:
 
 
 @router.get("/api/conversations/{session_id}/export")
-def export_conversation(session_id: str, user: User = Depends(require_user)) -> Response:
-    """Скачать ОДНУ беседу пользователя JSON-ом (только свою — фильтр по user_id)."""
+def export_conversation(session_id: str, fmt: str = "json", user: User = Depends(require_user)) -> Response:
+    """Скачать ОДНУ беседу пользователя (только свою). Формат fmt: json | md | txt."""
     with get_session() as db:
         msgs = q.get_session_messages(db, user.id, session_id)
         title = next((m.content for m in msgs if m.role == "user"), "Диалог")
+    base = f"navigator719-chat-{session_id[:8]}"
+    if fmt == "md":
+        return _download(_conv_to_markdown(title, msgs), "text/markdown; charset=utf-8", base + ".md")
+    if fmt == "txt":
+        return _download(_conv_to_text(title, msgs), "text/plain; charset=utf-8", base + ".txt")
     return _json_download(
         {"user": user.username, "conversation": {
             "session_id": session_id, "title": title, "messages": _serialize_messages(msgs)}},
-        f"navigator719-chat-{session_id[:8]}.json",
+        base + ".json",
     )

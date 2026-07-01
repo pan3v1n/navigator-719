@@ -63,6 +63,14 @@ a { color: inherit; text-decoration: none; }
 .hi-export { font-size: 18px; font-weight: 700; }
 .history-item:hover .hi-del, .history-item:hover .hi-export { opacity: 1; }
 .hi-del:hover, .hi-export:hover { background: #dcdcdc; color: #333; }
+
+/* выпадающее меню экспорта у «⋮» */
+.dropdown { position: fixed; z-index: 50; background: #fff; border: 1px solid var(--border); border-radius: 10px;
+            box-shadow: 0 6px 24px rgba(0,0,0,.14); padding: 4px; min-width: 170px; animation: pop .12s ease; }
+.dd-item { display: block; width: 100%; text-align: left; padding: 8px 12px; border: none; background: none;
+           font-size: 14px; color: var(--text); cursor: pointer; border-radius: 7px; }
+.dd-item:hover { background: var(--hover); }
+.dd-head { padding: 6px 12px 3px; font-size: 11px; color: var(--muted); text-transform: uppercase; letter-spacing: .5px; }
 .side-nav { display: flex; flex-direction: column; gap: 2px; margin-top: 4px; }
 .nav-item { display: flex; align-items: center; gap: 10px; padding: 9px 12px; border-radius: 10px; font-size: 14px;
             cursor: pointer; color: var(--text); background: none; border: none; text-align: left; width: 100%;

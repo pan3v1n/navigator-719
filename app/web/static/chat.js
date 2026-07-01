@@ -27,6 +27,45 @@ function downloadUrl(url) {
   a.remove();
 }
 
+// Выпадающее меню экспорта чата у «⋮»: «Экспортировать чат» → выбор формата (JSON/Markdown/Текст).
+let menuEl = null;
+function closeMenu() {
+  if (menuEl) { menuEl.remove(); menuEl = null; document.removeEventListener("click", closeMenu); }
+}
+function openExportMenu(sid, anchor) {
+  closeMenu();
+  menuEl = document.createElement("div");
+  menuEl.className = "dropdown";
+  const step1 = document.createElement("button");
+  step1.className = "dd-item";
+  step1.textContent = "Экспортировать чат";
+  step1.addEventListener("click", (e) => {
+    e.stopPropagation();
+    menuEl.innerHTML = "";
+    const head = document.createElement("div");
+    head.className = "dd-head";
+    head.textContent = "Формат";
+    menuEl.appendChild(head);
+    [["JSON", "json"], ["Markdown", "md"], ["Текст", "txt"]].forEach(([label, fmt]) => {
+      const b = document.createElement("button");
+      b.className = "dd-item";
+      b.textContent = label;
+      b.addEventListener("click", (e2) => {
+        e2.stopPropagation();
+        downloadUrl("/api/conversations/" + sid + "/export?fmt=" + fmt);
+        closeMenu();
+      });
+      menuEl.appendChild(b);
+    });
+  });
+  menuEl.appendChild(step1);
+  document.body.appendChild(menuEl);
+  const r = anchor.getBoundingClientRect();
+  menuEl.style.top = r.bottom + 4 + "px";
+  menuEl.style.left = Math.min(r.left, window.innerWidth - 190) + "px";
+  setTimeout(() => document.addEventListener("click", closeMenu), 0);
+}
+
 // Минимальный БЕЗОПАСНЫЙ рендер markdown ответа движка (**жирный**, • списки, абзацы).
 // Сначала экранируем HTML (защита от XSS), потом добавляем ТОЛЬКО свои теги.
 function renderMarkdown(text) {
@@ -140,7 +179,7 @@ function addHistoryItem(sid, title, prepend) {
   exp.type = "button";
   exp.title = "Экспортировать диалог";
   exp.textContent = "⋮";
-  exp.addEventListener("click", (e) => { e.stopPropagation(); downloadUrl("/api/conversations/" + sid + "/export"); });
+  exp.addEventListener("click", (e) => { e.stopPropagation(); openExportMenu(sid, exp); });
   item.appendChild(exp);
   const del = document.createElement("button");
   del.className = "hi-del";
