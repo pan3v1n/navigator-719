@@ -1,26 +1,62 @@
 {% extends "base.html" %}
 {% block title %}Чат — {{ app_title }}{% endblock %}
 {% block body %}
-<header class="topbar">
-  <div class="brand">{{ app_title }}</div>
-  <div class="spacer"></div>
-  <span class="who">{{ user.username }}{% if user.role == 'admin' %} · admin{% endif %}</span>
-  {% if user.role == 'admin' %}<a class="btn-link" href="/admin">Логи</a>{% endif %}
-  <button class="btn-link" id="fb-open" type="button">Оставить отзыв</button>
-  <a class="btn-link" href="/logout">Выйти</a>
-</header>
-
-<main class="chat">
-  <div id="messages" class="messages">
-    <div class="msg assistant">
-      <div class="bubble">Здравствуйте! Опишите продукцию или укажите код ОКПД2 — подскажу позицию приложения к ПП №719, требования и баллы. Итоговый вердикт — за экспертом ТПП.</div>
+<div class="app">
+  <aside class="sidebar">
+    <div class="side-top">
+      <div class="brand"><span class="logo">719</span> Навигатор</div>
     </div>
-  </div>
-  <form id="chat-form" class="composer">
-    <textarea id="input" rows="1" placeholder="Опишите продукцию или код ОКПД2…" autofocus></textarea>
-    <button type="submit" id="send">Отправить</button>
-  </form>
-</main>
+    <button class="new-chat" id="new-chat" type="button">
+      <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      Новый диалог
+    </button>
+    <div class="history" id="history"></div>
+    <nav class="side-nav">
+      {% if user.role == 'admin' %}
+      <a class="nav-item" href="/admin">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        Логи диалогов
+      </a>
+      {% endif %}
+      <button class="nav-item" id="fb-open" type="button">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Оставить отзыв
+      </button>
+    </nav>
+    <div class="side-bottom">
+      <div class="user-chip">
+        <span class="avatar">{{ user.username[0]|upper }}</span>
+        <span class="uname">{{ user.username }}{% if user.role == 'admin' %} · admin{% endif %}</span>
+      </div>
+      <a class="logout" href="/logout">Выйти</a>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="chat-header">
+      <div class="chat-title">{{ app_title }}</div>
+    </header>
+
+    <div class="chat-scroll" id="chat-scroll">
+      <div class="chat-col">
+        <div class="hero" id="hero">
+          <h1>Чем помочь по ПП №719?</h1>
+          <p>Опишите продукцию или укажите код ОКПД2 — подскажу позицию приложения, требования и баллы.</p>
+        </div>
+        <div id="messages" class="messages"></div>
+      </div>
+    </div>
+
+    <div class="composer-wrap">
+      <form id="chat-form" class="composer">
+        <textarea id="input" rows="1" placeholder="Спросите про 719 — продукцию или код ОКПД2…" autofocus></textarea>
+        <button type="submit" id="send" class="send-btn" aria-label="Отправить">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6 11l6-6 6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+      </form>
+    </div>
+  </main>
+</div>
 
 <div id="fb-modal" class="modal hidden">
   <form id="fb-form" class="modal-card">

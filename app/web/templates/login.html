@@ -2,17 +2,16 @@
 {% block title %}Вход — {{ app_title }}{% endblock %}
 {% block body %}
 <div class="login-wrap">
-  <form class="login-card" method="post" action="/login">
+  <div class="login-card">
+    <div class="login-logo">719</div>
     <h1>{{ app_title }}</h1>
     <p class="sub">Ассистент эксперта по ПП №719 · {{ org }}</p>
-    {% if error %}<div class="error">{{ error }}</div>{% endif %}
-    <label>Логин
-      <input name="username" autocomplete="username" required autofocus>
-    </label>
-    <label>Пароль
-      <input name="password" type="password" autocomplete="current-password" required>
-    </label>
-    <button type="submit">Войти</button>
-  </form>
+    <form class="login-form" method="post" action="/login">
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+      <input name="username" placeholder="Логин" autocomplete="username" required autofocus>
+      <input name="password" type="password" placeholder="Пароль" autocomplete="current-password" required>
+      <button type="submit">Войти</button>
+    </form>
+  </div>
 </div>
 {% endblock %}

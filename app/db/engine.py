@@ -22,6 +22,23 @@ SessionLocal = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False
 def init_db() -> None:
     """Создаёт таблицы, если их ещё нет (идемпотентно). Зовётся на старте приложения."""
     Base.metadata.create_all(engine)
+    _ensure_columns()
+
+
+def _ensure_columns() -> None:
+    """Лёгкая миграция демо-БД: добавляет недостающие колонки в существующие таблицы
+    (SQLite ALTER ADD COLUMN). Нужна, т.к. схема приложения эволюционирует между версиями,
+    а create_all не меняет уже созданные таблицы."""
+    wanted = {
+        "messages": [("prompt_tokens", "INTEGER"), ("completion_tokens", "INTEGER")],
+        "feedback": [("matched", "VARCHAR(16)")],
+    }
+    with engine.begin() as conn:
+        for table, cols in wanted.items():
+            existing = {row[1] for row in conn.exec_driver_sql(f"PRAGMA table_info({table})")}
+            for name, ddl in cols:
+                if name not in existing:
+                    conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {name} {ddl}")
 
 
 def get_session() -> Session:

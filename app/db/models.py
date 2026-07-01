@@ -54,6 +54,9 @@ class Message(Base):
     sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     low_relevance: Mapped[bool] = mapped_column(Boolean, default=False)
     unverified_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # токены DeepSeek за этот ответ (для учёта затрат в админ-логах; эмбеддинг/Qdrant локальны)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="messages")
 

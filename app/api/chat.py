@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -75,6 +76,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
                 db, user_id=user.id, session_id=session_id, role="assistant", content=ans.text,
                 sources=[s.model_dump() for s in sources],
                 low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
+                prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
             )
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
         logger.exception("chat: не удалось записать лог диалога (user_id=%s)", user.id)
@@ -83,3 +85,29 @@ def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id,
     )
+
+
+@router.get("/api/conversations")
+def list_conversations(user: User = Depends(require_user)) -> list[dict]:
+    """Список бесед пользователя для сайдбара (новые сверху)."""
+    with get_session() as db:
+        sess = q.get_user_sessions(db, user.id)
+    return [
+        {"session_id": s["session_id"], "title": (s["title"] or "Диалог")[:48],
+         "ts": s["ts"].isoformat()}
+        for s in sess
+    ]
+
+
+@router.get("/api/conversations/{session_id}")
+def get_conversation(session_id: str, user: User = Depends(require_user)) -> dict:
+    """Реплики одной беседы для переоткрытия (только свои — фильтр по user_id)."""
+    with get_session() as db:
+        msgs = q.get_session_messages(db, user.id, session_id)
+        out = []
+        for m in msgs:
+            item = {"role": m.role, "content": m.content}
+            if m.sources_json:
+                item["sources"] = json.loads(m.sources_json)
+            out.append(item)
+    return {"session_id": session_id, "messages": out}

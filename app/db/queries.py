@@ -46,6 +46,8 @@ def log_message(
     sources: list | None = None,
     low_relevance: bool = False,
     unverified: list | None = None,
+    prompt_tokens: int | None = None,
+    completion_tokens: int | None = None,
 ) -> Message:
     m = Message(
         user_id=user_id,
@@ -55,6 +57,8 @@ def log_message(
         sources_json=json.dumps(sources, ensure_ascii=False) if sources is not None else None,
         low_relevance=low_relevance,
         unverified_json=json.dumps(unverified, ensure_ascii=False) if unverified else None,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
     db.add(m)
     db.commit()
@@ -72,6 +76,29 @@ def get_messages_for_user(db: Session, user_id: int) -> list[Message]:
 
 def get_all_messages(db: Session) -> list[Message]:
     return list(db.execute(select(Message).order_by(Message.ts)).scalars())
+
+
+def get_user_sessions(db: Session, user_id: int) -> list[dict]:
+    """Беседы пользователя для сайдбара: [{session_id, title, ts}], новые сверху.
+    Заголовок = первое сообщение эксперта в беседе."""
+    sessions: dict[str, dict] = {}
+    for m in get_messages_for_user(db, user_id):  # по возрастанию ts
+        s = sessions.setdefault(m.session_id, {"session_id": m.session_id, "title": None, "ts": m.ts})
+        if s["title"] is None and m.role == "user":
+            s["title"] = m.content
+        s["ts"] = m.ts  # последняя реплика (проход по возрастанию → остаётся максимум)
+    return sorted(sessions.values(), key=lambda s: s["ts"], reverse=True)
+
+
+def get_session_messages(db: Session, user_id: int, session_id: str) -> list[Message]:
+    """Реплики конкретной беседы пользователя (для переоткрытия), по возрастанию ts."""
+    return list(
+        db.execute(
+            select(Message)
+            .where(Message.user_id == user_id, Message.session_id == session_id)
+            .order_by(Message.ts)
+        ).scalars()
+    )
 
 
 # --- feedback ------------------------------------------------------------

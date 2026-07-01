@@ -21,6 +21,7 @@ from app.api.auth import (
     require_user,
 )
 from app.core.config import settings
+from app.core.costs import cost_rub
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -84,25 +85,52 @@ def admin_page(request: Request):
         return RedirectResponse("/chat", status_code=302)  # эксперт логи не видит
 
     # Извлекаем в ПЛОСКИЕ структуры внутри сессии (объекты БД после закрытия — detached).
+    # По каждой беседе: заголовок = первый вопрос эксперта; суммируем токены и стоимость (₽).
     data = []
+    g_prompt = g_completion = 0
     with get_session() as db:
         for u in q.list_users(db):
             msgs = q.get_messages_for_user(db, u.id)
-            sessions: dict[str, list[dict]] = {}
+            by_sid: dict[str, dict] = {}
+            order: list[str] = []
             for m in msgs:
-                sessions.setdefault(m.session_id, []).append({
+                s = by_sid.get(m.session_id)
+                if s is None:
+                    s = {"sid": m.session_id, "title": None, "messages": [], "prompt": 0, "completion": 0}
+                    by_sid[m.session_id] = s
+                    order.append(m.session_id)
+                if s["title"] is None and m.role == "user":
+                    s["title"] = m.content
+                s["messages"].append({
                     "role": m.role, "content": m.content, "ts": m.ts,
                     "low_relevance": m.low_relevance, "unverified": m.unverified_json,
+                    "tokens": (m.prompt_tokens or 0) + (m.completion_tokens or 0),
                 })
+                s["prompt"] += m.prompt_tokens or 0
+                s["completion"] += m.completion_tokens or 0
+            u_prompt = u_completion = 0
+            sessions = []
+            for sid in reversed(order):  # новые беседы сверху
+                s = by_sid[sid]
+                s["title"] = (s["title"] or "Диалог")[:60]
+                s["tokens"] = s["prompt"] + s["completion"]
+                s["cost"] = cost_rub(s["prompt"], s["completion"])
+                u_prompt += s["prompt"]
+                u_completion += s["completion"]
+                sessions.append(s)
             feedback = [
                 {"rating": f.rating, "matched": f.matched, "comment": f.comment, "ts": f.ts}
                 for f in q.get_feedback_for_user(db, u.id)
             ]
+            g_prompt += u_prompt
+            g_completion += u_completion
             data.append({
                 "username": u.username, "role": u.role, "msg_count": len(msgs),
                 "sessions": sessions, "feedback": feedback,
+                "tokens": u_prompt + u_completion, "cost": cost_rub(u_prompt, u_completion),
             })
-    return templates.TemplateResponse("admin.html", _ctx(request, admin=user, data=data))
+    totals = {"tokens": g_prompt + g_completion, "cost": cost_rub(g_prompt, g_completion)}
+    return templates.TemplateResponse("admin.html", _ctx(request, admin=user, data=data, totals=totals))
 
 
 class FeedbackIn(BaseModel):

@@ -41,6 +41,8 @@ class Answer:
     cases: list[dict] = field(default_factory=list)
     low_relevance: bool = False  # сработал ли сигнал out-of-scope guard
     unverified_numbers: list[str] = field(default_factory=list)  # числа баллов/% в ответе, не найденные в контексте
+    prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
+    completion_tokens: int = 0
 
 
 def _hit_operations(h: Hit) -> list[dict]:
@@ -70,7 +72,7 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         sect = f"«{h.section_title}»" if h.section_title else f"Раздел {h.section_roman}"
         head = f"[{i}] {h.product_name} (раздел {sect})"
         if h.okpd2_match:
-            head += "  ✓ СОВПАДЕНИЕ ПО КОДУ ОКПД2 (наиболее вероятная позиция)"
+            head += "  СОВПАДЕНИЕ ПО КОДУ ОКПД2 (наиболее вероятная позиция)"
         lines = [head]
         if h.okpd2_codes:
             lines.append(f"    ОКПД2: {', '.join(h.okpd2_codes)}")
@@ -90,7 +92,7 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
             if total > MAX_OPS_PER_HIT:
                 rel = " (показаны наиболее релевантные запросу)" if query else ""
                 lines.append(
-                    f"      ⚠ СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
+                    f"      СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
                     f"{rel}; полный перечень требований и баллов — в первоисточнике ПП №719 (этот раздел)."
                 )
         if h.source_anchor:
@@ -160,16 +162,12 @@ def unverified_numbers(text: str, context: str) -> list[str]:
     return out
 
 
-def _faithfulness_warning(nums: list[str]) -> str:
-    """Видимая пометка эксперту: эти числа в ответе не подтверждены контекстом. Текст
-    специально НЕ ставит числа рядом с «балл/процент», чтобы не зациклить постпроверку."""
-    return (
-        f"⚠ Проверьте показатели: значения [{', '.join(nums)}] в ответе не найдены среди "
-        f"требований и баллов найденных позиций базы — сверьте с первоисточником ПП №719."
-    )
-
-
 def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
+    # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
+    from app.rag import meta
+    if meta.is_meta(query):
+        return Answer(text=meta.response(query), hits=[])
+
     # Процедурный дефер-предохранитель: чистый процедурный вопрос (внесение в реестр, ГИСП,
     # подача заявления, сроки, обжалование) корпусом НЕ покрыт. Деферим детерминированно ДО
     # поиска — без вызова LLM (ноль галлюцинаций/стоимости). Товарные/смешанные вопросы (есть
@@ -177,7 +175,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     if settings.PROCEDURAL_DEFLECT_ENABLED:
         from app.rag import procedural
         if procedural.is_procedural(query, has_code=bool(okpd2)):
-            return Answer(text=procedural.DEFLECTION + "\n\n" + EXPERT_DISCLAIMER, hits=[])
+            return Answer(text=procedural.DEFLECTION, hits=[])
 
     hits = search(query, okpd2=okpd2, limit=limit)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
@@ -189,7 +187,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     if not hits and not cases:
         return Answer(
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "
-            "наименование продукции или укажите код ОКПД2.\n\n" + EXPERT_DISCLAIMER,
+            "наименование продукции или укажите код ОКПД2.",
             hits=[],
         )
 
@@ -216,20 +214,24 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
         # перечисляла РАЗНЫЕ подмножества операций → числа баллов «плавали» (eval_determinism
         # 0.60). 0 стабилизирует набор чисел; реранкер и так temp=0.
     )
+    usage = resp.usage
+    prompt_tokens = usage.prompt_tokens if usage else 0
+    completion_tokens = usage.completion_tokens if usage else 0
 
-    # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с тем же контекстом,
-    # что видела модель. Незаземлённые НЕ удаляем (верное значение нам неизвестно) — а
-    # ВИДИМО помечаем эксперту (принцип «ИИ — черновик, вердикт за экспертом»).
+    # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с контекстом. Незаземлённые
+    # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
+    # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
     raw = resp.choices[0].message.content or ""
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     ungrounded = unverified_numbers(raw, grounding)
-    text = raw.rstrip() + "\n\n" + _faithfulness_warning(ungrounded) if ungrounded else raw
     return Answer(
-        text=_ensure_disclaimer(text),
+        text=raw,
         hits=hits,
         cases=cases,
         low_relevance=low_rel,
         unverified_numbers=ungrounded,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
     )
 
 

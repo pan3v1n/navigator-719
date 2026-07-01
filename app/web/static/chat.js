@@ -1,8 +1,11 @@
-// Чат UI 1.0: fetch POST /api/chat → рендер сообщений + источников. Без внешних либ.
+// Чат UI 1.0: fetch POST /api/chat → рендер сообщений + источников + история бесед. Без внешних либ.
+const scroll = document.getElementById("chat-scroll");
 const messages = document.getElementById("messages");
+const hero = document.getElementById("hero");
 const form = document.getElementById("chat-form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
+const history = document.getElementById("history");
 let sessionId = null;
 
 function el(cls) {
@@ -11,14 +14,72 @@ function el(cls) {
   return d;
 }
 
-function addMessage(role, text) {
-  const wrap = el("msg " + role);
-  const bubble = el("bubble");
-  bubble.textContent = text; // textContent → без XSS; CSS white-space:pre-wrap сохранит переносы
-  wrap.appendChild(bubble);
+function scrollDown() {
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+// Минимальный БЕЗОПАСНЫЙ рендер markdown ответа движка (**жирный**, • списки, абзацы).
+// Сначала экранируем HTML (защита от XSS), потом добавляем ТОЛЬКО свои теги.
+function renderMarkdown(text) {
+  const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = (s) => esc(s).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  const lines = (text || "").split(/\r?\n/);
+  let html = "";
+  let inList = false;
+  for (const raw of lines) {
+    const line = raw.trim();
+    const bullet = /^[•\-*]\s+/.test(line);
+    if (bullet) {
+      if (!inList) { html += "<ul>"; inList = true; }
+      html += "<li>" + inline(line.replace(/^[•\-*]\s+/, "")) + "</li>";
+    } else {
+      if (inList) { html += "</ul>"; inList = false; }
+      if (line) html += "<p>" + inline(line) + "</p>";
+    }
+  }
+  if (inList) html += "</ul>";
+  return html;
+}
+
+function addUser(text) {
+  const wrap = el("msg user");
+  const b = el("bubble");
+  b.textContent = text; // вопрос эксперта — как есть (без XSS)
+  wrap.appendChild(b);
   messages.appendChild(wrap);
-  messages.scrollTop = messages.scrollHeight;
+  scrollDown();
   return wrap;
+}
+
+function addAssistant(text, sources) {
+  const wrap = el("msg assistant");
+  const b = el("bubble");
+  b.innerHTML = renderMarkdown(text);
+  wrap.appendChild(b);
+  messages.appendChild(wrap);
+  if (sources) addSources(wrap, sources);
+  return wrap;
+}
+
+function addPending() {
+  const wrap = el("msg assistant");
+  const b = el("bubble");
+  b.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+  wrap.appendChild(b);
+  messages.appendChild(wrap);
+  scrollDown();
+  return wrap;
+}
+
+// Официальный текст ПП №719 на Контур.Норматив (для кликабельных источников).
+const KONTUR_719 = "https://normativ.kontur.ru/document/1/506613-postanovlenie-pravitelstva-rf-ot-17-07-2015-n-719";
+
+// Ссылка на документ 719 + текстовый фрагмент (#:~:text=…): браузер (Chrome/Edge) прокручивает
+// к позиции в таблице. Цель — код ОКПД2 (в таблице он есть дословно) либо наименование продукции.
+function konturLink(s) {
+  const codes = s.okpd2 || [];
+  const anchor = codes.length ? codes[0] : (s.product_name || "").slice(0, 40);
+  return KONTUR_719 + (anchor ? "#:~:text=" + encodeURIComponent(anchor) : "");
 }
 
 function addSources(wrap, sources) {
@@ -29,21 +90,76 @@ function addSources(wrap, sources) {
   sum.textContent = "Источники (" + sources.length + ")";
   det.appendChild(sum);
   sources.forEach((s, i) => {
-    const item = el("src-item");
-    const mark = s.okpd2_match ? " ✓ совпадение по коду" : "";
+    const a = document.createElement("a");
+    a.className = "src-item";
+    a.href = konturLink(s);
+    a.target = "_blank";
+    a.rel = "noopener";
+    a.title = "Открыть в тексте ПП №719 (Контур.Норматив)";
+    const mark = s.okpd2_match ? " (совпадение по коду)" : "";
     const codes = (s.okpd2 || []).join(", ");
     let t = "[" + (i + 1) + "] " + s.product_name + " — " + (s.section || "") + mark;
     if (codes) t += " · ОКПД2 " + codes;
     if (s.source_anchor) t += " · " + s.source_anchor;
-    item.textContent = t;
-    det.appendChild(item);
+    a.textContent = t;
+    det.appendChild(a);
   });
   wrap.appendChild(det);
 }
 
+// --- история бесед в сайдбаре ---
+function setActive(sid) {
+  history.querySelectorAll(".history-item").forEach((x) =>
+    x.classList.toggle("active", x.dataset.sid === sid)
+  );
+}
+
+function addHistoryItem(sid, title, prepend) {
+  if (history.querySelector('[data-sid="' + sid + '"]')) { setActive(sid); return; }
+  const item = el("history-item");
+  item.dataset.sid = sid;
+  item.textContent = title || "Диалог";
+  item.title = title || "Диалог";
+  item.addEventListener("click", () => openConversation(sid));
+  if (prepend) history.prepend(item); else history.appendChild(item);
+  setActive(sid);
+}
+
+async function loadConversations() {
+  try {
+    const r = await fetch("/api/conversations");
+    if (!r.ok) return;
+    const list = await r.json();
+    history.innerHTML = "";
+    list.forEach((c) => addHistoryItem(c.session_id, c.title, false));
+    setActive(sessionId);
+  } catch (e) { /* сеть — не критично */ }
+}
+
+async function openConversation(sid) {
+  try {
+    const r = await fetch("/api/conversations/" + sid);
+    if (!r.ok) return;
+    const data = await r.json();
+    messages.innerHTML = "";
+    if (hero) hero.style.display = "none";
+    sessionId = sid;
+    data.messages.forEach((m) => {
+      if (m.role === "user") addUser(m.content);
+      else addAssistant(m.content, m.sources);
+    });
+    setActive(sid);
+    scrollDown();
+  } catch (e) { /* сеть */ }
+}
+
+// --- отправка вопроса ---
 async function ask(text) {
-  addMessage("user", text);
-  const thinking = addMessage("assistant", "…думаю");
+  if (hero) hero.style.display = "none";
+  const isNew = !sessionId;
+  addUser(text);
+  const pending = addPending();
+  const bubble = pending.querySelector(".bubble");
   send.disabled = true;
   try {
     const r = await fetch("/api/chat", {
@@ -52,19 +168,18 @@ async function ask(text) {
       body: JSON.stringify({ message: text, session_id: sessionId }),
     });
     if (r.status === 401) { window.location = "/login"; return; }
-    if (!r.ok) {
-      thinking.querySelector(".bubble").textContent = "Ошибка: сервис недоступен, повторите запрос.";
-      return;
-    }
+    if (!r.ok) { bubble.textContent = "Ошибка: сервис недоступен, повторите запрос."; return; }
     const data = await r.json();
     sessionId = data.session_id;
-    thinking.querySelector(".bubble").textContent = data.answer;
-    addSources(thinking, data.sources);
+    if (isNew) addHistoryItem(data.session_id, text, true); // новая беседа → в историю
+    else setActive(data.session_id);
+    bubble.innerHTML = renderMarkdown(data.answer);
+    addSources(pending, data.sources);
   } catch (e) {
-    thinking.querySelector(".bubble").textContent = "Ошибка сети, повторите запрос.";
+    bubble.textContent = "Ошибка сети, повторите запрос.";
   } finally {
     send.disabled = false;
-    messages.scrollTop = messages.scrollHeight;
+    scrollDown();
   }
 }
 
@@ -84,6 +199,16 @@ input.addEventListener("input", () => {
 });
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
+});
+
+// «Новый диалог» — текущая беседа уже в истории (сохранена в БД); чистим экран, начинаем новую
+const newChat = document.getElementById("new-chat");
+if (newChat) newChat.addEventListener("click", () => {
+  messages.innerHTML = "";
+  sessionId = null;
+  if (hero) hero.style.display = "";
+  setActive(null);
+  input.focus();
 });
 
 // форма обратной связи
@@ -108,3 +233,6 @@ document.getElementById("fb-form").addEventListener("submit", async (e) => {
     setTimeout(() => modal.classList.add("hidden"), 1200);
   }
 });
+
+// загрузить историю бесед при открытии
+loadConversations();

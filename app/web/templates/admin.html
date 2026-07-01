@@ -1,19 +1,24 @@
 {% extends "base.html" %}
 {% block title %}Логи — {{ app_title }}{% endblock %}
 {% block body %}
-<header class="topbar">
-  <div class="brand">{{ app_title }} · логи</div>
+<header class="admin-header">
+  <div class="brand"><span class="logo">719</span> Навигатор · логи</div>
   <div class="spacer"></div>
-  <span class="who">{{ admin.username }} · admin</span>
-  <a class="btn-link" href="/chat">Чат</a>
-  <a class="btn-link" href="/logout">Выйти</a>
+  <span class="muted">{{ admin.username }} · admin</span>
+  <a class="link" href="/chat">Чат</a>
+  <a class="link" href="/logout">Выйти</a>
 </header>
 
 <main class="admin">
+  <div class="totals">
+    Затраты на модель: токенов <b>{{ totals.tokens }}</b> · оценка <b>{{ '%.2f'|format(totals.cost) }} ₽</b>
+    <span class="muted">эмбеддинг и Qdrant локальны (бесплатно); ₽ — только DeepSeek</span>
+  </div>
+
   {% for d in data %}
   <section class="user-block">
     <h2>{{ d.username }} <span class="role">{{ d.role }}</span>
-        <span class="count">· реплик: {{ d.msg_count }}</span></h2>
+        <span class="count">· реплик: {{ d.msg_count }} · токенов: {{ d.tokens }} · {{ '%.2f'|format(d.cost) }} ₽</span></h2>
 
     {% if d.feedback %}
     <div class="fb-list">
@@ -27,14 +32,17 @@
     </div>
     {% endif %}
 
-    {% for sid, msgs in d.sessions.items() %}
+    {% for s in d.sessions %}
     <details class="thread">
-      <summary>Беседа {{ sid[:8] }} · {{ msgs|length }} реплик</summary>
-      {% for m in msgs %}
+      <summary>{{ s.title }}
+        <span class="thread-meta">· {{ s.messages|length }} реплик · {{ s.tokens }} ток. · {{ '%.3f'|format(s.cost) }} ₽</span>
+      </summary>
+      {% for m in s.messages %}
       <div class="log-msg {{ m.role }}">
         <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
         <span class="content">{{ m.content }}</span>
-        {% if m.unverified %}<span class="flag">⚠ непроверенные числа: {{ m.unverified }}</span>{% endif %}
+        {% if m.tokens %}<span class="tok">{{ m.tokens }} ток.</span>{% endif %}
+        {% if m.unverified %}<span class="flag">непроверенные числа: {{ m.unverified }}</span>{% endif %}
         {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
       </div>
       {% endfor %}
