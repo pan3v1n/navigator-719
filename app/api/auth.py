@@ -8,11 +8,42 @@ username+password, состояние — в ПОДПИСАННОЙ сессио
 from __future__ import annotations
 
 import bcrypt
-from fastapi import HTTPException, Request, status
+from fastapi import HTTPException, Request, Response, status
+from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from app.core.config import settings
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
+
+# «Запомнить меня»: подписанный cookie с user_id, переживает закрытие браузера (в отличие от
+# сессионной куки, которая теперь session-only → логин требуется при каждом открытии сайта).
+REMEMBER_COOKIE = "remember719"
+REMEMBER_MAX_AGE = 30 * 24 * 3600  # 30 дней
+_remember = URLSafeTimedSerializer(settings.SESSION_SECRET, salt="remember-719")
+
+
+def make_remember_token(user_id: int) -> str:
+    return _remember.dumps(user_id)
+
+
+def uid_from_remember(request: Request) -> int | None:
+    tok = request.cookies.get(REMEMBER_COOKIE)
+    if not tok:
+        return None
+    try:
+        return _remember.loads(tok, max_age=REMEMBER_MAX_AGE)
+    except (BadSignature, SignatureExpired):
+        return None
+
+
+def set_remember_cookie(response: Response, user_id: int) -> None:
+    response.set_cookie(REMEMBER_COOKIE, make_remember_token(user_id),
+                        max_age=REMEMBER_MAX_AGE, httponly=True, samesite="lax")
+
+
+def clear_remember_cookie(response: Response) -> None:
+    response.delete_cookie(REMEMBER_COOKIE)
 
 
 def hash_password(password: str) -> str:
@@ -46,8 +77,13 @@ def logout_session(request: Request) -> None:
 
 
 def current_user(request: Request) -> User | None:
-    """Текущий пользователь из сессии или None (мягкая проверка, для страниц)."""
+    """Текущий пользователь из сессии или None (мягкая проверка, для страниц).
+    Если сессии нет, но есть валидный cookie «запомнить меня» — восстанавливаем сессию (автовход)."""
     uid = request.session.get("user_id")
+    if not uid:
+        uid = uid_from_remember(request)
+        if uid:
+            request.session["user_id"] = uid
     if not uid:
         return None
     with get_session() as db:

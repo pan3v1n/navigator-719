@@ -122,16 +122,48 @@ def delete_conversation(session_id: str, user: User = Depends(require_user)) -> 
     return {"ok": True, "removed": removed}
 
 
-def _serialize_messages(msgs) -> list[dict]:
-    return [
-        {
-            "role": m.role,
-            "content": m.content,
-            "ts": m.ts.isoformat() if m.ts else None,
-            "sources": json.loads(m.sources_json) if m.sources_json else None,
-        }
-        for m in msgs
-    ]
+def _serialize_messages(msgs, include_sources: bool = True) -> list[dict]:
+    out = []
+    for m in msgs:
+        d = {"role": m.role, "content": m.content, "ts": m.ts.isoformat() if m.ts else None}
+        if include_sources and m.sources_json:
+            d["sources"] = json.loads(m.sources_json)
+        out.append(d)
+    return out
+
+
+def _parse_date(s: str):
+    from datetime import datetime
+    try:
+        return datetime.strptime(s, "%Y-%m-%d").date() if s else None
+    except ValueError:
+        return None
+
+
+def _convs_to_markdown(user_name: str, picked) -> str:
+    lines = [f"# Экспорт диалогов — {user_name}", ""]
+    for s, msgs in picked:
+        lines.append(f"## {s['title'] or 'Диалог'}")
+        if s["ts"]:
+            lines.append(f"_{s['ts'].strftime('%d.%m.%Y %H:%M')}_")
+        lines.append("")
+        for m in msgs:
+            who = "Эксперт" if m.role == "user" else "Ассистент"
+            lines += [f"**{who}:**", "", m.content, ""]
+        lines += ["---", ""]
+    return "\n".join(lines)
+
+
+def _convs_to_text(user_name: str, picked) -> str:
+    lines = [f"Экспорт диалогов — {user_name}", "=" * 40, ""]
+    for s, msgs in picked:
+        stamp = f"  [{s['ts'].strftime('%d.%m.%Y %H:%M')}]" if s["ts"] else ""
+        lines += [(s["title"] or "Диалог") + stamp, "-" * 30]
+        for m in msgs:
+            who = "Эксперт" if m.role == "user" else "Ассистент"
+            lines += [f"{who}:", m.content, ""]
+        lines.append("")
+    return "\n".join(lines)
 
 
 def _json_download(payload: dict, filename: str) -> Response:
@@ -167,17 +199,38 @@ def _conv_to_text(title: str, msgs) -> str:
 
 
 @router.get("/api/export")
-def export_conversations(user: User = Depends(require_user)) -> Response:
-    """Скачать ВСЕ беседы пользователя одним JSON (переносимость данных из сервиса)."""
+def export_conversations(
+    fmt: str = "json", date_from: str = "", date_to: str = "", sources: int = 1,
+    user: User = Depends(require_user),
+) -> Response:
+    """Скачать беседы пользователя с настройками: формат (json/md/txt), период дат, источники."""
+    df, dt = _parse_date(date_from), _parse_date(date_to)
+    incl_sources = bool(sources)
+    picked = []  # список (session-dict, msgs) после фильтра по датам
     with get_session() as db:
-        conversations = [
-            {"session_id": s["session_id"], "title": s["title"],
-             "messages": _serialize_messages(q.get_session_messages(db, user.id, s["session_id"]))}
-            for s in q.get_user_sessions(db, user.id)
-        ]
+        for s in q.get_user_sessions(db, user.id):
+            d = s["ts"].date() if s["ts"] else None
+            if df and (d is None or d < df):
+                continue
+            if dt and (d is None or d > dt):
+                continue
+            picked.append((s, q.get_session_messages(db, user.id, s["session_id"])))
+
+    base = "navigator719-chats"
+    if fmt == "md":
+        return _download(_convs_to_markdown(user.username, picked), "text/markdown; charset=utf-8", base + ".md")
+    if fmt == "txt":
+        return _download(_convs_to_text(user.username, picked), "text/plain; charset=utf-8", base + ".txt")
+    conversations = [
+        {"session_id": s["session_id"], "title": s["title"],
+         "messages": _serialize_messages(msgs, incl_sources)}
+        for s, msgs in picked
+    ]
     return _json_download(
-        {"user": user.username, "exported_conversations": len(conversations), "conversations": conversations},
-        "navigator719-chats.json",
+        {"user": user.username,
+         "filters": {"date_from": date_from or None, "date_to": date_to or None, "sources": incl_sources},
+         "exported_conversations": len(conversations), "conversations": conversations},
+        base + ".json",
     )
 
 

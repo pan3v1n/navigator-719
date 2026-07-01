@@ -26,11 +26,14 @@ app = FastAPI(
 )
 
 # Сессии-куки для auth веб-UI (подпись SESSION_SECRET). Для демо по http: https_only=False.
+# max_age=None → session-only cookie (умирает при закрытии браузера): логин требуется при каждом
+# открытии сайта. Персистентный автовход — через cookie «запомнить меня» (app/api/auth.py).
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.SESSION_SECRET,
     same_site="lax",
     https_only=False,
+    max_age=None,
 )
 
 app.include_router(navigate_router, tags=["navigator"])

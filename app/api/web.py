@@ -15,10 +15,12 @@ from pydantic import BaseModel
 
 from app.api.auth import (
     authenticate,
+    clear_remember_cookie,
     current_user,
     login_session,
     logout_session,
     require_user,
+    set_remember_cookie,
 )
 from app.core.config import settings
 from app.core.costs import cost_rub
@@ -51,20 +53,26 @@ def login_page(request: Request):
 
 
 @router.post("/login", response_class=HTMLResponse)
-def login_submit(request: Request, username: str = Form(...), password: str = Form(...)):
+def login_submit(request: Request, username: str = Form(...), password: str = Form(...),
+                 remember: str = Form(default="")):
     user = authenticate(username.strip(), password)
     if not user:
         return templates.TemplateResponse(
             "login.html", _ctx(request, error="Неверный логин или пароль"), status_code=401
         )
     login_session(request, user)
-    return RedirectResponse("/", status_code=302)
+    resp = RedirectResponse("/", status_code=302)
+    if remember:  # «Запомнить меня» → персистентный cookie автовхода
+        set_remember_cookie(resp, user.id)
+    return resp
 
 
 @router.api_route("/logout", methods=["GET", "POST"])
 def logout(request: Request):
     logout_session(request)
-    return RedirectResponse("/login", status_code=302)
+    resp = RedirectResponse("/login", status_code=302)
+    clear_remember_cookie(resp)  # выход снимает и автовход
+    return resp
 
 
 @router.get("/chat", response_class=HTMLResponse)

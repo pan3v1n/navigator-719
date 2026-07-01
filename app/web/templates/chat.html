@@ -1,38 +1,55 @@
 {% extends "base.html" %}
 {% block title %}Чат — {{ app_title }}{% endblock %}
 {% block body %}
-<div class="app">
+<div class="app" id="app">
   <aside class="sidebar">
     <div class="side-top">
-      <a class="brand" href="/chat" title="На начальную страницу"><span class="logo">719</span> Навигатор</a>
+      <button class="side-toggle" id="side-toggle" title="Свернуть / развернуть меню">
+        <span class="logo">719</span>
+        <svg class="collapse-ic" viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <a class="brand-text" href="/chat" title="На начальную страницу">Навигатор</a>
     </div>
-    <button class="new-chat" id="new-chat" type="button">
+
+    <button class="new-chat" id="new-chat" type="button" title="Новый диалог">
       <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      Новый диалог
+      <span class="nc-text">Новый диалог</span>
     </button>
+
+    <button class="new-chat" id="search-btn" type="button" title="Поиск по чатам">
+      <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+      <span class="nc-text">Поиск по чатам</span>
+    </button>
+
+    <div class="search-box hidden" id="search-box">
+      <input type="text" id="search-input" placeholder="Поиск по чатам…" autocomplete="off">
+    </div>
+
     <div class="history" id="history"></div>
+
     <nav class="side-nav">
       {% if user.role == 'admin' %}
       <a class="nav-item" href="/admin">
         <svg viewBox="0 0 24 24" fill="none"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        Логи диалогов
+        <span class="nc-text">Логи диалогов</span>
       </a>
       {% endif %}
       <button class="nav-item" id="export-btn" type="button">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Экспорт диалогов
+        <span class="nc-text">Экспорт диалогов</span>
       </button>
       <button class="nav-item" id="fb-open" type="button">
         <svg viewBox="0 0 24 24" fill="none"><path d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        Оставить отзыв
+        <span class="nc-text">Оставить отзыв</span>
       </button>
     </nav>
+
     <div class="side-bottom">
       <div class="user-chip">
         <span class="avatar">{{ user.username[0]|upper }}</span>
-        <span class="uname">{{ user.username }}{% if user.role == 'admin' %} · admin{% endif %}</span>
+        <span class="uname nc-text">{{ user.username }}{% if user.role == 'admin' %} · admin{% endif %}</span>
       </div>
-      <a class="logout" href="/logout">Выйти</a>
+      <a class="logout nc-text" href="/logout">Выйти</a>
     </div>
   </aside>
 
@@ -91,6 +108,28 @@
       <button type="submit">Отправить отзыв</button>
     </div>
     <div id="fb-thanks" class="thanks hidden">Спасибо! Отзыв записан.</div>
+  </form>
+</div>
+
+<div id="export-modal" class="modal hidden">
+  <form id="export-form" class="modal-card">
+    <h2>Экспорт диалогов</h2>
+    <label>Формат
+      <select name="fmt">
+        <option value="json">JSON</option>
+        <option value="md">Markdown</option>
+        <option value="txt">Текст</option>
+      </select>
+    </label>
+    <div class="field-row">
+      <label>Дата с<input type="date" name="date_from"></label>
+      <label>Дата по<input type="date" name="date_to"></label>
+    </div>
+    <label class="checkbox"><input type="checkbox" name="sources" checked> Включать источники (для JSON)</label>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="export-cancel">Отмена</button>
+      <button type="submit">Экспортировать</button>
+    </div>
   </form>
 </div>
 

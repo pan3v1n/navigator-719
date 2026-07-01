@@ -37,40 +37,49 @@ function openItemMenu(sid, item, anchor) {
   menuEl = document.createElement("div");
   menuEl.className = "dropdown";
 
-  const expBtn = document.createElement("button");
-  expBtn.className = "dd-item";
-  expBtn.textContent = "Экспортировать чат";
-  expBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
+  function renderMain() {
+    menuEl.innerHTML = "";
+    const expBtn = document.createElement("button");
+    expBtn.className = "dd-item";
+    expBtn.textContent = "Экспортировать чат";
+    expBtn.addEventListener("click", (e) => { e.stopPropagation(); renderFormats(); });
+    menuEl.appendChild(expBtn);
+    const delBtn = document.createElement("button");
+    delBtn.className = "dd-item danger";
+    delBtn.textContent = "Удалить чат";
+    delBtn.addEventListener("click", (e) => { e.stopPropagation(); closeMenu(); deleteConversation(sid, item); });
+    menuEl.appendChild(delBtn);
+  }
+
+  function renderFormats() {
     menuEl.innerHTML = "";
     const head = document.createElement("div");
-    head.className = "dd-head";
-    head.textContent = "Формат";
+    head.className = "dd-head-back";
+    const back = document.createElement("button");
+    back.className = "dd-back";
+    back.type = "button";
+    back.title = "Назад";
+    back.innerHTML = '<svg viewBox="0 0 24 24" fill="none" width="15" height="15"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>';
+    back.addEventListener("click", (e) => { e.stopPropagation(); renderMain(); });
+    const title = document.createElement("span");
+    title.textContent = "Формат";
+    head.appendChild(back);
+    head.appendChild(title);
     menuEl.appendChild(head);
     [["JSON", "json"], ["Markdown", "md"], ["Текст", "txt"]].forEach(([label, fmt]) => {
       const b = document.createElement("button");
       b.className = "dd-item";
       b.textContent = label;
-      b.addEventListener("click", (e2) => {
-        e2.stopPropagation();
+      b.addEventListener("click", (e) => {
+        e.stopPropagation();
         downloadUrl("/api/conversations/" + sid + "/export?fmt=" + fmt);
         closeMenu();
       });
       menuEl.appendChild(b);
     });
-  });
-  menuEl.appendChild(expBtn);
+  }
 
-  const delBtn = document.createElement("button");
-  delBtn.className = "dd-item danger";
-  delBtn.textContent = "Удалить чат";
-  delBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
-    closeMenu();
-    deleteConversation(sid, item);
-  });
-  menuEl.appendChild(delBtn);
-
+  renderMain();
   document.body.appendChild(menuEl);
   const r = anchor.getBoundingClientRect();
   menuEl.style.top = r.bottom + 4 + "px";
@@ -320,9 +329,54 @@ if (newChat) newChat.addEventListener("click", () => {
   input.focus();
 });
 
-// экспорт всех диалогов пользователя (скачивание JSON)
+// --- экспорт всех диалогов: окно настроек (формат / период дат / источники) ---
 const exportBtn = document.getElementById("export-btn");
-if (exportBtn) exportBtn.addEventListener("click", () => downloadUrl("/api/export"));
+const exportModal = document.getElementById("export-modal");
+if (exportBtn) exportBtn.addEventListener("click", () => exportModal.classList.remove("hidden"));
+const exportCancel = document.getElementById("export-cancel");
+if (exportCancel) exportCancel.addEventListener("click", () => exportModal.classList.add("hidden"));
+const exportForm = document.getElementById("export-form");
+if (exportForm) exportForm.addEventListener("submit", (e) => {
+  e.preventDefault();
+  const f = e.target;
+  const p = new URLSearchParams();
+  p.set("fmt", f.fmt.value);
+  if (f.date_from.value) p.set("date_from", f.date_from.value);
+  if (f.date_to.value) p.set("date_to", f.date_to.value);
+  p.set("sources", f.sources.checked ? "1" : "0");
+  downloadUrl("/api/export?" + p.toString());
+  exportModal.classList.add("hidden");
+});
+
+// --- сворачивание/разворачивание сайдбара (состояние в localStorage) ---
+const appEl = document.getElementById("app");
+const sideToggle = document.getElementById("side-toggle");
+function setCollapsed(on) {
+  appEl.classList.toggle("collapsed", on);
+  try { localStorage.setItem("sidebarCollapsed", on ? "1" : "0"); } catch (e) {}
+}
+if (sideToggle) sideToggle.addEventListener("click", () => setCollapsed(!appEl.classList.contains("collapsed")));
+try { if (localStorage.getItem("sidebarCollapsed") === "1") appEl.classList.add("collapsed"); } catch (e) {}
+
+// --- поиск по чатам (фильтр истории по заголовку) ---
+const searchBtn = document.getElementById("search-btn");
+const searchBox = document.getElementById("search-box");
+const searchInput = document.getElementById("search-input");
+function filterHistory(qq) {
+  const q = (qq || "").trim().toLowerCase();
+  history.querySelectorAll(".history-item").forEach((it) => {
+    const label = it.querySelector(".hi-title");
+    const t = (label ? label.textContent : "").toLowerCase();
+    it.style.display = !q || t.indexOf(q) !== -1 ? "" : "none";
+  });
+}
+if (searchBtn) searchBtn.addEventListener("click", () => {
+  if (appEl.classList.contains("collapsed")) setCollapsed(false); // развернуть для поиска
+  searchBox.classList.toggle("hidden");
+  if (!searchBox.classList.contains("hidden")) { searchInput.focus(); }
+  else { searchInput.value = ""; filterHistory(""); }
+});
+if (searchInput) searchInput.addEventListener("input", () => filterHistory(searchInput.value));
 
 // форма обратной связи
 const modal = document.getElementById("fb-modal");
