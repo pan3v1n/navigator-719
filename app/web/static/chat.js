@@ -193,6 +193,11 @@ function addHistoryItem(sid, title, prepend) {
   setActive(sid);
 }
 
+function removeHistoryItem(sid) {
+  const it = history.querySelector('[data-sid="' + sid + '"]');
+  if (it) it.remove();
+}
+
 async function deleteConversation(sid, item) {
   if (!confirm("Удалить этот диалог? Действие необратимо.")) return;
   try {
@@ -236,9 +241,20 @@ async function openConversation(sid) {
 }
 
 // --- отправка вопроса ---
+function genId() {
+  return window.crypto && crypto.randomUUID
+    ? crypto.randomUUID()
+    : "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+}
+
 async function ask(text) {
   main.classList.remove("empty");
   const isNew = !sessionId;
+  if (isNew) {
+    // новую беседу заводим СРАЗУ (id на клиенте) и добавляем в историю ДО ответа
+    sessionId = genId();
+    addHistoryItem(sessionId, text, true);
+  }
   addUser(text);
   const pending = addPending();
   const bubble = pending.querySelector(".bubble");
@@ -250,15 +266,19 @@ async function ask(text) {
       body: JSON.stringify({ message: text, session_id: sessionId }),
     });
     if (r.status === 401) { window.location = "/login"; return; }
-    if (!r.ok) { bubble.textContent = "Ошибка: сервис недоступен, повторите запрос."; return; }
+    if (!r.ok) {
+      bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
+      if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт
+      return;
+    }
     const data = await r.json();
     sessionId = data.session_id;
-    if (isNew) addHistoryItem(data.session_id, text, true); // новая беседа → в историю
-    else setActive(data.session_id);
+    setActive(sessionId);
     bubble.innerHTML = renderMarkdown(data.answer);
     addSources(pending, data.sources);
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
+    if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
   } finally {
     send.disabled = false;
     scrollDown();
