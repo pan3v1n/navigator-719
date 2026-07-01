@@ -27,19 +27,20 @@ function downloadUrl(url) {
   a.remove();
 }
 
-// Выпадающее меню экспорта чата у «⋮»: «Экспортировать чат» → выбор формата (JSON/Markdown/Текст).
+// Меню чата у «⋮»: «Экспортировать чат» (→ выбор формата) + «Удалить чат».
 let menuEl = null;
 function closeMenu() {
   if (menuEl) { menuEl.remove(); menuEl = null; document.removeEventListener("click", closeMenu); }
 }
-function openExportMenu(sid, anchor) {
+function openItemMenu(sid, item, anchor) {
   closeMenu();
   menuEl = document.createElement("div");
   menuEl.className = "dropdown";
-  const step1 = document.createElement("button");
-  step1.className = "dd-item";
-  step1.textContent = "Экспортировать чат";
-  step1.addEventListener("click", (e) => {
+
+  const expBtn = document.createElement("button");
+  expBtn.className = "dd-item";
+  expBtn.textContent = "Экспортировать чат";
+  expBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     menuEl.innerHTML = "";
     const head = document.createElement("div");
@@ -58,7 +59,18 @@ function openExportMenu(sid, anchor) {
       menuEl.appendChild(b);
     });
   });
-  menuEl.appendChild(step1);
+  menuEl.appendChild(expBtn);
+
+  const delBtn = document.createElement("button");
+  delBtn.className = "dd-item danger";
+  delBtn.textContent = "Удалить чат";
+  delBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    closeMenu();
+    deleteConversation(sid, item);
+  });
+  menuEl.appendChild(delBtn);
+
   document.body.appendChild(menuEl);
   const r = anchor.getBoundingClientRect();
   menuEl.style.top = r.bottom + 4 + "px";
@@ -174,20 +186,13 @@ function addHistoryItem(sid, title, prepend) {
   label.className = "hi-title";
   label.textContent = title || "Диалог";
   item.appendChild(label);
-  const exp = document.createElement("button");
-  exp.className = "hi-export";
-  exp.type = "button";
-  exp.title = "Экспортировать диалог";
-  exp.textContent = "⋮";
-  exp.addEventListener("click", (e) => { e.stopPropagation(); openExportMenu(sid, exp); });
-  item.appendChild(exp);
-  const del = document.createElement("button");
-  del.className = "hi-del";
-  del.type = "button";
-  del.title = "Удалить диалог";
-  del.textContent = "×";
-  del.addEventListener("click", (e) => { e.stopPropagation(); deleteConversation(sid, item); });
-  item.appendChild(del);
+  const menuBtn = document.createElement("button");
+  menuBtn.className = "hi-export";
+  menuBtn.type = "button";
+  menuBtn.title = "Меню чата";
+  menuBtn.textContent = "⋮";
+  menuBtn.addEventListener("click", (e) => { e.stopPropagation(); openItemMenu(sid, item, menuBtn); });
+  item.appendChild(menuBtn);
   item.addEventListener("click", () => openConversation(sid));
   if (prepend) history.prepend(item); else history.appendChild(item);
   setActive(sid);
