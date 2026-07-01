@@ -4,11 +4,17 @@
 <div class="app" id="app">
   <aside class="sidebar">
     <div class="side-top">
-      <button class="side-toggle" id="side-toggle" title="Свернуть / развернуть меню">
+      <a class="brand" href="/chat" title="На начальную страницу">
         <span class="logo">719</span>
-        <svg class="collapse-ic" viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span class="brand-text">Навигатор</span>
+      </a>
+      <button class="side-collapse" id="side-collapse" type="button" title="Свернуть меню">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
       </button>
-      <a class="brand-text" href="/chat" title="На начальную страницу">Навигатор</a>
+      <button class="side-expand" id="side-expand" type="button" title="Развернуть меню">
+        <span class="logo">719</span>
+        <svg class="expand-ic" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
     </div>
 
     <button class="new-chat" id="new-chat" type="button" title="Новый диалог">

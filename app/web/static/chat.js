@@ -350,12 +350,14 @@ if (exportForm) exportForm.addEventListener("submit", (e) => {
 
 // --- сворачивание/разворачивание сайдбара (состояние в localStorage) ---
 const appEl = document.getElementById("app");
-const sideToggle = document.getElementById("side-toggle");
 function setCollapsed(on) {
   appEl.classList.toggle("collapsed", on);
   try { localStorage.setItem("sidebarCollapsed", on ? "1" : "0"); } catch (e) {}
 }
-if (sideToggle) sideToggle.addEventListener("click", () => setCollapsed(!appEl.classList.contains("collapsed")));
+const sideCollapse = document.getElementById("side-collapse");
+const sideExpand = document.getElementById("side-expand");
+if (sideCollapse) sideCollapse.addEventListener("click", () => setCollapsed(true));
+if (sideExpand) sideExpand.addEventListener("click", () => setCollapsed(false));
 try { if (localStorage.getItem("sidebarCollapsed") === "1") appEl.classList.add("collapsed"); } catch (e) {}
 
 // --- поиск по чатам (фильтр истории по заголовку) ---
