@@ -84,30 +84,58 @@ def admin_page(request: Request):
     if user.role != "admin":
         return RedirectResponse("/chat", status_code=302)  # эксперт логи не видит
 
-    # Извлекаем в ПЛОСКИЕ структуры внутри сессии (объекты БД после закрытия — detached).
-    # По каждой беседе: заголовок = первый вопрос эксперта; суммируем токены и стоимость (₽).
+    from collections import defaultdict
+
+    # Собираем ЗА ОДИН проход: детальные логи (юзер → беседы → реплики, с датами, всё в плоских
+    # структурах — объекты БД после закрытия detached) + агрегаты для дашборда.
+    def _fmt(ts):
+        return ts.strftime("%d.%m.%Y %H:%M") if ts else ""
+
     data = []
     g_prompt = g_completion = 0
+    total_requests = total_answers = total_conversations = 0
+    flags_unverified = flags_lowrel = 0
+    per_day = defaultdict(lambda: {"requests": 0, "tokens": 0})
+    per_user_stat = []
+    matched_counts = {"да": 0, "частично": 0, "нет": 0}
+    ratings = []
+
     with get_session() as db:
         for u in q.list_users(db):
             msgs = q.get_messages_for_user(db, u.id)
-            by_sid: dict[str, dict] = {}
-            order: list[str] = []
+            by_sid, order = {}, []
+            u_req = 0
             for m in msgs:
                 s = by_sid.get(m.session_id)
                 if s is None:
-                    s = {"sid": m.session_id, "title": None, "messages": [], "prompt": 0, "completion": 0}
+                    s = {"sid": m.session_id, "title": None, "date": "", "messages": [],
+                         "prompt": 0, "completion": 0}
                     by_sid[m.session_id] = s
                     order.append(m.session_id)
                 if s["title"] is None and m.role == "user":
                     s["title"] = m.content
+                if not s["date"] and m.ts:
+                    s["date"] = _fmt(m.ts)
+                tok = (m.prompt_tokens or 0) + (m.completion_tokens or 0)
                 s["messages"].append({
-                    "role": m.role, "content": m.content, "ts": m.ts,
-                    "low_relevance": m.low_relevance, "unverified": m.unverified_json,
-                    "tokens": (m.prompt_tokens or 0) + (m.completion_tokens or 0),
+                    "role": m.role, "content": m.content, "ts": _fmt(m.ts),
+                    "low_relevance": m.low_relevance, "unverified": m.unverified_json, "tokens": tok,
                 })
                 s["prompt"] += m.prompt_tokens or 0
                 s["completion"] += m.completion_tokens or 0
+                day = m.ts.strftime("%d.%m") if m.ts else None
+                if m.role == "user":
+                    u_req += 1
+                    if day:
+                        per_day[day]["requests"] += 1
+                else:
+                    total_answers += 1
+                    if day:
+                        per_day[day]["tokens"] += tok
+                    if m.unverified_json:
+                        flags_unverified += 1
+                    if m.low_relevance:
+                        flags_lowrel += 1
             u_prompt = u_completion = 0
             sessions = []
             for sid in reversed(order):  # новые беседы сверху
@@ -118,19 +146,55 @@ def admin_page(request: Request):
                 u_prompt += s["prompt"]
                 u_completion += s["completion"]
                 sessions.append(s)
-            feedback = [
-                {"rating": f.rating, "matched": f.matched, "comment": f.comment, "ts": f.ts}
-                for f in q.get_feedback_for_user(db, u.id)
-            ]
+            feedback = []
+            for f in q.get_feedback_for_user(db, u.id):
+                feedback.append({"rating": f.rating, "matched": f.matched, "comment": f.comment, "ts": _fmt(f.ts)})
+                if f.rating is not None:
+                    ratings.append(f.rating)
+                if f.matched in matched_counts:
+                    matched_counts[f.matched] += 1
             g_prompt += u_prompt
             g_completion += u_completion
+            total_requests += u_req
+            total_conversations += len(order)
+            u_tokens, u_cost = u_prompt + u_completion, cost_rub(u_prompt, u_completion)
             data.append({
                 "username": u.username, "role": u.role, "msg_count": len(msgs),
-                "sessions": sessions, "feedback": feedback,
-                "tokens": u_prompt + u_completion, "cost": cost_rub(u_prompt, u_completion),
+                "conversations": len(order), "requests": u_req,
+                "sessions": sessions, "feedback": feedback, "tokens": u_tokens, "cost": u_cost,
             })
-    totals = {"tokens": g_prompt + g_completion, "cost": cost_rub(g_prompt, g_completion)}
-    return templates.TemplateResponse("admin.html", _ctx(request, admin=user, data=data, totals=totals))
+            per_user_stat.append({"username": u.username, "requests": u_req, "tokens": u_tokens, "cost": u_cost})
+
+    per_user_stat.sort(key=lambda x: x["requests"], reverse=True)
+    per_day_list = [{"date": d, "requests": v["requests"], "tokens": v["tokens"]}
+                    for d, v in sorted(per_day.items())][-14:]
+    tokens_total, cost_total = g_prompt + g_completion, cost_rub(g_prompt, g_completion)
+    stats = {
+        "users_total": len(data),
+        "experts": sum(1 for x in data if x["role"] == "expert"),
+        "admins": sum(1 for x in data if x["role"] == "admin"),
+        "conversations": total_conversations,
+        "requests": total_requests,
+        "answers": total_answers,
+        "tokens": tokens_total,
+        "cost": cost_total,
+        "avg_tokens": round(tokens_total / total_answers) if total_answers else 0,
+        "avg_cost": round(cost_total / total_answers, 3) if total_answers else 0,
+        "feedback_count": sum(len(x["feedback"]) for x in data),
+        "avg_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,
+        "matched": matched_counts,
+        "flags_unverified": flags_unverified,
+        "flags_lowrel": flags_lowrel,
+        "per_user": per_user_stat,
+        "per_day": per_day_list,
+        "max_requests": per_user_stat[0]["requests"] if per_user_stat else 0,
+        "max_cost": max((x["cost"] for x in per_user_stat), default=0),
+        "max_day": max((d["requests"] for d in per_day_list), default=0),
+    }
+    totals = {"tokens": tokens_total, "cost": cost_total}
+    return templates.TemplateResponse(
+        "admin.html", _ctx(request, admin=user, data=data, totals=totals, stats=stats)
+    )
 
 
 class FeedbackIn(BaseModel):

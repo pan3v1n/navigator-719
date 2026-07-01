@@ -1,8 +1,8 @@
 {% extends "base.html" %}
-{% block title %}Логи — {{ app_title }}{% endblock %}
+{% block title %}Панель — {{ app_title }}{% endblock %}
 {% block body %}
 <header class="admin-header">
-  <a class="brand" href="/chat" title="На начальную страницу"><span class="logo">719</span> Навигатор · логи</a>
+  <a class="brand" href="/chat" title="На начальную страницу"><span class="logo">719</span> Навигатор · панель</a>
   <div class="spacer"></div>
   <span class="muted">{{ admin.username }} · admin</span>
   <a class="link" href="/chat">Чат</a>
@@ -10,49 +10,124 @@
 </header>
 
 <main class="admin">
-  <div class="totals">
-    Затраты на модель: токенов <b>{{ totals.tokens }}</b> · оценка <b>{{ '%.2f'|format(totals.cost) }} ₽</b>
-    <span class="muted">эмбеддинг и Qdrant локальны (бесплатно); ₽ — только DeepSeek</span>
+  <div class="tabs">
+    <button class="tab active" data-tab="dash">Дашборд</button>
+    <button class="tab" data-tab="logs">Логи</button>
   </div>
 
-  {% for d in data %}
-  <section class="user-block">
-    <h2>{{ d.username }} <span class="role">{{ d.role }}</span>
-        <span class="count">· реплик: {{ d.msg_count }} · токенов: {{ d.tokens }} · {{ '%.2f'|format(d.cost) }} ₽</span></h2>
-
-    {% if d.feedback %}
-    <div class="fb-list">
-      <h3>Отзывы</h3>
-      {% for f in d.feedback %}
-      <div class="fb">оценка: <b>{{ f.rating if f.rating is not none else '—' }}</b>
-        · соответствие 719: <b>{{ f.matched or '—' }}</b>
-        {% if f.comment %}<br>«{{ f.comment }}»{% endif %}
-        <span class="ts">{{ f.ts }}</span></div>
-      {% endfor %}
+  <!-- ===== ДАШБОРД ===== -->
+  <section id="tab-dash" class="tab-panel">
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-val">{{ stats.users_total }}</div><div class="kpi-label">Пользователи</div>
+        <div class="kpi-sub">эксперты {{ stats.experts }} · админы {{ stats.admins }}</div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.conversations }}</div><div class="kpi-label">Диалоги</div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.requests }}</div><div class="kpi-label">Запросы</div>
+        <div class="kpi-sub">ответов {{ stats.answers }}</div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.tokens }}</div><div class="kpi-label">Токены</div>
+        <div class="kpi-sub">~{{ stats.avg_tokens }} / ответ</div></div>
+      <div class="kpi"><div class="kpi-val">{{ '%.2f'|format(stats.cost) }} ₽</div><div class="kpi-label">Затраты</div>
+        <div class="kpi-sub">~{{ '%.3f'|format(stats.avg_cost) }} ₽ / ответ</div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.avg_rating if stats.avg_rating is not none else '—' }}</div>
+        <div class="kpi-label">Ср. оценка</div><div class="kpi-sub">{{ stats.feedback_count }} отзывов</div></div>
     </div>
-    {% endif %}
 
-    {% for s in d.sessions %}
-    <details class="thread">
-      <summary>{{ s.title }}
-        <span class="thread-meta">· {{ s.messages|length }} реплик · {{ s.tokens }} ток. · {{ '%.3f'|format(s.cost) }} ₽</span>
-      </summary>
-      {% for m in s.messages %}
-      <div class="log-msg {{ m.role }}">
-        <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
-        <span class="content">{{ m.content }}</span>
-        {% if m.tokens %}<span class="tok">{{ m.tokens }} ток.</span>{% endif %}
-        {% if m.unverified %}<span class="flag">непроверенные числа: {{ m.unverified }}</span>{% endif %}
-        {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
+    <div class="charts">
+      <div class="card">
+        <h3>Запросы по пользователям</h3>
+        {% for u in stats.per_user %}
+        <div class="bar-row" title="{{ u.username }}: {{ u.requests }} запросов">
+          <span class="bar-label">{{ u.username }}</span>
+          <span class="bar-track"><span class="bar-fill" style="width: {{ ((u.requests / (stats.max_requests or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ u.requests }}</span>
+        </div>
+        {% else %}<p class="empty">Нет данных.</p>{% endfor %}
       </div>
-      {% endfor %}
-    </details>
-    {% else %}
-    <p class="empty">Пока нет диалогов.</p>
-    {% endfor %}
+
+      <div class="card">
+        <h3>Затраты по пользователям, ₽</h3>
+        {% for u in stats.per_user %}
+        <div class="bar-row" title="{{ u.username }}: {{ '%.3f'|format(u.cost) }} ₽ · {{ u.tokens }} ток.">
+          <span class="bar-label">{{ u.username }}</span>
+          <span class="bar-track"><span class="bar-fill cost" style="width: {{ ((u.cost / (stats.max_cost or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ '%.2f'|format(u.cost) }}</span>
+        </div>
+        {% else %}<p class="empty">Нет данных.</p>{% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Активность по дням (запросы)</h3>
+        <div class="daychart">
+          {% for d in stats.per_day %}
+          <div class="daybar" title="{{ d.date }}: {{ d.requests }} запросов, {{ d.tokens }} ток.">
+            <span class="daybar-fill" style="height: {{ ((d.requests / (stats.max_day or 1)) * 100)|round }}%"></span>
+            <em>{{ d.date }}</em>
+          </div>
+          {% else %}<p class="empty">Нет данных.</p>{% endfor %}
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Обратная связь</h3>
+        <div class="fb-stat">Средняя оценка: <b>{{ stats.avg_rating if stats.avg_rating is not none else '—' }}</b> · отзывов: {{ stats.feedback_count }}</div>
+        <div class="fb-stat">Соответствие 719: да <b>{{ stats.matched['да'] }}</b> · частично <b>{{ stats.matched['частично'] }}</b> · нет <b>{{ stats.matched['нет'] }}</b></div>
+      </div>
+
+      <div class="card">
+        <h3>Флаги качества</h3>
+        <div class="fb-stat">Непроверенные числа (guard): <b>{{ stats.flags_unverified }}</b></div>
+        <div class="fb-stat">Низкая релевантность: <b>{{ stats.flags_lowrel }}</b></div>
+      </div>
+    </div>
   </section>
-  {% else %}
-  <p class="empty">Нет пользователей.</p>
-  {% endfor %}
+
+  <!-- ===== ЛОГИ ===== -->
+  <section id="tab-logs" class="tab-panel hidden">
+    {% for u in data %}
+    <details class="user-log">
+      <summary>
+        <span class="ul-name">{{ u.username }} <span class="role">{{ u.role }}</span></span>
+        <span class="ul-meta">диалогов {{ u.conversations }} · запросов {{ u.requests }} · {{ u.tokens }} ток. · {{ '%.2f'|format(u.cost) }} ₽</span>
+      </summary>
+      <div class="ul-body">
+        {% if u.feedback %}
+        <div class="fb-list">
+          <h3>Отзывы</h3>
+          {% for f in u.feedback %}
+          <div class="fb">оценка: <b>{{ f.rating if f.rating is not none else '—' }}</b>
+            · соответствие 719: <b>{{ f.matched or '—' }}</b>{% if f.comment %}<br>«{{ f.comment }}»{% endif %}
+            <span class="ts">{{ f.ts }}</span></div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% for s in u.sessions %}
+        <details class="thread">
+          <summary>{{ s.title }}<span class="thread-meta"> · {{ s.date }} · {{ s.messages|length }} реплик · {{ s.tokens }} ток. · {{ '%.3f'|format(s.cost) }} ₽</span></summary>
+          {% for m in s.messages %}
+          <div class="log-msg {{ m.role }}">
+            <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
+            <span class="content">{{ m.content }}</span>
+            <span class="ts">{{ m.ts }}</span>
+            {% if m.tokens %}<span class="tok">{{ m.tokens }} ток.</span>{% endif %}
+            {% if m.unverified %}<span class="flag">непроверенные числа: {{ m.unverified }}</span>{% endif %}
+            {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
+          </div>
+          {% endfor %}
+        </details>
+        {% else %}<p class="empty">Нет диалогов.</p>{% endfor %}
+      </div>
+    </details>
+    {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
+  </section>
 </main>
+
+<script>
+  document.querySelectorAll(".tab").forEach(function (t) {
+    t.addEventListener("click", function () {
+      document.querySelectorAll(".tab").forEach(function (x) { x.classList.remove("active"); });
+      t.classList.add("active");
+      document.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.add("hidden"); });
+      document.getElementById("tab-" + t.dataset.tab).classList.remove("hidden");
+    });
+  });
+</script>
 {% endblock %}
