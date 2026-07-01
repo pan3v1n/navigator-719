@@ -162,6 +162,17 @@ def unverified_numbers(text: str, context: str) -> list[str]:
     return out
 
 
+# Рантайм-очистка эмодзи/символов-значков из ответа модели (внутренний продукт — без эмодзи).
+# Промпт просит их не использовать, но модель изредка добавляет (напр. ⚠); подчищаем гарантированно.
+# Диапазоны: emoji, misc symbols/dingbats (⚠ ✓ ✅), доп. символы/стрелки, variation selector.
+# Типографику (• « » — … № ™ ®) НЕ трогаем — она вне этих диапазонов.
+_EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️]")
+
+
+def _strip_emoji(text: str) -> str:
+    return _EMOJI_RE.sub("", text)
+
+
 def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import meta
@@ -221,7 +232,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с контекстом. Незаземлённые
     # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
     # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
-    raw = resp.choices[0].message.content or ""
+    raw = _strip_emoji(resp.choices[0].message.content or "")
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     ungrounded = unverified_numbers(raw, grounding)
     return Answer(

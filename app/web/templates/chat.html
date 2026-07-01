@@ -18,6 +18,10 @@
         Логи диалогов
       </a>
       {% endif %}
+      <button class="nav-item" id="export-btn" type="button">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        Экспорт диалогов
+      </button>
       <button class="nav-item" id="fb-open" type="button">
         <svg viewBox="0 0 24 24" fill="none"><path d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         Оставить отзыв
@@ -32,28 +36,32 @@
     </div>
   </aside>
 
-  <main class="main">
+  <main class="main empty" id="main">
     <header class="chat-header">
       <div class="chat-title">{{ app_title }}</div>
     </header>
 
     <div class="chat-scroll" id="chat-scroll">
       <div class="chat-col">
-        <div class="hero" id="hero">
-          <h1>Чем помочь по ПП №719?</h1>
-          <p>Опишите продукцию или укажите код ОКПД2 — подскажу позицию приложения, требования и баллы.</p>
-        </div>
         <div id="messages" class="messages"></div>
       </div>
     </div>
 
-    <div class="composer-wrap">
+    <div class="composer-area">
+      <div class="hero" id="hero">
+        <h1>Чем помочь по ПП №719?</h1>
+        <p>Опишите продукцию или укажите код ОКПД2 — подскажу позицию приложения, требования и баллы.</p>
+      </div>
       <form id="chat-form" class="composer">
         <textarea id="input" rows="1" placeholder="Спросите про 719 — продукцию или код ОКПД2…" autofocus></textarea>
         <button type="submit" id="send" class="send-btn" aria-label="Отправить">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6 11l6-6 6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
       </form>
+      <div class="composer-disclaimer">
+        Навигатор 719 — ИИ-ассистент по <a href="https://normativ.kontur.ru/document/1/506613-postanovlenie-pravitelstva-rf-ot-17-07-2015-n-719" target="_blank" rel="noopener">Постановлению Правительства РФ №719</a>.
+        Ответы предварительны, окончательное решение принимает эксперт Курской ТПП. Диалоги сохраняются и могут использоваться для улучшения сервиса.
+      </div>
     </div>
   </main>
 </div>

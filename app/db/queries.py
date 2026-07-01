@@ -101,6 +101,18 @@ def get_session_messages(db: Session, user_id: int, session_id: str) -> list[Mes
     )
 
 
+def delete_session(db: Session, user_id: int, session_id: str) -> int:
+    """Удаляет беседу пользователя (все её реплики). Фильтр по user_id — чужое не тронуть.
+    Возвращает число удалённых реплик."""
+    from sqlalchemy import delete as _delete
+
+    res = db.execute(
+        _delete(Message).where(Message.user_id == user_id, Message.session_id == session_id)
+    )
+    db.commit()
+    return res.rowcount or 0
+
+
 # --- feedback ------------------------------------------------------------
 def save_feedback(
     db: Session, *, user_id: int, rating: int | None, matched: str | None = None,

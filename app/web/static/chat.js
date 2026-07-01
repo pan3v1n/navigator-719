@@ -6,6 +6,7 @@ const form = document.getElementById("chat-form");
 const input = document.getElementById("input");
 const send = document.getElementById("send");
 const history = document.getElementById("history");
+const main = document.getElementById("main");
 let sessionId = null;
 
 function el(cls) {
@@ -118,11 +119,35 @@ function addHistoryItem(sid, title, prepend) {
   if (history.querySelector('[data-sid="' + sid + '"]')) { setActive(sid); return; }
   const item = el("history-item");
   item.dataset.sid = sid;
-  item.textContent = title || "Диалог";
   item.title = title || "Диалог";
+  const label = document.createElement("span");
+  label.className = "hi-title";
+  label.textContent = title || "Диалог";
+  item.appendChild(label);
+  const del = document.createElement("button");
+  del.className = "hi-del";
+  del.type = "button";
+  del.title = "Удалить диалог";
+  del.textContent = "×";
+  del.addEventListener("click", (e) => { e.stopPropagation(); deleteConversation(sid, item); });
+  item.appendChild(del);
   item.addEventListener("click", () => openConversation(sid));
   if (prepend) history.prepend(item); else history.appendChild(item);
   setActive(sid);
+}
+
+async function deleteConversation(sid, item) {
+  if (!confirm("Удалить этот диалог? Действие необратимо.")) return;
+  try {
+    const r = await fetch("/api/conversations/" + sid, { method: "DELETE" });
+    if (!r.ok) return;
+    item.remove();
+    if (sessionId === sid) {
+      messages.innerHTML = "";
+      sessionId = null;
+      main.classList.add("empty");
+    }
+  } catch (e) { /* сеть */ }
 }
 
 async function loadConversations() {
@@ -142,7 +167,7 @@ async function openConversation(sid) {
     if (!r.ok) return;
     const data = await r.json();
     messages.innerHTML = "";
-    if (hero) hero.style.display = "none";
+    main.classList.remove("empty");
     sessionId = sid;
     data.messages.forEach((m) => {
       if (m.role === "user") addUser(m.content);
@@ -155,7 +180,7 @@ async function openConversation(sid) {
 
 // --- отправка вопроса ---
 async function ask(text) {
-  if (hero) hero.style.display = "none";
+  main.classList.remove("empty");
   const isNew = !sessionId;
   addUser(text);
   const pending = addPending();
@@ -206,10 +231,14 @@ const newChat = document.getElementById("new-chat");
 if (newChat) newChat.addEventListener("click", () => {
   messages.innerHTML = "";
   sessionId = null;
-  if (hero) hero.style.display = "";
+  main.classList.add("empty");
   setActive(null);
   input.focus();
 });
+
+// экспорт всех диалогов пользователя (скачивание JSON)
+const exportBtn = document.getElementById("export-btn");
+if (exportBtn) exportBtn.addEventListener("click", () => { window.location = "/api/export"; });
 
 // форма обратной связи
 const modal = document.getElementById("fb-modal");

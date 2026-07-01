@@ -13,6 +13,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
+from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -111,3 +112,42 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
                 item["sources"] = json.loads(m.sources_json)
             out.append(item)
     return {"session_id": session_id, "messages": out}
+
+
+@router.delete("/api/conversations/{session_id}")
+def delete_conversation(session_id: str, user: User = Depends(require_user)) -> dict:
+    """Удалить беседу пользователя (только свою — фильтр по user_id)."""
+    with get_session() as db:
+        removed = q.delete_session(db, user.id, session_id)
+    return {"ok": True, "removed": removed}
+
+
+@router.get("/api/export")
+def export_conversations(user: User = Depends(require_user)) -> Response:
+    """Скачать все беседы пользователя одним JSON (переносимость данных из сервиса)."""
+    with get_session() as db:
+        conversations = []
+        for s in q.get_user_sessions(db, user.id):
+            msgs = q.get_session_messages(db, user.id, s["session_id"])
+            conversations.append({
+                "session_id": s["session_id"],
+                "title": s["title"],
+                "messages": [
+                    {
+                        "role": m.role,
+                        "content": m.content,
+                        "ts": m.ts.isoformat() if m.ts else None,
+                        "sources": json.loads(m.sources_json) if m.sources_json else None,
+                    }
+                    for m in msgs
+                ],
+            })
+    payload = json.dumps(
+        {"user": user.username, "exported_conversations": len(conversations), "conversations": conversations},
+        ensure_ascii=False, indent=2,
+    )
+    return Response(
+        content=payload,
+        media_type="application/json",
+        headers={"Content-Disposition": 'attachment; filename="navigator719-chats.json"'},
+    )
