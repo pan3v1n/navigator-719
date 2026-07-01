@@ -306,6 +306,11 @@
     разовое демо 3–4 ч → локально + бесплатный туннель (cloudflared/LAN), ~₽50 DeepSeek. Managed-RAG не берём.
     Источники: timeweb.cloud/services/vds-vps, yandex.cloud/ru/docs/compute/pricing, mws.ru (Compute pricing),
     cloud.ru/solutions/umniy-poisk-i-ai-pomoschnik, yandex AI Studio (pdf-searchindex-ai-assistant).
+  - **✅ РЕШЕНО (2026-07-01): демо-хостинг = Yandex Cloud, грант 4000 ₽/60 дней.** Почасовой биллинг → 2-дневное
+    демо (~₽280 VM) целиком покрывается грантом → фактически бесплатно (только DeepSeek ~₽50). Схема:
+    создать VM → docker-compose (Qdrant+FastAPI+e5) → настроить/протестировать → провести демо → **удалить VM**
+    (биллинг стоп). Публичная ссылка снимает риск LAN (client-isolation/фаервол/общая Wi-Fi). Постоянный
+    пилот после демо — пересмотреть (фикс-VPS Timeweb ₽1782/мес). Продукт собираем локально, деплоим за час.
 
 ---
 
