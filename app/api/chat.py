@@ -122,32 +122,49 @@ def delete_conversation(session_id: str, user: User = Depends(require_user)) -> 
     return {"ok": True, "removed": removed}
 
 
+def _serialize_messages(msgs) -> list[dict]:
+    return [
+        {
+            "role": m.role,
+            "content": m.content,
+            "ts": m.ts.isoformat() if m.ts else None,
+            "sources": json.loads(m.sources_json) if m.sources_json else None,
+        }
+        for m in msgs
+    ]
+
+
+def _json_download(payload: dict, filename: str) -> Response:
+    return Response(
+        content=json.dumps(payload, ensure_ascii=False, indent=2),
+        media_type="application/json",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/api/export")
 def export_conversations(user: User = Depends(require_user)) -> Response:
-    """Скачать все беседы пользователя одним JSON (переносимость данных из сервиса)."""
+    """Скачать ВСЕ беседы пользователя одним JSON (переносимость данных из сервиса)."""
     with get_session() as db:
-        conversations = []
-        for s in q.get_user_sessions(db, user.id):
-            msgs = q.get_session_messages(db, user.id, s["session_id"])
-            conversations.append({
-                "session_id": s["session_id"],
-                "title": s["title"],
-                "messages": [
-                    {
-                        "role": m.role,
-                        "content": m.content,
-                        "ts": m.ts.isoformat() if m.ts else None,
-                        "sources": json.loads(m.sources_json) if m.sources_json else None,
-                    }
-                    for m in msgs
-                ],
-            })
-    payload = json.dumps(
+        conversations = [
+            {"session_id": s["session_id"], "title": s["title"],
+             "messages": _serialize_messages(q.get_session_messages(db, user.id, s["session_id"]))}
+            for s in q.get_user_sessions(db, user.id)
+        ]
+    return _json_download(
         {"user": user.username, "exported_conversations": len(conversations), "conversations": conversations},
-        ensure_ascii=False, indent=2,
+        "navigator719-chats.json",
     )
-    return Response(
-        content=payload,
-        media_type="application/json",
-        headers={"Content-Disposition": 'attachment; filename="navigator719-chats.json"'},
+
+
+@router.get("/api/conversations/{session_id}/export")
+def export_conversation(session_id: str, user: User = Depends(require_user)) -> Response:
+    """Скачать ОДНУ беседу пользователя JSON-ом (только свою — фильтр по user_id)."""
+    with get_session() as db:
+        msgs = q.get_session_messages(db, user.id, session_id)
+        title = next((m.content for m in msgs if m.role == "user"), "Диалог")
+    return _json_download(
+        {"user": user.username, "conversation": {
+            "session_id": session_id, "title": title, "messages": _serialize_messages(msgs)}},
+        f"navigator719-chat-{session_id[:8]}.json",
     )

@@ -19,6 +19,14 @@ function scrollDown() {
   scroll.scrollTop = scroll.scrollHeight;
 }
 
+function downloadUrl(url) {
+  const a = document.createElement("a");
+  a.href = url;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
 // Минимальный БЕЗОПАСНЫЙ рендер markdown ответа движка (**жирный**, • списки, абзацы).
 // Сначала экранируем HTML (защита от XSS), потом добавляем ТОЛЬКО свои теги.
 function renderMarkdown(text) {
@@ -124,6 +132,13 @@ function addHistoryItem(sid, title, prepend) {
   label.className = "hi-title";
   label.textContent = title || "Диалог";
   item.appendChild(label);
+  const exp = document.createElement("button");
+  exp.className = "hi-export";
+  exp.type = "button";
+  exp.title = "Экспортировать диалог";
+  exp.textContent = "⋮";
+  exp.addEventListener("click", (e) => { e.stopPropagation(); downloadUrl("/api/conversations/" + sid + "/export"); });
+  item.appendChild(exp);
   const del = document.createElement("button");
   del.className = "hi-del";
   del.type = "button";
@@ -220,7 +235,9 @@ form.addEventListener("submit", (e) => {
 // авто-рост textarea; Enter — отправка, Shift+Enter — перенос строки
 input.addEventListener("input", () => {
   input.style.height = "auto";
-  input.style.height = input.scrollHeight + "px";
+  const cap = window.innerHeight * 0.5; // растём вверх до половины экрана, потом — прокрутка
+  input.style.height = Math.min(input.scrollHeight, cap) + "px";
+  input.style.overflowY = input.scrollHeight > cap ? "auto" : "hidden";
 });
 input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
@@ -238,7 +255,7 @@ if (newChat) newChat.addEventListener("click", () => {
 
 // экспорт всех диалогов пользователя (скачивание JSON)
 const exportBtn = document.getElementById("export-btn");
-if (exportBtn) exportBtn.addEventListener("click", () => { window.location = "/api/export"; });
+if (exportBtn) exportBtn.addEventListener("click", () => downloadUrl("/api/export"));
 
 // форма обратной связи
 const modal = document.getElementById("fb-modal");
