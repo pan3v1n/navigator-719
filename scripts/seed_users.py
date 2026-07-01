@@ -32,6 +32,8 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Сид пользователей демо (admin + эксперты)")
     ap.add_argument("--experts", type=int, default=4, help="сколько экспертов создать (expert1..N)")
     ap.add_argument("--admin", type=str, default="admin", help="логин администратора")
+    ap.add_argument("--admin-password", type=str, default=None,
+                    help="фиксированный пароль администратора (иначе генерируется); ставится даже без --reset")
     ap.add_argument("--reset", action="store_true", help="сбросить пароли существующим юзерам")
     args = ap.parse_args()
 
@@ -42,10 +44,11 @@ def main() -> None:
     with get_session() as db:
         for username, role in spec:
             existing = q.get_user_by_username(db, username)
-            if existing and not args.reset:
+            forced = args.admin_password if (role == "admin" and args.admin_password) else None
+            if existing and not args.reset and not forced:
                 creds.append((username, "(без изменений)", role))
                 continue
-            pw = _gen_password()
+            pw = forced or _gen_password()
             if existing:
                 existing.password_hash = hash_password(pw)
                 db.commit()
