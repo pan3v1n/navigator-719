@@ -18,6 +18,11 @@ class Settings(BaseSettings):
     DEEPSEEK_MODEL: str = "deepseek-chat"
 
     DATABASE_URL: str = "sqlite+aiosqlite:///./navigator.db"
+    # Синхронный SQLite для данных приложения 1.0 (users / messages / feedback) — CRUD
+    # крошечный, async не нужен; эндпоинты объявлены как `def` → FastAPI гонит в threadpool.
+    APP_DB_URL: str = "sqlite:///./navigator_app.db"
+    # Секрет подписи сессионных кук. В проде ОБЯЗАТЕЛЬНО переопределить в .env.
+    SESSION_SECRET: str = "dev-insecure-secret-change-in-env"
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_COLLECTION: str = "pp719"
     QDRANT_CASES_COLLECTION: str = "verified_cases"  # кейсы, подтверждённые экспертом ТПП
