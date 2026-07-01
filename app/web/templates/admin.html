@@ -1,0 +1,50 @@
+{% extends "base.html" %}
+{% block title %}Логи — {{ app_title }}{% endblock %}
+{% block body %}
+<header class="topbar">
+  <div class="brand">{{ app_title }} · логи</div>
+  <div class="spacer"></div>
+  <span class="who">{{ admin.username }} · admin</span>
+  <a class="btn-link" href="/chat">Чат</a>
+  <a class="btn-link" href="/logout">Выйти</a>
+</header>
+
+<main class="admin">
+  {% for d in data %}
+  <section class="user-block">
+    <h2>{{ d.username }} <span class="role">{{ d.role }}</span>
+        <span class="count">· реплик: {{ d.msg_count }}</span></h2>
+
+    {% if d.feedback %}
+    <div class="fb-list">
+      <h3>Отзывы</h3>
+      {% for f in d.feedback %}
+      <div class="fb">оценка: <b>{{ f.rating if f.rating is not none else '—' }}</b>
+        · соответствие 719: <b>{{ f.matched or '—' }}</b>
+        {% if f.comment %}<br>«{{ f.comment }}»{% endif %}
+        <span class="ts">{{ f.ts }}</span></div>
+      {% endfor %}
+    </div>
+    {% endif %}
+
+    {% for sid, msgs in d.sessions.items() %}
+    <details class="thread">
+      <summary>Беседа {{ sid[:8] }} · {{ msgs|length }} реплик</summary>
+      {% for m in msgs %}
+      <div class="log-msg {{ m.role }}">
+        <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
+        <span class="content">{{ m.content }}</span>
+        {% if m.unverified %}<span class="flag">⚠ непроверенные числа: {{ m.unverified }}</span>{% endif %}
+        {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
+      </div>
+      {% endfor %}
+    </details>
+    {% else %}
+    <p class="empty">Пока нет диалогов.</p>
+    {% endfor %}
+  </section>
+  {% else %}
+  <p class="empty">Нет пользователей.</p>
+  {% endfor %}
+</main>
+{% endblock %}

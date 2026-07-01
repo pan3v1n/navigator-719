@@ -74,6 +74,37 @@ def chat_page(request: Request):
     return templates.TemplateResponse("chat.html", _ctx(request, user=user))
 
 
+@router.get("/admin", response_class=HTMLResponse)
+def admin_page(request: Request):
+    """Логи диалогов и отзывы по каждому пользователю. Только для роли admin."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    if user.role != "admin":
+        return RedirectResponse("/chat", status_code=302)  # эксперт логи не видит
+
+    # Извлекаем в ПЛОСКИЕ структуры внутри сессии (объекты БД после закрытия — detached).
+    data = []
+    with get_session() as db:
+        for u in q.list_users(db):
+            msgs = q.get_messages_for_user(db, u.id)
+            sessions: dict[str, list[dict]] = {}
+            for m in msgs:
+                sessions.setdefault(m.session_id, []).append({
+                    "role": m.role, "content": m.content, "ts": m.ts,
+                    "low_relevance": m.low_relevance, "unverified": m.unverified_json,
+                })
+            feedback = [
+                {"rating": f.rating, "matched": f.matched, "comment": f.comment, "ts": f.ts}
+                for f in q.get_feedback_for_user(db, u.id)
+            ]
+            data.append({
+                "username": u.username, "role": u.role, "msg_count": len(msgs),
+                "sessions": sessions, "feedback": feedback,
+            })
+    return templates.TemplateResponse("admin.html", _ctx(request, admin=user, data=data))
+
+
 class FeedbackIn(BaseModel):
     rating: int | None = None
     matched: str | None = None
