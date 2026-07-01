@@ -26,6 +26,7 @@ from app.rag.pipeline import (  # noqa: E402
     unverified_numbers,
 )
 from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
+from app.rag import procedural  # noqa: E402
 
 
 def make_hit(**kw) -> Hit:
@@ -182,6 +183,49 @@ class TestFaithfulness(unittest.TestCase):
     def test_unverified_empty_when_grounded(self):
         ctx = "Порог: не менее 64 баллов\n  • сварка — 400 балл."
         self.assertEqual(unverified_numbers("нужно 400 баллов при пороге 64 балла", ctx), [])
+
+
+class TestProceduralDeflect(unittest.TestCase):
+    # ЧИСТО процедурные вопросы — детектор обязан сработать (деферим, LLM не зовём)
+    PROCEDURAL = [
+        "какой порядок внесения продукции в реестр",
+        "как внести станки в реестр российской промышленной продукции",
+        "как подать заявление в Минпромторг на подтверждение производства",
+        "какие документы нужны для подачи заявки",
+        "срок рассмотрения заявления о внесении в реестр",
+        "как работать с ГИСП",
+        "нужно обжаловать отказ во внесении в реестр",
+        "как получить заключение о производстве продукции в России",
+        "порядок регистрации в реестре промышленной продукции",
+    ]
+    # Товарные и СМЕШАННЫЕ (есть код/товарно-балльный сигнал) — НЕ деферим
+    NOT_PROCEDURAL = [
+        "какие требования к локализации центробежных насосов",
+        "сколько баллов для гусеничных бульдозеров",
+        "требования к подшипникам",
+        "производим прицепы для легковых авто 29.20.23",
+        # смешанный: спрашивают ТРЕБОВАНИЯ, хоть и «для внесения в реестр» → отвечаем по базе
+        "какие требования к локализации насосов для внесения в реестр",
+        "сколько баллов нужно, чтобы попасть в реестр промышленной продукции",
+    ]
+
+    def test_positive_cases_detected(self):
+        for q in self.PROCEDURAL:
+            self.assertTrue(procedural.is_procedural(q), f"НЕ распознан процедурный: {q!r}")
+
+    def test_negative_cases_pass_through(self):
+        for q in self.NOT_PROCEDURAL:
+            self.assertFalse(procedural.is_procedural(q), f"Ложное срабатывание на: {q!r}")
+
+    def test_code_param_disables_deflect(self):
+        # передан код ОКПД2 → товарная привязка, не деферим даже при процедурных словах
+        self.assertFalse(procedural.is_procedural("как внести в реестр", has_code=True))
+
+    def test_deflection_message_has_pointers(self):
+        self.assertIn("ГИСП", procedural.DEFLECTION)
+        self.assertIn("реестр", procedural.DEFLECTION.lower())
+        # само сообщение не содержит выдуманных баллов/сроков
+        self.assertEqual(claim_numbers(procedural.DEFLECTION), [])
 
 
 if __name__ == "__main__":

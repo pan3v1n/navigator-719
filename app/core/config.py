@@ -29,6 +29,10 @@ class Settings(BaseSettings):
     # 0.95→0.98. Применяется только без совпадения по коду ОКПД2. Можно выключить для скорости.
     RERANK_ENABLED: bool = True
 
+    # Процедурный дефер-предохранитель: чистый процедурный вопрос (реестр/ГИСП/подача/сроки)
+    # корпусом не покрыт — деферим детерминированно, без вызова LLM (см. app/rag/procedural.py).
+    PROCEDURAL_DEFLECT_ENABLED: bool = True
+
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000

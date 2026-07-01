@@ -20,7 +20,12 @@ from app.core.prompts import (
 from app.rag import sparse
 from app.rag.retriever import Hit, dense_top1, search, search_cases
 
-MAX_OPS_PER_HIT = 15  # ограничиваем контекст: у некоторых продуктов сотни операций
+MAX_OPS_PER_HIT = 25  # ограничиваем контекст: у некоторых продуктов сотни операций.
+# 15→25 (INTERIM-фикс P2): у 264 мега-продуктов (20% базы) усечение теряло балльные требования
+# (при 15 ВСЕ баллы влезали лишь у 13/242; при 25 — у 167/242). Выше не поднимаем: длинный
+# перечень операций провоцирует авто-выдумку итога (см. eval_faithfulness_stress). Остаток
+# усечения помечается «⚠ СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ» (см. format_context + правило 2а промпта);
+# экстремальный хвост (676/220 опер) лечится parent/child auto-merge — отложено в 2.0.
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
 # Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
 # Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
@@ -83,10 +88,11 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
                 ptxt = f" — {pts} балл." if pts is not None else " — балл зависит от условий/категории"
                 lines.append(f"      • {o.get('text', '')}{ptxt}")
             if total > MAX_OPS_PER_HIT:
-                tail = f"      … ещё {total - MAX_OPS_PER_HIT} операций"
-                if query:
-                    tail += " (показаны наиболее релевантные запросу)"
-                lines.append(tail)
+                rel = " (показаны наиболее релевантные запросу)" if query else ""
+                lines.append(
+                    f"      ⚠ СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
+                    f"{rel}; полный перечень требований и баллов — в первоисточнике ПП №719 (этот раздел)."
+                )
         if h.source_anchor:
             lines.append(f"    Источник: {h.source_anchor}")
         blocks.append("\n".join(lines))
@@ -164,6 +170,15 @@ def _faithfulness_warning(nums: list[str]) -> str:
 
 
 def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
+    # Процедурный дефер-предохранитель: чистый процедурный вопрос (внесение в реестр, ГИСП,
+    # подача заявления, сроки, обжалование) корпусом НЕ покрыт. Деферим детерминированно ДО
+    # поиска — без вызова LLM (ноль галлюцинаций/стоимости). Товарные/смешанные вопросы (есть
+    # код или товарно-балльный сигнал) сюда не попадают — их обрабатывает обычный пайплайн.
+    if settings.PROCEDURAL_DEFLECT_ENABLED:
+        from app.rag import procedural
+        if procedural.is_procedural(query, has_code=bool(okpd2)):
+            return Answer(text=procedural.DEFLECTION + "\n\n" + EXPERT_DISCLAIMER, hits=[])
+
     hits = search(query, okpd2=okpd2, limit=limit)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
     # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
@@ -197,7 +212,9 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
             {"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT},
             {"role": "user", "content": user},
         ],
-        temperature=0.1,
+        temperature=0,  # детерминизм (INTERIM-фикс P2): при 0.1 модель на мега-продуктах
+        # перечисляла РАЗНЫЕ подмножества операций → числа баллов «плавали» (eval_determinism
+        # 0.60). 0 стабилизирует набор чисел; реранкер и так temp=0.
     )
 
     # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с тем же контекстом,
