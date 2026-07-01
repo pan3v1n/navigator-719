@@ -66,7 +66,8 @@ class Feedback(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # напр. 1..5
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # полезность 1..5
+    matched: Mapped[str | None] = mapped_column(String(16), nullable=True)  # да | частично | нет
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="feedback")

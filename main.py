@@ -1,10 +1,13 @@
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.chat import router as chat_router
 from app.api.routes import router as navigate_router
+from app.api.web import router as web_router
 from app.core.config import settings
 from app.db.engine import init_db
 
@@ -32,6 +35,14 @@ app.add_middleware(
 
 app.include_router(navigate_router, tags=["navigator"])
 app.include_router(chat_router, tags=["chat"])
+app.include_router(web_router, tags=["web"])
+
+# Статика веб-фронта (css/js)
+app.mount(
+    "/static",
+    StaticFiles(directory=str(Path(__file__).resolve().parent / "app" / "web" / "static")),
+    name="static",
+)
 
 
 @app.get("/ping")

@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% block title %}Чат — {{ app_title }}{% endblock %}
+{% block body %}
+<header class="topbar">
+  <div class="brand">{{ app_title }}</div>
+  <div class="spacer"></div>
+  <span class="who">{{ user.username }}{% if user.role == 'admin' %} · admin{% endif %}</span>
+  {% if user.role == 'admin' %}<a class="btn-link" href="/admin">Логи</a>{% endif %}
+  <button class="btn-link" id="fb-open" type="button">Оставить отзыв</button>
+  <a class="btn-link" href="/logout">Выйти</a>
+</header>
+
+<main class="chat">
+  <div id="messages" class="messages">
+    <div class="msg assistant">
+      <div class="bubble">Здравствуйте! Опишите продукцию или укажите код ОКПД2 — подскажу позицию приложения к ПП №719, требования и баллы. Итоговый вердикт — за экспертом ТПП.</div>
+    </div>
+  </div>
+  <form id="chat-form" class="composer">
+    <textarea id="input" rows="1" placeholder="Опишите продукцию или код ОКПД2…" autofocus></textarea>
+    <button type="submit" id="send">Отправить</button>
+  </form>
+</main>
+
+<div id="fb-modal" class="modal hidden">
+  <form id="fb-form" class="modal-card">
+    <h2>Обратная связь</h2>
+    <label>Полезность (1–5)
+      <select name="rating">
+        <option value="">—</option>
+        <option>1</option><option>2</option><option>3</option><option>4</option><option>5</option>
+      </select>
+    </label>
+    <label>Ответы соответствовали требованиям 719?
+      <select name="matched">
+        <option value="">—</option>
+        <option value="да">да</option>
+        <option value="частично">частично</option>
+        <option value="нет">нет</option>
+      </select>
+    </label>
+    <label>Комментарий (что не так / чего не хватило)
+      <textarea name="comment" rows="4"></textarea>
+    </label>
+    <div class="modal-actions">
+      <button type="button" class="btn-secondary" id="fb-cancel">Отмена</button>
+      <button type="submit">Отправить отзыв</button>
+    </div>
+    <div id="fb-thanks" class="thanks hidden">Спасибо! Отзыв записан.</div>
+  </form>
+</div>
+
+<script src="/static/chat.js"></script>
+{% endblock %}

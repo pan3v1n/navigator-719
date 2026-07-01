@@ -75,8 +75,11 @@ def get_all_messages(db: Session) -> list[Message]:
 
 
 # --- feedback ------------------------------------------------------------
-def save_feedback(db: Session, *, user_id: int, rating: int | None, comment: str | None) -> Feedback:
-    f = Feedback(user_id=user_id, rating=rating, comment=comment)
+def save_feedback(
+    db: Session, *, user_id: int, rating: int | None, matched: str | None = None,
+    comment: str | None = None,
+) -> Feedback:
+    f = Feedback(user_id=user_id, rating=rating, matched=matched, comment=comment)
     db.add(f)
     db.commit()
     db.refresh(f)
