@@ -43,7 +43,10 @@ function renderMarkdown(text) {
       html += "<li>" + inline(line.replace(/^[•\-*]\s+/, "")) + "</li>";
     } else {
       if (inList) { html += "</ul>"; inList = false; }
-      if (line) html += "<p>" + inline(line) + "</p>";
+      if (line) {
+        const sec = /^\*\*/.test(line) ? ' class="sec"' : ""; // заголовок раздела (жирный лейбл) — с отступом
+        html += "<p" + sec + ">" + inline(line) + "</p>";
+      }
     }
   }
   if (inList) html += "</ul>";

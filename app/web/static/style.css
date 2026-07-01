@@ -102,6 +102,8 @@ a { color: inherit; text-decoration: none; }
 .bubble ul { margin: 8px 0; padding-left: 20px; }
 .bubble li { margin: 4px 0; }
 .bubble strong { font-weight: 600; }
+.bubble p.sec { margin-top: 14px; }
+.bubble p.sec:first-child { margin-top: 0; }
 .sources { margin-top: 10px; font-size: 13px; }
 .sources summary { cursor: pointer; color: var(--muted); list-style: none; display: inline-flex; align-items: center;
                    gap: 6px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; transition: background .15s; }
