@@ -265,6 +265,30 @@
   - **Гигиена (быстрое):** убрать дамп сессии `*-navigator-719.txt` из корня + в `.gitignore`;
     выкинуть неиспользуемый `llama-index-*` из `requirements.txt` и синхронизировать таблицу стека
     (CLAUDE.md/README заявляют LlamaIndex, а RAG рукописный); закоммитить `scripts/eval_experiments.py`.
+- **Облачный деплой RAG в РФ — удешевление + РФ-сервисы «под RAG» (исследование 2026-07-01, курс ~90 ₽/$).** `P2` · `🔬 к рассмотрению перед деплоем 1.0.5`
+  - **Стек ложится на 1 CPU-VM + `docker-compose` (Qdrant + FastAPI + e5), GPU НЕ нужен;** DeepSeek —
+    исходящим HTTPS (из РФ-облака домен открыт; ключ уже пополнен в ¥). Все провайдеры ниже — ФЗ-152.
+  - **Цены (2026-07, конфиг 2–4 vCPU / 8 ГБ / SSD):**
+    - **Фикс-VPS (ДЁШЕВО, рекоменд.):** Timeweb 4 vCPU/8 ГБ/80 ГБ NVMe = **1 782 ₽/мес** (100% CPU, ФЗ-152);
+      2 vCPU/4 ГБ/50 ГБ = 1 062 ₽/мес. Аналоги — Selectel (надёжность/аттестация), VDSina (минимум).
+    - **Метровые гиперскейлеры (дороже):** Yandex Cloud ~4 200 ₽/мес, MWS ~3 900 ₽/мес за 2 vCPU/8 ГБ.
+      MWS: 1 vCPU 829,65 ₽/мес, 1 ГБ RAM 220,83; Yandex: vCPU ~892,8, RAM 237,6 ₽/ГБ. У Yandex грант
+      4 000 ₽/60 дн + burstable 20%-vCPU (~374 ₽/ядро); у MWS аттестованный сегмент 152-ФЗ.
+  - **Рычаги удешевления (по убыванию):** (1) фикс-VPS вместо метрового ≈ **2.5× дешевле** [главный];
+    (2) `e5-base` (~1.1 ГБ, 768d) вместо `large` → влезает в 2 vCPU/4 ГБ (₽1 062) + быстрее CPU, НО
+    качество мерить (recall 0.97 снят на large+F1 → переиндекс + прогон `eval_*`); (3) выключать вне
+    рабочих часов — только на метровом биллинге (~4×); (4) одна VM на всё (Qdrant крошечный, 1357 точек);
+    (5) DeepSeek — не рычаг (~₽50 за демо на 3–4 ч).
+  - **РФ managed-RAG «под ключ» — ЕСТЬ, но НЕ БЕРЁМ:** Cloud.ru (Sber) «Evolution Managed RAG», Yandex
+    AI Studio (File Search / Vector Store API), MWS «Inference Valve» / GPT Model Hub. Они ЗАМЕНЯЮТ наш
+    рукописный движок (F1-эмбеддинг, ОКПД2-буст, реранкер, faithfulness-постпроверка, дефер, DeepSeek) →
+    потеря контроля + измеренных наработок + vendor lock-in. Для старта с нуля, не для нас.
+  - **На будущее:** РФ LLM-по-API (Yandex Foundation Models / MWS GPT Model Hub / Cloud.ru Evolution) —
+    если убирать зависимость от DeepSeek/Китая. GPU-облака (immers.cloud, Selectel GPU) НЕ нужны (e5 на CPU).
+  - **Рекомендация к пересмотру:** постоянный пилот/24-7 → фикс-VPS Timeweb/Selectel 4 vCPU/8 ГБ ≈ **₽1 782/мес**;
+    разовое демо 3–4 ч → локально + бесплатный туннель (cloudflared/LAN), ~₽50 DeepSeek. Managed-RAG не берём.
+    Источники: timeweb.cloud/services/vds-vps, yandex.cloud/ru/docs/compute/pricing, mws.ru (Compute pricing),
+    cloud.ru/solutions/umniy-poisk-i-ai-pomoschnik, yandex AI Studio (pdf-searchindex-ai-assistant).
 
 ---
 
