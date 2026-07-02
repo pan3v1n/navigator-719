@@ -1,0 +1,39 @@
+# Навигатор ПП РФ №719 — деплой одной VM: app (FastAPI+e5) + Qdrant.
+# Порядок первого запуска — в docs/DEPLOY.md (индексация load_kb делается разово).
+services:
+  qdrant:
+    image: qdrant/qdrant:latest
+    restart: unless-stopped
+    volumes:
+      - qdrant_storage:/qdrant/storage
+    # Порт наружу не публикуем — Qdrant доступен только приложению по внутренней сети.
+
+  app:
+    build: .
+    restart: unless-stopped
+    depends_on:
+      - qdrant
+    # DEEPSEEK_API_KEY, SESSION_SECRET, APP_VERSION и пр. — из .env на VM.
+    env_file: .env
+    environment:
+      # Внутри compose-сети Qdrant доступен по имени сервиса.
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: pp719
+      # БД приложения — в томе (переживает пересоздание контейнера).
+      APP_DB_URL: sqlite:////data/navigator_app.db
+      # Кэш модели e5 — в томе (качается один раз при первом load_kb).
+      HF_HOME: /models
+      SENTENCE_TRANSFORMERS_HOME: /models
+      # Зеркало HF — раскомментируй в .env, если CDN huggingface рвётся с VM:
+      # HF_ENDPOINT: https://hf-mirror.com
+    volumes:
+      - models:/models
+      - appdata:/data
+    ports:
+      # Демо по http на 80-м порту VM. Не забудь открыть 80 в security group.
+      - "80:8000"
+
+volumes:
+  qdrant_storage:
+  models:
+  appdata:

@@ -1,0 +1,26 @@
+# Локальные тяжёлые/приватные артефакты — в образ не кладём
+.git
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+.emb_cache
+graphify-out
+models
+hf-cache
+downloads
+qdrant_storage
+uploads
+.env
+*.db
+*.sqlite
+*.rtf
+*.log
+
+# knowledge_base оставляем ЦЕЛИКОМ (structured/*.json нужны load_kb; полнотекст/чанки
+# маленькие — не рискуем сломать индексацию ради экономии мегабайт).
+
+# Docs/тесты/Streamlit в рантайме контейнера не нужны
+docs
+tests
+frontend
