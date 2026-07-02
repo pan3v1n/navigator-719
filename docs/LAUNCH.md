@@ -1,4 +1,4 @@
-# Запуск Навигатора ПП №719 (V1-MVP)
+# Запуск Навигатора ПП №719 (0.5.0 · движок + веб-чат мини-1.0)
 
 Краткая инструкция: от свежего клона до работающего интерфейса. Подробная настройка
 окружения с нуля — в [SETUP.md](../SETUP.md); протокол теста с экспертом — в
@@ -48,7 +48,7 @@ copy .env.example .env                     # затем вписать DEEPSEEK_
 Коллекции хранятся постоянно — повторять только при смене схемы/данных.
 
 ```powershell
-.venv\Scripts\python scripts\load_kb.py        # база знаний → коллекция pp719 (~1353 точек)
+.venv\Scripts\python scripts\load_kb.py        # база знаний → коллекция pp719 (~1357 точек)
 .venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases (на старте пусто)
 ```
 Первый запуск `load_kb.py` считает эмбеддинги e5 на CPU (~15–25 мин). Повторные —
@@ -60,20 +60,25 @@ copy .env.example .env                     # затем вписать DEEPSEEK_
 
 ## Запуск интерфейса
 
-### Вариант A — Streamlit (MVP, для эксперта)
+### Вариант A — Веб-приложение мини-1.0 (главный: чат + роли + админка)
+
+```powershell
+.venv\Scripts\python scripts\seed_users.py --admin-password admin   # разово: создать логины
+.venv\Scripts\python main.py                                        # uvicorn на http://localhost:8000
+```
+Открыть `http://localhost:8000` → вход (по умолчанию `admin` / `admin`). Дальше — окно чата
+(история диалогов, экспорт, источники), для роли `admin` — `/admin` (логи диалогов, дашборд
+KPI: токены/₽/активность, фидбек). Роли: `user` (чат) · `expert` (+фидбек) · `admin` (+логи/дашборд).
+
+### Вариант B — Streamlit-форма (ранний MVP, вытеснен веб-чатом)
 
 ```powershell
 .venv\Scripts\python -m streamlit run frontend\streamlit_app.py
 ```
-Откроется `http://localhost:8501`: поле ввода продукции + код ОКПД2 → анализ, источники,
-чек-лист, пометка.
+Откроется `http://localhost:8501`: поле ввода продукции + код ОКПД2 → анализ, источники, чек-лист.
 
-### Вариант B — API (FastAPI)
+### Вариант C — API `POST /navigate` (быстрый смоук)
 
-```powershell
-.venv\Scripts\python main.py          # uvicorn на http://localhost:8000
-```
-Проверка:
 ```powershell
 curl http://localhost:8000/ping
 curl -X POST http://localhost:8000/navigate -H "Content-Type: application/json" ^
@@ -81,7 +86,7 @@ curl -X POST http://localhost:8000/navigate -H "Content-Type: application/json" 
 ```
 Интерактивная документация: `http://localhost:8000/docs`.
 
-### Вариант C — поиск без LLM/UI (быстрый смоук)
+### Вариант D — поиск без LLM/UI (быстрый смоук пайплайна)
 
 ```powershell
 .venv\Scripts\python -m app.rag.pipeline "выпускаем промышленные чиллеры" 28.25.13
@@ -92,7 +97,8 @@ curl -X POST http://localhost:8000/navigate -H "Content-Type: application/json" 
 ## Ежедневный быстрый запуск (после первичной настройки)
 
 1. Запустить Docker Desktop (Qdrant поднимется сам) → `curl http://localhost:6333/healthz`.
-2. `.venv\Scripts\python -m streamlit run frontend\streamlit_app.py`.
+2. `.venv\Scripts\python main.py` → `http://localhost:8000` (вход). Streamlit-форму — при
+   необходимости, Вариант B.
 
 ---
 

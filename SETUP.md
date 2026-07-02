@@ -81,7 +81,7 @@ docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 она скачивается с HuggingFace при первом запуске индексации.
 
 ```powershell
-.venv\Scripts\python scripts\load_kb.py        # JSON → Qdrant, ~1353 точек (разово, ~15–25 мин на CPU)
+.venv\Scripts\python scripts\load_kb.py        # JSON → Qdrant, ~1357 точек (разово, ~15–25 мин на CPU)
 .venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases (на старте пусто)
 ```
 
@@ -126,7 +126,7 @@ RTF-файл не хранится в репозитории (слишком б�
 ```
 
 Открыть в браузере: [http://localhost:8000/ping](http://localhost:8000/ping)  
-Ожидаемый ответ: `{"status":"ok","app":"Навигатор ПП РФ №719","version":"0.1.0"}`
+Ожидаемый ответ: `{"status":"ok","app":"Навигатор ПП РФ №719","version":"0.5.0"}`
 
 ---
 
