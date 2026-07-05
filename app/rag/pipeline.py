@@ -173,11 +173,62 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text)
 
 
-def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
+# --- Мультитёрн: контекстуализация follow-up для ПОИСКА (P1a) -----------------------
+# Уточняющий вопрос («а какой порог?», «а для гидравлического?») без своего предмета даёт
+# контекст-фри поиск. Переписываем его в самостоятельный запрос по истории — ТОЛЬКО для
+# ретрива и гейтов; генерация видит историю диалога отдельно (messages). Ошибка → исходный запрос.
+_REWRITE_SYSTEM = (
+    "Ты переписываешь уточняющий вопрос пользователя в САМОСТОЯТЕЛЬНЫЙ поисковый запрос по "
+    "контексту диалога о продукции и требованиях ПП №719. Если новый вопрос ссылается на "
+    "предыдущее (местоимения, «а …», опущенный предмет — «а какой порог?», «а для "
+    "микропроцессорного?»), подставь продукт/тему из диалога и верни ПОЛНЫЙ запрос. Если вопрос "
+    "уже самодостаточен — верни его без изменений. Ответь ТОЛЬКО текстом запроса, без пояснений."
+)
+_HAS_CODE_RE = re.compile(r"\d{2}\.\d{2}")
+
+
+def _needs_context(query: str) -> bool:
+    """Дёшево отсеиваем заведомо самодостаточные запросы (свой код ОКПД2 или длинный текст),
+    чтобы не звать LLM-переписыватель на каждый ход зря."""
+    return not _HAS_CODE_RE.search(query) and len(query) <= 80
+
+
+def _contextualize(query: str, history: list[dict]) -> str:
+    """Follow-up → самостоятельный поисковый запрос по истории. Ошибка → исходный запрос."""
+    if not history:
+        return query
+    try:
+        dialog = "\n".join(
+            f"{'Пользователь' if m.get('role') == 'user' else 'Ассистент'}: {(m.get('content') or '')[:400]}"
+            for m in history[-4:]
+        )
+        resp = _client().chat.completions.create(
+            model=settings.DEEPSEEK_MODEL,
+            messages=[
+                {"role": "system", "content": _REWRITE_SYSTEM},
+                {"role": "user", "content": f"Диалог:\n{dialog}\n\nНовый вопрос: {query}\n\nСамостоятельный запрос:"},
+            ],
+            temperature=0,
+            max_tokens=120,
+        )
+        out = (resp.choices[0].message.content or "").strip().strip('"«»')
+        return out or query
+    except Exception:  # noqa: BLE001 — переписывание не должно ронять ответ
+        return query
+
+
+def answer(query: str, okpd2: str | None = None, limit: int = 5,
+           history: list[dict] | None = None) -> Answer:
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import meta
     if meta.is_meta(query):
         return Answer(text=meta.response(query), hits=[])
+
+    # Мультитёрн: уточняющий вопрос переписываем в самостоятельный — ТОЛЬКО для поиска/гейтов
+    # (генерация ниже видит историю диалога через messages).
+    search_query = query
+    if history and _needs_context(query):
+        search_query = _contextualize(query, history)
 
     # Процедурный дефер-предохранитель: чистый процедурный вопрос (внесение в реестр, ГИСП,
     # подача заявления, сроки, обжалование) корпусом НЕ покрыт. Деферим детерминированно ДО
@@ -185,16 +236,16 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     # код или товарно-балльный сигнал) сюда не попадают — их обрабатывает обычный пайплайн.
     if settings.PROCEDURAL_DEFLECT_ENABLED:
         from app.rag import procedural
-        if procedural.is_procedural(query, has_code=bool(okpd2)):
+        if procedural.is_procedural(search_query, has_code=bool(okpd2)):
             return Answer(text=procedural.DEFLECTION, hits=[])
 
-    hits = search(query, okpd2=okpd2, limit=limit)
+    hits = search(search_query, okpd2=okpd2, limit=limit)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
     # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
     if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
         from app.rag.reranker import rerank
-        hits = rerank(query, hits)
-    cases = search_cases(query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
+        hits = rerank(search_query, hits)
+    cases = search_cases(search_query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "
@@ -207,20 +258,23 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5) -> Answer:
     low_rel = (
         not cases
         and not any(h.okpd2_match for h in hits)
-        and dense_top1(query) < RELEVANCE_SOFT
+        and dense_top1(search_query) < RELEVANCE_SOFT
     )
 
-    ctx = format_context(hits, query)
+    ctx = format_context(hits, search_query)
     cases_ctx = format_cases(cases) if cases else None
+    resolved = search_query if search_query != query else None
     user = build_navigator_user_prompt(
-        query, ctx, okpd2, cases=cases_ctx, low_relevance=low_rel,
+        query, ctx, okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
     )
+    # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
+    messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]
+    if history:
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
-        messages=[
-            {"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT},
-            {"role": "user", "content": user},
-        ],
+        messages=messages,
         temperature=0,  # детерминизм (INTERIM-фикс P2): при 0.1 модель на мега-продуктах
         # перечисляла РАЗНЫЕ подмножества операций → числа баллов «плавали» (eval_determinism
         # 0.60). 0 стабилизирует набор чисел; реранкер и так temp=0.

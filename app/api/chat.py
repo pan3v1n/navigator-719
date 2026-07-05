@@ -61,11 +61,26 @@ def _sources_from_hits(hits) -> list[SourceItem]:
     ]
 
 
+def _load_history(user_id: int, session_id: str, max_msgs: int = 4) -> list[dict]:
+    """Последние реплики беседы для мультитёрн-контекста (ответы ассистента усекаем).
+    Пусто для новой беседы — тогда движок ведёт себя как одиночный вопрос."""
+    try:
+        with get_session() as db:
+            prev = q.get_session_messages(db, user_id, session_id)
+    except Exception:  # noqa: BLE001 — история не критична, не роняем ответ
+        return []
+    return [
+        {"role": m.role, "content": m.content if m.role == "user" else m.content[:600]}
+        for m in prev[-max_msgs:]
+    ]
+
+
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
     session_id = req.session_id or uuid.uuid4().hex
+    history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
     try:
-        ans = answer(req.message)
+        ans = answer(req.message, history=history)
     except Exception:  # noqa: BLE001 — наружу дружелюбно, детали в лог (рваная сеть/DeepSeek)
         logger.exception("chat: движок упал на запросе от user_id=%s", user.id)
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
