@@ -48,6 +48,10 @@
         <svg viewBox="0 0 24 24" fill="none"><path d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="nc-text">Оставить отзыв</span>
       </button>
+      <button class="nav-item" id="ob-open" type="button">
+        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M12 16v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></svg>
+        <span class="nc-text">Как пользоваться</span>
+      </button>
     </nav>
 
     <div class="side-bottom">
@@ -137,6 +141,86 @@
       <button type="submit">Экспортировать</button>
     </div>
   </form>
+</div>
+
+<div id="onboarding-modal" class="modal ob-modal hidden">
+  <div class="modal-card ob-card">
+    <button type="button" class="ob-skip" id="ob-skip">Пропустить</button>
+    <div class="ob-steps">
+
+      <div class="ob-step">
+        <div class="ob-art">
+          <svg viewBox="0 0 120 120" fill="none">
+            <rect x="22" y="14" width="56" height="78" rx="7" stroke="currentColor" stroke-width="3"/>
+            <path d="M34 32h32M34 44h32M34 56h20" stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity=".45"/>
+            <circle cx="74" cy="74" r="17" fill="#fff" stroke="currentColor" stroke-width="3"/>
+            <text x="74" y="79" font-size="12" font-weight="700" text-anchor="middle" fill="currentColor">719</text>
+            <path d="M87 87l11 11" stroke="currentColor" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>Навигатор по ПП №719</h2>
+        <p>Ассистент эксперта Курской ТПП. По описанию продукции или коду ОКПД2 находит позицию приложения 719, требования к локализации и баллы — со ссылками на первоисточник. Ответы ИИ — предварительный черновик, финальное решение принимаете вы.</p>
+      </div>
+
+      <div class="ob-step hidden">
+        <div class="ob-art">
+          <svg viewBox="0 0 120 120" fill="none">
+            <rect x="14" y="46" width="92" height="30" rx="15" stroke="currentColor" stroke-width="3"/>
+            <text x="30" y="66" font-size="13" font-weight="600" fill="currentColor">28.25.13</text>
+            <circle cx="92" cy="61" r="11" fill="#0d0d0d"/>
+            <path d="M88 61h7M92 57l4 4-4 4" stroke="#fff" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>Задайте вопрос</h2>
+        <p>Опишите продукцию словами («требования к чиллерам») или укажите код ОКПД2 («28.25.13»). Код даёт точную привязку к позиции — указывайте его, если знаете.</p>
+      </div>
+
+      <div class="ob-step hidden">
+        <div class="ob-art">
+          <svg viewBox="0 0 120 120" fill="none">
+            <rect x="14" y="24" width="62" height="34" rx="13" stroke="currentColor" stroke-width="3"/>
+            <path d="M40 58l-4 12 14-7" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+            <path d="M52 38h24M52 46h14" stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity=".45"/>
+            <rect x="44" y="64" width="62" height="34" rx="13" fill="#0d0d0d"/>
+            <path d="M56 79h30M56 87h16" stroke="#fff" stroke-width="3" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>Уточняйте по ходу</h2>
+        <p>Это диалог — уточняйте в том же чате: «а какой порог?», «а какие операции?», «чем отличается от…?». Система помнит контекст беседы.</p>
+      </div>
+
+      <div class="ob-step hidden">
+        <div class="ob-art">
+          <svg viewBox="0 0 120 120" fill="none">
+            <text x="60" y="40" font-size="24" text-anchor="middle" fill="#f5b301" letter-spacing="3">★★★★★</text>
+            <rect x="24" y="54" width="72" height="34" rx="9" stroke="currentColor" stroke-width="3"/>
+            <path d="M34 68h30M34 78h18" stroke="currentColor" stroke-width="3" stroke-linecap="round" opacity=".45"/>
+            <path d="M78 52l16-16 10 10-16 16-13 3 3-13z" fill="#fff" stroke="currentColor" stroke-width="3" stroke-linejoin="round"/>
+          </svg>
+        </div>
+        <h2>Оцените каждый ответ</h2>
+        <p>Под ответом: «Оценить ответ» (звёзды 0–5 + комментарий), «отметить ошибку» (впишите верное значение, если система ошиблась) и «комментарий к диалогу». Ваши оценки и исправления — основа приёмки и обучения сервиса.</p>
+      </div>
+
+      <div class="ob-step hidden">
+        <div class="ob-art">
+          <svg viewBox="0 0 120 120" fill="none">
+            <circle cx="60" cy="60" r="36" stroke="currentColor" stroke-width="3" stroke-dasharray="5 8"/>
+            <circle cx="60" cy="46" r="4.5" fill="currentColor"/>
+            <path d="M60 58v20" stroke="currentColor" stroke-width="4.5" stroke-linecap="round"/>
+          </svg>
+        </div>
+        <h2>Что пока вне охвата</h2>
+        <p>Сервис отвечает по требованиям и баллам приложения 719. Пока НЕ выносит вердикт «российская / не российская», а процедурные вопросы (внесение в реестр, ГИСП, сроки, состав документов) честно отклоняет — задавайте их, мы соберём статистику. У очень крупных позиций список операций может быть неполным — сверяйтесь с первоисточником по ссылке под ответом.</p>
+      </div>
+
+    </div>
+    <div class="ob-dots" id="ob-dots"></div>
+    <div class="ob-nav">
+      <button type="button" class="btn-secondary" id="ob-prev">Назад</button>
+      <button type="button" id="ob-next">Далее</button>
+    </div>
+  </div>
 </div>
 
 <script src="/static/chat.js"></script>

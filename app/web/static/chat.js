@@ -505,3 +505,42 @@ document.getElementById("fb-form").addEventListener("submit", async (e) => {
 
 // загрузить историю бесед при открытии
 loadConversations();
+
+// --- онбординг: попап при первом входе (localStorage) + кнопка «Как пользоваться» ---
+(function initOnboarding() {
+  const modal = document.getElementById("onboarding-modal");
+  if (!modal) return;
+  const steps = Array.from(modal.querySelectorAll(".ob-step"));
+  const dotsWrap = document.getElementById("ob-dots");
+  const prevBtn = document.getElementById("ob-prev");
+  const nextBtn = document.getElementById("ob-next");
+  const skipBtn = document.getElementById("ob-skip");
+  let i = 0;
+  const dots = steps.map((_, k) => {
+    const d = document.createElement("span");
+    d.className = "ob-dot";
+    d.addEventListener("click", () => go(k));
+    dotsWrap.appendChild(d);
+    return d;
+  });
+  function render() {
+    steps.forEach((s, k) => s.classList.toggle("hidden", k !== i));
+    dots.forEach((d, k) => d.classList.toggle("on", k === i));
+    prevBtn.style.visibility = i === 0 ? "hidden" : "visible";
+    nextBtn.textContent = i === steps.length - 1 ? "Начать работу" : "Далее";
+  }
+  function go(k) { i = Math.max(0, Math.min(steps.length - 1, k)); render(); }
+  function open() { go(0); modal.classList.remove("hidden"); }
+  function close() {
+    modal.classList.add("hidden");
+    try { localStorage.setItem("onboarding719Seen", "1"); } catch (e) {}
+  }
+  prevBtn.addEventListener("click", () => go(i - 1));
+  nextBtn.addEventListener("click", () => { if (i === steps.length - 1) close(); else go(i + 1); });
+  if (skipBtn) skipBtn.addEventListener("click", close);
+  const openBtn = document.getElementById("ob-open");
+  if (openBtn) openBtn.addEventListener("click", open);
+  let seen = false;
+  try { seen = localStorage.getItem("onboarding719Seen") === "1"; } catch (e) {}
+  if (!seen) open();
+})();

@@ -233,6 +233,26 @@ a { color: inherit; text-decoration: none; }
 .modal-card label.checkbox { flex-direction: row; align-items: center; gap: 8px; }
 .modal-card label.checkbox input { width: auto; }
 
+/* ---------- онбординг-попап ---------- */
+.ob-card { width: 470px; max-width: 100%; padding: 0; overflow: hidden; position: relative; gap: 0; }
+.ob-skip { position: absolute; top: 12px; right: 14px; border: none; background: none; color: var(--muted);
+           font-size: 13px; cursor: pointer; z-index: 2; padding: 4px 6px; border-radius: 8px; }
+.ob-skip:hover { color: var(--text); background: var(--hover); }
+.ob-steps { padding: 42px 34px 6px; }
+.ob-step { display: flex; flex-direction: column; align-items: center; text-align: center; animation: fadeInUp .25s ease; }
+.ob-art { width: 118px; height: 118px; color: var(--text); margin-bottom: 18px; }
+.ob-art svg { width: 100%; height: 100%; }
+.ob-step h2 { font-size: 19px; font-weight: 600; margin: 0 0 10px; }
+.ob-step p { font-size: 14px; line-height: 1.62; color: #555; margin: 0; }
+.ob-dots { display: flex; justify-content: center; gap: 7px; padding: 18px 0 4px; }
+.ob-dot { width: 7px; height: 7px; border-radius: 50%; background: #d4d4d4; cursor: pointer;
+          transition: background .15s, transform .15s; }
+.ob-dot.on { background: var(--accent); transform: scale(1.28); }
+.ob-nav { display: flex; justify-content: space-between; gap: 10px; padding: 8px 24px 24px; }
+.ob-nav button { padding: 11px 20px; border-radius: 11px; border: none; background: var(--accent); color: #fff;
+                 font-size: 14px; cursor: pointer; transition: opacity .15s; min-width: 128px; }
+.ob-nav button:hover { opacity: .88; }
+
 /* ---------- admin ---------- */
 .admin-header { height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 22px;
                 border-bottom: 1px solid var(--border); }
