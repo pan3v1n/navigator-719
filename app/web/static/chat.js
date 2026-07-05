@@ -179,6 +179,105 @@ function addSources(wrap, sources) {
   wrap.appendChild(det);
 }
 
+// --- обратная связь на ответ: звёзды 0..5 + отметить ошибку (исправление) + коммент к диалогу ---
+async function postFeedback(payload) {
+  try {
+    const r = await fetch("/api/feedback", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    return r.ok;
+  } catch (e) { return false; }
+}
+
+function mkFbLink(text, onClick) {
+  const a = document.createElement("button");
+  a.type = "button"; a.className = "fb-link"; a.textContent = text;
+  a.addEventListener("click", onClick);
+  return a;
+}
+
+function flash(anchor, text) {
+  let f = anchor.querySelector(":scope > .fb-flash");
+  if (!f) { f = document.createElement("span"); f.className = "fb-flash"; anchor.appendChild(f); }
+  f.textContent = text;
+  clearTimeout(f._t);
+  f._t = setTimeout(() => { f.textContent = ""; }, 2000);
+}
+
+function addFeedbackBar(wrap, messageId, sid) {
+  if (!messageId) return; // без id ответа привязать оценку нельзя (редкий сбой лога)
+  const bar = el("fb-bar");
+
+  // поле «textarea + Сохранить» внутри панели
+  const addSaveField = (w, placeholder, btnText, onSave) => {
+    const ta = document.createElement("textarea");
+    ta.className = "fb-ta"; ta.rows = 3; ta.placeholder = placeholder;
+    const btn = document.createElement("button");
+    btn.type = "button"; btn.className = "fb-save"; btn.textContent = btnText;
+    btn.addEventListener("click", async () => {
+      const val = ta.value.trim();
+      if (!val) return;
+      if (await onSave(val)) { ta.value = ""; flash(w, "спасибо!"); }
+    });
+    w.appendChild(ta); w.appendChild(btn);
+  };
+  const mkPanel = (build) => {
+    const w = el("fb-panel hidden");
+    build(w);
+    return {
+      wrap: w,
+      toggle: () => { w.classList.toggle("hidden"); const t = w.querySelector("textarea"); if (!w.classList.contains("hidden") && t) t.focus(); },
+      hide: () => w.classList.add("hidden"),
+    };
+  };
+
+  // «Оценить ответ» → звёзды 0..5 (клик = сразу, повтор по активной = сброс в 0) + комментарий к ответу
+  const ratePanel = mkPanel((w) => {
+    const stars = el("fb-stars");
+    let current = 0;
+    const glyphs = [];
+    const paint = (n) => glyphs.forEach((g, i) => g.classList.toggle("on", i < n));
+    for (let i = 1; i <= 5; i++) {
+      const s = document.createElement("button");
+      s.type = "button"; s.className = "fb-star"; s.textContent = "★"; s.title = i + " из 5";
+      s.addEventListener("mouseenter", () => paint(i));
+      s.addEventListener("mouseleave", () => paint(current));
+      s.addEventListener("click", async () => {
+        current = current === i ? 0 : i;
+        paint(current);
+        if (await postFeedback({ kind: "answer", message_id: messageId, session_id: sid, rating: current }))
+          flash(w, current === 0 ? "0 — учтено" : "оценка сохранена");
+      });
+      glyphs.push(s); stars.appendChild(s);
+    }
+    w.appendChild(stars);
+    addSaveField(w, "Комментарий к этому ответу (необязательно):", "Сохранить комментарий",
+      (val) => postFeedback({ kind: "answer", message_id: messageId, session_id: sid, comment: val }));
+  });
+
+  const errPanel = mkPanel((w) => addSaveField(w, "Что не так? Верное значение / позиция:", "Сохранить исправление",
+    (val) => postFeedback({ kind: "answer", message_id: messageId, session_id: sid, correction: val })));
+
+  const dlgPanel = mkPanel((w) => addSaveField(w, "Комментарий ко всему диалогу:", "Отправить комментарий",
+    (val) => postFeedback({ kind: "dialog", session_id: sid, comment: val })));
+
+  // ссылки-действия: раскрывают ровно одну панель (остальные прячут)
+  const panels = [ratePanel, errPanel, dlgPanel];
+  const only = (p) => { panels.forEach((x) => { if (x !== p) x.hide(); }); p.toggle(); };
+  const actions = el("fb-actions");
+  const rateLink = mkFbLink("Оценить ответ", () => only(ratePanel));
+  rateLink.classList.add("primary");
+  actions.appendChild(rateLink);
+  actions.appendChild(mkFbLink("отметить ошибку", () => only(errPanel)));
+  actions.appendChild(mkFbLink("комментарий к диалогу", () => only(dlgPanel)));
+  bar.appendChild(actions);
+  bar.appendChild(ratePanel.wrap); bar.appendChild(errPanel.wrap); bar.appendChild(dlgPanel.wrap);
+
+  wrap.appendChild(bar);
+}
+
 // --- история бесед в сайдбаре ---
 function setActive(sid) {
   history.querySelectorAll(".history-item").forEach((x) =>
@@ -290,6 +389,7 @@ async function ask(text) {
     setActive(sessionId);
     bubble.innerHTML = renderMarkdown(data.answer);
     addSources(pending, data.sources);
+    addFeedbackBar(pending, data.message_id, sessionId);
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
     if (isNew) { removeHistoryItem(sessionId); sessionId = null; }

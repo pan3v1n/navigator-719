@@ -29,6 +29,8 @@
         <div class="kpi-sub">~{{ '%.3f'|format(stats.avg_cost) }} ₽ / ответ</div></div>
       <div class="kpi"><div class="kpi-val">{{ stats.avg_rating if stats.avg_rating is not none else '—' }}</div>
         <div class="kpi-label">Ср. оценка</div><div class="kpi-sub">{{ stats.feedback_count }} отзывов</div></div>
+      <div class="kpi"><div class="kpi-val">{{ (stats.accept_pct ~ '%') if stats.accept_pct is not none else '—' }}</div>
+        <div class="kpi-label">Приёмка ответов</div><div class="kpi-sub">≥4★ · оценок {{ stats.answer_ratings }} · ср. {{ stats.avg_stars if stats.avg_stars is not none else '—' }}</div></div>
     </div>
 
     <div class="charts">
@@ -76,6 +78,48 @@
         <h3>Флаги качества</h3>
         <div class="fb-stat">Непроверенные числа (guard): <b>{{ stats.flags_unverified }}</b></div>
         <div class="fb-stat">Низкая релевантность: <b>{{ stats.flags_lowrel }}</b></div>
+      </div>
+
+      <div class="card">
+        <h3>Оценки ответов (звёзды 0–5)</h3>
+        <div class="fb-stat">Средняя: <b>{{ stats.avg_stars if stats.avg_stars is not none else '—' }}</b> · оценок: {{ stats.answer_ratings }}</div>
+        <div class="fb-stat">Приёмка (≥4★): <b>{{ (stats.accept_pct ~ '%') if stats.accept_pct is not none else '—' }}</b></div>
+        {% for star, cnt in stats.star_dist %}
+        <div class="bar-row" title="{{ star }}★: {{ cnt }}">
+          <span class="bar-label">{{ star }} ★</span>
+          <span class="bar-track"><span class="bar-fill" style="width: {{ ((cnt / (stats.answer_ratings or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ cnt }}</span>
+        </div>
+        {% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Исправления экспертов (критические ошибки) · {{ stats.corrections|length }}</h3>
+        {% for c in stats.corrections %}
+        <div class="corr">
+          <div class="corr-head">{{ c.user }}<span class="ts">{{ c.ts }}</span></div>
+          {% if c.answer %}<div class="corr-ans">Ответ ИИ: {{ c.answer }}</div>{% endif %}
+          <div class="corr-fix">Исправление: <b>{{ c.correction }}</b></div>
+        </div>
+        {% else %}<p class="empty">Пока нет исправлений.</p>{% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Комментарии к ответам · {{ stats.answer_comments|length }}</h3>
+        {% for c in stats.answer_comments %}
+        <div class="corr">
+          <div class="corr-head">{{ c.user }}<span class="ts">{{ c.ts }}</span></div>
+          {% if c.answer %}<div class="corr-ans">Ответ ИИ: {{ c.answer }}</div>{% endif %}
+          <div>«{{ c.comment }}»</div>
+        </div>
+        {% else %}<p class="empty">Пока нет комментариев к ответам.</p>{% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Комментарии к диалогам · {{ stats.dialog_comments|length }}</h3>
+        {% for c in stats.dialog_comments %}
+        <div class="corr"><div class="corr-head">{{ c.user }}<span class="ts">{{ c.ts }}</span></div><div>«{{ c.comment }}»</div></div>
+        {% else %}<p class="empty">Пока нет комментариев.</p>{% endfor %}
       </div>
     </div>
   </section>

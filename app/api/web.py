@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Form, Request
+from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from pydantic import BaseModel
@@ -42,7 +42,9 @@ def root(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    return RedirectResponse("/admin" if user.role == "admin" else "/chat", status_code=302)
+    # Все роли (вкл. admin) открываются на «главной» — чат с вводом. Дашборд `/admin`
+    # доступен админу из сайдбара («Логи диалогов»), но не как стартовая страница.
+    return RedirectResponse("/chat", status_code=302)
 
 
 @router.get("/login", response_class=HTMLResponse)
@@ -107,6 +109,10 @@ def admin_page(request: Request):
     per_user_stat = []
     matched_counts = {"да": 0, "частично": 0, "нет": 0}
     ratings = []
+    ans_ratings = []       # звёзды ответов 0..5 (kind='answer')
+    corrections = []       # исправления критич. ошибок (kind='answer', correction)
+    answer_comments = []   # комментарии к ответам (kind='answer', comment)
+    dialog_comments = []   # комментарии к диалогам (kind='dialog')
 
     with get_session() as db:
         for u in q.list_users(db):
@@ -155,12 +161,29 @@ def admin_page(request: Request):
                 u_completion += s["completion"]
                 sessions.append(s)
             feedback = []
+            msg_by_id = {m.id: m for m in msgs}
             for f in q.get_feedback_for_user(db, u.id):
-                feedback.append({"rating": f.rating, "matched": f.matched, "comment": f.comment, "ts": _fmt(f.ts)})
-                if f.rating is not None:
-                    ratings.append(f.rating)
-                if f.matched in matched_counts:
-                    matched_counts[f.matched] += 1
+                kind = f.kind or "service"
+                if kind == "service":  # глобальная форма — как в мини-1.0
+                    feedback.append({"rating": f.rating, "matched": f.matched, "comment": f.comment, "ts": _fmt(f.ts)})
+                    if f.rating is not None:
+                        ratings.append(f.rating)
+                    if f.matched in matched_counts:
+                        matched_counts[f.matched] += 1
+                elif kind == "answer":  # звёзды 0..5 + опц. коммент/исправление, привязаны к ответу
+                    if f.rating is not None:
+                        ans_ratings.append(f.rating)
+                    orig = msg_by_id.get(f.message_id)
+                    ans_txt = orig.content if orig else ""
+                    snippet = (ans_txt[:220] + "…") if len(ans_txt) > 220 else ans_txt
+                    if f.correction:
+                        corrections.append({"user": u.username, "correction": f.correction,
+                                            "ts": _fmt(f.ts), "answer": snippet})
+                    if f.comment:
+                        answer_comments.append({"user": u.username, "comment": f.comment,
+                                                "ts": _fmt(f.ts), "answer": snippet})
+                elif kind == "dialog" and f.comment:  # комментарий ко всей беседе
+                    dialog_comments.append({"user": u.username, "comment": f.comment, "ts": _fmt(f.ts)})
             g_prompt += u_prompt
             g_completion += u_completion
             total_requests += u_req
@@ -177,6 +200,9 @@ def admin_page(request: Request):
     per_day_list = [{"date": d, "requests": v["requests"], "tokens": v["tokens"]}
                     for d, v in sorted(per_day.items())][-14:]
     tokens_total, cost_total = g_prompt + g_completion, cost_rub(g_prompt, g_completion)
+    star_dist = [(i, sum(1 for r in ans_ratings if r == i)) for i in range(5, -1, -1)]
+    avg_stars = round(sum(ans_ratings) / len(ans_ratings), 2) if ans_ratings else None
+    accept_pct = round(100 * sum(1 for r in ans_ratings if r >= 4) / len(ans_ratings)) if ans_ratings else None
     stats = {
         "users_total": len(data),
         "experts": sum(1 for x in data if x["role"] == "expert"),
@@ -191,6 +217,13 @@ def admin_page(request: Request):
         "feedback_count": sum(len(x["feedback"]) for x in data),
         "avg_rating": round(sum(ratings) / len(ratings), 1) if ratings else None,
         "matched": matched_counts,
+        "answer_ratings": len(ans_ratings),
+        "avg_stars": avg_stars,
+        "accept_pct": accept_pct,
+        "star_dist": star_dist,
+        "corrections": corrections,
+        "answer_comments": answer_comments,
+        "dialog_comments": dialog_comments,
         "flags_unverified": flags_unverified,
         "flags_lowrel": flags_lowrel,
         "per_user": per_user_stat,
@@ -206,16 +239,41 @@ def admin_page(request: Request):
 
 
 class FeedbackIn(BaseModel):
-    rating: int | None = None
-    matched: str | None = None
-    comment: str | None = None
+    kind: str = "service"          # answer | dialog | service
+    rating: int | None = None      # answer: звёзды 0..5 / service: 1..5
+    matched: str | None = None     # service: да | частично | нет
+    comment: str | None = None     # dialog / service
+    correction: str | None = None  # answer (опц.) — исправление критической ошибки
+    session_id: str | None = None
+    message_id: int | None = None
 
 
 @router.post("/api/feedback")
 def submit_feedback(fb: FeedbackIn, user: User = Depends(require_user)) -> dict:
+    """Три канала (см. Feedback.kind): 'answer' — звёзды 0..5 + опц. исправление к ответу
+    (нужен message_id); 'dialog' — комментарий к беседе (нужен session_id); 'service' —
+    глобальная форма (оценка 1..5 + соответствие + текст), путь мини-1.0 без изменений."""
+    kind = fb.kind if fb.kind in ("answer", "dialog", "service") else "service"
+    if fb.rating is not None and not (0 <= fb.rating <= 5):
+        raise HTTPException(status_code=422, detail="Оценка вне диапазона 0..5")
+    comment = (fb.comment or "").strip() or None
+    correction = (fb.correction or "").strip() or None
+    if kind == "answer":
+        if fb.message_id is None:
+            raise HTTPException(status_code=422, detail="message_id обязателен для оценки ответа")
+        if fb.rating is None and correction is None and comment is None:
+            return {"ok": True, "skipped": True}  # пустой сигнал не храним
+    if kind == "dialog":
+        if not fb.session_id:
+            raise HTTPException(status_code=422, detail="session_id обязателен для комментария к диалогу")
+        if comment is None:
+            return {"ok": True, "skipped": True}
     with get_session() as db:
         q.save_feedback(
-            db, user_id=user.id, rating=fb.rating, matched=fb.matched,
-            comment=(fb.comment or "").strip() or None,
+            db, user_id=user.id, kind=kind, rating=fb.rating,
+            matched=(fb.matched if kind == "service" else None),
+            comment=comment,  # answer: коммент к ответу / dialog: к беседе / service: глоб. форма
+            correction=(correction if kind == "answer" else None),
+            session_id=fb.session_id, message_id=(fb.message_id if kind == "answer" else None),
         )
     return {"ok": True}

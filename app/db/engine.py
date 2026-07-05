@@ -31,7 +31,13 @@ def _ensure_columns() -> None:
     а create_all не меняет уже созданные таблицы."""
     wanted = {
         "messages": [("prompt_tokens", "INTEGER"), ("completion_tokens", "INTEGER")],
-        "feedback": [("matched", "VARCHAR(16)")],
+        "feedback": [
+            ("matched", "VARCHAR(16)"),
+            ("kind", "VARCHAR(16) DEFAULT 'service'"),  # answer|dialog|service; легаси-строки → service
+            ("session_id", "VARCHAR(36)"),
+            ("message_id", "INTEGER"),
+            ("correction", "TEXT"),
+        ],
     }
     with engine.begin() as conn:
         for table, cols in wanted.items():

@@ -45,6 +45,7 @@ class ChatResponse(BaseModel):
     low_relevance: bool
     unverified_numbers: list[str]
     session_id: str
+    message_id: int | None = None  # id сохранённой реплики-ответа — для привязки оценки/исправления
 
 
 def _sources_from_hits(hits) -> list[SourceItem]:
@@ -70,21 +71,23 @@ def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
 
     sources = _sources_from_hits(ans.hits)
+    message_id: int | None = None
     try:
         with get_session() as db:
             q.log_message(db, user_id=user.id, session_id=session_id, role="user", content=req.message)
-            q.log_message(
+            asst = q.log_message(
                 db, user_id=user.id, session_id=session_id, role="assistant", content=ans.text,
                 sources=[s.model_dump() for s in sources],
                 low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
                 prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
             )
+            message_id = asst.id
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
         logger.exception("chat: не удалось записать лог диалога (user_id=%s)", user.id)
 
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
-        unverified_numbers=ans.unverified_numbers, session_id=session_id,
+        unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=message_id,
     )
 
 

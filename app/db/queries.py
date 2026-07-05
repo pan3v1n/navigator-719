@@ -115,10 +115,14 @@ def delete_session(db: Session, user_id: int, session_id: str) -> int:
 
 # --- feedback ------------------------------------------------------------
 def save_feedback(
-    db: Session, *, user_id: int, rating: int | None, matched: str | None = None,
-    comment: str | None = None,
+    db: Session, *, user_id: int, kind: str = "service", rating: int | None = None,
+    matched: str | None = None, comment: str | None = None, correction: str | None = None,
+    session_id: str | None = None, message_id: int | None = None,
 ) -> Feedback:
-    f = Feedback(user_id=user_id, rating=rating, matched=matched, comment=comment)
+    f = Feedback(
+        user_id=user_id, kind=kind, rating=rating, matched=matched, comment=comment,
+        correction=correction, session_id=session_id, message_id=message_id,
+    )
     db.add(f)
     db.commit()
     db.refresh(f)

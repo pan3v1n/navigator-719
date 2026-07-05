@@ -62,15 +62,22 @@ class Message(Base):
 
 
 class Feedback(Base):
-    """Обратная связь эксперта в конце сессии (оценка + комментарий)."""
+    """Обратная связь эксперта. `kind` различает канал:
+    - 'answer'  — оценка ответа (звёзды 0..5) + опц. `correction` (исправление критич. ошибки), к `message_id`;
+    - 'dialog'  — комментарий к беседе, к `session_id`;
+    - 'service' — глобальный отзыв на сервис (оценка 1..5 + `matched` + `comment`), как в мини-1.0."""
 
     __tablename__ = "feedback"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
     ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
-    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # полезность 1..5
-    matched: Mapped[str | None] = mapped_column(String(16), nullable=True)  # да | частично | нет
+    kind: Mapped[str] = mapped_column(String(16), default="service")  # answer | dialog | service
+    session_id: Mapped[str | None] = mapped_column(String(36), index=True, nullable=True)
+    message_id: Mapped[int | None] = mapped_column(Integer, index=True, nullable=True)  # → messages.id (логическая ссылка)
+    rating: Mapped[int | None] = mapped_column(Integer, nullable=True)  # answer: звёзды 0..5 / service: 1..5
+    matched: Mapped[str | None] = mapped_column(String(16), nullable=True)  # service: да | частично | нет
     comment: Mapped[str | None] = mapped_column(Text, nullable=True)
+    correction: Mapped[str | None] = mapped_column(Text, nullable=True)  # исправление критич. ошибки (к ответу)
 
     user: Mapped["User"] = relationship(back_populates="feedback")
