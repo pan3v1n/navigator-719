@@ -121,6 +121,14 @@
         <div class="corr"><div class="corr-head">{{ c.user }}<span class="ts">{{ c.ts }}</span></div><div>«{{ c.comment }}»</div></div>
         {% else %}<p class="empty">Пока нет комментариев.</p>{% endfor %}
       </div>
+
+      <div class="card wide">
+        <h3>Процедурные вопросы (вне охвата, дефер) · {{ stats.procedural_questions|length }}</h3>
+        <div class="kpi-sub" style="margin:0 0 8px">Что эксперты спрашивают про процедуру (реестр / ГИСП / документы) — приоритизация корпуса Правил.</div>
+        {% for c in stats.procedural_questions %}
+        <div class="corr"><div class="corr-head">{{ c.user }}<span class="ts">{{ c.ts }}</span></div><div>«{{ c.q }}»</div></div>
+        {% else %}<p class="empty">Пока нет процедурных вопросов.</p>{% endfor %}
+      </div>
     </div>
   </section>
 

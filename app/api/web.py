@@ -32,6 +32,10 @@ router = APIRouter()
 _WEB = Path(__file__).resolve().parents[1] / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
 
+# Подпись дефера процедурного вопроса (из app/rag/procedural.DEFLECTION) — для учёта в /admin
+# «что эксперты спрашивают про процедуру вне охвата» → приоритизация корпуса Правил реестра (P2).
+_PROC_SIG = "это вопрос о ПРОЦЕДУРЕ"
+
 
 def _ctx(request: Request, **kw) -> dict:
     return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME, **kw}
@@ -113,12 +117,14 @@ def admin_page(request: Request):
     corrections = []       # исправления критич. ошибок (kind='answer', correction)
     answer_comments = []   # комментарии к ответам (kind='answer', comment)
     dialog_comments = []   # комментарии к диалогам (kind='dialog')
+    procedural_questions = []  # вопросы, ушедшие в процедурный дефер (что спрашивают вне охвата → P2)
 
     with get_session() as db:
         for u in q.list_users(db):
             msgs = q.get_messages_for_user(db, u.id)
             by_sid, order = {}, []
             u_req = 0
+            last_user = None  # последний вопрос эксперта — чтобы связать с дефером ассистента
             for m in msgs:
                 s = by_sid.get(m.session_id)
                 if s is None:
@@ -139,6 +145,7 @@ def admin_page(request: Request):
                 s["completion"] += m.completion_tokens or 0
                 day = m.ts.strftime("%d.%m") if m.ts else None
                 if m.role == "user":
+                    last_user = m.content
                     u_req += 1
                     if day:
                         per_day[day]["requests"] += 1
@@ -150,6 +157,10 @@ def admin_page(request: Request):
                         flags_unverified += 1
                     if m.low_relevance:
                         flags_lowrel += 1
+                    if _PROC_SIG in (m.content or ""):  # ответ = процедурный дефер
+                        procedural_questions.append(
+                            {"user": u.username, "q": (last_user or "")[:140], "ts": _fmt(m.ts)}
+                        )
             u_prompt = u_completion = 0
             sessions = []
             for sid in reversed(order):  # новые беседы сверху
@@ -224,6 +235,7 @@ def admin_page(request: Request):
         "corrections": corrections,
         "answer_comments": answer_comments,
         "dialog_comments": dialog_comments,
+        "procedural_questions": procedural_questions,
         "flags_unverified": flags_unverified,
         "flags_lowrel": flags_lowrel,
         "per_user": per_user_stat,
