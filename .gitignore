@@ -52,3 +52,6 @@ logs/
 
 # Граф знаний graphify — локальный, в репо не нужен
 graphify-out/
+
+# Рабочая папка diff_edition.py и разовых сверок редакций
+scratchpad/

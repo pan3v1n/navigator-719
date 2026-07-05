@@ -93,7 +93,7 @@ python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```bash
 docker compose build                                   # соберёт образ (torch+e5 deps, ~5–10 мин)
 docker compose up -d qdrant                            # поднять Qdrant
-docker compose run --rm app python scripts/load_kb.py  # скачает e5 (~2 ГБ) + проиндексирует 1357 точек
+docker compose run --rm app python scripts/load_kb.py  # скачает e5 (~2 ГБ) + проиндексирует 1379 точек
 docker compose run --rm app python scripts/seed_users.py --admin-password ВАШ_ПАРОЛЬ
 docker compose up -d app                               # поднять приложение
 docker compose ps                                      # app и qdrant в статусе Up/healthy

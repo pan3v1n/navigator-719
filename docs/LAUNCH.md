@@ -48,7 +48,7 @@ copy .env.example .env                     # затем вписать DEEPSEEK_
 Коллекции хранятся постоянно — повторять только при смене схемы/данных.
 
 ```powershell
-.venv\Scripts\python scripts\load_kb.py        # база знаний → коллекция pp719 (~1357 точек)
+.venv\Scripts\python scripts\load_kb.py        # база знаний → коллекция pp719 (~1379 точек)
 .venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases (на старте пусто)
 ```
 Первый запуск `load_kb.py` считает эмбеддинги e5 на CPU (~15–25 мин). Повторные —
