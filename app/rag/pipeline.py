@@ -20,12 +20,16 @@ from app.core.prompts import (
 from app.rag import sparse
 from app.rag.retriever import Hit, dense_top1, search, search_cases
 
-MAX_OPS_PER_HIT = 25  # ограничиваем контекст: у некоторых продуктов сотни операций.
-# 15→25 (INTERIM-фикс P2): у 264 мега-продуктов (20% базы) усечение теряло балльные требования
-# (при 15 ВСЕ баллы влезали лишь у 13/242; при 25 — у 167/242). Выше не поднимаем: длинный
-# перечень операций провоцирует авто-выдумку итога (см. eval_faithfulness_stress). Остаток
-# усечения помечается «⚠ СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ» (см. format_context + правило 2а промпта);
-# экстремальный хвост (676/220 опер) лечится parent/child auto-merge — отложено в 2.0.
+# Адаптивный кап операций (вариант A, 2026-07-05). Целевой хит (совпадение по коду ОКПД2 / top-1)
+# показываем ПОЛНЕЕ — MAX_OPS_TARGET, — чтобы не резать умеренные продукты (напр. чиллеры XVI,
+# 38 операций); прочие кандидаты [2]-[5] — кратко (MAX_OPS_OTHER). Контекст остаётся ограниченным
+# (~60 + 4×12 ≈ прежние 5×25), а «СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ» помечается только там, где список реально
+# усечён (истинный хвост). История: плоский кап 15→25 (INTERIM-фикс P2, faithfulness 1.000 при temp=0
+# + пометке), но 25 резал 38-оп чиллеры так же, как 676-оп автобусы. Экстремальный хвост (676/220 опер)
+# лечится parent/child auto-merge — отложено в 2.0.
+MAX_OPS_TARGET = 60
+MAX_OPS_OTHER = 12
+MAX_OPS_PER_HIT = MAX_OPS_TARGET  # обратная совместимость (test_rag / eval_truncation берут как дефолт)
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
 # Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
 # Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
@@ -67,8 +71,12 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
 
 
 def format_context(hits: list[Hit], query: str | None = None) -> str:
+    # Целевой хит (совпадение по коду ОКПД2, иначе top-1) показываем полнее прочих кандидатов.
+    has_match = any(h.okpd2_match for h in hits)
     blocks: list[str] = []
     for i, h in enumerate(hits, 1):
+        is_target = h.okpd2_match if has_match else (i == 1)
+        cap = MAX_OPS_TARGET if is_target else MAX_OPS_OTHER
         sect = f"«{h.section_title}»" if h.section_title else f"Раздел {h.section_roman}"
         head = f"[{i}] {h.product_name} (раздел {sect})"
         if h.okpd2_match:
@@ -80,16 +88,16 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
             lines.append(f"    Порог: {h.min_threshold}")
         ops = _hit_operations(h)
         total = len(ops)
-        if total > MAX_OPS_PER_HIT:
+        if total > cap:
             ops = _rank_operations(ops, query)
-        shown = ops[:MAX_OPS_PER_HIT]
+        shown = ops[:cap]
         if shown:
             lines.append("    Ключевые операции:")
             for o in shown:
                 pts = o.get("points")
                 ptxt = f" — {pts} балл." if pts is not None else " — балл зависит от условий/категории"
                 lines.append(f"      • {o.get('text', '')}{ptxt}")
-            if total > MAX_OPS_PER_HIT:
+            if total > cap:
                 rel = " (показаны наиболее релевантные запросу)" if query else ""
                 lines.append(
                     f"      СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
