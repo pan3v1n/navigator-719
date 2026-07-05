@@ -25,6 +25,8 @@ services:
       QDRANT_COLLECTION: pp719
       # БД приложения — в томе (переживает пересоздание контейнера).
       APP_DB_URL: sqlite:////data/navigator_app.db
+      # Файловый лог loguru — на том appdata (переживает редеплой; ротация 10МБ / 14 дней).
+      LOG_FILE: /data/app.log
       # Кэш модели e5 — в томе (качается один раз при первом load_kb).
       HF_HOME: /models
       SENTENCE_TRANSFORMERS_HOME: /models
@@ -36,6 +38,9 @@ services:
     ports:
       # Демо по http на 80-м порту VM. Не забудь открыть 80 в security group.
       - "80:8000"
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }  # ограничить docker-логи, чтобы не распухли за тест
 
 volumes:
   qdrant_storage:

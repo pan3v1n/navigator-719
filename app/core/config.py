@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000
     LOG_LEVEL: str = "INFO"
+    LOG_FILE: str = ""  # путь к файловому логу loguru; пусто = только stderr. На VM — /data/app.log (том)
 
     APP_TITLE: str = "Навигатор ПП РФ №719"
     # 0.5.0 — движок навигатора готов; цель 1.0 = чат-ассистент по 719 (см. ROADMAP.md)

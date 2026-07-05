@@ -179,6 +179,17 @@ function addSources(wrap, sources) {
   wrap.appendChild(det);
 }
 
+// пометка о незаземлённых числах: faithfulness-guard поймал число баллов/%, которого нет в источнике
+function addUnverifiedFlag(wrap, nums) {
+  if (!nums || !nums.length) return;
+  const f = el("answer-flag");
+  f.innerHTML = '<svg viewBox="0 0 24 24" fill="none" width="16" height="16"><path d="M12 3.5l9 16.5H3l9-16.5z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 10v4.5M12 17.6h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  const s = document.createElement("span");
+  s.textContent = "Проверьте показатели: " + nums.join(", ") + " — эти числа не найдены в тексте источника, сверьте с ПП №719.";
+  f.appendChild(s);
+  wrap.appendChild(f);
+}
+
 // --- обратная связь на ответ: звёзды 0..5 + отметить ошибку (исправление) + коммент к диалогу ---
 async function postFeedback(payload) {
   try {
@@ -391,6 +402,7 @@ async function ask(text) {
     sessionId = data.session_id;
     setActive(sessionId);
     bubble.innerHTML = renderMarkdown(data.answer);
+    addUnverifiedFlag(pending, data.unverified_numbers);
     addSources(pending, data.sources);
     addFeedbackBar(pending, data.message_id, sessionId);
   } catch (e) {

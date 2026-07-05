@@ -38,12 +38,12 @@ yc vpc network create --name default
 yc vpc subnet create --name default-a --zone ru-central1-a --network-name default --range 10.0.0.0/24
 ```
 
-## 3. Создать VM (Ubuntu 22.04, 4 vCPU / 8 ГБ)
+## 3. Создать VM (Ubuntu 24.04, 2 vCPU / 8 ГБ)
 ```powershell
 yc compute instance create `
   --name navigator-719 `
   --zone ru-central1-a `
-  --cores 4 --memory 8GB --core-fraction 100 `
+  --cores 2 --memory 8GB --core-fraction 100 `
   --create-boot-disk image-folder-id=standard-images,image-family=ubuntu-2204-lts,size=30,type=network-ssd `
   --network-interface subnet-name=default-a,nat-ip-version=ipv4 `
   --ssh-key $HOME\.ssh\id_ed25519.pub
@@ -51,7 +51,9 @@ yc compute instance create `
 Записать **публичный IP** из вывода (поле `one_to_one_nat address`). Далее — `VM_IP`.
 
 > Если CLI-сеть капризничает — VM проще создать в консоли `console.yandex.cloud`
-> (Compute Cloud → Создать ВМ: Ubuntu 22.04, 4 vCPU/8 ГБ, публичный IP, вставить SSH-ключ).
+> (Compute Cloud → Создать ВМ: Ubuntu 24.04, 2 vCPU/8 ГБ, публичный IP, вставить SSH-ключ).
+> Для 5-дневного теста сразу **зарезервируй статический публичный IP** (иначе при stop/start
+> адрес сменится и ссылка у экспертов протухнет).
 
 ## 4. Открыть порты 22 и 80
 В security group подсети/VM (консоль → Virtual Private Cloud → Security groups, или дефолтная SG)
@@ -70,21 +72,27 @@ sudo usermod -aG docker $USER && newgrp docker      # чтобы docker без s
 docker version && docker compose version            # проверка
 ```
 
-## 6. Забрать код и создать .env
+## 6. Доставить код и создать .env
+Репозиторий **приватный** → код везём снимком ветки с ЛОКАЛЬНОЙ машины (`git clone` без токена не
+сработает). С локального ПК из корня репо:
 ```bash
-git clone -b dev https://github.com/pan3v1n/navigator-719.git
+git archive dev | ssh yc-user@VM_IP "mkdir -p navigator-719 && tar -x -C navigator-719"
+```
+Затем на VM:
+```bash
 cd navigator-719
 cp .env.example .env
 nano .env
 ```
 В `.env` задать (минимум):
 ```
-DEEPSEEK_API_KEY=sk-...            # твой ключ
-SESSION_SECRET=<длинная-случайная> # см. ниже
+DEEPSEEK_API_KEY=sk-...             # твой ключ
+SESSION_SECRET=<длинная-случайная>  # ОБЯЗАТЕЛЬНО (см. ниже)
 APP_VERSION=0.5.0
-# QDRANT_URL/APP_DB_URL/HF_HOME НЕ трогать — их задаёт docker-compose
+# QDRANT_URL/APP_DB_URL/HF_HOME/APP_ENV НЕ трогать — их задаёт docker-compose
 ```
-Сгенерировать секрет сессий:
+> ⚠️ **SESSION_SECRET обязателен.** compose ставит `APP_ENV=production`, а стартап-гард приложения
+> **не даст запуститься** с публичным дефолт-секретом (иначе можно подделать admin-cookie). Сгенерировать:
 ```bash
 python3 -c "import secrets; print(secrets.token_urlsafe(48))"
 ```
@@ -106,11 +114,24 @@ docker compose ps                                      # app и qdrant в ста
 
 ---
 
-## 9. После демо — погасить биллинг
-```powershell
-yc compute instance delete navigator-719
+## 9. Бэкап данных теста + пауза биллинга
+
+**Бэкап БД (ежедневно).** Фидбек/оценки/исправления/логи диалогов = результат теста. Тома
+переживают редеплой (`up --build`/`down`), но `instance delete` их стирает — снимайте копию off-VM:
+```bash
+# на VM: консистентный дамп SQLite из тома → вынести на хост
+docker compose exec -T app python -c "import sqlite3; c=sqlite3.connect('/data/navigator_app.db'); b=sqlite3.connect('/tmp/backup.db'); c.backup(b); b.close()"
+docker compose cp app:/tmp/backup.db ./navigator_backup.db
+# с локального ПК: забрать к себе
+scp yc-user@VM_IP:navigator-719/navigator_backup.db ./navigator_backup-$(date +%F).db
 ```
-(Тома удаляются вместе с VM. Локальный продукт при этом полностью цел.)
+
+**Пауза биллинга (на ночь / между днями теста):** останавливать VM **в консоли**
+`console.yandex.cloud` («Остановить»). Гостевой `sudo poweroff` биллинг НЕ гасит. Данные (тома)
+переживают stop/start; при отсутствии статического IP адрес сменится (см. шаг 3).
+
+**Финальный teardown (после теста — СНАЧАЛА бэкап!):** удалить инстанс в консоли (реальное имя,
+не `navigator-719`). Тома удаляются вместе с VM; локальный продукт полностью цел.
 
 ---
 

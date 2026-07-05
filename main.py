@@ -27,6 +27,9 @@ async def lifespan(app: FastAPI):
             logger.warning(msg + ". Для прод-деплоя ОБЯЗАТЕЛЬНО задайте случайный SESSION_SECRET.")
         else:
             raise RuntimeError(msg + f". Задайте случайный SESSION_SECRET (APP_ENV={settings.APP_ENV}).")
+    if settings.LOG_FILE:  # персистентный файловый лог (на VM — на томе, переживает редеплой)
+        logger.add(settings.LOG_FILE, rotation="10 MB", retention="14 days",
+                   encoding="utf-8", enqueue=True, level=settings.LOG_LEVEL)
     init_db()  # таблицы приложения (users/messages/feedback), идемпотентно
     yield
 

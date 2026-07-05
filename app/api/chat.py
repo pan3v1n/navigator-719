@@ -84,7 +84,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
     try:
         ans = answer(req.message, okpd2=okpd2, history=history)
     except Exception:  # noqa: BLE001 — наружу дружелюбно, детали в лог (рваная сеть/DeepSeek)
-        logger.exception("chat: движок упал на запросе от user_id=%s", user.id)
+        logger.exception(f"chat: движок упал на запросе от user_id={user.id}")
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
 
     sources = _sources_from_hits(ans.hits)
@@ -100,7 +100,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
             )
             message_id = asst.id
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
-        logger.exception("chat: не удалось записать лог диалога (user_id=%s)", user.id)
+        logger.exception(f"chat: не удалось записать лог диалога (user_id={user.id})")
 
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
