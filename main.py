@@ -3,6 +3,7 @@ from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.staticfiles import StaticFiles
+from loguru import logger
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.chat import router as chat_router
@@ -12,9 +13,21 @@ from app.core.config import settings
 from app.db.engine import init_db
 
 
+_DEFAULT_SECRET = "dev-insecure-secret-change-in-env"
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    init_db()  # таблицы приложения (users/messages/feedback), если их ещё нет — идемпотентно
+    # Гард секрета: публичный дефолт SESSION_SECRET (лежит в репо) позволяет подделать сессию и
+    # войти как admin. Локально (development) — громкое предупреждение; в проде — не стартуем.
+    if settings.SESSION_SECRET == _DEFAULT_SECRET:
+        msg = ("SESSION_SECRET не задан в .env — используется ПУБЛИЧНЫЙ дефолт из репозитория "
+               "(позволяет подделать сессию и войти как admin)")
+        if settings.APP_ENV == "development":
+            logger.warning(msg + ". Для прод-деплоя ОБЯЗАТЕЛЬНО задайте случайный SESSION_SECRET.")
+        else:
+            raise RuntimeError(msg + f". Задайте случайный SESSION_SECRET (APP_ENV={settings.APP_ENV}).")
+    init_db()  # таблицы приложения (users/messages/feedback), идемпотентно
     yield
 
 

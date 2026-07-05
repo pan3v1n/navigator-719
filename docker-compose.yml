@@ -16,6 +16,10 @@ services:
     # DEEPSEEK_API_KEY, SESSION_SECRET, APP_VERSION и пр. — из .env на VM.
     env_file: .env
     environment:
+      # APP_ENV=production включает startup-гард SESSION_SECRET: если секрет дефолтный — приложение
+      # НЕ стартует (иначе можно подделать admin-cookie). Значит .env на VM ОБЯЗАН содержать
+      # случайный SESSION_SECRET (docs/DEPLOY.md шаг 6).
+      APP_ENV: production
       # Внутри compose-сети Qdrant доступен по имени сервиса.
       QDRANT_URL: http://qdrant:6333
       QDRANT_COLLECTION: pp719

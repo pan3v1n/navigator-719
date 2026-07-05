@@ -372,11 +372,14 @@ async function ask(text) {
   const pending = addPending();
   const bubble = pending.querySelector(".bubble");
   send.disabled = true;
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);  // клиентский таймаут (бэкенд режет DeepSeek на 30с/вызов)
   try {
     const r = await fetch("/api/chat", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text, session_id: sessionId }),
+      signal: ctrl.signal,
     });
     if (r.status === 401) { window.location = "/login"; return; }
     if (!r.ok) {
@@ -394,6 +397,7 @@ async function ask(text) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
     if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
   } finally {
+    clearTimeout(timer);
     send.disabled = false;
     scrollDown();
   }

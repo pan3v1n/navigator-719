@@ -126,7 +126,12 @@ def _client():
 
     if not settings.DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY пуст — заполни .env")
-    return OpenAI(api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL)
+    # timeout+ретраи: без них openai-дефолт 600с×2 → на рваной РФ-сети зависший запрос держит поток
+    # ~10 мин, эксперт смотрит в спиннер. Покрывает генерацию и контекстуализацию (реранкер — свой клиент).
+    return OpenAI(
+        api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL,
+        timeout=30.0, max_retries=1,
+    )
 
 
 def _ensure_disclaimer(text: str) -> str:

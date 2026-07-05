@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 
+from app.api.auth import require_user
 from app.api.schemas import NavigateRequest, NavigateResponse, SourceItem
+from app.db.models import User
 from app.tools.navigator import navigate
 
 logger = logging.getLogger(__name__)
@@ -14,7 +16,7 @@ router = APIRouter()
 
 
 @router.post("/navigate", response_model=NavigateResponse)
-def navigate_endpoint(req: NavigateRequest) -> NavigateResponse:
+def navigate_endpoint(req: NavigateRequest, user: User = Depends(require_user)) -> NavigateResponse:
     """Принимает описание/код продукции → применимая позиция 719 + требования + чек-лист.
 
     Синхронный обработчик: FastAPI выполнит его в пуле потоков, чтобы блокирующий вызов

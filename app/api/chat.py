@@ -22,6 +22,7 @@ from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
 from app.rag.pipeline import answer
+from app.tools.navigator import extract_okpd2
 
 router = APIRouter()
 
@@ -79,8 +80,9 @@ def _load_history(user_id: int, session_id: str, max_msgs: int = 4) -> list[dict
 def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
+    okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а
     try:
-        ans = answer(req.message, history=history)
+        ans = answer(req.message, okpd2=okpd2, history=history)
     except Exception:  # noqa: BLE001 — наружу дружелюбно, детали в лог (рваная сеть/DeepSeek)
         logger.exception("chat: движок упал на запросе от user_id=%s", user.id)
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
