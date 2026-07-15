@@ -15,10 +15,12 @@ from app.core.config import settings
 from app.core.prompts import (
     EXPERT_DISCLAIMER,
     NAVIGATOR_SYSTEM_PROMPT,
+    PROCEDURAL_SYSTEM_PROMPT,
     build_navigator_user_prompt,
+    build_procedural_user_prompt,
 )
 from app.rag import sparse
-from app.rag.retriever import Hit, dense_top1, search, search_cases
+from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
 
 # Адаптивный кап операций (вариант A, 2026-07-05). Целевой хит (совпадение по коду ОКПД2 / top-1)
 # показываем ПОЛНЕЕ — MAX_OPS_TARGET, — чтобы не резать умеренные продукты (напр. чиллеры XVI,
@@ -31,6 +33,7 @@ MAX_OPS_TARGET = 60
 MAX_OPS_OTHER = 12
 MAX_OPS_PER_HIT = MAX_OPS_TARGET  # обратная совместимость (test_rag / eval_truncation берут как дефолт)
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
+RULES_TOP_K = 6  # сколько пунктов Правил реестра тянуть для процедурного ответа (проза → синтез из нескольких)
 # Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
 # Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
 # полоса перекрытия узкая, поэтому порог НЕ режет жёстко, а лишь поднимает флаг для модели
@@ -121,6 +124,23 @@ def format_cases(cases: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+RULES_TEXT_CAP = 1400  # символов на пункт Правил в контексте (длинные усекаем, помечая)
+
+
+def format_rules_context(rules: list[dict]) -> str:
+    """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …)."""
+    blocks: list[str] = []
+    for i, r in enumerate(rules, 1):
+        point = r.get("point") or "?"
+        sect = r.get("section_title") or r.get("section_roman") or ""
+        head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
+        text = (r.get("text") or "").strip()
+        if len(text) > RULES_TEXT_CAP:
+            text = text[:RULES_TEXT_CAP].rstrip() + " …(пункт приведён не полностью; полный текст — в первоисточнике)"
+        blocks.append(head + "\n" + text)
+    return "\n\n".join(blocks)
+
+
 def _client():
     from openai import OpenAI
 
@@ -172,6 +192,24 @@ def unverified_numbers(text: str, context: str) -> list[str]:
         if n not in seen and not number_in_context(n, context):
             seen.add(n)
             out.append(n)
+    return out
+
+
+# Сроки в процедурном ответе («10 рабочих дней», «15 календарных дней») — отдельный класс числовых
+# претензий, которые unverified_numbers НЕ ловит (там только «балл»/«процент/%»), а риск выдумки на
+# процедурной ветке — именно сроки. Проверяем так же: срок незаземлён, если числа нет в контексте
+# Правил. НЕ трогаем claim_numbers/unverified_numbers — от их семантики зависят eval_answers.py и тесты.
+_DEADLINE_CLAIM_RE = re.compile(rf"({_NUM})\s*(?:рабоч|календарн)\w*\s+дн", re.IGNORECASE)
+
+
+def unverified_deadlines(text: str, context: str) -> list[str]:
+    """Сроки в днях из ОТВЕТА, которых НЕТ в контексте Правил (кандидаты в выдумки процедуры)."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in (v.replace(",", ".") for v in _DEADLINE_CLAIM_RE.findall(text)):
+        if n not in seen and not number_in_context(n, context):
+            seen.add(n)
+            out.append(f"{n} дн.")
     return out
 
 
@@ -230,6 +268,46 @@ def _contextualize(query: str, history: list[dict]) -> str:
         return query
 
 
+def _answer_procedural(query: str, search_query: str,
+                       history: list[dict] | None = None) -> Answer:
+    """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
+
+    Фолбэк: если корпус выключен / коллекции нет / ничего не нашлось — ЧЕСТНЫЙ ДЕФЕР
+    (procedural.DEFLECTION): порядок действий и сроки НЕ выдумываем. Иначе генерируем grounded-ответ
+    по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ (unverified_deadlines)."""
+    from app.rag import procedural
+
+    if not settings.PROCEDURAL_ANSWER_FROM_RULES:
+        return Answer(text=procedural.DEFLECTION, hits=[])
+    rules = search_rules(search_query, limit=RULES_TOP_K)
+    if not rules:  # коллекции нет / пусто → честный дефер, а не выдумка процедуры
+        return Answer(text=procedural.DEFLECTION, hits=[])
+
+    ctx = format_rules_context(rules)
+    user = build_procedural_user_prompt(query, ctx)
+    messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
+    if history:  # мультитёрн: процедурный follow-up видит историю диалога
+        messages.extend(history)
+    messages.append({"role": "user", "content": user})
+    resp = _client().chat.completions.create(
+        model=settings.DEEPSEEK_MODEL,
+        messages=messages,
+        temperature=0,  # детерминизм (как товарный путь): стабильный набор шагов/сроков
+    )
+    usage = resp.usage
+    raw = _strip_emoji(resp.choices[0].message.content or "")
+    # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
+    ungrounded = unverified_numbers(raw, ctx) + unverified_deadlines(raw, ctx)
+    return Answer(
+        text=raw,
+        hits=[],
+        low_relevance=False,
+        unverified_numbers=ungrounded,
+        prompt_tokens=usage.prompt_tokens if usage else 0,
+        completion_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
 def answer(query: str, okpd2: str | None = None, limit: int = 5,
            history: list[dict] | None = None) -> Answer:
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
@@ -250,7 +328,9 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5,
     if settings.PROCEDURAL_DEFLECT_ENABLED:
         from app.rag import procedural
         if procedural.is_procedural(search_query, has_code=bool(okpd2)):
-            return Answer(text=procedural.DEFLECTION, hits=[])
+            # Раньше здесь был немедленный дефер. Теперь маршрутизируем на корпус Правил реестра;
+            # дефер остаётся ФОЛБЭКОМ внутри _answer_procedural (корпус пуст / ничего не нашлось).
+            return _answer_procedural(query, search_query, history)
 
     hits = search(search_query, okpd2=okpd2, limit=limit)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии

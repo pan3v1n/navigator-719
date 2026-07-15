@@ -1,0 +1,44 @@
+{% extends "base.html" %}
+{% block title %}Профиль — {{ app_title }}{% endblock %}
+{% block body %}
+<div class="login-wrap">
+  <div class="login-card profile-card">
+    <div class="login-logo">719</div>
+    <h1>Профиль участника</h1>
+    <p class="sub">Заполните данные о себе — это нужно для доступа к тесту навигатора по ПП №719 · {{ org }}</p>
+    <form class="login-form" method="post" action="/profile">
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+
+      <label class="field">ФИО
+        <input name="full_name" value="{{ full_name or '' }}" placeholder="Фамилия Имя Отчество"
+               autocomplete="name" required autofocus>
+      </label>
+
+      <label class="field">Регион
+        <select name="region" required>
+          <option value="" disabled {% if not prefill_region %}selected{% endif %}>— выберите регион —</option>
+          {% for r in regions %}
+          <option value="{{ r }}" {% if r == prefill_region %}selected{% endif %}>{{ r }}</option>
+          {% endfor %}
+        </select>
+      </label>
+
+      <label class="field">Ник в Telegram
+        <input name="telegram" value="{{ telegram or '' }}" placeholder="@username" required>
+      </label>
+
+      <label class="consent">
+        <input type="checkbox" name="consent" value="1" {% if consent %}checked{% endif %} required>
+        <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, ник в Telegram,
+          содержание диалогов с сервисом) оператором — {{ org }} — в целях проведения тестирования и
+          улучшения сервиса «Навигатор ПП №719». Согласие действует на период тестирования; отозвать
+          можно, обратившись к организатору.</span>
+      </label>
+      <p class="consent-note">На время тестирования сервис работает по незащищённому соединению (http) —
+        не вводите данные ограниченного доступа.</p>
+
+      <button type="submit">Сохранить и продолжить</button>
+    </form>
+  </div>
+</div>
+{% endblock %}

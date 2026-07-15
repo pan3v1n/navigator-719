@@ -11,7 +11,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Feedback, Message, User
+from app.db.models import Feedback, Message, User, _utcnow
 
 
 # --- users ---------------------------------------------------------------
@@ -26,6 +26,25 @@ def get_user(db: Session, user_id: int) -> User | None:
 def create_user(db: Session, username: str, password_hash: str, role: str = "expert") -> User:
     u = User(username=username, password_hash=password_hash, role=role)
     db.add(u)
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def update_profile(
+    db: Session, user_id: int, *, full_name: str, region: str, telegram: str, consent: bool
+) -> User | None:
+    """Сохраняет профиль пользователя (ФИО/регион/Telegram) и согласие на ПДн. Момент согласия
+    (consent_at) фиксируем ОДИН раз при первой отметке — след 152-ФЗ. Возвращает User или None."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.full_name = (full_name or "").strip()
+    u.region = (region or "").strip()
+    u.telegram = (telegram or "").strip()
+    if consent and not u.consent:
+        u.consent = True
+        u.consent_at = _utcnow()
     db.commit()
     db.refresh(u)
     return u

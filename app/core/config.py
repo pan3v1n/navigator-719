@@ -26,6 +26,10 @@ class Settings(BaseSettings):
     QDRANT_URL: str = "http://localhost:6333"
     QDRANT_COLLECTION: str = "pp719"
     QDRANT_CASES_COLLECTION: str = "verified_cases"  # кейсы, подтверждённые экспертом ТПП
+    # Корпус «Правила формирования и ведения реестра российской промышленной продукции» —
+    # ОТДЕЛЬНАЯ коллекция (проза, а не товарные записи), чтобы не сдвигать калибровку out-of-scope
+    # guard (dense_top1 по pp719) и не трогать измеренный товарный recall. Грузится scripts/load_rules_kb.py.
+    QDRANT_RULES_COLLECTION: str = "pp719_rules"
 
     EMBEDDING_MODEL: str = "intfloat/multilingual-e5-large"
     EMBEDDING_DIM: int = 1024
@@ -35,8 +39,12 @@ class Settings(BaseSettings):
     RERANK_ENABLED: bool = True
 
     # Процедурный дефер-предохранитель: чистый процедурный вопрос (реестр/ГИСП/подача/сроки)
-    # корпусом не покрыт — деферим детерминированно, без вызова LLM (см. app/rag/procedural.py).
+    # детектируется детерминированно (см. app/rag/procedural.py). Раньше такой вопрос СРАЗУ
+    # деферился; теперь при PROCEDURAL_ANSWER_FROM_RULES он маршрутизируется на корпус Правил
+    # (QDRANT_RULES_COLLECTION) и отвечается по нему, а дефер остаётся ЧЕСТНЫМ ФОЛБЭКОМ, если
+    # корпус ничего релевантного не вернул (коллекции нет / пусто) — ноль выдумок процедуры.
     PROCEDURAL_DEFLECT_ENABLED: bool = True
+    PROCEDURAL_ANSWER_FROM_RULES: bool = True
 
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"

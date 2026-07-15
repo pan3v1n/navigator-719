@@ -38,6 +38,13 @@ def _ensure_columns() -> None:
             ("message_id", "INTEGER"),
             ("correction", "TEXT"),
         ],
+        "users": [  # профиль + согласие на ПДн (роль user); DEFAULT 0 → у старых строк consent=False
+            ("consent", "BOOLEAN DEFAULT 0"),
+            ("consent_at", "DATETIME"),
+            ("full_name", "TEXT"),
+            ("region", "VARCHAR(128)"),
+            ("telegram", "VARCHAR(128)"),
+        ],
     }
     with engine.begin() as conn:
         for table, cols in wanted.items():

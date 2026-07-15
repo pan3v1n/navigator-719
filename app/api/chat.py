@@ -17,7 +17,7 @@ from fastapi.responses import Response
 from loguru import logger
 from pydantic import BaseModel, Field
 
-from app.api.auth import require_user
+from app.api.auth import require_user, require_user_profiled
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -77,7 +77,7 @@ def _load_history(user_id: int, session_id: str, max_msgs: int = 4) -> list[dict
 
 
 @router.post("/api/chat", response_model=ChatResponse)
-def chat(req: ChatRequest, user: User = Depends(require_user)) -> ChatResponse:
+def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
     okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а

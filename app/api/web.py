@@ -19,22 +19,22 @@ from app.api.auth import (
     current_user,
     login_session,
     logout_session,
+    needs_profile,
     require_user,
+    require_user_profiled,
     set_remember_cookie,
 )
 from app.core.config import settings
+from app.core.regions import REGIONS, region_from_username
 from app.core.costs import cost_rub
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
+from app.rag import procedural
 
 router = APIRouter()
 _WEB = Path(__file__).resolve().parents[1] / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
-
-# Подпись дефера процедурного вопроса (из app/rag/procedural.DEFLECTION) — для учёта в /admin
-# «что эксперты спрашивают про процедуру вне охвата» → приоритизация корпуса Правил реестра (P2).
-_PROC_SIG = "это вопрос о ПРОЦЕДУРЕ"
 
 
 def _ctx(request: Request, **kw) -> dict:
@@ -46,6 +46,8 @@ def root(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if needs_profile(user):  # роль user без профиля/согласия → сначала анкета
+        return RedirectResponse("/profile", status_code=302)
     # Все роли (вкл. admin) открываются на «главной» — чат с вводом. Дашборд `/admin`
     # доступен админу из сайдбара («Логи диалогов»), но не как стартовая страница.
     return RedirectResponse("/chat", status_code=302)
@@ -86,7 +88,50 @@ def chat_page(request: Request):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    if needs_profile(user):  # жёсткий гейт: роль user не в чат, пока не заполнит профиль+согласие
+        return RedirectResponse("/profile", status_code=302)
     return templates.TemplateResponse("chat.html", _ctx(request, user=user))
+
+
+@router.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    prefill = user.region or region_from_username(user.username)
+    return templates.TemplateResponse(
+        "profile.html",
+        _ctx(request, user=user, error=None, regions=REGIONS, prefill_region=prefill,
+             full_name=user.full_name or "", telegram=user.telegram or "",
+             consent=bool(user.consent)),
+    )
+
+
+@router.post("/profile", response_class=HTMLResponse)
+def profile_submit(
+    request: Request,
+    consent: str = Form(default=""),
+    full_name: str = Form(default=""),
+    region: str = Form(default=""),
+    telegram: str = Form(default=""),
+):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    fn, rg, tg = full_name.strip(), region.strip(), telegram.strip()
+    # Все поля обязательны (решение заказчика: жёсткий гейт). Незаполненное → дружелюбный ре-рендер.
+    if not (consent and fn and rg and tg):
+        return templates.TemplateResponse(
+            "profile.html",
+            _ctx(request, user=user,
+                 error="Заполните ФИО, регион и Telegram и подтвердите согласие на обработку персональных данных.",
+                 regions=REGIONS, prefill_region=rg or region_from_username(user.username),
+                 full_name=fn, telegram=tg, consent=bool(consent)),
+            status_code=400,
+        )
+    with get_session() as db:
+        q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True)
+    return RedirectResponse("/chat", status_code=302)
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -149,6 +194,12 @@ def admin_page(request: Request):
                     u_req += 1
                     if day:
                         per_day[day]["requests"] += 1
+                    # Процедурный интент считаем по САМОМУ вопросу (детектор pipeline'а) — так учитываются
+                    # и отвеченные по Правилам, и деференные вопросы (не завязано на текст ответа).
+                    if procedural.is_procedural(m.content or ""):
+                        procedural_questions.append(
+                            {"user": u.username, "q": (m.content or "")[:140], "ts": _fmt(m.ts)}
+                        )
                 else:
                     total_answers += 1
                     if day:
@@ -157,10 +208,6 @@ def admin_page(request: Request):
                         flags_unverified += 1
                     if m.low_relevance:
                         flags_lowrel += 1
-                    if _PROC_SIG in (m.content or ""):  # ответ = процедурный дефер
-                        procedural_questions.append(
-                            {"user": u.username, "q": (last_user or "")[:140], "ts": _fmt(m.ts)}
-                        )
             u_prompt = u_completion = 0
             sessions = []
             for sid in reversed(order):  # новые беседы сверху
@@ -261,7 +308,7 @@ class FeedbackIn(BaseModel):
 
 
 @router.post("/api/feedback")
-def submit_feedback(fb: FeedbackIn, user: User = Depends(require_user)) -> dict:
+def submit_feedback(fb: FeedbackIn, user: User = Depends(require_user_profiled)) -> dict:
     """Три канала (см. Feedback.kind): 'answer' — звёзды 0..5 + опц. исправление к ответу
     (нужен message_id); 'dialog' — комментарий к беседе (нужен session_id); 'service' —
     глобальная форма (оценка 1..5 + соответствие + текст), путь мини-1.0 без изменений."""

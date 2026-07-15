@@ -393,6 +393,7 @@ async function ask(text) {
       signal: ctrl.signal,
     });
     if (r.status === 401) { window.location = "/login"; return; }
+    if (r.status === 403) { window.location = "/profile"; return; }  // профиль/согласие не заполнены
     if (!r.ok) {
       bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
       if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт

@@ -107,3 +107,23 @@ def require_admin(request: Request) -> User:
     if user.role != "admin":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Доступ только для admin")
     return user
+
+
+def profile_complete(user: User) -> bool:
+    """Профиль заполнен: согласие на ПДн + ФИО + регион + Telegram (жёсткий гейт заказчика)."""
+    return bool(user.consent and user.full_name and user.region and user.telegram)
+
+
+def needs_profile(user: User) -> bool:
+    """Роль `user` (региональный тестировщик) обязана заполнить профиль/согласие до чата.
+    Для admin/expert всегда False — их через профиль НЕ гоняем (внутренние роли)."""
+    return user.role == "user" and not profile_complete(user)
+
+
+def require_user_profiled(request: Request) -> User:
+    """Как require_user, но роль `user` без заполненного профиля → 403 (JSON-фронт редиректит на
+    /profile). Гейт на УРОВНЕ РОУТА (после current_user) — держит и при автологине «запомнить меня»."""
+    user = require_user(request)
+    if needs_profile(user):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="profile_required")
+    return user

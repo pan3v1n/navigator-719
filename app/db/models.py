@@ -27,8 +27,16 @@ class User(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     username: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
-    role: Mapped[str] = mapped_column(String(16), default="expert")  # expert | admin
+    role: Mapped[str] = mapped_column(String(16), default="expert")  # user | expert | admin
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    # Профиль + согласие на обработку ПДн (152-ФЗ). Обязательны для роли `user` — жёсткий гейт до
+    # чата (см. app/api/auth.needs_profile). Nullable/дефолтны, чтобы существующие admin/expert и
+    # тесты (create_user без этих полей) не ломались; consent пишем один раз с consent_at.
+    consent: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, server_default="0")
+    consent_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # момент согласия
+    full_name: Mapped[str | None] = mapped_column(Text, nullable=True)            # ФИО
+    region: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    telegram: Mapped[str | None] = mapped_column(String(128), nullable=True)      # ник в Telegram
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

@@ -17,16 +17,24 @@ if str(ROOT) not in sys.path:
 
 from app.core.prompts import EXPERT_DISCLAIMER, build_navigator_user_prompt  # noqa: E402
 from app.rag import sparse  # noqa: E402
+from app.rag import pipeline as pipeline_mod  # noqa: E402
 from app.rag.pipeline import (  # noqa: E402
     _ensure_disclaimer,
     claim_numbers,
     format_cases,
     format_context,
+    format_rules_context,
     number_in_context,
+    unverified_deadlines,
     unverified_numbers,
 )
 from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
 from app.rag import procedural  # noqa: E402
+
+# Загрузчик Правил лежит в scripts/ (не пакет) — добавляем в путь для теста парсера.
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+import load_rules_kb  # noqa: E402
 
 
 def make_hit(**kw) -> Hit:
@@ -226,6 +234,84 @@ class TestProceduralDeflect(unittest.TestCase):
         self.assertIn("реестр", procedural.DEFLECTION.lower())
         # само сообщение не содержит выдуманных баллов/сроков
         self.assertEqual(claim_numbers(procedural.DEFLECTION), [])
+
+
+class TestFormatRulesContext(unittest.TestCase):
+    def test_numbers_blocks_and_anchor(self):
+        rules = [
+            {"point": "8", "section_roman": "II", "section_title": "Включение сведений",
+             "text": "Заявка рассматривается в течение 10 рабочих дней."},
+            {"point": "9", "section_roman": "II", "section_title": "Включение сведений",
+             "text": "Минпромторг включает сведения в реестр."},
+        ]
+        ctx = format_rules_context(rules)
+        self.assertIn("[1]", ctx)
+        self.assertIn("[2]", ctx)
+        self.assertIn("Правила ведения реестра, п. 8", ctx)
+        self.assertIn("10 рабочих дней", ctx)
+
+    def test_long_point_truncated_with_marker(self):
+        long_text = "А" * (pipeline_mod.RULES_TEXT_CAP + 500)
+        ctx = format_rules_context([{"point": "6", "section_roman": "II",
+                                     "section_title": "Включение", "text": long_text}])
+        self.assertIn("приведён не полностью", ctx)
+        self.assertLess(len(ctx), pipeline_mod.RULES_TEXT_CAP + 200)
+
+
+class TestUnverifiedDeadlines(unittest.TestCase):
+    def test_flags_fabricated_deadline(self):
+        # в контексте только 10 рабочих дней, ответ выдумал 20 → незаземлено
+        ctx = "Заявка рассматривается в течение 10 рабочих дней [1]."
+        self.assertEqual(unverified_deadlines("решение за 20 рабочих дней", ctx), ["20 дн."])
+
+    def test_empty_when_grounded(self):
+        ctx = "срок 15 календарных дней"
+        self.assertEqual(unverified_deadlines("в течение 15 календарных дней", ctx), [])
+
+    def test_ignores_non_deadline_numbers(self):
+        self.assertEqual(unverified_deadlines("нужно 50 баллов", "контекст без сроков"), [])
+
+
+class TestProceduralAnswerFallback(unittest.TestCase):
+    """Ключевая гарантия безопасности: если корпус Правил пуст/недоступен — честный дефер,
+    БЕЗ вызова DeepSeek (процедуру не выдумываем)."""
+
+    def setUp(self):
+        self._orig = pipeline_mod.search_rules
+
+    def tearDown(self):
+        pipeline_mod.search_rules = self._orig
+
+    def test_deflects_when_rules_empty(self):
+        pipeline_mod.search_rules = lambda *a, **k: []
+        ans = pipeline_mod._answer_procedural("как внести в реестр", "как внести в реестр")
+        self.assertEqual(ans.text, procedural.DEFLECTION)
+        self.assertEqual(ans.hits, [])
+
+
+class TestRulesLoader(unittest.TestCase):
+    """Парсер корпуса Правил (scripts/load_rules_kb) — без Qdrant/e5."""
+
+    def test_parse_all_sections(self):
+        recs, _ = load_rules_kb.load_records()
+        self.assertGreaterEqual(len(recs), 40)  # ~58 пунктов
+        romans = {r["section_roman"] for r in recs}
+        self.assertTrue({"I", "II", "III", "V", "VI"} <= romans)
+        for r in recs[:5]:
+            self.assertTrue(r["text"])
+            self.assertTrue(r["source_anchor"].startswith("Правила ведения реестра, п."))
+            self.assertEqual(r["doc_type"], "rules_registry")
+
+    def test_edition_detected(self):
+        _, edition = load_rules_kb.load_records()
+        self.assertIn("ред. от", edition)  # штамп редакции извлечён из текста (нормализация nbsp)
+
+    def test_subpoints_kept_in_parent(self):
+        recs, _ = load_rules_kb.load_records()
+        points = {r["point"] for r in recs}
+        self.assertIn("3.1", points)  # подпункт с точкой распознан отдельным пунктом
+        p2 = next(r for r in recs if r["section_roman"] == "I" and r["point"] == "2")
+        self.assertIn("акт экспертизы", p2["text"])  # определения остались внутри п.2
 
 
 if __name__ == "__main__":

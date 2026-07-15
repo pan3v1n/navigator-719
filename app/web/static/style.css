@@ -41,6 +41,17 @@ a { color: inherit; text-decoration: none; }
 .login-form .remember input { width: auto; padding: 0; margin: 0; }
 .error { background: #fdeaea; color: #c0392b; padding: 9px 12px; border-radius: 10px; font-size: 13px; }
 
+/* ---------- профиль (анкета + согласие на ПДн), переиспользует .login-* ---------- */
+.login-card.profile-card { max-width: 460px; }
+.login-form select { padding: 12px 14px; border: 1px solid var(--border); border-radius: 12px;
+  font-size: 14px; background: #fff; width: 100%; }
+.login-form select:focus { outline: none; border-color: #b5b5b5; box-shadow: 0 0 0 3px rgba(0,0,0,.04); }
+.login-form label.field { display: flex; flex-direction: column; gap: 5px; font-size: 12.5px; color: #555; text-align: left; }
+.login-form label.consent { display: flex; align-items: flex-start; gap: 9px; font-size: 12.5px;
+  color: #444; text-align: left; line-height: 1.5; }
+.login-form label.consent input { width: auto; margin-top: 3px; flex-shrink: 0; }
+.consent-note { font-size: 11.5px; color: var(--muted); line-height: 1.5; text-align: left; margin: 2px 0 4px; }
+
 /* ---------- app shell ---------- */
 .app { display: flex; height: 100vh; }
 .sidebar { width: 264px; flex-shrink: 0; background: var(--sidebar); border-right: 1px solid var(--border);

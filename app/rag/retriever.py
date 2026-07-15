@@ -178,3 +178,24 @@ def search_cases(query: str, limit: int = 3) -> list[dict]:
         pl["_score"] = p.score
         out.append(pl)
     return out
+
+
+def search_rules(query: str, limit: int = 6) -> list[dict]:
+    """Гибрид-поиск по корпусу «Правила ведения реестра» (отдельная коллекция pp719_rules).
+
+    Возвращает payload'ы пунктов Правил со score в `_score`. Если коллекции нет или Qdrant
+    недоступен — пустой список (процедурный путь тогда честно деферится, см. pipeline).
+    БЕЗ ОКПД2-буста и реранкера (то и другое заточено под товарные записи, не под прозу норм)."""
+    client = _client()
+    name = settings.QDRANT_RULES_COLLECTION
+    try:
+        if not client.collection_exists(name):
+            return []
+    except Exception:  # noqa: BLE001 — Qdrant недоступен: не валим ответ, деферим
+        return []
+    out: list[dict] = []
+    for p in _hybrid(query, limit, collection=name):
+        pl = dict(p.payload or {})
+        pl["_score"] = p.score
+        out.append(pl)
+    return out
