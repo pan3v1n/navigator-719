@@ -313,6 +313,9 @@ a { color: inherit; text-decoration: none; }
 .kpi-val { font-size: 24px; font-weight: 700; }
 .kpi-label { font-size: 13px; margin-top: 2px; }
 .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+/* приёмка ≥70%: зелёный = порог пройден, красный = ниже */
+.pass { color: #1e874b; }
+.fail { color: #c0392b; }
 
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
@@ -355,9 +358,32 @@ a { color: inherit; text-decoration: none; }
 @keyframes fade { from { opacity: 0; } to { opacity: 1; } }
 @keyframes blink { 0%, 60%, 100% { opacity: .3; transform: translateY(0); } 30% { opacity: 1; transform: translateY(-4px); } }
 
-/* ---------- mobile ---------- */
+/* ---------- mobile (сайдбар → off-canvas «шторка») ---------- */
+.menu-btn { display: none; }        /* гамбургер — только на мобиле */
+.drawer-backdrop { display: none; }
+
 @media (max-width: 760px) {
-  .sidebar { display: none; }
-  .chat-col, .composer, .composer-hint { max-width: 100%; }
-  .hero { padding-top: 32px; }
+  .menu-btn { display: inline-flex; align-items: center; justify-content: center; width: 38px; height: 38px;
+    margin: 0 8px 0 -6px; border: none; background: none; color: var(--text); cursor: pointer; border-radius: 9px; flex-shrink: 0; }
+  .menu-btn:hover { background: var(--hover); }
+  .menu-btn svg { width: 22px; height: 22px; }
+
+  /* сайдбар выезжает слева; перекрываем и «свёрнутый» десктопный вид */
+  .sidebar, .app.collapsed .sidebar { position: fixed; top: 0; left: 0; bottom: 0; z-index: 50;
+    width: 82vw; max-width: 320px; transform: translateX(-100%); transition: transform .25s ease;
+    box-shadow: 2px 0 22px rgba(0,0,0,.16); }
+  .sidebar.open { transform: none; }
+  .side-collapse, .side-expand { display: none; }
+  .app.collapsed .nc-text, .app.collapsed .brand, .app.collapsed .history { display: revert; }
+
+  .drawer-backdrop { display: block; position: fixed; inset: 0; z-index: 40; background: rgba(0,0,0,.42);
+    opacity: 0; pointer-events: none; transition: opacity .25s ease; }
+  .drawer-backdrop.open { opacity: 1; pointer-events: auto; }
+
+  .chat-col, .composer, .composer-hint, .composer-disclaimer { max-width: 100%; }
+  .composer-area { padding: 10px 12px 14px; }
+  .hero { padding-top: 24px; }
+  .hero h1 { font-size: 22px; }
+  .kpis { grid-template-columns: 1fr 1fr; }
+  .admin, .admin-header { padding-left: 12px; padding-right: 12px; }
 }

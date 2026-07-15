@@ -159,6 +159,7 @@ def admin_page(request: Request):
     matched_counts = {"да": 0, "частично": 0, "нет": 0}
     ratings = []
     ans_ratings = []       # звёзды ответов 0..5 (kind='answer')
+    ans_ratings_by_role: dict[str, list[int]] = defaultdict(list)  # сегментация приёмки: role → [звёзды]
     corrections = []       # исправления критич. ошибок (kind='answer', correction)
     answer_comments = []   # комментарии к ответам (kind='answer', comment)
     dialog_comments = []   # комментарии к диалогам (kind='dialog')
@@ -231,6 +232,7 @@ def admin_page(request: Request):
                 elif kind == "answer":  # звёзды 0..5 + опц. коммент/исправление, привязаны к ответу
                     if f.rating is not None:
                         ans_ratings.append(f.rating)
+                        ans_ratings_by_role[u.role].append(f.rating)
                     orig = msg_by_id.get(f.message_id)
                     ans_txt = orig.content if orig else ""
                     snippet = (ans_txt[:220] + "…") if len(ans_txt) > 220 else ans_txt
@@ -260,9 +262,14 @@ def admin_page(request: Request):
     tokens_total, cost_total = g_prompt + g_completion, cost_rub(g_prompt, g_completion)
     star_dist = [(i, sum(1 for r in ans_ratings if r == i)) for i in range(5, -1, -1)]
     avg_stars = round(sum(ans_ratings) / len(ans_ratings), 2) if ans_ratings else None
-    accept_pct = round(100 * sum(1 for r in ans_ratings if r >= 4) / len(ans_ratings)) if ans_ratings else None
+    def _accept(lst):  # доля оценок ≥4★ (гейт приёмки ≥70%)
+        return round(100 * sum(1 for r in lst if r >= 4) / len(lst)) if lst else None
+    accept_pct = _accept(ans_ratings)
+    accept_user = _accept(ans_ratings_by_role.get("user", []))
+    accept_expert = _accept(ans_ratings_by_role.get("expert", []))
     stats = {
         "users_total": len(data),
+        "users": sum(1 for x in data if x["role"] == "user"),
         "experts": sum(1 for x in data if x["role"] == "expert"),
         "admins": sum(1 for x in data if x["role"] == "admin"),
         "conversations": total_conversations,
@@ -278,6 +285,11 @@ def admin_page(request: Request):
         "answer_ratings": len(ans_ratings),
         "avg_stars": avg_stars,
         "accept_pct": accept_pct,
+        "accept_user": accept_user,
+        "accept_user_n": len(ans_ratings_by_role.get("user", [])),
+        "accept_expert": accept_expert,
+        "accept_expert_n": len(ans_ratings_by_role.get("expert", [])),
+        "gate": 70,
         "star_dist": star_dist,
         "corrections": corrections,
         "answer_comments": answer_comments,

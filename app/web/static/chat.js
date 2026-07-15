@@ -563,3 +563,19 @@ loadConversations();
   try { seen = localStorage.getItem("onboarding719Seen") === "1"; } catch (e) {}
   if (!seen) open();
 })();
+
+// Мобильная «шторка»-сайдбар: гамбургер открывает, бэкдроп / переход по пункту — закрывает.
+(function initDrawer() {
+  const sidebar = document.querySelector(".sidebar");
+  const backdrop = document.getElementById("drawer-backdrop");
+  const btn = document.getElementById("menu-btn");
+  if (!sidebar || !backdrop || !btn) return;
+  const open = () => { sidebar.classList.add("open"); backdrop.classList.add("open"); };
+  const close = () => { sidebar.classList.remove("open"); backdrop.classList.remove("open"); };
+  btn.addEventListener("click", open);
+  backdrop.addEventListener("click", close);
+  sidebar.addEventListener("click", (e) => {   // переход по пункту закрывает шторку на мобиле
+    if (window.innerWidth > 760) return;
+    if (e.target.closest("#new-chat, #history, a.nav-item, .logout")) close();
+  });
+})();

@@ -19,7 +19,7 @@
   <section id="tab-dash" class="tab-panel">
     <div class="kpis">
       <div class="kpi"><div class="kpi-val">{{ stats.users_total }}</div><div class="kpi-label">Пользователи</div>
-        <div class="kpi-sub">эксперты {{ stats.experts }} · админы {{ stats.admins }}</div></div>
+        <div class="kpi-sub">пользователи {{ stats.users }} · эксперты {{ stats.experts }} · админы {{ stats.admins }}</div></div>
       <div class="kpi"><div class="kpi-val">{{ stats.conversations }}</div><div class="kpi-label">Диалоги</div></div>
       <div class="kpi"><div class="kpi-val">{{ stats.requests }}</div><div class="kpi-label">Запросы</div>
         <div class="kpi-sub">ответов {{ stats.answers }}</div></div>
@@ -29,8 +29,8 @@
         <div class="kpi-sub">~{{ '%.3f'|format(stats.avg_cost) }} ₽ / ответ</div></div>
       <div class="kpi"><div class="kpi-val">{{ stats.avg_rating if stats.avg_rating is not none else '—' }}</div>
         <div class="kpi-label">Ср. оценка</div><div class="kpi-sub">{{ stats.feedback_count }} отзывов</div></div>
-      <div class="kpi"><div class="kpi-val">{{ (stats.accept_pct ~ '%') if stats.accept_pct is not none else '—' }}</div>
-        <div class="kpi-label">Приёмка ответов</div><div class="kpi-sub">≥4★ · оценок {{ stats.answer_ratings }} · ср. {{ stats.avg_stars if stats.avg_stars is not none else '—' }}</div></div>
+      <div class="kpi"><div class="kpi-val {{ 'pass' if stats.accept_user is not none and stats.accept_user >= stats.gate else ('fail' if stats.accept_user is not none else '') }}">{{ (stats.accept_user ~ '%') if stats.accept_user is not none else '—' }}</div>
+        <div class="kpi-label">Приёмка (пользователи)</div><div class="kpi-sub">≥4★ · порог ≥{{ stats.gate }}% · оценок {{ stats.accept_user_n }}</div></div>
     </div>
 
     <div class="charts">
@@ -83,7 +83,10 @@
       <div class="card">
         <h3>Оценки ответов (звёзды 0–5)</h3>
         <div class="fb-stat">Средняя: <b>{{ stats.avg_stars if stats.avg_stars is not none else '—' }}</b> · оценок: {{ stats.answer_ratings }}</div>
-        <div class="fb-stat">Приёмка (≥4★): <b>{{ (stats.accept_pct ~ '%') if stats.accept_pct is not none else '—' }}</b></div>
+        <div class="fb-stat">Приёмка (доля ≥4★), порог ≥{{ stats.gate }}%:</div>
+        <div class="fb-stat">— пользователи: <b class="{{ 'pass' if stats.accept_user is not none and stats.accept_user >= stats.gate else ('fail' if stats.accept_user is not none else '') }}">{{ (stats.accept_user ~ '%') if stats.accept_user is not none else '—' }}</b> ({{ stats.accept_user_n }} оц.)</div>
+        <div class="fb-stat">— эксперты: <b>{{ (stats.accept_expert ~ '%') if stats.accept_expert is not none else '—' }}</b> ({{ stats.accept_expert_n }} оц.)</div>
+        <div class="fb-stat">— все вместе: <b>{{ (stats.accept_pct ~ '%') if stats.accept_pct is not none else '—' }}</b></div>
         {% for star, cnt in stats.star_dist %}
         <div class="bar-row" title="{{ star }}★: {{ cnt }}">
           <span class="bar-label">{{ star }} ★</span>
@@ -123,8 +126,8 @@
       </div>
 
       <div class="card wide">
-        <h3>Процедурные вопросы (вне охвата, дефер) · {{ stats.procedural_questions|length }}</h3>
-        <div class="kpi-sub" style="margin:0 0 8px">Что эксперты спрашивают про процедуру (реестр / ГИСП / документы) — приоритизация корпуса Правил.</div>
+        <h3>Процедурные вопросы · {{ stats.procedural_questions|length }}</h3>
+        <div class="kpi-sub" style="margin:0 0 8px">Вопросы про процедуру (реестр / ГИСП / документы) — отвечаются по Правилам ведения реестра; статистика показывает спрос.</div>
         {% for c in stats.procedural_questions %}
         <div class="corr"><div class="corr-head">{{ c.user }}<span class="ts">{{ c.ts }}</span></div><div>«{{ c.q }}»</div></div>
         {% else %}<p class="empty">Пока нет процедурных вопросов.</p>{% endfor %}

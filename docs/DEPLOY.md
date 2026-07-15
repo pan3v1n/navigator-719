@@ -126,6 +126,21 @@ docker compose cp app:/tmp/backup.db ./navigator_backup.db
 scp yc-user@VM_IP:navigator-719/navigator_backup.db ./navigator_backup-$(date +%F).db
 ```
 
+**Автоматизация (cron на VM).** Скрипт `scripts/backup_db.py` делает консистентную копию с
+ротацией в том `/data/backups` (переживает редеплой; `.backup` без остановки сервиса). Поставить
+ежедневный дамп в 03:00, хранить 30 копий:
+```bash
+( sudo crontab -l 2>/dev/null; \
+  echo '0 3 * * * cd /home/yc-user/navigator-719 && docker compose exec -T app python scripts/backup_db.py --dir /data/backups --keep 30' \
+) | sudo crontab -
+```
+Off-VM (том стирается при `instance delete`) — периодически с ЛОКАЛЬНОГО ПК забирать папку бэкапов:
+```bash
+ssh yc-user@VM_IP 'cd navigator-719 && sudo docker compose cp app:/data/backups ./backups-vm'
+scp -r yc-user@VM_IP:navigator-719/backups-vm ./navigator-backups
+```
+Перед финальным `instance delete` — обязательно сделать этот вынос.
+
 **Пауза биллинга (на ночь / между днями теста):** останавливать VM **в консоли**
 `console.yandex.cloud` («Остановить»). Гостевой `sudo poweroff` биллинг НЕ гасит. Данные (тома)
 переживают stop/start; при отсутствии статического IP адрес сменится (см. шаг 3).
