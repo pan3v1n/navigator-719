@@ -62,9 +62,10 @@ def _sources_from_hits(hits) -> list[SourceItem]:
     ]
 
 
-def _load_history(user_id: int, session_id: str, max_msgs: int = 4) -> list[dict]:
-    """Последние реплики беседы для мультитёрн-контекста (ответы ассистента усекаем).
-    Пусто для новой беседы — тогда движок ведёт себя как одиночный вопрос."""
+def _load_history(user_id: int, session_id: str, max_msgs: int = 12) -> list[dict]:
+    """Последние реплики беседы для мультитёрн-контекста (ответы ассистента усекаем). Окно 12 реплик
+    (~6 ходов) — «полный контекст чата» в разумных пределах токенов; для очень длинных бесед позже
+    добавить сжатие старых ходов. Пусто для новой беседы — движок ведёт себя как одиночный вопрос."""
     try:
         with get_session() as db:
             prev = q.get_session_messages(db, user_id, session_id)

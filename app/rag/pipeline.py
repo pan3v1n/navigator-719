@@ -21,6 +21,7 @@ from app.core.prompts import (
 )
 from app.rag import sparse
 from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
+from app.rag.thresholds import lookup_threshold
 
 # Адаптивный кап операций (вариант A, 2026-07-05). Целевой хит (совпадение по коду ОКПД2 / top-1)
 # показываем ПОЛНЕЕ — MAX_OPS_TARGET, — чтобы не резать умеренные продукты (напр. чиллеры XVI,
@@ -87,8 +88,12 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         lines = [head]
         if h.okpd2_codes:
             lines.append(f"    ОКПД2: {', '.join(h.okpd2_codes)}")
-        if h.min_threshold:
-            lines.append(f"    Порог: {h.min_threshold}")
+        # Порог: из самой позиции, иначе (для ЦЕЛЕВОГО хита) — из примечаний-таблиц по годам
+        # (thresholds.py; напр. Чиллеры разд.XVI прим.77). Числа дословны → заземлены для гарда.
+        mt = h.min_threshold or (lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
+                                 if is_target else None)
+        if mt:
+            lines.append(f"    Порог: {mt}")
         ops = _hit_operations(h)
         total = len(ops)
         if total > cap:

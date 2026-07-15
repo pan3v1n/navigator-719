@@ -30,6 +30,7 @@ from app.rag.pipeline import (  # noqa: E402
 )
 from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
 from app.rag import procedural  # noqa: E402
+from app.rag.thresholds import _tables, lookup_threshold  # noqa: E402
 
 # Загрузчик Правил лежит в scripts/ (не пакет) — добавляем в путь для теста парсера.
 if str(ROOT / "scripts") not in sys.path:
@@ -290,6 +291,31 @@ class TestProceduralAnswerFallback(unittest.TestCase):
         ans = pipeline_mod._answer_procedural("как внести в реестр", "как внести в реестр")
         self.assertEqual(ans.text, procedural.DEFLECTION)
         self.assertEqual(ans.hits, [])
+
+
+class TestThresholds(unittest.TestCase):
+    """Пороги баллов из примечаний (thresholds.py) — без Qdrant/DeepSeek."""
+
+    def test_tables_parsed(self):
+        self.assertGreaterEqual(len(_tables()), 8)  # ~10 таблиц-порогов по разделам
+
+    def test_chillery_threshold_year_stepped(self):
+        thr = lookup_threshold(["28.25.13"], "Чиллеры", "XVI")
+        self.assertIsNotNone(thr)
+        for n in ("270", "320", "480", "542"):  # авторитетная строка «Чиллеры» прим.77
+            self.assertIn(n, thr)
+        self.assertIn("прим. 77", thr)
+
+    def test_no_match_returns_none(self):
+        self.assertIsNone(lookup_threshold(["99.99"], "Несуществующая продукция", "XVI"))
+
+    def test_format_context_injects_threshold_for_target(self):
+        # целевой хит по чиллерам без своего min_threshold → порог подтягивается из примечаний
+        hit = make_hit(product_name="Чиллеры", section_roman="XVI",
+                       okpd2_codes=["28.25.13"], okpd2_match=True, min_threshold=None)
+        ctx = format_context([hit])
+        self.assertIn("Порог:", ctx)
+        self.assertIn("270", ctx)
 
 
 class TestRulesLoader(unittest.TestCase):
