@@ -313,8 +313,13 @@ def _answer_procedural(query: str, search_query: str,
     )
 
 
-def answer(query: str, okpd2: str | None = None, limit: int = 5,
+def answer(query: str, okpd2: str | None = None, limit: int = 8,
            history: list[dict] | None = None) -> Answer:
+    # limit=8 (не 5): пограничные, но валидные позиции с обобщённым наименованием
+    # («Прицепы и полуприцепы прочие» 29.20.23) садятся на ранг 5–7 чистого ретрива и при
+    # limit=5 выпадали из окна на мелкой смене формулировки (ед./мн. число) — модель их не
+    # видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты
+    # ограничены MAX_OPS_OTHER и служат материалом для уточнения по коду (правило 1г).
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import meta
     if meta.is_meta(query):
