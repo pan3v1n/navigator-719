@@ -10,7 +10,10 @@ from pathlib import Path
 from striprtf.striprtf import rtf_to_text
 
 ROOT = Path(__file__).parent.parent
-RTF_FILE = ROOT / "Постановление Правительства РФ от 17.07.2015 N 719 О подтверждении производства Российской.rtf"
+# Текущий авторитетный RTF ПП №719 (ред., действующая с 01.07.2026) лежит в корне репо; имя менялось
+# между редакциями, поэтому берём единственный .rtf с «719» в имени, а не хардкод старого имени.
+_RTFS = [p for p in ROOT.glob("*.rtf") if "719" in p.name]
+RTF_FILE = _RTFS[0] if _RTFS else ROOT / "Постановление 719.rtf"
 OUT_DIR = ROOT / "knowledge_base" / "pp719"
 OUT_FULL = OUT_DIR / "pp719_full.txt"
 OUT_CHUNKS_DIR = OUT_DIR / "chunks"
