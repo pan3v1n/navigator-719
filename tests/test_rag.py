@@ -225,9 +225,12 @@ class TestProceduralDeflect(unittest.TestCase):
         for q in self.NOT_PROCEDURAL:
             self.assertFalse(procedural.is_procedural(q), f"Ложное срабатывание на: {q!r}")
 
-    def test_code_param_disables_deflect(self):
-        # передан код ОКПД2 → товарная привязка, не деферим даже при процедурных словах
-        self.assertFalse(procedural.is_procedural("как внести в реестр", has_code=True))
+    def test_code_does_not_block_procedural(self):
+        # код ОКПД2 больше НЕ отменяет процедурный путь: смешанный «процедура + код» → по Правилам
+        self.assertTrue(procedural.is_procedural("как внести в реестр", has_code=True))
+        self.assertTrue(procedural.is_procedural("процедура внесения в реестр чиллеров 28.25.13"))
+        # но товарно-балльный сигнал уводит на товарный путь даже с процедурным словом и кодом
+        self.assertFalse(procedural.is_procedural("какие требования к чиллерам 28.25.13 для внесения в реестр"))
 
     def test_deflection_message_has_pointers(self):
         self.assertIn("ГИСП", procedural.DEFLECTION)
