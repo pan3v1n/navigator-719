@@ -364,6 +364,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 5,
     resolved = search_query if search_query != query else None
     user = build_navigator_user_prompt(
         query, ctx, okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
+        suggest_okpd2=(okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]

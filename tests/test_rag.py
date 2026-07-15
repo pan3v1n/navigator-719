@@ -165,6 +165,14 @@ class TestUserPrompt(unittest.TestCase):
         self.assertIn("28.15.10", p)
         self.assertIn("КЕЙС-ТЕКСТ", p)
 
+    def test_suggest_okpd2_only_when_flagged(self):
+        # поиск по наименованию (кода нет) → просим предложить код
+        self.assertIn("Предполагаемый код ОКПД2",
+                      build_navigator_user_prompt("чиллеры", "ctx", suggest_okpd2=True))
+        # код указан → подсказку кода не навязываем
+        self.assertNotIn("Предполагаемый код ОКПД2",
+                         build_navigator_user_prompt("чиллеры", "ctx", okpd2="28.25.13"))
+
 
 class TestFaithfulness(unittest.TestCase):
     def test_claim_numbers_balls_and_percent(self):
