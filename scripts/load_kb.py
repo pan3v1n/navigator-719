@@ -128,6 +128,18 @@ def make_client():
     return QdrantClient(url=settings.QDRANT_URL, timeout=60)
 
 
+def okpd2_prefixes(codes: list[str]) -> list[str]:
+    """Все префиксы кодов записи: 26.51.52.120 → [26, 26.51, 26.51.52, 26.51.52.120]. Поле для
+    фильтра «поиск по частичному коду» (T5): класс-код запроса (26.51.52) матчит дочерние позиции
+    ветки (26.51.52.120), которые точный MatchAny по okpd2_codes не находит."""
+    out: set[str] = set()
+    for c in codes or []:
+        segs = [s for s in str(c).replace(" ", "").split(".") if s]
+        for i in range(len(segs)):
+            out.add(".".join(segs[: i + 1]))
+    return sorted(out)
+
+
 def recreate_collection(client) -> None:
     from qdrant_client import models
 
@@ -147,6 +159,7 @@ def recreate_collection(client) -> None:
     )
     # индекс по кодам ОКПД2 — для жёсткого фильтра/буста в retriever
     client.create_payload_index(name, "okpd2_codes", models.PayloadSchemaType.KEYWORD)
+    client.create_payload_index(name, "okpd2_prefixes", models.PayloadSchemaType.KEYWORD)  # T5: частичный код
     client.create_payload_index(name, "section_roman", models.PayloadSchemaType.KEYWORD)
 
 
@@ -229,6 +242,7 @@ def index_all(client, recs: list[dict], batch: int = 128, text_fn=build_embeddin
             idx, val = document_vector(text, avgdl)
             payload = dict(rec)
             payload["text"] = text
+            payload["okpd2_prefixes"] = okpd2_prefixes(rec.get("okpd2_codes") or [])  # T5: частичный код
             points.append(
                 models.PointStruct(
                     id=point_id(rec, k),

@@ -412,6 +412,17 @@ class TestDialogAnchor(unittest.TestCase):
         self.assertFalse(_is_continuation(""))
 
 
+class TestOkpd2Prefixes(unittest.TestCase):
+    """T5 (Волна 2): поле okpd2_prefixes для поиска по частичному коду (load_kb)."""
+
+    def test_prefixes_union(self):
+        from load_kb import okpd2_prefixes  # ленивый импорт: модуль тянет embeddings
+        self.assertEqual(okpd2_prefixes(["26.51.52.120"]),
+                         ["26", "26.51", "26.51.52", "26.51.52.120"])
+        self.assertTrue({"27.3", "27.32", "27.32.14"} <= set(okpd2_prefixes(["27.3", "27.32.14"])))
+        self.assertEqual(okpd2_prefixes([]), [])
+
+
 class TestProceduralCorpus(unittest.TestCase):
     """Волна 1 шаг 1: парсеры доп. процедурных источников — тело ПП №719 + Приказ ТПП №52."""
 

@@ -120,22 +120,24 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40)
         for h in hits:
             h.okpd2_match = okpd2_match(h.okpd2_codes, okpd2)
 
-        # Подстраховка: если в пуле нет совпадений по коду — отдельный жёсткий запрос
-        # по записям, чьи коды лежат на ветке запрашиваемого кода (MatchAny по префиксам).
-        if not any(h.okpd2_match for h in hits):
-            prefixes = _prefixes(okpd2)
-            if prefixes:
-                qfilter = models.Filter(
-                    must=[models.FieldCondition(
-                        key="okpd2_codes", match=models.MatchAny(any=prefixes)
-                    )]
-                )
-                seen = {h.source_anchor for h in hits}
-                for p in _hybrid(query, limit, qfilter=qfilter):
-                    h = _to_hit(p)
-                    if h.source_anchor not in seen:
-                        h.okpd2_match = True
-                        hits.append(h)
+        # Ветку кода (родители + дети) подтягиваем ВСЕГДА, а не только при отсутствии совпадений:
+        # пул мог включить родителя (26.51), но пропустить дочерние позиции (26.51.52.120). Две ветви
+        # OR: РОДИТЕЛИ — код записи равен префиксу запроса (okpd2_codes ∋ один из префиксов); ДЕТИ/сам —
+        # префикс-набор записи содержит код запроса (okpd2_prefixes ∋ okpd2), т.е. класс-код «26.51.52»
+        # находит «26.51.52.120» (T5, поиск по частичному коду).
+        prefixes = _prefixes(okpd2)
+        if prefixes:
+            qfilter = models.Filter(should=[
+                models.FieldCondition(key="okpd2_codes", match=models.MatchAny(any=prefixes)),
+                models.FieldCondition(key="okpd2_prefixes", match=models.MatchAny(any=[okpd2.strip()])),
+            ])
+            seen = {h.source_anchor for h in hits}
+            for p in _hybrid(query, max(limit, 12), qfilter=qfilter):
+                h = _to_hit(p)
+                if h.source_anchor not in seen:
+                    h.okpd2_match = True
+                    seen.add(h.source_anchor)
+                    hits.append(h)
 
         # Стабильная пересортировка: совпавшие по коду — выше, далее по score.
         hits.sort(key=lambda h: (not h.okpd2_match, -h.score))
