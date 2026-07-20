@@ -157,6 +157,12 @@ a { color: inherit; text-decoration: none; }
 .bubble strong { font-weight: 600; }
 .bubble p.sec { margin-top: 14px; }
 .bubble p.sec:first-child { margin-top: 0; }
+/* T17: таблицы в ответе — с горизонтальным скроллом (не ломают вёрстку на узком экране) */
+.bubble .tbl-wrap { overflow-x: auto; margin: 10px 0; -webkit-overflow-scrolling: touch; }
+.bubble table { border-collapse: collapse; width: 100%; font-size: 14px; }
+.bubble th, .bubble td { border: 1px solid var(--border); padding: 7px 10px; text-align: left; vertical-align: top; }
+.bubble thead th { background: var(--sidebar); font-weight: 600; white-space: nowrap; }
+.bubble tbody tr:nth-child(even) { background: var(--user); }
 .sources { margin-top: 10px; font-size: 13px; }
 .sources summary { cursor: pointer; color: var(--muted); list-style: none; display: inline-flex; align-items: center;
                    gap: 6px; padding: 5px 11px; border: 1px solid var(--border); border-radius: 999px; transition: background .15s; }

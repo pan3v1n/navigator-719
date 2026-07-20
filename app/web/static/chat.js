@@ -92,24 +92,45 @@ function openItemMenu(sid, item, anchor) {
 function renderMarkdown(text) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const inline = (s) => esc(s).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+  // строка-разделитель Markdown-таблицы: |---|:--:|---| и т.п.
+  const isSep = (s) => /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
+  const cells = (s) => s.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
   const lines = (text || "").split(/\r?\n/);
   let html = "";
   let inList = false;
-  for (const raw of lines) {
-    const line = raw.trim();
+  const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i].trim();
+    // ТАБЛИЦА: строка с «|» и следующая — разделитель «|---|---|»
+    if (line.includes("|") && i + 1 < lines.length && isSep(lines[i + 1].trim())) {
+      closeList();
+      const head = cells(line);
+      let body = "";
+      i += 2;
+      while (i < lines.length && lines[i].includes("|") && lines[i].trim()) {
+        body += "<tr>" + cells(lines[i].trim()).map((x) => "<td>" + inline(x) + "</td>").join("") + "</tr>";
+        i++;
+      }
+      html += '<div class="tbl-wrap"><table><thead><tr>'
+        + head.map((x) => "<th>" + inline(x) + "</th>").join("")
+        + "</tr></thead><tbody>" + body + "</tbody></table></div>";
+      continue;
+    }
     const bullet = /^[•\-*]\s+/.test(line);
     if (bullet) {
       if (!inList) { html += "<ul>"; inList = true; }
       html += "<li>" + inline(line.replace(/^[•\-*]\s+/, "")) + "</li>";
     } else {
-      if (inList) { html += "</ul>"; inList = false; }
+      closeList();
       if (line) {
         const sec = /^\*\*/.test(line) ? ' class="sec"' : ""; // заголовок раздела (жирный лейбл) — с отступом
         html += "<p" + sec + ">" + inline(line) + "</p>";
       }
     }
+    i++;
   }
-  if (inList) html += "</ul>";
+  closeList();
   return html;
 }
 
