@@ -484,6 +484,21 @@ class TestOkpd2Ref(unittest.TestCase):
         self.assertTrue(any(c.startswith("28.12.13") for c in codes2))        # → «Насосы гидравлические»
         self.assertEqual(okpd2_ref.suggest_okpd2_by_name("!!! ??? …"), [])    # нет значимых токенов
 
+    def test_extract_tnved(self):
+        self.assertEqual(okpd2_ref.extract_tnved("код ТН ВЭД 8471 30 000 0"), "8471 30 000")
+        self.assertEqual(okpd2_ref.extract_tnved("сертификат 8536 50"), "8536 50")  # пробел-группировка
+        self.assertIsNone(okpd2_ref.extract_tnved("производим насосы 28.13.14"))    # ОКПД2, не ТН ВЭД
+        self.assertIsNone(okpd2_ref.extract_tnved("договор №8471301234"))           # слитный без маркера
+
+    def test_navigator_prompt_tnved_and_suggestions(self):
+        p = build_navigator_user_prompt("вопрос", "ctx", "26.20.11", tnved=("8471 30", ["26.20.11"]))
+        self.assertIn("ТН ВЭД", p)
+        self.assertIn("переходному ключу", p)
+        self.assertNotIn("указан пользователем", p)  # код из перевода ТН ВЭД, не от пользователя
+        p2 = build_navigator_user_prompt("вопрос", "ctx", okpd2_suggestions=[("25.73.40.110", "Сверла")])
+        self.assertIn("классификатор", p2.lower())
+        self.assertIn("25.73.40.110", p2)
+
 
 class TestAnswerStream(unittest.TestCase):
     """T18: контракт стриминга на РАННЕМ пути (meta — без сети/Qdrant/DeepSeek). LLM-путь

@@ -19,7 +19,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import sparse
+from app.rag import okpd2_ref, sparse
 from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
 
@@ -421,6 +421,17 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if effective_okpd2 is None and _is_continuation(query):
         effective_okpd2 = _anchor_code(history)
 
+    # T9: код ТН ВЭД в запросе (из сертификата/декларации) → перевод в ОКПД2 по переходным ключам,
+    # затем обычный поиск/проверка в приложении 719. Только если своего кода ОКПД2 нет.
+    tnved = None
+    if effective_okpd2 is None:
+        tn = okpd2_ref.extract_tnved(query)
+        if tn:
+            tn_okpd2 = okpd2_ref.tnved_to_okpd2(tn)
+            if tn_okpd2:
+                effective_okpd2 = tn_okpd2[0]  # первый — для иерархического буста ретрива
+                tnved = (tn, tn_okpd2)
+
     hits = search(search_query, okpd2=effective_okpd2, limit=limit)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
     # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
@@ -443,12 +454,21 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         and dense_top1(search_query) < RELEVANCE_SOFT
     )
 
+    # T9: поиск по наименованию без уверенного совпадения (вероятно вне приложения 719) → подсказка
+    # кодов ОКПД2 по ВСЕМУ классификатору (для пути СТ-1 / уточнения), помимо позиций 719.
+    okpd2_suggestions = None
+    if low_rel and effective_okpd2 is None:
+        sugg = okpd2_ref.suggest_okpd2_by_name(search_query, k=4)
+        if sugg:
+            okpd2_suggestions = [(c, n) for c, n, _s in sugg]
+
     ctx = format_context(hits, search_query)
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
+        tnved=tnved, okpd2_suggestions=okpd2_suggestions,
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]

@@ -55,6 +55,20 @@ def normalize_tnved(s: str | None) -> str:
     return "".join(ch for ch in (s or "") if ch.isdigit())
 
 
+# Детект кода ТН ВЭД в свободном тексте. КОНСЕРВАТИВНО (иначе ловим номера договоров/ИНН/годы):
+# либо явный маркер «ТН ВЭД <код>», либо код с ПРОБЕЛЬНОЙ группировкой («8471 30», «8407 34 100 0») —
+# так его пишут в сертификатах/декларациях. Голый слитный 10-значный без маркера НЕ трогаем.
+_TNVED_CUE_RE = re.compile(r"(?:тн\s*вэд|тнвэд)\D{0,6}(\d{4}\s?\d{2}(?:\s?\d{2,4}){0,3})", re.IGNORECASE)
+_TNVED_GROUPED_RE = re.compile(r"(?<![\d.,])(\d{4}\s\d{2}(?:\s?\d{2,4}){0,3})(?![\d.,])")
+
+
+def extract_tnved(text: str | None) -> str | None:
+    """Код ТН ВЭД из текста (маркер «ТН ВЭД …» ИЛИ пробел-группированный код), иначе None."""
+    t = text or ""
+    m = _TNVED_CUE_RE.search(t) or _TNVED_GROUPED_RE.search(t)
+    return m.group(1).strip() if m else None
+
+
 def okpd2_name(code: str | None) -> str | None:
     """Наименование по коду ОКПД2. Точного нет → иерархический фолбэк на родителя (28.13.14.190 → 28.13.14)."""
     names = _okpd2_names()
