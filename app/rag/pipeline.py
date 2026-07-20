@@ -103,7 +103,7 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
             lines.append("    Ключевые операции:")
             for o in shown:
                 pts = o.get("points")
-                ptxt = f" — {pts} балл." if pts is not None else " — балл зависит от условий/категории"
+                ptxt = f" — {pts} балл." if pts is not None else " — баллы в контексте не указаны"
                 lines.append(f"      • {o.get('text', '')}{ptxt}")
             if total > cap:
                 rel = " (показаны наиболее релевантные запросу)" if query else ""
@@ -273,6 +273,48 @@ def _contextualize(query: str, history: list[dict]) -> str:
         return query
 
 
+# --- Мультитёрн: якорь-код диалога (T6) --------------------------------------------
+# Если код уже подтверждён в диалоге, а текущий ход — продолжение (ссылается на установленную
+# позицию, а не вводит новый продукт), переносим последний код пользователя из истории в поиск.
+# Иначе ретрив «уходит» в другие коды — частая жалоба экспертов («код определили, а ИИ ищет другие»).
+_USER_CODE_RE = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
+# Сильная обратная ссылка на установленную позицию → всегда продолжение (порог/баллы/это/операции…).
+_STRONG_BACKREF_RE = re.compile(
+    r"поро[гв]|балл|это[йгм]?\b|эту\s+позици|по\s+(?:этом|нашем|нем)\w*\s+код|неполн|"
+    r"полн\w*\s+перечень|целиком|дальше|операци|как\s+подтверд|какие\s+документ",
+    re.IGNORECASE,
+)
+# Голая команда/согласие — продолжение ТОЛЬКО на коротком запросе (иначе «покажи требования к
+# насосам» ложно заякорит прежний код).
+_BARE_CMD_RE = re.compile(
+    r"^\W*(?:да|нет|ага|ок|окей|покажи|поясни|распиши|подробнее|продолжай?|дальше|давай)\W*$",
+    re.IGNORECASE,
+)
+
+
+def _is_continuation(query: str) -> bool:
+    """Ход продолжает установленную позицию (переносить код-якорь), а не вводит новый продукт."""
+    q = (query or "").strip()
+    if not q or _HAS_CODE_RE.search(q):
+        return False
+    if _BARE_CMD_RE.match(q):
+        return True
+    return len(q) <= 60 and bool(_STRONG_BACKREF_RE.search(q))
+
+
+def _anchor_code(history: list[dict] | None) -> str | None:
+    """Последний код ОКПД2, НАЗВАННЫЙ ПОЛЬЗОВАТЕЛЕМ в истории (якорь темы диалога)."""
+    if not history:
+        return None
+    for m in reversed(history):
+        if m.get("role") != "user":
+            continue
+        codes = _USER_CODE_RE.findall(m.get("content") or "")
+        if codes:
+            return codes[-1]
+    return None
+
+
 def _answer_procedural(query: str, search_query: str,
                        history: list[dict] | None = None) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
@@ -342,7 +384,13 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
             # дефер остаётся ФОЛБЭКОМ внутри _answer_procedural (корпус пуст / ничего не нашлось).
             return _answer_procedural(query, search_query, history)
 
-    hits = search(search_query, okpd2=okpd2, limit=limit)
+    # T6: якорь-код диалога — код текущего хода приоритетен; если его нет, а ход продолжает
+    # установленную позицию, берём последний код пользователя из истории (не «уходим» в другие коды).
+    effective_okpd2 = okpd2
+    if effective_okpd2 is None and _is_continuation(query):
+        effective_okpd2 = _anchor_code(history)
+
+    hits = search(search_query, okpd2=effective_okpd2, limit=limit)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
     # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
     if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
@@ -368,8 +416,8 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
     user = build_navigator_user_prompt(
-        query, ctx, okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
-        suggest_okpd2=(okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
+        query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
+        suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]

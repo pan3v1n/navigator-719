@@ -19,7 +19,9 @@ from app.core.prompts import EXPERT_DISCLAIMER, build_navigator_user_prompt  # n
 from app.rag import sparse  # noqa: E402
 from app.rag import pipeline as pipeline_mod  # noqa: E402
 from app.rag.pipeline import (  # noqa: E402
+    _anchor_code,
     _ensure_disclaimer,
+    _is_continuation,
     claim_numbers,
     format_cases,
     format_context,
@@ -126,7 +128,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         ctx = format_context([hit])
         self.assertIn("Подшипники шариковые или роликовые", ctx)
         self.assertIn("сварка кузова — 400 балл.", ctx)
-        self.assertIn("окраска — балл зависит", ctx)
+        self.assertIn("окраска — баллы в контексте не указаны", ctx)
 
     def test_format_cases(self):
         out = format_cases([{"product_name": "Прицепы", "okpd2": "29.20.23",
@@ -349,6 +351,46 @@ class TestRulesLoader(unittest.TestCase):
         self.assertIn("3.1", points)  # подпункт с точкой распознан отдельным пунктом
         p2 = next(r for r in recs if r["section_roman"] == "I" and r["point"] == "2")
         self.assertIn("акт экспертизы", p2["text"])  # определения остались внутри п.2
+
+
+class TestDialogAnchor(unittest.TestCase):
+    """T6: перенос кода-якоря из истории для продолжающих ход вопросов (без «ухода» в другие коды)."""
+
+    def test_anchor_code_from_user_not_assistant(self):
+        hist = [
+            {"role": "user", "content": "производим станки 28.41.1"},
+            {"role": "assistant", "content": "нашлось по коду 26.20.13 ..."},
+            {"role": "user", "content": "покажи требования"},
+        ]
+        self.assertEqual(_anchor_code(hist), "28.41.1")  # код из реплики ПОЛЬЗОВАТЕЛЯ, не ассистента
+
+    def test_anchor_code_most_recent_user_wins(self):
+        hist = [
+            {"role": "user", "content": "мой код 28.41.1"},
+            {"role": "user", "content": "нет, мой код 27.40.33.130"},
+        ]
+        self.assertEqual(_anchor_code(hist), "27.40.33.130")
+
+    def test_anchor_code_none(self):
+        self.assertIsNone(_anchor_code([{"role": "user", "content": "какие требования к насосам"}]))
+        self.assertIsNone(_anchor_code(None))
+
+    def test_continuation_bare_commands(self):
+        for q in ("да", "покажи", "поясни", "распиши", "давай"):
+            self.assertTrue(_is_continuation(q), q)
+
+    def test_continuation_strong_backref(self):
+        for q in ("а какой порог?", "сколько баллов надо набрать", "покажи полный перечень операций"):
+            self.assertTrue(_is_continuation(q), q)
+
+    def test_continuation_false_for_new_product(self):
+        # новый продукт по наименованию — НЕ продолжение (иначе ложно заякорит прежний код)
+        for q in ("покажи требования к насосам", "какие требования к спецодежде", "мешки для мусора"):
+            self.assertFalse(_is_continuation(q), q)
+
+    def test_continuation_false_when_own_code_or_empty(self):
+        self.assertFalse(_is_continuation("требования к 28.41.1"))
+        self.assertFalse(_is_continuation(""))
 
 
 if __name__ == "__main__":
