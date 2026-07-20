@@ -380,12 +380,14 @@ class TestDialogAnchor(unittest.TestCase):
             self.assertTrue(_is_continuation(q), q)
 
     def test_continuation_strong_backref(self):
-        for q in ("а какой порог?", "сколько баллов надо набрать", "покажи полный перечень операций"):
+        for q in ("а какой порог?", "сколько баллов надо набрать", "покажи полный перечень операций",
+                  "покажи требования", "поясни требования для этой позиции", "какие документы нужны"):
             self.assertTrue(_is_continuation(q), q)
 
     def test_continuation_false_for_new_product(self):
         # новый продукт по наименованию — НЕ продолжение (иначе ложно заякорит прежний код)
-        for q in ("покажи требования к насосам", "какие требования к спецодежде", "мешки для мусора"):
+        for q in ("покажи требования к насосам", "какие требования к спецодежде", "мешки для мусора",
+                  "требования для станков"):
             self.assertFalse(_is_continuation(q), q)
 
     def test_continuation_false_when_own_code_or_empty(self):
