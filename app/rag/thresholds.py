@@ -86,23 +86,84 @@ def _fmt(row: dict, note: str, section: str) -> str:
     return f"{steps} [прим. {note} к разд. {section}]"
 
 
+# --- Простые пороги-списки из примечаний (прим. 7/11/31/52/53…) --------------------------
+# Формат строки: «[из ]КОД "Наименование"[, [из ]КОД "…"…] - не менее N баллов[…]; (в ред. …)».
+# Отличается от таблиц-по-годам (те через «|»); порог привязан к КОДУ (у строки бывает несколько
+# кодов, у кода — несколько строк с разными порогами → дизамбигуация по наименованию). Описательные
+# примечания (прим. 8(1): «…не менее N баллов для лопастей…», без кода) сюда НЕ попадают — покрыты
+# verified_cases / отдельной доработкой.
+_NOTE_HDR_RE = re.compile(r"^(\d+(?:\(\d+\))?)\.\s")            # «7.», «8(1).», «52.»
+_FLAT_ROW_RE = re.compile(r'^(?:из\s+)?\d{2}(?:\.\d+)*\s*"')     # строка-порог: начинается с «код "»
+_CODE_BEFORE_Q_RE = re.compile(r'(?:^|,)\s*(?:из\s+)?(\d{2}(?:\.\d+)*)\s*"')  # коды перед кавычкой
+_NAME_Q_RE = re.compile(r'"([^"]+)"')
+_AMEND_STRIP_RE = re.compile(r"\s*\(в ред\.(?:[^()]|\([^()]*\))*\)")
+
+
+@lru_cache(maxsize=1)
+def _flat_thresholds() -> list[dict]:
+    """Строки-пороги «код "имя" - не менее N баллов» из примечаний-списков. Кэш на процесс."""
+    if not _CHUNK.exists():
+        return []
+    rows: list[dict] = []
+    note = None
+    for ln in _CHUNK.read_text(encoding="utf-8").split("\n"):
+        h = _NOTE_HDR_RE.match(ln)
+        if h:
+            note = h.group(1)
+        if not _FLAT_ROW_RE.match(ln) or "не менее" not in ln:
+            continue
+        i = ln.find("не менее")
+        left, right = ln[:i], ln[i:]
+        codes = _CODE_BEFORE_Q_RE.findall(left)
+        thr = _AMEND_STRIP_RE.sub("", right).strip().rstrip(";. ").strip()
+        if codes and thr:
+            rows.append({"codes": codes, "names": _NAME_Q_RE.findall(left),
+                         "threshold": thr, "note": note})
+    return rows
+
+
+def _code_match(a: str, b: str) -> bool:
+    """Иерархическое совпадение кодов посегментно (22.22 ≡ 22.22.11, но 22.11 ≢ 22.22)."""
+    sa, sb = a.split("."), b.split(".")
+    n = min(len(sa), len(sb))
+    return n > 0 and sa[:n] == sb[:n]
+
+
+def _name_overlap(product_name: str | None, names: list[str]) -> int:
+    pt = set(re.findall(r"\w{4,}", _norm(product_name)))
+    return max((len(pt & set(re.findall(r"\w{4,}", _norm(nm)))) for nm in names), default=0)
+
+
+def _fmt_flat(r: dict) -> str:
+    return f"{r['threshold']} [прим. {r['note']}]" if r.get("note") else r["threshold"]
+
+
 def lookup_threshold(codes: list[str], product_name: str, section: str | None = None) -> str | None:
     """Порог по годам для позиции (из примечаний), либо None. Матч по НАИМЕНОВАНИЮ в рамках раздела
     (у одного кода бывают строки «общая категория» и «конкретный продукт» — имя различает)."""
     name = _norm(product_name)
-    if not name:
-        return None
-    tables = _tables()
-    # 1) точный матч имени в нужном разделе
-    for t in tables:
-        if section and t["section"] != section:
-            continue
-        for r in t["rows"]:
-            if _norm(r["name"]) == name:
-                return _fmt(r, t["note"], t["section"])
-    # 2) матч имени без ограничения раздела
-    for t in tables:
-        for r in t["rows"]:
-            if _norm(r["name"]) == name:
-                return _fmt(r, t["note"], t["section"])
+    # 1) таблицы-пороги по годам (прим.77 и т.п.) — матч по НАИМЕНОВАНИЮ
+    if name:
+        tables = _tables()
+        for t in tables:  # точный матч имени в нужном разделе
+            if section and t["section"] != section:
+                continue
+            for r in t["rows"]:
+                if _norm(r["name"]) == name:
+                    return _fmt(r, t["note"], t["section"])
+        for t in tables:  # матч имени без ограничения раздела
+            for r in t["rows"]:
+                if _norm(r["name"]) == name:
+                    return _fmt(r, t["note"], t["section"])
+    # 2) простые пороги-списки (прим. 7/11/31/52/53…) — матч по КОДУ; при неоднозначности (у кода
+    #    несколько строк с разными порогами) разрешаем по наименованию, иначе НЕ гадаем.
+    if codes:
+        cands = [r for r in _flat_thresholds()
+                 if any(_code_match(c, rc) for c in codes for rc in r["codes"])]
+        if len(cands) == 1:
+            return _fmt_flat(cands[0])
+        if len(cands) > 1:
+            best = max(cands, key=lambda r: _name_overlap(product_name, r["names"]))
+            if _name_overlap(product_name, best["names"]) >= 2:
+                return _fmt_flat(best)
     return None

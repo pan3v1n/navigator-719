@@ -329,6 +329,21 @@ class TestThresholds(unittest.TestCase):
         self.assertIn("Порог:", ctx)
         self.assertIn("270", ctx)
 
+    def test_flat_threshold_by_code(self):
+        # простой порог «не менее N баллов» из примечания-списка по КОДУ (прим. 7)
+        thr = lookup_threshold(["22.22.11"], "Изделия пластмассовые упаковочные")
+        self.assertIsNotNone(thr)
+        self.assertIn("90 баллов", thr)
+        self.assertIn("прим. 7", thr)
+
+    def test_flat_threshold_name_disambiguation(self):
+        # у кода 32.99.53.130 несколько строк с разными порогами → выбор по наименованию (прим. 31)
+        self.assertIn("10 баллов", lookup_threshold(["32.99.53.130"], "Оборудование для практикума"))
+        self.assertIn("15 баллов", lookup_threshold(["32.99.53.130"], "Конструктор робототехнический"))
+
+    def test_flat_threshold_none_when_absent(self):
+        self.assertIsNone(lookup_threshold(["28.41.1"], "Станки лазерные"))
+
 
 class TestRulesLoader(unittest.TestCase):
     """Парсер корпуса Правил (scripts/load_rules_kb) — без Qdrant/e5."""
