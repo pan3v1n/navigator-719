@@ -216,6 +216,8 @@ class TestProceduralDeflect(unittest.TestCase):
         "нужно обжаловать отказ во внесении в реестр",
         "как получить заключение о производстве продукции в России",
         "порядок регистрации в реестре промышленной продукции",
+        "срок действия акта экспертизы на компоненты",         # склонение «акта» (Приказ №52)
+        "какие документы нужны для получения акта экспертизы",  # склонение + документы
     ]
     # Товарные и СМЕШАННЫЕ (есть код/товарно-балльный сигнал) — НЕ деферим
     NOT_PROCEDURAL = [
@@ -393,6 +395,32 @@ class TestDialogAnchor(unittest.TestCase):
     def test_continuation_false_when_own_code_or_empty(self):
         self.assertFalse(_is_continuation("требования к 28.41.1"))
         self.assertFalse(_is_continuation(""))
+
+
+class TestProceduralCorpus(unittest.TestCase):
+    """Волна 1 шаг 1: парсеры доп. процедурных источников — тело ПП №719 + Приказ ТПП №52."""
+
+    def test_decree_body_criteria_subpoints(self):
+        body = load_rules_kb.parse_decree_body(load_rules_kb.BODY_PATH)
+        pts = {r["point"] for r in body}
+        self.assertTrue({"1а", "1б", "1в", "1г"} <= pts)  # критерии п.1 разбиты по подпунктам
+        g = next(r for r in body if r["point"] == "1г")   # критерий «г» = СТ-1
+        self.assertIn("сертификат", g["text"].lower())     # «наличие сертификата о происхождении»
+        self.assertIn("происхождени", g["text"].lower())
+        self.assertIn("отсутстви", g["text"].lower())      # «в случае отсутствия … в приложении»
+        self.assertEqual(g["doc_type"], "decree_body")
+        self.assertIn("подпункт «г»", g["source_anchor"])
+        self.assertNotIn("(в ред", g["text"])              # аннотации редакций вырезаны
+
+    def test_order52_components_and_documents(self):
+        order = load_rules_kb.parse_order52(load_rules_kb.ORDER52_PATH)
+        self.assertGreater(len(order), 100)
+        self.assertTrue(all(r["source_anchor"].startswith("Приказ ТПП РФ №52") for r in order))
+        self.assertTrue(all(r["doc_type"] == "tpp_order_52" for r in order))
+        p38 = next((r for r in order if r["point"] == "3.8"), None)  # акт на компоненты, срок 3 года
+        self.assertIsNotNone(p38)
+        self.assertIn("3 года", p38["text"])
+        self.assertTrue(any(r["point"].startswith("4.2") for r in order))  # раздел 4 — состав документов
 
 
 if __name__ == "__main__":

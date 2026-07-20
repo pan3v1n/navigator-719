@@ -48,6 +48,11 @@ RULES_FILES = [
     "14_V_predostavlenie_svedeniy.txt",
     "15_VI_katalog_produkcii.txt",
 ]
+# Доп. процедурные источники (Волна 1, T1/T4) в ТУ ЖЕ коллекцию pp719_rules, но с иным doc_type и
+# атрибуцией (source_anchor): тело ПП №719 (критерии подтверждения — п.1 а/б/в/г, СТ-1) и
+# Приказ ТПП РФ №52 (порядок выдачи документов: состав документов, сроки, акт на компоненты).
+BODY_PATH = CHUNKS_DIR / "01_postanovlenie.txt"
+ORDER52_PATH = CHUNKS_DIR.parent / "prikaz52_tpp_full.txt"  # knowledge_base/pp719/
 DENSE = "dense"
 SPARSE = "bm25"
 
@@ -57,6 +62,9 @@ SMOKE_QUERIES = [
     "сколько времени рассматривают заявку",
     "как обжаловать отказ во включении в реестр",
     "что такое каталог продукции",
+    "как внести в реестр продукцию, которой нет в приложении 719",  # → критерий г (СТ-1), тело 719
+    "какие документы нужны для получения акта экспертизы",           # → Приказ 52, Раздел 4
+    "срок действия акта экспертизы на компоненты",                   # → Приказ 52, п. 3.8
 ]
 
 # Пункт нормы начинается с начала строки: «1. », «3.1. », «12. » (номер, точка, пробел).
@@ -125,6 +133,107 @@ def parse_rules_file(path: Path) -> list[dict]:
     return records
 
 
+# Аннотации «(в ред. Постановления … N 553 (ред. от 22.06.2022), … N 894)» — шум для поиска и
+# контекста; вырезаем (один уровень вложенных скобок). У Правил их оставляем внутри пункта (см.
+# parse_rules_file), у тела/приказа — режем, т.к. они непомерно длинные и топят суть.
+_AMEND_STRIP_RE = re.compile(r"\s*\((?:в ред\.|введен)(?:[^()]|\([^()]*\))*\)")
+_SUBPOINT_RE = re.compile(r"^([абвгдеёжзиклмн])\)\s")
+_DECREE_POINT_RE = re.compile(r"^(\d+(?:\.\d+)*|\d+\(\d+\))\.\s")
+_SECTION52_RE = re.compile(r"^Раздел\s+(\d+)\.\s*(.+)$")
+_APPX52_RE = re.compile(r"^Приложение\s+(\d+)\b")
+_ORDER_POINT_RE = re.compile(r"^(\d+(?:\.\d+)*)\.\s")
+
+
+def _strip_amend(text: str) -> str:
+    return _AMEND_STRIP_RE.sub("", text).strip()
+
+
+def parse_decree_body(path: Path) -> list[dict]:
+    """Тело ПП №719 (критерии подтверждения производства, п. 1 а/б/в/г — где «г» = СТ-1 для
+    продукции, отсутствующей в приложении). Приложение (таблица продукции) НЕ индексируется —
+    оно живёт в structured/*.json. Пункт 1 режем по подпунктам а/б/в/г, иначе критерий «г» тонет
+    в длинном п. 1 и обрезается по кэпу контекста."""
+    raw = _normalize(path.read_text(encoding="utf-8"))
+    for marker in ("\nПриложение\n", "\nТРЕБОВАНИЯ К ПРОМЫШЛЕННОЙ"):
+        i = raw.find(marker)
+        if i > 0:
+            raw = raw[:i]
+            break
+    lines = raw.split("\n")
+    records: list[dict] = []
+    cur, buf = None, []
+
+    def _flush():
+        if not cur or not buf or cur == "1":  # bare «1» — лишь лид-ин критериев (несут 1а–1г)
+            return
+        text = _strip_amend("\n".join(buf))
+        if len(re.sub(r"\s", "", text)) < 40 or "утратил силу" in text.lower():
+            return
+        is_sub = len(cur) == 2 and cur[0] == "1" and cur[1] in "абвгдеёж"
+        anchor = (f"ПП №719, п. 1, подпункт «{cur[1]}»" if is_sub else f"ПП №719, п. {cur}")
+        records.append({
+            "doc_type": "decree_body", "section_roman": "",
+            "section_title": "Тело постановления №719 (критерии подтверждения производства)",
+            "point": cur, "text": text, "source_anchor": anchor})
+
+    for ln in lines:
+        mp = _DECREE_POINT_RE.match(ln)
+        ms = _SUBPOINT_RE.match(ln)
+        # «в критериях» = сейчас парсим п. 1 целиком ИЛИ уже его подпункт 1а/1б/… (не 1.1)
+        in_criteria = cur is not None and cur[0] == "1" and (cur == "1" or cur[1:] in "абвгдеёж")
+        if mp:
+            _flush(); cur, buf = mp.group(1), [ln]
+        elif ms and in_criteria:  # подпункт КРИТЕРИЕВ п. 1 → отдельная запись 1а/1б/1в/1г
+            _flush(); cur = "1" + ms.group(1)
+            buf = ["Критерии подтверждения производства российской промышленной продукции "
+                   "(п. 1 ПП №719): " + ln]
+        elif cur:
+            buf.append(ln)
+    _flush()
+    return records
+
+
+def parse_order52(path: Path) -> list[dict]:
+    """Приказ ТПП РФ №52 (Положение о порядке выдачи документов): состав документов (Раздел 4),
+    сроки (Раздел 6), акт экспертизы на компоненты (Раздел 13), изменение реестровой записи
+    (Раздел 9). Режем по «Раздел N. …» и пунктам N.N.N; приказ-часть до первого раздела
+    (утвердить/департаменты) и формы-пустышки приложений отбрасываем фильтром."""
+    raw = _normalize(path.read_text(encoding="utf-8"))
+    lines = raw.split("\n")
+    records: list[dict] = []
+    sec_num, sec_title, started = "", "", False
+    cur, buf = None, []
+
+    def _flush():
+        if not cur or not buf:
+            return
+        text = _strip_amend("\n".join(buf))
+        if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:  # форма/пустышка
+            return
+        loc = f"Раздел {sec_num}. {sec_title}" if sec_num.isdigit() else sec_title
+        records.append({
+            "doc_type": "tpp_order_52", "section_roman": sec_num, "section_title": sec_title,
+            "point": cur, "text": text,
+            "source_anchor": f"Приказ ТПП РФ №52, п. {cur}" + (f" ({loc})" if loc else "")})
+
+    for ln in lines:
+        msec = _SECTION52_RE.match(ln)
+        mappx = _APPX52_RE.match(ln)
+        mp = _ORDER_POINT_RE.match(ln)
+        if msec:
+            _flush(); cur, started = None, True
+            sec_num, sec_title = msec.group(1), msec.group(2).strip()
+        elif mappx:
+            _flush(); cur, started = None, True
+            sec_num, sec_title = f"прил.{mappx.group(1)}", f"Приложение {mappx.group(1)} к Положению"
+        elif started and mp:
+            _flush(); cur, buf = mp.group(1), [ln]
+        elif cur:
+            buf.append(ln)
+    _flush()
+    return records
+
+
 def detect_edition(all_text: str) -> str:
     """Последняя (по дате) пометка «(в ред. … от ДД.ММ.ГГГГ N …)» во всём корпусе — честный штамп
     редакции индексируемого текста."""
@@ -138,29 +247,67 @@ def detect_edition(all_text: str) -> str:
     return best_label or "редакция не определена в тексте"
 
 
+def _stamp_edition(recs: list[dict], text: str) -> None:
+    """Проставить каждой записи штамп редакции, вычисленный по её собственному тексту."""
+    ed = detect_edition(text)
+    for r in recs:
+        r["edition"] = ed
+
+
 def load_records() -> tuple[list[dict], str]:
     recs: list[dict] = []
-    corpus_text: list[str] = []
+    # 1) Правила ведения реестра (chunks 11–15), doc_type=rules_registry
+    rules_recs: list[dict] = []
+    rules_text: list[str] = []
     for name in RULES_FILES:
         path = CHUNKS_DIR / name
         if not path.exists():
             sys.exit(f"Нет файла Правил: {path}")
         txt = _normalize(path.read_text(encoding="utf-8"))
-        corpus_text.append(txt)
+        rules_text.append(txt)
         part = parse_rules_file(path)
         if not part:
             print(f"⚠️  {name}: не распознано ни одного пункта — проверь формат")
-        recs.extend(part)
-    edition = detect_edition("\n".join(corpus_text))
-    for r in recs:
-        r["edition"] = edition
+        rules_recs.extend(part)
+    rules_edition = detect_edition("\n".join(rules_text))
+    for r in rules_recs:
+        r["edition"] = rules_edition
+    recs.extend(rules_recs)
+    print(f"Правила ведения реестра: {len(rules_recs)} пунктов ({rules_edition})")
+
+    # 2) Тело ПП №719 (критерии подтверждения, п. 1 а/б/в/г — СТ-1), doc_type=decree_body
+    if BODY_PATH.exists():
+        body = parse_decree_body(BODY_PATH)
+        _stamp_edition(body, _normalize(BODY_PATH.read_text(encoding="utf-8")))
+        if not body:
+            print(f"⚠️  {BODY_PATH.name}: тело постановления не распознано")
+        recs.extend(body)
+        print(f"Тело ПП №719 (критерии): {len(body)} пунктов")
+    else:
+        print(f"⚠️  нет {BODY_PATH} — критерии/СТ-1 не проиндексированы")
+
+    # 3) Приказ ТПП РФ №52 (порядок выдачи документов), doc_type=tpp_order_52
+    if ORDER52_PATH.exists():
+        order = parse_order52(ORDER52_PATH)
+        _stamp_edition(order, _normalize(ORDER52_PATH.read_text(encoding="utf-8")))
+        if not order:
+            print(f"⚠️  {ORDER52_PATH.name}: приказ не распознан")
+        recs.extend(order)
+        print(f"Приказ ТПП РФ №52: {len(order)} пунктов")
+    else:
+        print(f"⚠️  нет {ORDER52_PATH} — состав документов/сроки/акт на компоненты не проиндексированы")
+
     if not recs:
-        sys.exit("Правила не распознаны — проверь knowledge_base/pp719/chunks/11..15")
-    return recs, edition
+        sys.exit("Процедурный корпус пуст — проверь knowledge_base/pp719/chunks/11..15")
+    return recs, rules_edition
 
 
 def point_id(rec: dict) -> str:
-    return str(uuid5(NAMESPACE_URL, f"rules|{rec.get('section_roman')}|{rec.get('point')}"))
+    # doc_type + начало текста в ключе — чтобы пункты тела/приказа/правил с одинаковым номером (в т.ч.
+    # повторяющиеся «1./2.» в формах приложений Приказа №52) не затирали друг друга при апсерте.
+    key = (f"{rec.get('doc_type', 'rules')}|{rec.get('section_roman')}|{rec.get('point')}"
+           f"|{(rec.get('text') or '')[:80]}")
+    return str(uuid5(NAMESPACE_URL, key))
 
 
 def make_client():

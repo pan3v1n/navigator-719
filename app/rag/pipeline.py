@@ -136,9 +136,15 @@ def format_rules_context(rules: list[dict]) -> str:
     """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …)."""
     blocks: list[str] = []
     for i, r in enumerate(rules, 1):
-        point = r.get("point") or "?"
-        sect = r.get("section_title") or r.get("section_roman") or ""
-        head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
+        # Атрибуция — из source_anchor записи (Правила / тело ПП №719 / Приказ ТПП №52); фолбэк на
+        # «Правила ведения реестра» для записей без анкера (обратная совместимость/тесты).
+        anchor = (r.get("source_anchor") or "").strip()
+        if anchor:
+            head = f"[{i}] {anchor}"
+        else:
+            point = r.get("point") or "?"
+            sect = r.get("section_title") or r.get("section_roman") or ""
+            head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
         text = (r.get("text") or "").strip()
         if len(text) > RULES_TEXT_CAP:
             text = text[:RULES_TEXT_CAP].rstrip() + " …(пункт приведён не полностью; полный текст — в первоисточнике)"
