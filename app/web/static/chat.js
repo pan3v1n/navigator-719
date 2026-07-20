@@ -141,6 +141,7 @@ function addUser(text) {
   wrap.appendChild(b);
   messages.appendChild(wrap);
   scrollDown();
+  updateJumpBtn(); // T16: обновить навигатор по вопросам чата
   return wrap;
 }
 
@@ -355,6 +356,7 @@ async function deleteConversation(sid, item) {
       messages.innerHTML = "";
       sessionId = null;
       main.classList.add("empty");
+      updateJumpBtn(); // T16
     }
   } catch (e) { /* сеть */ }
 }
@@ -384,6 +386,7 @@ async function openConversation(sid) {
     });
     setActive(sid);
     scrollDown();
+    updateJumpBtn(); // T16: показать/скрыть навигатор по вопросам открытой беседы
   } catch (e) { /* сеть */ }
 }
 
@@ -534,6 +537,7 @@ if (newChat) newChat.addEventListener("click", () => {
   sessionId = null;
   main.classList.add("empty");
   setActive(null);
+  updateJumpBtn(); // T16: скрыть навигатор (пустой чат)
   input.focus();
 });
 
@@ -668,3 +672,54 @@ loadConversations();
     if (e.target.closest("#new-chat, #history, a.nav-item, .logout")) close();
   });
 })();
+
+// --- T16: навигация по вопросам ВНУТРИ текущего чата (jump-to-question) ---
+// В длинной беседе (несколько вопросов) приходилось скролить, чтобы вернуться к прежнему запросу
+// (жалоба экспертов). Плавающая кнопка открывает список вопросов чата → клик прокручивает к нему.
+const jumpBtn = document.getElementById("jump-btn");
+let jumpMenu = null;
+function closeJump() {
+  if (jumpMenu) { jumpMenu.remove(); jumpMenu = null; document.removeEventListener("click", closeJump); }
+}
+function updateJumpBtn() {
+  if (!jumpBtn) return;
+  const n = messages.querySelectorAll(".msg.user").length;
+  jumpBtn.classList.toggle("hidden", n < 3); // показываем, только когда есть что листать
+  if (n < 3) closeJump();
+}
+function openJumpMenu() {
+  closeJump();
+  const qs = Array.from(messages.querySelectorAll(".msg.user"));
+  if (!qs.length) return;
+  jumpMenu = document.createElement("div");
+  jumpMenu.className = "jump-menu";
+  const head = document.createElement("div");
+  head.className = "jump-head";
+  head.textContent = "Вопросы в этом чате";
+  jumpMenu.appendChild(head);
+  qs.forEach((q, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "jump-item";
+    const txt = (q.textContent || "").trim();
+    b.textContent = (i + 1) + ". " + (txt.length > 70 ? txt.slice(0, 70) + "…" : txt);
+    b.title = txt;
+    b.addEventListener("click", (e) => {
+      e.stopPropagation();
+      q.scrollIntoView({ behavior: "smooth", block: "center" });
+      q.classList.add("q-flash");
+      setTimeout(() => q.classList.remove("q-flash"), 1200);
+      closeJump();
+    });
+    jumpMenu.appendChild(b);
+  });
+  document.body.appendChild(jumpMenu);
+  const r = jumpBtn.getBoundingClientRect();
+  jumpMenu.style.left = Math.max(12, r.right - jumpMenu.offsetWidth) + "px";   // выровнять по правому краю кнопки
+  jumpMenu.style.top = Math.max(12, r.top - jumpMenu.offsetHeight - 8) + "px"; // над кнопкой
+  setTimeout(() => document.addEventListener("click", closeJump), 0);
+}
+if (jumpBtn) jumpBtn.addEventListener("click", (e) => {
+  e.stopPropagation();
+  if (jumpMenu) closeJump(); else openJumpMenu();
+});
