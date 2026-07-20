@@ -32,6 +32,7 @@ from app.rag.pipeline import (  # noqa: E402
 )
 from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
 from app.rag import meta  # noqa: E402
+from app.rag import okpd2_ref  # noqa: E402
 from app.rag import procedural  # noqa: E402
 from app.rag.thresholds import _tables, lookup_threshold  # noqa: E402
 
@@ -458,6 +459,30 @@ class TestProceduralCorpus(unittest.TestCase):
         self.assertIsNotNone(p38)
         self.assertIn("3 года", p38["text"])
         self.assertTrue(any(r["point"].startswith("4.2") for r in order))  # раздел 4 — состав документов
+
+
+class TestOkpd2Ref(unittest.TestCase):
+    """T9: справочник ОКПД2 + переходные ключи ТН ВЭД↔ОКПД2 (okpd2_ref.py) — без сети/модели."""
+
+    def test_okpd2_name_exact_and_fallback(self):
+        self.assertEqual(okpd2_ref.okpd2_name("28.13.14.190"), "Насосы прочие")
+        self.assertIsNotNone(okpd2_ref.okpd2_name("28.13.14.999"))  # нет листа → фолбэк на родителя
+        self.assertIsNone(okpd2_ref.okpd2_name("00.00.00"))  # корня «00» нет — фолбэк упирается в None
+
+    def test_tnved_to_okpd2(self):
+        self.assertIn("26.20.11", okpd2_ref.tnved_to_okpd2("8471 30"))     # ЭВМ
+        self.assertIn("26.20.11", okpd2_ref.tnved_to_okpd2("8471300000"))  # 10-знач → 6-знач префикс ГС
+        self.assertEqual(okpd2_ref.tnved_to_okpd2("0000 00"), [])
+
+    def test_okpd2_to_tnved(self):
+        self.assertIn("847130", okpd2_ref.okpd2_to_tnved("26.20.11"))
+
+    def test_suggest_by_name(self):
+        codes = [c for c, _n, _s in okpd2_ref.suggest_okpd2_by_name("сверла")]
+        self.assertTrue(any(c.startswith("25.73.4") for c in codes))          # сверла → сменный инструмент
+        codes2 = [c for c, _n, _s in okpd2_ref.suggest_okpd2_by_name("гидравлические насосы")]
+        self.assertTrue(any(c.startswith("28.12.13") for c in codes2))        # → «Насосы гидравлические»
+        self.assertEqual(okpd2_ref.suggest_okpd2_by_name("!!! ??? …"), [])    # нет значимых токенов
 
 
 class TestAnswerStream(unittest.TestCase):
