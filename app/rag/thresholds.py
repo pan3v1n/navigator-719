@@ -101,24 +101,46 @@ _AMEND_STRIP_RE = re.compile(r"\s*\(в ред\.(?:[^()]|\([^()]*\))*\)")
 
 @lru_cache(maxsize=1)
 def _flat_thresholds() -> list[dict]:
-    """Строки-пороги «код "имя" - не менее N баллов» из примечаний-списков. Кэш на процесс."""
+    """Строки-пороги «код "имя" - не менее N баллов» из примечаний-списков (прим. 7/8/9/31/52/53…).
+    Два формата: ИНЛАЙН — порог на той же строке, что и код («…"имя": … - не менее N баллов…»);
+    МНОГОСТРОЧНЫЙ (прим. 9) — строка «код "имя":» и ниже отдельные строки-ступени «- не менее N
+    баллов;» до следующего кода/примечания. Кэш на процесс."""
     if not _CHUNK.exists():
         return []
+    lines = _CHUNK.read_text(encoding="utf-8").split("\n")
     rows: list[dict] = []
     note = None
-    for ln in _CHUNK.read_text(encoding="utf-8").split("\n"):
+    i, n = 0, len(lines)
+    while i < n:
+        ln = lines[i]
         h = _NOTE_HDR_RE.match(ln)
         if h:
             note = h.group(1)
-        if not _FLAT_ROW_RE.match(ln) or "не менее" not in ln:
-            continue
-        i = ln.find("не менее")
-        left, right = ln[:i], ln[i:]
-        codes = _CODE_BEFORE_Q_RE.findall(left)
-        thr = _AMEND_STRIP_RE.sub("", right).strip().rstrip(";. ").strip()
-        if codes and thr:
-            rows.append({"codes": codes, "names": _NAME_Q_RE.findall(left),
-                         "threshold": thr, "note": note})
+        if _FLAT_ROW_RE.match(ln):
+            if "не менее" in ln:  # инлайн: код и порог на одной строке
+                j = ln.find("не менее")
+                left = ln[:j]
+                thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip().rstrip(";. ").strip()
+                codes = _CODE_BEFORE_Q_RE.findall(left)
+                if codes and thr:
+                    rows.append({"codes": codes, "names": _NAME_Q_RE.findall(left),
+                                 "threshold": thr, "note": note})
+            elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
+                codes = _CODE_BEFORE_Q_RE.findall(ln)
+                names = _NAME_Q_RE.findall(ln)
+                steps: list[str] = []
+                k = i + 1
+                while (k < n and lines[k].strip()
+                       and not _FLAT_ROW_RE.match(lines[k]) and not _NOTE_HDR_RE.match(lines[k])):
+                    if "не менее" in lines[k]:
+                        steps.append(_AMEND_STRIP_RE.sub("", lines[k]).strip().rstrip(";. ").strip())
+                    k += 1
+                if codes and steps:
+                    rows.append({"codes": codes, "names": names,
+                                 "threshold": "; ".join(steps), "note": note})
+                i = k
+                continue
+        i += 1
     return rows
 
 

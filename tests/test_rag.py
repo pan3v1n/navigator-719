@@ -345,6 +345,16 @@ class TestThresholds(unittest.TestCase):
     def test_flat_threshold_none_when_absent(self):
         self.assertIsNone(lookup_threshold(["28.41.1"], "Станки лазерные"))
 
+    def test_flat_threshold_multiline_note9(self):
+        # прим.9: пороги нефтегаз-компрессоров идут ОТДЕЛЬНЫМИ строками-ступенями под «код "имя":»
+        # (многострочный формат) — раньше терялись, теперь собираются в один порог.
+        thr = lookup_threshold(
+            ["28.13.24"], "Компрессорные станции на колесных шасси на базе поршневых объемных компрессоров")
+        self.assertIsNotNone(thr)
+        self.assertIn("170 баллов", thr)  # с 1 января 2023 г.
+        self.assertIn("180 баллов", thr)  # с 1 января 2024 г.
+        self.assertIn("прим. 9", thr)
+
 
 class TestRulesLoader(unittest.TestCase):
     """Парсер корпуса Правил (scripts/load_rules_kb) — без Qdrant/e5."""
