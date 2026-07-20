@@ -406,6 +406,76 @@ async function ask(text) {
   const pending = addPending();
   const bubble = pending.querySelector(".bubble");
   send.disabled = true;
+  try {
+    // T18: сперва пробуем стриминг (постепенный вывод, как Claude/ChatGPT). Если он не стартовал
+    // или оборвался до финала — фолбэк на обычный /api/chat (рваная РФ-сеть → длинный SSE хрупок).
+    const streamed = await askStream(text, pending, bubble);
+    if (!streamed) await askFallback(text, pending, bubble, isNew);
+  } finally {
+    send.disabled = false;
+    scrollDown();
+  }
+}
+
+// Стриминг: fetch SSE-поток → дописываем delta в пузырь → на done навешиваем источники+оценку.
+// Возврат: true = завершилось финалом (done / редирект на login|profile); false = нужен фолбэк.
+async function askStream(text, pending, bubble) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), 120000);
+  let acc = "";
+  let done = null;
+  try {
+    const r = await fetch("/api/chat/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message: text, session_id: sessionId }),
+      signal: ctrl.signal,
+    });
+    if (r.status === 401) { window.location = "/login"; return true; }
+    if (r.status === 403) { window.location = "/profile"; return true; }  // профиль/согласие не заполнены
+    if (!r.ok || !r.body) return false;  // не стартовал → фолбэк
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    for (;;) {
+      const { value, done: rdone } = await reader.read();
+      if (rdone) break;
+      buf += dec.decode(value, { stream: true });
+      let idx;
+      while ((idx = buf.indexOf("\n\n")) !== -1) {  // SSE-события разделены пустой строкой
+        const evtext = buf.slice(0, idx).replace(/^data:\s?/, "").trim();
+        buf = buf.slice(idx + 2);
+        if (!evtext) continue;
+        let ev;
+        try { ev = JSON.parse(evtext); } catch (e) { continue; }
+        if (ev.type === "delta") {
+          acc += ev.text;
+          bubble.innerHTML = renderMarkdown(acc);  // инкрементальный рендер накопленного текста
+          scrollDown();
+        } else if (ev.type === "done") {
+          done = ev;
+        } else if (ev.type === "error") {
+          return false;  // движок упал на сервере → фолбэк
+        }
+      }
+    }
+    if (!done) return false;  // поток оборвался без финала → фолбэк (лог на сервере не писался)
+    sessionId = done.session_id;
+    setActive(sessionId);
+    bubble.innerHTML = renderMarkdown(acc);  // финальный ре-рендер полного текста
+    addUnverifiedFlag(pending, done.unverified_numbers);
+    addSources(pending, done.sources);
+    addFeedbackBar(pending, done.message_id, sessionId);
+    return true;
+  } catch (e) {
+    return false;  // сеть / abort → фолбэк
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// Фолбэк: обычный НЕ-стриминг /api/chat (сохранён как надёжный путь на рваной сети).
+async function askFallback(text, pending, bubble, isNew) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);  // клиентский таймаут (бэкенд режет DeepSeek на 30с/вызов)
   try {
@@ -434,8 +504,6 @@ async function ask(text) {
     if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
   } finally {
     clearTimeout(timer);
-    send.disabled = false;
-    scrollDown();
   }
 }
 

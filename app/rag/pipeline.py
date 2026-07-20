@@ -369,13 +369,30 @@ def _answer_procedural(query: str, search_query: str,
     )
 
 
-def answer(query: str, okpd2: str | None = None, limit: int = 8,
-           history: list[dict] | None = None) -> Answer:
-    # limit=8 (не 5): пограничные, но валидные позиции с обобщённым наименованием
-    # («Прицепы и полуприцепы прочие» 29.20.23) садятся на ранг 5–7 чистого ретрива и при
-    # limit=5 выпадали из окна на мелкой смене формулировки (ед./мн. число) — модель их не
-    # видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты
-    # ограничены MAX_OPS_OTHER и служат материалом для уточнения по коду (правило 1г).
+@dataclass
+class _Plan:
+    """План генерации (вся пред-работа сделана) — общий для answer()/answer_stream().
+    messages = [system, ...история, текущий вопрос]; grounding — контекст для faithfulness-гарда."""
+    messages: list[dict]
+    grounding: str
+    hits: list[Hit]
+    cases: list[dict]
+    low_relevance: bool
+
+
+def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
+                 history: list[dict] | None = None) -> "Answer | _Plan":
+    """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
+    поиск/реранк/кейсы → out-of-scope guard → сборка messages. Возвращает либо ранний Answer
+    (meta / процедурный / нет-позиции — модель уже не нужна или отработала), либо _Plan для
+    LLM-вызова. Общий для answer() (non-stream) и answer_stream() → их поведение ДО вызова
+    модели идентично (один и тот же путь).
+
+    limit=8 (не 5): пограничные, но валидные позиции с обобщённым наименованием
+    («Прицепы и полуприцепы прочие» 29.20.23) садятся на ранг 5–7 чистого ретрива и при
+    limit=5 выпадали из окна на мелкой смене формулировки (ед./мн. число) — модель их не
+    видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты
+    ограничены MAX_OPS_OTHER и служат материалом для уточнения по коду (правило 1г)."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import meta
     if meta.is_meta(query):
@@ -438,28 +455,83 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user})
+    grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
+    return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases, low_relevance=low_rel)
+
+
+def answer(query: str, okpd2: str | None = None, limit: int = 8,
+           history: list[dict] | None = None) -> Answer:
+    """Синхронный ответ навигатора (non-stream). Пред-работа — в _plan_answer; здесь только
+    финальная генерация DeepSeek + faithfulness-постпроверка. Поведение НЕ изменилось при
+    выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения)."""
+    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history)
+    if isinstance(planned, Answer):  # ранний путь (meta / процедурный / нет-позиции)
+        return planned
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
-        messages=messages,
+        messages=planned.messages,
         temperature=0,  # детерминизм (INTERIM-фикс P2): при 0.1 модель на мега-продуктах
         # перечисляла РАЗНЫЕ подмножества операций → числа баллов «плавали» (eval_determinism
         # 0.60). 0 стабилизирует набор чисел; реранкер и так temp=0.
     )
     usage = resp.usage
-    prompt_tokens = usage.prompt_tokens if usage else 0
-    completion_tokens = usage.completion_tokens if usage else 0
-
     # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с контекстом. Незаземлённые
     # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
     # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
     raw = _strip_emoji(resp.choices[0].message.content or "")
-    grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
-    ungrounded = unverified_numbers(raw, grounding)
+    ungrounded = unverified_numbers(raw, planned.grounding)
     return Answer(
         text=raw,
-        hits=hits,
-        cases=cases,
-        low_relevance=low_rel,
+        hits=planned.hits,
+        cases=planned.cases,
+        low_relevance=planned.low_relevance,
+        unverified_numbers=ungrounded,
+        prompt_tokens=usage.prompt_tokens if usage else 0,
+        completion_tokens=usage.completion_tokens if usage else 0,
+    )
+
+
+def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
+                  history: list[dict] | None = None):
+    """Стриминг ответа (T18): генератор — yield ('delta', str) по мере генерации, затем
+    ('done', Answer) с финальными метаданными (hits→sources / флаги / токены).
+
+    Ранние пути (meta / процедурный / нет-позиции) НЕ стримятся токен-за-токеном — отдаём готовый
+    текст одним 'delta' + 'done' (стрим для _answer_procedural — фолоу-ап). LLM-путь: stream=True,
+    копим текст; эмодзи чистим по кускам (дисплей = финал), в КОНЦЕ — faithfulness-постпроверка.
+    Исключения наружу НЕ глушим — эндпоинт ловит их и сигналит фронту фолбэк на /api/chat."""
+    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history)
+    if isinstance(planned, Answer):  # ранний путь — генерация не нужна / уже сделана
+        yield "delta", planned.text
+        yield "done", planned
+        return
+    resp = _client().chat.completions.create(
+        model=settings.DEEPSEEK_MODEL,
+        messages=planned.messages,
+        temperature=0,  # тот же детерминизм, что и non-stream answer()
+        stream=True,
+        stream_options={"include_usage": True},  # usage приходит финальным чанком (choices пуст)
+    )
+    parts: list[str] = []
+    prompt_tokens = completion_tokens = 0
+    for chunk in resp:
+        usage = getattr(chunk, "usage", None)
+        if usage:
+            prompt_tokens = usage.prompt_tokens
+            completion_tokens = usage.completion_tokens
+        if not chunk.choices:
+            continue
+        piece = _strip_emoji(chunk.choices[0].delta.content or "")
+        if piece:
+            parts.append(piece)
+            yield "delta", piece
+    raw = "".join(parts)
+    ungrounded = unverified_numbers(raw, planned.grounding)
+    yield "done", Answer(
+        text=raw,
+        hits=planned.hits,
+        cases=planned.cases,
+        low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,

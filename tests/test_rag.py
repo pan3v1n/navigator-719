@@ -31,6 +31,7 @@ from app.rag.pipeline import (  # noqa: E402
     unverified_numbers,
 )
 from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
+from app.rag import meta  # noqa: E402
 from app.rag import procedural  # noqa: E402
 from app.rag.thresholds import _tables, lookup_threshold  # noqa: E402
 
@@ -447,6 +448,31 @@ class TestProceduralCorpus(unittest.TestCase):
         self.assertIsNotNone(p38)
         self.assertIn("3 года", p38["text"])
         self.assertTrue(any(r["point"].startswith("4.2") for r in order))  # раздел 4 — состав документов
+
+
+class TestAnswerStream(unittest.TestCase):
+    """T18: контракт стриминга на РАННЕМ пути (meta — без сети/Qdrant/DeepSeek). LLM-путь
+    (реальные delta от DeepSeek) проверяется живым e2e-скриптом, здесь — только пламбинг."""
+
+    def test_plan_answer_meta_returns_ready_answer(self):
+        planned = pipeline_mod._plan_answer("что ты умеешь")
+        self.assertIsInstance(planned, pipeline_mod.Answer)  # ранний путь — готовый Answer, не _Plan
+        self.assertEqual(planned.text, meta.HELP)
+
+    def test_stream_meta_yields_delta_then_done(self):
+        events = list(pipeline_mod.answer_stream("привет"))
+        self.assertEqual([k for k, _ in events], ["delta", "done"])  # ровно один кусок + финал
+        self.assertEqual(events[0][1], meta.GREETING)                # текст отдан одним delta
+        done = events[-1][1]
+        self.assertIsInstance(done, pipeline_mod.Answer)
+        self.assertEqual(done.text, meta.GREETING)
+        self.assertEqual(done.hits, [])
+
+    def test_stream_matches_nonstream_on_early_path(self):
+        # Ранний путь (meta) должен давать тот же текст, что и non-stream answer() — оба через заготовку.
+        streamed = "".join(t for k, t in pipeline_mod.answer_stream("спасибо!") if k == "delta")
+        self.assertEqual(streamed, pipeline_mod.answer("спасибо!").text)
+        self.assertEqual(streamed, meta.THANKS)
 
 
 if __name__ == "__main__":

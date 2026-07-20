@@ -13,7 +13,7 @@ import json
 import uuid
 
 from fastapi import APIRouter, Depends, HTTPException
-from fastapi.responses import Response
+from fastapi.responses import Response, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
@@ -21,7 +21,7 @@ from app.api.auth import require_user, require_user_profiled
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
-from app.rag.pipeline import answer
+from app.rag.pipeline import answer, answer_stream
 from app.tools.navigator import extract_okpd2
 
 router = APIRouter()
@@ -106,6 +106,65 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=message_id,
+    )
+
+
+def _sse(event: dict) -> str:
+    """Одно SSE-событие: `data: <json>\\n\\n`. ensure_ascii=False — кириллица идёт как есть."""
+    return "data: " + json.dumps(event, ensure_ascii=False) + "\n\n"
+
+
+@router.post("/api/chat/stream")
+def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -> StreamingResponse:
+    """Стриминг ответа (T18): SSE-поток `text/event-stream`. События: {"type":"delta","text":…}
+    по мере генерации, затем один {"type":"done", message_id, sources, low_relevance,
+    unverified_numbers, session_id}. Лог реплики (user+assistant) и message_id — на 'done' (нужен
+    полный текст). Обрыв/сбой движка → {"type":"error"} → фронт делает фолбэк на /api/chat.
+
+    Эндпоинт СИНХРОННЫЙ (`def`): Starlette крутит sync-генератор в threadpool (как /api/chat),
+    event loop не держим. ⚠ Рваная РФ-сеть: длинный SSE хрупок — на фронте фолбэк обязателен."""
+    session_id = req.session_id or uuid.uuid4().hex
+    history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы (пусто для новой беседы)
+    okpd2 = extract_okpd2(req.message)
+
+    def gen():
+        try:
+            for kind, payload in answer_stream(req.message, okpd2=okpd2, history=history):
+                if kind == "delta":
+                    yield _sse({"type": "delta", "text": payload})
+                    continue
+                # kind == "done": payload — Answer. Логируем диалог и отдаём метаданные.
+                ans = payload
+                sources = _sources_from_hits(ans.hits)
+                message_id: int | None = None
+                try:
+                    with get_session() as db:
+                        q.log_message(db, user_id=user.id, session_id=session_id,
+                                      role="user", content=req.message)
+                        asst = q.log_message(
+                            db, user_id=user.id, session_id=session_id, role="assistant",
+                            content=ans.text, sources=[s.model_dump() for s in sources],
+                            low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
+                            prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
+                        )
+                        message_id = asst.id
+                except Exception:  # noqa: BLE001 — лог не должен ронять стрим (как в /api/chat)
+                    logger.exception(f"chat_stream: не удалось записать лог (user_id={user.id})")
+                yield _sse({
+                    "type": "done", "message_id": message_id,
+                    "sources": [s.model_dump() for s in sources],
+                    "low_relevance": ans.low_relevance,
+                    "unverified_numbers": ans.unverified_numbers,
+                    "session_id": session_id,
+                })
+        except Exception:  # noqa: BLE001 — движок упал (рваная сеть/DeepSeek) → сигнал фолбэка фронту
+            logger.exception(f"chat_stream: движок упал на запросе от user_id={user.id}")
+            yield _sse({"type": "error", "detail": "stream_failed"})
+
+    # X-Accel-Buffering:no — отключить буферизацию у обратного прокси (если появится nginx впереди).
+    return StreamingResponse(
+        gen(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
 
