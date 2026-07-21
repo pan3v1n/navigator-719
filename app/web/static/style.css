@@ -319,9 +319,95 @@ a { color: inherit; text-decoration: none; }
 .kpi-val { font-size: 24px; font-weight: 700; }
 .kpi-label { font-size: 13px; margin-top: 2px; }
 .kpi-sub { font-size: 11px; color: var(--muted); margin-top: 3px; }
+/* тренд-чипы на плитках (к прошлому периоду): зелёный=хорошо, красный=плохо, серый=нейтр./новое */
+.kpi-tr { margin-top: 6px; }
+.trend { font-size: 11px; font-weight: 600; white-space: nowrap; }
+.trend.tr-good { color: #1e874b; }
+.trend.tr-bad { color: #c0392b; }
+.trend.tr-flat, .trend.tr-new { color: var(--muted); }
+.trend-note { font-size: 11px; color: var(--muted); margin: -10px 2px 16px; }
 /* приёмка ≥70%: зелёный = порог пройден, красный = ниже */
 .pass { color: #1e874b; }
 .fail { color: #c0392b; }
+
+/* ---- панель фильтров (единый срез для всех вкладок) ---- */
+.filters { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 10px 14px; padding: 12px 14px;
+  background: #fff; border: 1px solid var(--border); border-radius: 12px; margin-bottom: 16px; }
+.f-field { display: flex; flex-direction: column; gap: 3px; font-size: 11px; color: var(--muted); }
+.f-field span { text-transform: uppercase; letter-spacing: .4px; }
+.f-field input, .f-field select { padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
+  font-size: 13px; font-family: inherit; background: #fff; color: var(--text); }
+.f-field input:focus, .f-field select:focus { outline: none; border-color: #b5b5b5; }
+.f-apply { padding: 8px 16px; border: none; border-radius: 9px; background: var(--accent); color: #fff;
+  font-size: 13px; font-weight: 500; cursor: pointer; }
+.f-apply:hover { opacity: .88; }
+.f-reset { font-size: 13px; color: #2563eb; align-self: center; }
+.f-reset:hover { text-decoration: underline; }
+.f-right { margin-left: auto; display: flex; align-items: center; gap: 14px; flex-wrap: wrap; }
+.f-stamp { font-size: 11px; color: var(--muted); }
+.f-export { font-size: 12px; color: var(--muted); }
+.f-export a { color: #2563eb; margin-left: 4px; }
+.f-export a:hover { text-decoration: underline; }
+
+/* ---- здоровье системы (оперативный статус инфраструктуры) ---- */
+.health .hstat { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 4px 0; }
+.health .hstat.sub { padding-left: 15px; font-size: 12.5px; }
+.health .hstat b { font-weight: 600; }
+.health .hmeta { margin-left: auto; font-size: 11px; color: var(--muted);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+.dot { width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0; background: #cbd5e1; }
+.dot.ok { background: #1e874b; }
+.dot.bad { background: #c0392b; }
+
+/* ---- лента последних вопросов ---- */
+.feed { display: flex; flex-direction: column; }
+.feed-row { display: flex; align-items: baseline; gap: 12px; padding: 7px 0; border-top: 1px solid var(--border); }
+.feed-row:first-child { border-top: none; }
+.feed-q { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.feed-meta { flex-shrink: 0; font-size: 11px; color: var(--muted); }
+
+/* ---- вкладка «Плохие ответы» (триаж ≤2★) ---- */
+.bad-intro { font-size: 13px; color: var(--muted); background: #fff; border: 1px solid var(--border);
+  border-radius: 12px; padding: 12px 16px; margin-bottom: 14px; line-height: 1.6; }
+.bad-card { background: #fff; border: 1px solid var(--border); border-left: 4px solid #c0392b;
+  border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+.bad-head { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 8px; font-size: 12px; }
+.bad-card .stars { color: #fff; background: #c0392b; padding: 1px 8px; border-radius: 6px; font-size: 11px; font-weight: 600; }
+.bad-who { font-weight: 600; font-size: 13px; }
+.bad-link { margin-left: auto; color: #2563eb; cursor: pointer; }
+.bad-link:hover { text-decoration: underline; }
+.bad-q { font-size: 14px; margin: 4px 0; line-height: 1.5; }
+.lbl { display: inline-block; font-size: 10px; text-transform: uppercase; letter-spacing: .5px;
+  color: var(--muted); margin-right: 8px; vertical-align: 1px; }
+.bad-a { margin: 6px 0; font-size: 13px; }
+.bad-a > summary { cursor: pointer; color: var(--muted); list-style: none; }
+.bad-a > summary::-webkit-details-marker { display: none; }
+.bad-a-full { white-space: pre-wrap; margin-top: 8px; padding: 10px 12px; background: #f7f8fa;
+  border-radius: 8px; line-height: 1.55; }
+.bad-c { font-size: 13px; color: #555; margin-top: 6px; }
+.bad-fix { font-size: 13px; color: #15803d; margin-top: 4px; }
+
+/* смысловые цвета баров (оценки/регионы): хорошо/средне/плохо/нет данных */
+.bar-fill.good { background: #1e874b; }
+.bar-fill.mid { background: #eab308; }
+.bar-fill.bad { background: #c0392b; }
+.bar-fill.na { background: #cbd5e1; }
+
+/* приёмка по регионам */
+.region-row .wide-label { width: 190px; }
+.region-meta { font-size: 11px; color: var(--muted); flex-shrink: 0; margin-left: 8px; white-space: nowrap; }
+
+/* группирующие заголовки + вторичные KPI (объём/затраты — под гейтом) */
+.section-title { font-size: 12px; text-transform: uppercase; letter-spacing: .5px; color: var(--muted);
+  margin: 22px 2px 10px; font-weight: 600; }
+.kpis.secondary { grid-template-columns: repeat(auto-fit, minmax(132px, 1fr)); margin-bottom: 6px; }
+.kpis.secondary .kpi-val { font-size: 20px; }
+
+/* бейдж-счётчик на вкладке «Плохие ответы» */
+.tab-badge { display: inline-block; min-width: 18px; padding: 0 5px; margin-left: 6px; border-radius: 999px;
+  background: #e5e7eb; color: #555; font-size: 11px; font-weight: 600; text-align: center; vertical-align: 1px; }
+.tab-badge.warn { background: #fdecec; color: #c0392b; }
+.ul-region { font-size: 11px; color: #2563eb; background: #eef2ff; padding: 1px 7px; border-radius: 999px; font-weight: 500; }
 
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
@@ -356,7 +442,12 @@ a { color: inherit; text-decoration: none; }
 .ul-meta { font-size: 12px; color: var(--muted); margin-left: auto; text-align: right; }
 .ul-body { padding: 0 18px 16px; }
 
-@media (max-width: 720px) { .charts { grid-template-columns: 1fr; } }
+@media (max-width: 720px) {
+  .charts { grid-template-columns: 1fr; }
+  .region-row .wide-label { width: 120px; }
+  .feed-row { flex-direction: column; gap: 2px; }
+  .feed-q { white-space: normal; }
+}
 
 /* ---------- keyframes ---------- */
 @keyframes fadeInUp { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
