@@ -34,6 +34,7 @@ from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E4
 from app.rag import meta  # noqa: E402
 from app.rag import okpd2_ref  # noqa: E402
 from app.rag import procedural  # noqa: E402
+from app.rag import translate  # noqa: E402
 from app.rag.thresholds import _tables, lookup_threshold  # noqa: E402
 
 # Загрузчик Правил лежит в scripts/ (не пакет) — добавляем в путь для теста парсера.
@@ -563,6 +564,42 @@ class TestOkpd2Ref(unittest.TestCase):
         p2 = build_navigator_user_prompt("вопрос", "ctx", okpd2_suggestions=[("25.73.40.110", "Сверла")])
         self.assertIn("классификатор", p2.lower())
         self.assertIn("25.73.40.110", p2)
+
+
+class TestTranslateIntent(unittest.TestCase):
+    """T9: детерминированный перевод ТН ВЭД↔ОКПД2 по прямому запросу (translate.py) — без LLM."""
+
+    def test_is_translate_positive(self):
+        self.assertTrue(translate.is_translate("умеешь ли ты переводить ОКПД2"))
+        self.assertTrue(translate.is_translate("переведи ТН ВЭД 8471 30 000 0 в ОКПД2"))
+        self.assertTrue(translate.is_translate("какой ОКПД2 у ТН ВЭД 8471 30"))
+        self.assertTrue(translate.is_translate("какой ТН ВЭД у ОКПД2 26.20.11"))
+        self.assertTrue(translate.is_translate("конвертация ТН ВЭД в ОКПД2"))
+
+    def test_is_translate_negative(self):
+        # обычные товарные вопросы — НЕ перевод (их ведёт навигатор)
+        self.assertFalse(translate.is_translate("какой ОКПД2 у гидравлического насоса"))
+        self.assertFalse(translate.is_translate("требования к 28.13.14"))
+        self.assertFalse(translate.is_translate("подпадает ли под 719 продукция с ТН ВЭД 8471 30"))
+        self.assertFalse(translate.is_translate("что ты умеешь"))
+
+    def test_answer_tnved_to_okpd2(self):
+        a = translate.answer("переведи ТН ВЭД 8471 30 в ОКПД2")
+        self.assertIn("26.20.11", a)
+        self.assertIn("ОКПД2", a)
+
+    def test_answer_okpd2_to_tnved(self):
+        a = translate.answer("какой ТН ВЭД у ОКПД2 26.20.11")
+        self.assertIn("847130", a)
+        self.assertIn("ТН ВЭД", a)
+
+    def test_answer_capability_when_no_code(self):
+        a = translate.answer("умеешь ли ты переводить ОКПД2")
+        self.assertIn("ТН ВЭД", a)
+        self.assertIn("ОКПД2", a)
+        # без кода — не «переводит», а описывает возможность и просит указать код
+        self.assertIn("Назовите код", a)
+        self.assertNotIn("Перевод ТН ВЭД в ОКПД2 (по переходному ключу)", a)
 
 
 class TestAnswerStream(unittest.TestCase):

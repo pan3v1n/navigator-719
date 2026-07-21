@@ -402,6 +402,12 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if meta.is_meta(query):
         return Answer(text=meta.response(query), hits=[])
 
+    # T9: прямой запрос на ПЕРЕВОД кода ТН ВЭД↔ОКПД2 — отвечаем детерминированно из справочника
+    # переходных ключей (без LLM: навигатор строго по 719 и на такой вопрос раньше отказывал).
+    from app.rag import translate
+    if translate.is_translate(query):
+        return Answer(text=translate.answer(query), hits=[])
+
     # Мультитёрн: уточняющий вопрос переписываем в самостоятельный — ТОЛЬКО для поиска/гейтов
     # (генерация ниже видит историю диалога через messages).
     search_query = query
