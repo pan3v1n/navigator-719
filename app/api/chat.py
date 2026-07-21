@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
@@ -38,6 +39,7 @@ class SourceItem(BaseModel):
     okpd2: list[str] = []
     source_anchor: str | None = None
     okpd2_match: bool = False
+    url: str | None = None  # прямая ссылка на первоисточник (процедурные источники); None → фронт строит по ОКПД2/наим.
 
 
 class ChatResponse(BaseModel):
@@ -60,6 +62,54 @@ def _sources_from_hits(hits) -> list[SourceItem]:
         )
         for h in hits
     ]
+
+
+# --- Кликабельные источники ПРОЦЕДУРНОГО ответа (пункты Правил/тела ПП №719/Приказа №52). ----------
+# Первоисточники на Контур.Норматив. Правила формирования и ведения реестра — раздел внутри документа
+# ПП №719 (якорь #h14240), поэтому та же ссылка, что и на тело, но с якорем раздела.
+_KONTUR_719 = "https://normativ.kontur.ru/document?moduleId=1&documentId=506899"
+_KONTUR_PRIKAZ_52 = "https://normativ.kontur.ru/document?moduleId=1&documentId=505398"
+_RULES_ANCHOR = "#h14240"  # раздел «Правила формирования и ведения реестра» внутри документа 719
+_DOC_NAMES = {
+    "tpp_order_52": "Приказ ТПП РФ №52",
+    "rules_registry": "Правила ведения реестра",
+    "decree_body": "Тело ПП №719",
+}
+
+
+def _rule_url(doc_type: str, text: str) -> str:
+    """Ссылка на первоисточник пункта + текст-фрагмент (`:~:text=`) для точной прокрутки браузером.
+    Приказ №52 — отдельный документ; Правила — раздел документа 719 (якорь h14240); тело — сам 719."""
+    if doc_type == "tpp_order_52":
+        base, anchor = _KONTUR_PRIKAZ_52, ""
+    elif doc_type == "rules_registry":
+        base, anchor = _KONTUR_719, _RULES_ANCHOR
+    else:  # decree_body и фолбэк
+        base, anchor = _KONTUR_719, ""
+    snippet = " ".join((text or "").split()[:8]).strip()  # первые ~8 слов пункта — цель прокрутки
+    if not snippet:
+        return base + anchor
+    frag = ":~:text=" + quote(snippet)  # текст-директива добавляется к фрагменту (после якоря или #)
+    return base + (anchor + frag if anchor else "#" + frag)
+
+
+def _sources_from_rules(rules) -> list[SourceItem]:
+    """Источники процедурного ответа в порядке [n]: метка пункта (source_anchor) + прямая ссылка на
+    первоисточник. ОКПД2 у норм нет — клик ведёт по `url`, а не по коду (см. фронт addSources)."""
+    out: list[SourceItem] = []
+    for r in rules:
+        anchor = (r.get("source_anchor") or "").strip()
+        doc_type = r.get("doc_type") or ""
+        doc_name = _DOC_NAMES.get(doc_type, "Правила ведения реестра")
+        out.append(SourceItem(
+            section=doc_name,
+            product_name=anchor or doc_name,
+            okpd2=[],
+            source_anchor=None,  # уже в product_name (метка пункта) — не дублируем в подписи
+            okpd2_match=False,
+            url=_rule_url(doc_type, r.get("text") or ""),
+        ))
+    return out
 
 
 def _load_history(user_id: int, session_id: str, max_msgs: int = 12) -> list[dict]:
@@ -88,7 +138,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
         logger.exception(f"chat: движок упал на запросе от user_id={user.id}")
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
 
-    sources = _sources_from_hits(ans.hits)
+    sources = _sources_from_hits(ans.hits) or _sources_from_rules(ans.rule_sources)
     message_id: int | None = None
     try:
         with get_session() as db:
@@ -135,7 +185,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                     continue
                 # kind == "done": payload — Answer. Логируем диалог и отдаём метаданные.
                 ans = payload
-                sources = _sources_from_hits(ans.hits)
+                sources = _sources_from_hits(ans.hits) or _sources_from_rules(ans.rule_sources)
                 message_id: int | None = None
                 try:
                     with get_session() as db:

@@ -305,6 +305,71 @@ class TestProceduralAnswerFallback(unittest.TestCase):
         ans = pipeline_mod._answer_procedural("как внести в реестр", "как внести в реестр")
         self.assertEqual(ans.text, procedural.DEFLECTION)
         self.assertEqual(ans.hits, [])
+        self.assertEqual(ans.rule_sources, [])  # дефер — источников нет
+
+
+class TestProceduralSources(unittest.TestCase):
+    """Клик по источникам процедурного ответа: пункты Правил/тела ПП №719/Приказа №52 →
+    SourceItem с прямой ссылкой на первоисточник (Контур.Норматив), в порядке [n]."""
+
+    def _rules(self):
+        return [
+            {"doc_type": "tpp_order_52", "source_anchor": "Приказ ТПП РФ №52, п. 7",
+             "text": "Уполномоченная ТПП в течение 3 рабочих дней регистрирует заявление."},
+            {"doc_type": "rules_registry", "source_anchor": "Правила ведения реестра, п. 12",
+             "text": "Минпромторг включает сведения о продукции в реестр."},
+            {"doc_type": "decree_body", "source_anchor": "ПП №719, п. 1, подпункт «г»",
+             "text": "подтверждается сертификатом СТ-1."},
+        ]
+
+    def test_builds_ordered_clickable_sources(self):
+        from app.api.chat import _sources_from_rules
+        src = _sources_from_rules(self._rules())
+        self.assertEqual(len(src), 3)
+        # порядок [n] сохранён + метка пункта в подписи
+        self.assertEqual(src[0].product_name, "Приказ ТПП РФ №52, п. 7")
+        # Приказ №52 — отдельный документ 505398
+        self.assertIn("documentId=505398", src[0].url)
+        # Правила — раздел документа 719 (якорь h14240)
+        self.assertIn("documentId=506899", src[1].url)
+        self.assertIn("h14240", src[1].url)
+        # тело ПП №719 — сам 719 без якоря раздела Правил
+        self.assertIn("documentId=506899", src[2].url)
+        self.assertNotIn("h14240", src[2].url)
+        # текст-фрагмент для точной прокрутки браузером
+        self.assertIn(":~:text=", src[0].url)
+
+    def test_empty_rules_no_sources(self):
+        from app.api.chat import _sources_from_rules
+        self.assertEqual(_sources_from_rules([]), [])
+
+    def test_answer_procedural_carries_rule_sources(self):
+        # grounded-ветка кладёт найденные пункты в rule_sources (тот же порядок, что в контексте [n])
+        rules = self._rules()
+        orig_search, orig_client = pipeline_mod.search_rules, pipeline_mod._client
+        pipeline_mod.search_rules = lambda *a, **k: rules
+
+        class _Usage:
+            prompt_tokens = completion_tokens = 1
+
+        class _Msg:
+            content = "Порядок по шагам [1][2][3]."
+
+        class _Resp:
+            choices = [type("C", (), {"message": _Msg()})()]
+            usage = _Usage()
+
+        class _Client:
+            chat = type("Ch", (), {"completions": type(
+                "Co", (), {"create": staticmethod(lambda *a, **k: _Resp())})()})()
+
+        pipeline_mod._client = lambda: _Client()
+        try:
+            ans = pipeline_mod._answer_procedural("порядок внесения в реестр", "порядок внесения в реестр")
+        finally:
+            pipeline_mod.search_rules, pipeline_mod._client = orig_search, orig_client
+        self.assertEqual(len(ans.rule_sources), 3)
+        self.assertEqual(ans.rule_sources[0]["doc_type"], "tpp_order_52")
 
 
 class TestThresholds(unittest.TestCase):

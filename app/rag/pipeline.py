@@ -51,6 +51,9 @@ class Answer:
     unverified_numbers: list[str] = field(default_factory=list)  # числа баллов/% в ответе, не найденные в контексте
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
+    # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
+    # для кликабельных источников. Товарный путь их не заполняет (там источники строятся из hits).
+    rule_sources: list[dict] = field(default_factory=list)
 
 
 def _hit_operations(h: Hit) -> list[dict]:
@@ -366,6 +369,7 @@ def _answer_procedural(query: str, search_query: str,
         unverified_numbers=ungrounded,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
+        rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
     )
 
 

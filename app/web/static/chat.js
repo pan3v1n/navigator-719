@@ -188,13 +188,15 @@ function addSources(wrap, sources) {
   sources.forEach((s, i) => {
     const a = document.createElement("a");
     a.className = "src-item";
-    a.href = konturLink(s);
+    // s.url — прямая ссылка на первоисточник (процедурные: Правила/ПП №719/Приказ №52).
+    // Товарные источники приходят без url → строим ссылку по ОКПД2/наименованию в тексте 719.
+    a.href = s.url || konturLink(s);
     a.target = "_blank";
     a.rel = "noopener";
-    a.title = "Открыть в тексте ПП №719 (Контур.Норматив)";
+    a.title = s.url ? "Открыть первоисточник (Контур.Норматив)" : "Открыть в тексте ПП №719 (Контур.Норматив)";
     const mark = s.okpd2_match ? " (совпадение по коду)" : "";
     const codes = (s.okpd2 || []).join(", ");
-    let t = "[" + (i + 1) + "] " + s.product_name + " — " + (s.section || "") + mark;
+    let t = "[" + (i + 1) + "] " + s.product_name + (s.section ? " — " + s.section : "") + mark;
     if (codes) t += " · ОКПД2 " + codes;
     if (s.source_anchor) t += " · " + s.source_anchor;
     a.textContent = t;
