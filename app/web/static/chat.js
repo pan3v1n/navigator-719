@@ -15,9 +15,24 @@ function el(cls) {
   return d;
 }
 
-function scrollDown() {
-  scroll.scrollTop = scroll.scrollHeight;
+// «Прилипание» к низу: во время анимации ответа скроллим вниз ТОЛЬКО если пользователь и так внизу.
+// Полистал вверх (колесо/тач) — отцепляемся и не мешаем читать; вернулся к низу — прицепляемся снова.
+let stickBottom = true;
+function atBottom() {
+  return scroll.scrollHeight - scroll.scrollTop - scroll.clientHeight < 80;
 }
+function scrollDown() {
+  // форсированно (действие пользователя: отправка вопроса / открытие беседы) — всегда вниз
+  scroll.scrollTop = scroll.scrollHeight;
+  stickBottom = true;
+}
+function autoScroll() {
+  // мягко (стриминг ответа): не дёргаем вниз, если пользователь листает выше
+  if (stickBottom) scroll.scrollTop = scroll.scrollHeight;
+}
+scroll.addEventListener("wheel", (e) => { if (e.deltaY < 0) stickBottom = false; }, { passive: true });
+scroll.addEventListener("touchmove", () => { if (!atBottom()) stickBottom = false; }, { passive: true });
+scroll.addEventListener("scroll", () => { if (atBottom()) stickBottom = true; });
 
 function downloadUrl(url) {
   const a = document.createElement("a");
@@ -418,7 +433,7 @@ async function ask(text) {
     if (!streamed) await askFallback(text, pending, bubble, isNew);
   } finally {
     send.disabled = false;
-    scrollDown();
+    autoScroll();  // в конце ответа не выдёргиваем пользователя вниз, если он читает выше
   }
 }
 
@@ -456,7 +471,7 @@ async function askStream(text, pending, bubble) {
         if (ev.type === "delta") {
           acc += ev.text;
           bubble.innerHTML = renderMarkdown(acc);  // инкрементальный рендер накопленного текста
-          scrollDown();
+          autoScroll();  // следуем за текстом, только если пользователь не листает выше
         } else if (ev.type === "done") {
           done = ev;
         } else if (ev.type === "error") {
