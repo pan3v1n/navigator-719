@@ -135,6 +135,7 @@ def build_admin_view(
     matched_counts = {"да": 0, "частично": 0, "нет": 0}
     ratings: list[int] = []                                  # service-оценки 1..5
     ans_ratings: list[int] = []                              # звёзды ответов 0..5 (kind='answer')
+    orphan_ratings = 0                                       # оценки без найденного ответа — вне метрики (R2)
     ans_ratings_by_role: dict[str, list[int]] = defaultdict(list)
     region_acc: dict[str, dict] = defaultdict(
         lambda: {"users": 0, "ratings": [], "requests": 0, "tokens": 0, "cost": 0.0}
@@ -210,19 +211,28 @@ def build_admin_view(
                     matched_counts[f.matched] += 1
             elif kind == "answer":
                 orig = msg_by_id.get(f.message_id)
+                # R2: оценка-СИРОТА — ответ, к которому она привязана, не найден (беседа удалена
+                # либо легаси-строка). Такую оценку в ПРИЁМОЧНУЮ МЕТРИКУ не берём: раньше она
+                # учитывалась безусловно, и гейт 1.0 тихо искажался ответами, которых уже нет.
+                # Считаем отдельно и показываем в «Сигналах качества» — потеря данных должна быть
+                # видимой, а не молчаливой. Комментарии и исправления сохраняем в любом случае:
+                # они ценны сами по себе (обучающий материал петли кейсов).
+                orphan = orig is None
                 ans_txt = orig.content if orig else ""
                 snippet = (ans_txt[:220] + "…") if len(ans_txt) > 220 else ans_txt
-                if f.rating is not None:
+                if f.rating is not None and orphan:
+                    orphan_ratings += 1
+                elif f.rating is not None:
                     ans_ratings.append(f.rating)
                     ans_ratings_by_role[u.role].append(f.rating)
                     region_acc[u_region]["ratings"].append(f.rating)
                     answer_rows.append({  # каждый оценённый ответ (триаж ≤2★ и экспорт-скоркард)
                         "user": u.username, "region": u_region, "role": u.role,
                         "rating": f.rating, "ts": _fmt(f.ts), "_sort_ts": f.ts,
-                        "question": _question_for(orig, sess_msgs) if orig else "",
+                        "question": _question_for(orig, sess_msgs),
                         "answer": ans_txt,
-                        "unverified": orig.unverified_json if orig else None,
-                        "low_relevance": bool(orig.low_relevance) if orig else False,
+                        "unverified": orig.unverified_json,
+                        "low_relevance": bool(orig.low_relevance),
                         "comment": f.comment or "", "correction": f.correction or "",
                         "session_id": f.session_id,
                     })
@@ -370,6 +380,9 @@ def build_admin_view(
         "demand_procedural": len(procedural_questions),
         "flags_unverified": flags_unverified,
         "flags_lowrel": flags_lowrel,
+        # Оценки, чей ответ не найден: в приёмку НЕ включены (R2). Ненулевое значение — сигнал,
+        # что часть сигнала качества потеряна вместе с удалёнными беседами.
+        "orphan_ratings": orphan_ratings,
         "per_user": per_user_stat,
         "per_day": per_day_list,
         "max_requests": per_user_stat[0]["requests"] if per_user_stat else 0,

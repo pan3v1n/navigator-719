@@ -210,7 +210,7 @@ def admin_export(request: Request, fmt: str = "json", date_from: str = "", date_
     scalar = ("users_total", "users", "experts", "admins", "conversations", "requests", "answers",
               "tokens", "cost", "answer_ratings", "avg_stars", "accept_pct", "accept_user",
               "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
-              "demand_product", "demand_procedural")
+              "demand_product", "demand_procedural", "orphan_ratings")
     payload = {
         "generated_at": st["generated_at"],
         "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
@@ -255,6 +255,15 @@ def submit_feedback(fb: FeedbackIn, user: User = Depends(require_user_profiled))
         if comment is None:
             return {"ok": True, "skipped": True}
     with get_session() as db:
+        if kind == "answer":
+            # R2: оценить можно ТОЛЬКО свой ответ ассистента. Раньше проверки не было — любой
+            # залогиненный мог проставить оценку чужому message_id, и она засчитывалась в приёмку
+            # (гейт 1.0) от лица своей роли и своего региона. Метрика должна быть защищена.
+            msg = q.get_message(db, fb.message_id)
+            if msg is None or msg.user_id != user.id:
+                raise HTTPException(status_code=403, detail="Оценить можно только свой ответ")
+            if msg.role != "assistant":
+                raise HTTPException(status_code=422, detail="Оценка ставится ответу ассистента")
         q.save_feedback(
             db, user_id=user.id, kind=kind, rating=fb.rating,
             matched=(fb.matched if kind == "service" else None),

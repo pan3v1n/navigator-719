@@ -152,6 +152,31 @@ class TestAdminStats(unittest.TestCase):
         self.assertIn("version", h)
         self.assertIn("qdrant_ok", h)
 
+    def test_orphan_rating_excluded_from_gate(self):
+        """R2: оценка, чей ответ не найден, не должна попадать в приёмочную метрику.
+
+        Регресс: `ans_ratings.append(f.rating)` выполнялся безусловно, даже когда ответ по
+        `message_id` не находился (беседа удалена) — гейт 1.0 считался по ответам, которых нет,
+        а в скоркарте у них были пустые вопрос и ответ."""
+        with self.Session() as db:
+            u = self._user(db, "u", region="Курская область")
+            t = datetime(2026, 7, 20, 12, 0)
+            self._msg(db, u, "s1", "user", "Живой вопрос?", t)
+            a = self._msg(db, u, "s1", "assistant", "Живой ответ", t)
+            self._fb(db, u, t, kind="answer", rating=1, message_id=a.id, session_id="s1")
+            # сирота: 5★ на несуществующую реплику — раньше вытягивала приёмку с 0 % до 50 %
+            self._fb(db, u, t, kind="answer", rating=5, message_id=999999, session_id="s-gone",
+                     correction="а вот верное значение")
+            st = build_admin_view(db)["stats"]
+
+        self.assertEqual(st["answer_ratings"], 1)     # в метрике только живая оценка
+        self.assertEqual(st["accept_pct"], 0)         # 1★ → 0 %, сиротская 5★ не спасает
+        self.assertEqual(st["orphan_ratings"], 1)     # но потеря видима, а не молчалива
+        self.assertEqual(len(st["answer_rows"]), 1)   # в скоркард пустые строки не попадают
+        # исправление эксперта сохраняем даже без исходного ответа — это обучающий материал
+        self.assertEqual(len(st["corrections"]), 1)
+        self.assertEqual(st["corrections"][0]["correction"], "а вот верное значение")
+
     def test_day_bucket_chronological_across_months(self):
         """Регресс на баг сортировки: ключ «%d.%m» как строка ставил 01.07 раньше 30.06."""
         with self.Session() as db:

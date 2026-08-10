@@ -1,10 +1,17 @@
-"""Чат-эндпоинт веб-UI 1.0: вопрос эксперта → движок навигатора → лог диалога в БД → ответ.
+"""Чат-эндпоинты веб-UI 1.0: вопрос эксперта → движок навигатора → лог диалога в БД → ответ.
 
-Эндпоинт СИНХРОННЫЙ (`def`) — FastAPI исполняет его в threadpool (как `/navigate`); движок
-(`pipeline.answer`: e5 + Qdrant + DeepSeek) блокирующий, event loop не держим. Диалог группируется
-по `session_id` (одна беседа = один id). Реплики (вопрос + ответ + флаги качества) логируются в БД —
-их видит admin. History-aware follow-up («а какой порог?») — отложенный fast-follow: сейчас каждый
-вопрос самостоятелен.
+Две ручки на один движок: `POST /api/chat` (обычный ответ) и `POST /api/chat/stream` (SSE-стриминг,
+T18) — фронт сперва пробует стрим, при обрыве откатывается на первую. Обе СИНХРОННЫЕ (`def`):
+FastAPI исполняет их в threadpool (как `/navigate`), движок (e5 + Qdrant + DeepSeek) блокирующий,
+event loop не держим.
+
+Диалог группируется по `session_id` (одна беседа = один id). Реплики (вопрос + ответ + флаги
+качества + токены) логируются в БД — их видит admin.
+
+МУЛЬТИТЁРН: реализован. `_load_history` поднимает последние 12 реплик беседы и передаёт их движку;
+уточняющий вопрос («а какой порог?») понимается в контексте прошлых ходов — контекстуализация для
+поиска и якорь-код диалога живут в `pipeline._plan_answer`. Для новой беседы история пуста →
+поведение как у одиночного вопроса.
 """
 
 from __future__ import annotations
@@ -246,10 +253,13 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
 
 @router.delete("/api/conversations/{session_id}")
 def delete_conversation(session_id: str, user: User = Depends(require_user)) -> dict:
-    """Удалить беседу пользователя (только свою — фильтр по user_id)."""
+    """Удалить беседу пользователя (только свою — фильтр по user_id).
+
+    Вместе с репликами уходят и оценки этой беседы (R2) — иначе они оставались сиротами и
+    продолжали учитываться в приёмочной метрике без вопроса и ответа."""
     with get_session() as db:
-        removed = q.delete_session(db, user.id, session_id)
-    return {"ok": True, "removed": removed}
+        removed, removed_feedback = q.delete_session(db, user.id, session_id)
+    return {"ok": True, "removed": removed, "removed_feedback": removed_feedback}
 
 
 def _serialize_messages(msgs, include_sources: bool = True) -> list[dict]:

@@ -85,6 +85,12 @@ def log_message(
     return m
 
 
+def get_message(db: Session, message_id: int) -> Message | None:
+    """Реплика по id — для проверки владельца перед сохранением оценки (см. web.submit_feedback).
+    Без этой проверки любой залогиненный мог оценить ЧУЖОЙ ответ, и оценка попадала в приёмку."""
+    return db.get(Message, message_id)
+
+
 def get_messages_for_user(db: Session, user_id: int) -> list[Message]:
     return list(
         db.execute(
@@ -120,16 +126,37 @@ def get_session_messages(db: Session, user_id: int, session_id: str) -> list[Mes
     )
 
 
-def delete_session(db: Session, user_id: int, session_id: str) -> int:
-    """Удаляет беседу пользователя (все её реплики). Фильтр по user_id — чужое не тронуть.
-    Возвращает число удалённых реплик."""
-    from sqlalchemy import delete as _delete
+def delete_session(db: Session, user_id: int, session_id: str) -> tuple[int, int]:
+    """Удаляет беседу пользователя: её реплики И привязанную к ним обратную связь.
 
+    Оценки удаляем ВМЕСТЕ с репликами (R2). Раньше уходили только `Message`, а строки `Feedback`
+    оставались висеть на несуществующем `message_id` — и продолжали учитываться в приёмочной
+    метрике (гейт 1.0), при том что вопрос и ответ в скоркарте были пустые. То есть пользователь,
+    удаляя свой чат, тихо искажал главную метрику проекта.
+
+    Фильтр по `user_id` везде — чужое не тронуть. Всё в одной транзакции.
+    Возвращает (удалено реплик, удалено записей обратной связи)."""
+    from sqlalchemy import delete as _delete, or_
+
+    msg_ids = list(
+        db.execute(
+            select(Message.id).where(
+                Message.user_id == user_id, Message.session_id == session_id
+            )
+        ).scalars()
+    )
+    # Оценка привязана к беседе (session_id) ИЛИ к конкретной реплике (message_id) — чистим оба следа.
+    fb_where = [Feedback.session_id == session_id]
+    if msg_ids:
+        fb_where.append(Feedback.message_id.in_(msg_ids))
+    fb_res = db.execute(
+        _delete(Feedback).where(Feedback.user_id == user_id, or_(*fb_where))
+    )
     res = db.execute(
         _delete(Message).where(Message.user_id == user_id, Message.session_id == session_id)
     )
     db.commit()
-    return res.rowcount or 0
+    return res.rowcount or 0, fb_res.rowcount or 0
 
 
 # --- feedback ------------------------------------------------------------
