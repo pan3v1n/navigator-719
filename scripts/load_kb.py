@@ -6,11 +6,17 @@
   • sparse-вектор — локальный BM25 (app/rag/sparse, Modifier.IDF на коллекции);
   • payload — ВСЯ структура записи из structured/*.json (чтобы не перепарсивать) +
     служебные поля для фильтра (okpd2_codes, section_roman, text).
-  • текст для ЭМБЕДДИНГА (dense+sparse) ПО УМОЛЧАНИЮ — ИДЕНТИЧНОСТЬ записи
-    (build_embedding_text: имя/раздел/код/порог), БЕЗ операций; операции остаются в payload.
-    Это F1 (2026-06-30): полный текст топил дискриминативный сигнал имени бойлерплейтом →
-    product-level recall@1 0.886→0.972, перефраз raw 0.533→0.663 (см. docs/eval_coverage_report.md,
-    docs/eval_paraphrase_report.md). Откат к старому полному тексту — флаг --full-text.
+  • тексты для векторов РАЗНЫЕ (R9, асимметрия):
+      – DENSE — ИДЕНТИЧНОСТЬ записи (build_embedding_text: имя/раздел/код/порог), БЕЗ операций.
+        Это F1 (2026-06-30): полный текст топил дискриминативный сигнал имени бойлерплейтом →
+        product-level recall@1 0.886→0.972, перефраз raw 0.533→0.663 (docs/eval_coverage_report.md,
+        docs/eval_paraphrase_report.md).
+      – SPARSE — ПОЛНЫЙ текст записи (build_text: + компоненты, операции, методичка, примечания).
+        До R9 sparse строился из того же identity-текста, и BM25 терял свой единственный смысл:
+        лексический поиск по формулировкам требований («закалка зубьев», «пайка волной») не
+        работал НИ ОДНИМ каналом — этих слов не было в индексе. Гибрид вырождался в
+        «dense + BM25 по четырём полям идентичности».
+    Откат обоих каналов на полный текст (состояние до F1) — флаг --full-text.
 
 Запуск (из корня, через venv; нужен поднятый Qdrant на :6333):
   .venv/Scripts/python.exe scripts/load_kb.py            # пересоздать коллекцию и загрузить всё
@@ -217,7 +223,21 @@ def dense_vectors_cached(texts: list[str], batch: int = 128) -> list[list[float]
     return [cache[k].tolist() for k in keys]
 
 
-def index_all(client, recs: list[dict], batch: int = 128, text_fn=build_embedding_text) -> None:
+def index_all(client, recs: list[dict], batch: int = 128,
+              text_fn=build_embedding_text, sparse_text_fn=build_text) -> None:
+    """Индексация с АСИММЕТРИЧНЫМ текстом: dense — identity, sparse — полный текст (R9).
+
+    Почему асимметрия. F1 (2026-06-30) убрал операции из текста эмбеддинга и поднял
+    product-level recall@1 0.886→0.972 — для dense это верно: многословные generic-операции
+    схлопывают вектор к centroid'у «обобщённой машины». Но тот же текст использовался и для
+    sparse, и BM25 из-за этого потерял СВОЙ ЕДИНСТВЕННЫЙ СМЫСЛ — лексический поиск по
+    формулировкам требований. Запрос «закалка зубьев» или «пайка волной» не находил ничего
+    ни одним каналом: этих слов не было в индексе, гибрид выродился в «dense + BM25 по четырём
+    полям идентичности».
+
+    Теперь: dense — `build_embedding_text` (имя/раздел/код/порог), sparse — `build_text`
+    (то же плюс компоненты, операции, методичка, примечания). `avgdl` считается по SPARSE-текстам,
+    иначе нормировка BM25 по длине была бы к чужому корпусу."""
     from qdrant_client import models
 
     try:
@@ -226,11 +246,14 @@ def index_all(client, recs: list[dict], batch: int = 128, text_fn=build_embeddin
         tqdm = None
 
     name = settings.QDRANT_COLLECTION
-    texts = [text_fn(r) for r in recs]
-    # средняя длина документа в токенах — для нормировки BM25 по длине
-    lengths = [doc_length(t) for t in texts]
+    texts = [text_fn(r) for r in recs]                     # dense: идентичность записи
+    sparse_texts = [sparse_text_fn(r) for r in recs]       # sparse: полный текст записи
+    # средняя длина документа в токенах — для нормировки BM25 по длине (по SPARSE-текстам!)
+    lengths = [doc_length(t) for t in sparse_texts]
     avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
-    print(f"avgdl (токенов на чанк): {avgdl:.1f}  | макс={max(lengths)}  мин={min(lengths)}")
+    d_len = [doc_length(t) for t in texts]
+    print(f"avgdl sparse (токенов на чанк): {avgdl:.1f}  | макс={max(lengths)}  мин={min(lengths)}")
+    print(f"для сравнения, длина dense-текста: сред={sum(d_len)/len(d_len):.1f}  макс={max(d_len)}")
 
     dense_all = dense_vectors_cached(texts, batch=batch)
 
@@ -239,9 +262,9 @@ def index_all(client, recs: list[dict], batch: int = 128, text_fn=build_embeddin
         points = []
         for k in range(start, min(start + batch, len(recs))):
             rec, text = recs[k], texts[k]
-            idx, val = document_vector(text, avgdl)
+            idx, val = document_vector(sparse_texts[k], avgdl)  # R9: BM25 — по ПОЛНОМУ тексту
             payload = dict(rec)
-            payload["text"] = text
+            payload["text"] = text  # идентичность (то, что легло в dense) — для отладки выдачи
             payload["okpd2_prefixes"] = okpd2_prefixes(rec.get("okpd2_codes") or [])  # T5: частичный код
             points.append(
                 models.PointStruct(
@@ -310,7 +333,8 @@ def main() -> None:
     ap.add_argument("--smoke-only", action="store_true", help="только smoke-запросы (без перезагрузки)")
     ap.add_argument("--batch", type=int, default=128, help="размер батча апсерта")
     ap.add_argument("--full-text", action="store_true",
-                    help="откат к эмбеддингу ВСЕГО текста с операциями; по умолчанию — identity (F1)")
+                    help="откат: DENSE тоже на полном тексте с операциями (до F1). По умолчанию "
+                         "асимметрия — dense на идентичности (F1), sparse на полном тексте (R9)")
     args = ap.parse_args()
 
     client = make_client()
@@ -320,7 +344,8 @@ def main() -> None:
         n_prod = sum(1 for r in recs if r.get("record_type") != "section_methodology")
         print(f"Записей к загрузке: {len(recs)} (продуктов {n_prod} + методичек {len(recs) - n_prod})")
         text_fn = build_text if args.full_text else build_embedding_text
-        mode = "FULL-TEXT (операции в векторе)" if args.full_text else "IDENTITY (F1: имя/раздел/код/порог; операции лишь в payload)"
+        mode = ("FULL-TEXT: и dense, и sparse на полном тексте (откат до F1)" if args.full_text
+                else "АСИММЕТРИЯ (R9): dense — идентичность (F1), sparse — полный текст")
         print(f"Эмбеддинг: {mode}. Коллекция: {settings.QDRANT_COLLECTION}")
         recreate_collection(client)
         index_all(client, recs, batch=args.batch, text_fn=text_fn)

@@ -796,6 +796,54 @@ class TestOkpd2Prefixes(unittest.TestCase):
         self.assertEqual(okpd2_prefixes([]), [])
 
 
+class TestIndexTextAsymmetry(unittest.TestCase):
+    """R9: dense и sparse индексируются РАЗНЫМ текстом.
+
+    До R9 оба канала строились из identity-текста, и BM25 терял свой единственный смысл —
+    лексический поиск по формулировкам требований. Гибрид вырождался в «dense + BM25 по четырём
+    полям идентичности»."""
+
+    REC = {
+        "product_name": "Краны грузоподъемные стрелкового типа",
+        "section_roman": "III", "section_title": "Спецмашиностроение",
+        "okpd2_codes": ["28.22.14.125"], "min_threshold": "не менее 10 баллов",
+        "requirement_blocks": [{"component": "несущая рама",
+                                "operations": [{"text": "сварка и покраска стрелы", "points": 7}]}],
+        "notes": "примечание к позиции",
+    }
+
+    def setUp(self):
+        from load_kb import build_embedding_text, build_text  # ленивый: модуль тянет embeddings
+        self.dense = build_embedding_text(self.REC)
+        self.sparse = build_text(self.REC)
+
+    def test_identity_present_in_both(self):
+        for t in (self.dense, self.sparse):
+            self.assertIn("Краны грузоподъемные стрелкового типа", t)
+            self.assertIn("28.22.14.125", t)
+            self.assertIn("не менее 10 баллов", t)
+
+    def test_operations_only_in_sparse_text(self):
+        self.assertNotIn("сварка и покраска стрелы", self.dense)  # F1: операции топят dense
+        self.assertIn("сварка и покраска стрелы", self.sparse)    # R9: но нужны BM25
+        self.assertNotIn("несущая рама", self.dense)
+        self.assertIn("несущая рама", self.sparse)
+
+    def test_requirement_phrase_is_searchable_only_via_sparse(self):
+        from app.rag import sparse as sp
+        q = set(sp.tokenize("сварка стрелы"))
+        self.assertFalse(q <= set(sp.tokenize(self.dense)))
+        self.assertTrue(q <= set(sp.tokenize(self.sparse)))
+
+    def test_index_all_defaults_to_asymmetric(self):
+        import inspect
+
+        import load_kb
+        sig = inspect.signature(load_kb.index_all)
+        self.assertIs(sig.parameters["text_fn"].default, load_kb.build_embedding_text)
+        self.assertIs(sig.parameters["sparse_text_fn"].default, load_kb.build_text)
+
+
 class TestProceduralCorpus(unittest.TestCase):
     """Волна 1 шаг 1: парсеры доп. процедурных источников — тело ПП №719 + Приказ ТПП №52."""
 
