@@ -93,9 +93,26 @@ def _fmt(row: dict, note: str, section: str) -> str:
 # примечания (прим. 8(1): «…не менее N баллов для лопастей…», без кода) сюда НЕ попадают — покрыты
 # verified_cases / отдельной доработкой.
 _NOTE_HDR_RE = re.compile(r"^(\d+(?:\(\d+\))?)\.\s")            # «7.», «8(1).», «52.»
-_FLAT_ROW_RE = re.compile(r'^(?:из\s+)?\d{2}(?:\.\d+)*\s*"')     # строка-порог: начинается с «код "»
-_CODE_BEFORE_Q_RE = re.compile(r'(?:^|,)\s*(?:из\s+)?(\d{2}(?:\.\d+)*)\s*"')  # коды перед кавычкой
+# Строка-порог начинается с кода (кодов) и кавычки. Два реальных усложнения корпуса, из-за которых
+# раньше терялись десятки порогов (R7):
+#   * СНОСКА между кодом и наименованием: «19.20.31 <11> "Пропан и бутан сжиженные" - не менее 300…»
+#   * НЕСКОЛЬКО КОДОВ через запятую: «из 20.13.43.110, из 20.13.43.111, из 20.13.43.119 "Сода…"»
+# Прежняя регулярка требовала кавычку сразу за первым кодом и не брала ни то, ни другое.
+_CODE_TOKEN = r"(?:из\s+)?\d{2}(?:\.\d+)*(?:\s*<[^>\n]{1,16}>)?"
+_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}(?:\s*,\s*{_CODE_TOKEN})*\s*"', re.IGNORECASE)
+_FOOTNOTE_RE = re.compile(r"<[^>\n]{1,16}>")
+_CODE_ONLY_RE = re.compile(r"\d{2}(?:\.\d+)*")
 _NAME_Q_RE = re.compile(r'"([^"]+)"')
+
+
+def _codes_before_quote(line: str) -> list[str]:
+    """Все коды в левой части строки — ДО первой кавычки.
+
+    Отсечка по кавычке обязательна: иначе в «коды» попадают числа из наименования продукции
+    («чистотой менее 95 процентов»). Сноски вырезаем до поиска, иначе «<11>» даёт «код» 11."""
+    q = line.find('"')
+    left = line[:q] if q > 0 else line
+    return _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", left))
 _AMEND_STRIP_RE = re.compile(r"\s*\(в ред\.(?:[^()]|\([^()]*\))*\)")
 
 
@@ -121,12 +138,12 @@ def _flat_thresholds() -> list[dict]:
                 j = ln.find("не менее")
                 left = ln[:j]
                 thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip().rstrip(";. ").strip()
-                codes = _CODE_BEFORE_Q_RE.findall(left)
+                codes = _codes_before_quote(ln)
                 if codes and thr:
                     rows.append({"codes": codes, "names": _NAME_Q_RE.findall(left),
                                  "threshold": thr, "note": note})
             elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
-                codes = _CODE_BEFORE_Q_RE.findall(ln)
+                codes = _codes_before_quote(ln)
                 names = _NAME_Q_RE.findall(ln)
                 steps: list[str] = []
                 k = i + 1

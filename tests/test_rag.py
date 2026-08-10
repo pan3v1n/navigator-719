@@ -628,6 +628,40 @@ class TestThresholds(unittest.TestCase):
         self.assertIsNotNone(thr)
         self.assertNotIn("порог задан для группы", thr)  # это её собственный порог
 
+    def test_operations_model_says_threshold_not_applicable(self):
+        """R7: «порога нет в 719» и «порог не нашли» — разные вещи, и путать их нельзя.
+
+        Молчание заставляло модель писать «Порог: в контексте не указан» — читается как пробел в
+        данных, это была жалоба №1 теста. Но у 370 позиций требования заданы ПЕРЕЧНЕМ операций без
+        баллов, и порога в постановлении для них просто не существует."""
+        hit = make_hit(min_threshold=None, okpd2_codes=["99.99"], product_name="Нечто без порога",
+                       payload={"requirement_type": "operations"},
+                       requirement_blocks=[{"operations": [{"text": "сборка", "points": None}]}])
+        self.assertIn("Порог: не предусмотрен", format_context([hit]))
+
+    def test_points_model_without_threshold_stays_silent(self):
+        # у позиции есть баллы → порог обязан быть; не нашли — молчим, а не заявляем «не предусмотрен»
+        hit = make_hit(min_threshold=None, okpd2_codes=["99.99"], product_name="Нечто с баллами",
+                       payload={"requirement_type": "points"},
+                       requirement_blocks=[{"operations": [{"text": "сборка", "points": 5}]}])
+        ctx = format_context([hit])
+        self.assertNotIn("Порог: не предусмотрен", ctx)
+        # и на смешанном типе без найденных баллов тоже молчим (возможна потеря при разборе)
+        hit2 = make_hit(min_threshold=None, okpd2_codes=["99.99"], product_name="Нечто смешанное",
+                        payload={"requirement_type": "mixed"},
+                        requirement_blocks=[{"operations": [{"text": "сборка", "points": None}]}])
+        self.assertNotIn("Порог: не предусмотрен", format_context([hit2]))
+
+    def test_threshold_parses_footnote_and_multicode_rows(self):
+        """R7: два формата строк примечаний, которые парсер раньше терял целиком."""
+        # сноска между кодом и наименованием: «19.20.31 <11> "Пропан и бутан сжиженные" - …»
+        self.assertIn("300 баллов", lookup_threshold(["19.20.31"], "Пропан и бутан сжиженные", "XXI"))
+        # несколько кодов через запятую: «из 20.13.43.110, из 20.13.43.111, из 20.13.43.119 "Сода…"»
+        for code in ("20.13.43.110", "20.13.43.111", "20.13.43.119"):
+            thr = lookup_threshold([code], "Сода кальцинированная", "XXI")
+            self.assertIsNotNone(thr, code)
+            self.assertIn("460 баллов", thr)
+
     def test_flat_threshold_none_when_absent(self):
         self.assertIsNone(lookup_threshold(["28.41.1"], "Станки лазерные"))
 

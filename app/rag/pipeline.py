@@ -117,19 +117,32 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         # (thresholds.py; напр. Чиллеры разд.XVI прим.77). Числа дословны → заземлены для гарда.
         mt = h.min_threshold or (lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
                                  if is_target else None)
-        if mt:
-            lines.append(f"    Порог: {mt}")
         ops = _hit_operations(h)
         # R6 шаг 3: своих требований нет → показываем требования ГРУППЫ с явной атрибуцией.
         # Подмены не происходит: строка-атрибуция называет позицию-источник, а промпт обязан
         # это воспроизвести. Баллы не суммируем — это решает эксперт по первоисточнику.
         parent = None if ops else inheritance.lookup(h.section_roman, h.product_name)
+        attribution_line = None
         if parent:
-            lines.append("    " + inheritance.attribution(parent))
+            attribution_line = "    " + inheritance.attribution(parent)
             ops = list(parent.get("operations") or [])
             if parent.get("min_threshold") and not mt:
-                lines.append(f"    Порог группы (у позиции «{parent.get('product_name','')}»): "
-                             f"{parent['min_threshold']}")
+                mt = (f"{parent['min_threshold']} — порог ГРУППЫ, указан у позиции "
+                      f"«{parent.get('product_name', '')}»")
+        # R7: различаем «порог не нашли» и «порога НЕТ в 719». Если требования позиции — перечень
+        # обязательных операций без баллов (модель «operations»), то порога не существует, и молчание
+        # заставляло модель писать «в контексте не указан» — читается как пробел в данных и было
+        # жалобой №1 теста. Утверждаем это только при ДВУХ согласных признаках: ни у одной операции
+        # нет баллов И тип требований не балльный. При «points»/«mixed» без баллов молчим — там
+        # возможна потеря при разборе, и выдумывать «порога нет» нельзя.
+        rtype = (h.payload or {}).get("requirement_type")
+        if mt:
+            lines.append(f"    Порог: {mt}")
+        elif ops and not any(o.get("points") is not None for o in ops) and rtype in (None, "operations"):
+            lines.append("    Порог: не предусмотрен — требования этой позиции заданы ПЕРЕЧНЕМ "
+                         "обязательных операций, баллы за них не начисляются.")
+        if attribution_line:
+            lines.append(attribution_line)
         total = len(ops)
         if total > cap:
             ops = _rank_operations(ops, query)
