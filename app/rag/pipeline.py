@@ -19,7 +19,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import fragments, okpd2_ref, sparse
+from app.rag import fragments, inheritance, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
@@ -120,12 +120,22 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         if mt:
             lines.append(f"    Порог: {mt}")
         ops = _hit_operations(h)
+        # R6 шаг 3: своих требований нет → показываем требования ГРУППЫ с явной атрибуцией.
+        # Подмены не происходит: строка-атрибуция называет позицию-источник, а промпт обязан
+        # это воспроизвести. Баллы не суммируем — это решает эксперт по первоисточнику.
+        parent = None if ops else inheritance.lookup(h.section_roman, h.product_name)
+        if parent:
+            lines.append("    " + inheritance.attribution(parent))
+            ops = list(parent.get("operations") or [])
+            if parent.get("min_threshold") and not mt:
+                lines.append(f"    Порог группы (у позиции «{parent.get('product_name','')}»): "
+                             f"{parent['min_threshold']}")
         total = len(ops)
         if total > cap:
             ops = _rank_operations(ops, query)
         shown = ops[:cap]
         if shown:
-            lines.append("    Ключевые операции:")
+            lines.append("    Ключевые операции группы:" if parent else "    Ключевые операции:")
             for o in shown:
                 pts = o.get("points")
                 ptxt = f" — {pts} балл." if pts is not None else " — баллы в контексте не указаны"

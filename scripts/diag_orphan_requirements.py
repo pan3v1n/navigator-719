@@ -384,6 +384,104 @@ def find_fragmented(rows: list[Row]) -> list[list[Row]]:
     return out
 
 
+# --------------------------------------------------------------------------- #
+# R6 шаг 3: карта наследования требований от родителя группы
+# --------------------------------------------------------------------------- #
+def record_operations(rec: dict) -> list[dict]:
+    """Требования записи ровно по правилу рантайма (`pipeline._hit_operations`)."""
+    out: list[dict] = []
+    for b in rec.get("requirement_blocks") or []:
+        ops = b.get("operations") or []
+        if ops:
+            out.extend({"text": (o.get("text") or ""), "points": o.get("points")} for o in ops)
+        elif (b.get("component") or "").strip():
+            out.append({"text": b["component"].strip(), "points": None})
+    return out
+
+
+def _map_key(section: str | None, name: str | None) -> str:
+    """Ключ позиции: раздел + ПЕРВАЯ строка наименования без маркеров сносок.
+
+    Раздел обязателен — одноимённые позиции встречаются в разных разделах, без него наследование
+    уехало бы в чужой раздел. Сноски (`<9>`) снимаем: в исходной таблице имя пишется со сноской
+    («Спасательные жилеты <9>»), а в записи базы — без неё, и без нормализации не находился
+    родитель у 130 позиций, включая весь раздел XVIII (99 наследников)."""
+    first = (name or "").strip().split("\n")[0]
+    first = _FOOTNOTE.sub(" ", first)
+    return f"{section or '?'}|{re.sub(r'\s+', ' ', first).strip().lower()}"
+
+
+def build_inheritance_map(recs: list[dict], chunks: dict[str, list[Row]], out: Path) -> None:
+    """Строит карту «позиция без требований → требования родителя её группы».
+
+    Осознанные ОТКАЗЫ (лучше не показать, чем показать чужое):
+      * только INHERIT/HIGH — MEDIUM/LOW и прочие категории не берём;
+      * родитель обязан иметь требования сам (иначе наследовать нечего);
+      * позиции из R29 (расколотая ячейка) исключаются с обеих сторон: там текст родителя —
+        оборванная вводная, потомок получил бы фразу без списка.
+    """
+    from app.rag import fragments  # локальный импорт: скрипт работает и без поднятого приложения
+
+    by_key = {_map_key(r.get("section_roman"), r.get("product_name")): r for r in recs}
+    ops_by_name: dict[str, int] = {}
+    for r in recs:
+        k = _norm(r.get("product_name"))
+        ops_by_name[k] = max(ops_by_name.get(k, 0), n_operations(r))
+
+    parents: dict[str, dict] = {}
+    children: dict[str, str] = {}
+    skipped: Counter = Counter()
+
+    for rec in [r for r in recs if n_operations(r) == 0]:
+        sec = rec.get("section_roman")
+        rows = chunks.get(sec or "")
+        if not rows:
+            skipped["нет чанка раздела"] += 1
+            continue
+        f = classify(rec, rows, ops_by_name)
+        if f.category != "INHERIT" or f.confidence != "HIGH":
+            skipped[f"не INHERIT/HIGH ({f.category})"] += 1
+            continue
+        if fragments.is_fragmented(rec.get("product_name")) or fragments.is_fragmented(f.parent["name"]):
+            skipped["R29: расколотая ячейка"] += 1
+            continue
+        p_rec = by_key.get(_map_key(sec, f.parent["name"]))
+        if p_rec is None:
+            skipped["родитель не найден в базе"] += 1
+            continue
+        p_ops = record_operations(p_rec)
+        if not p_ops:
+            skipped["у родителя самого нет требований"] += 1
+            continue
+        p_key = _map_key(sec, p_rec.get("product_name"))
+        parents.setdefault(p_key, {
+            "section": sec,
+            "product_name": (p_rec.get("product_name") or "").split("\n")[0],
+            "okpd2_codes": p_rec.get("okpd2_codes") or [],
+            "min_threshold": p_rec.get("min_threshold"),
+            "operations": p_ops,
+        })
+        children[_map_key(sec, rec.get("product_name"))] = p_key
+
+    out.parent.mkdir(parents=True, exist_ok=True)
+    out.write_text(json.dumps({
+        "_comment": ("Карта наследования требований по группам приложения 719 (R6). Генерируется "
+                     "детерминированно: scripts/diag_orphan_requirements.py --inheritance. "
+                     "Правится ТОЛЬКО перегенерацией."),
+        "parents": parents, "children": children,
+    }, ensure_ascii=False, indent=1), encoding="utf-8")
+
+    print(f"Карта наследования → {out}")
+    print(f"  позиций-наследников: {len(children)}")
+    print(f"  различных родителей: {len(parents)}")
+    print(f"  требований у родителей суммарно: {sum(len(p['operations']) for p in parents.values())}")
+    print("\n  ОТКАЗЫ (осознанные):")
+    for k, v in skipped.most_common():
+        print(f"    {v:>4}  {k}")
+    per_sec = Counter(k.split("|")[0] for k in children)
+    print("\n  по разделам:", dict(per_sec.most_common(10)))
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Диагностика позиций 719 без требований (R6, шаг 1)")
     ap.add_argument("--section", help="ограничить одним разделом (римская цифра, напр. XVIII)")
@@ -391,6 +489,8 @@ def main() -> None:
     ap.add_argument("--json", help="куда сложить машиночитаемый результат")
     ap.add_argument("--fragments", metavar="PATH",
                     help="R29: выгрузить позиции с РАСКОЛОТОЙ общей ячейкой требований")
+    ap.add_argument("--inheritance", metavar="PATH",
+                    help="R6 шаг 3: построить карту наследования требований от родителя группы")
     args = ap.parse_args()
 
     chunks: dict[str, list[Row]] = {}
@@ -424,6 +524,10 @@ def main() -> None:
             for p in g["positions"]:
                 print(f"     {','.join(p['okpd2_codes']) or '(код объединён)':<16} "
                       f"{p['product_name'][:46]:<46} {p['req_preview'][:60]}")
+        return
+
+    if args.inheritance:
+        build_inheritance_map(recs, chunks, Path(args.inheritance))
         return
 
     orphans = [r for r in recs if n_operations(r) == 0]

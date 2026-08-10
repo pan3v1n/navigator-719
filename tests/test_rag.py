@@ -208,6 +208,47 @@ class TestContextAndDisclaimer(unittest.TestCase):
                      "Хладон-125 ХП", "Мономер-6 технический (гексафторпропилен технический)"):
             self.assertTrue(fragments.is_fragmented(name), name)
 
+    def test_inherited_group_requirements_are_attributed(self):
+        """R6 шаг 3: позиция без своих требований получает требования ГРУППЫ — но с атрибуцией.
+
+        «Автокраны» (29.10.51) в приложении имеют пустую ячейку требований: они входят в группу
+        «Краны грузоподъемные стрелкового типа» (28.22.14.125). Подмены быть не должно — в контексте
+        обязана стоять строка, называющая позицию-источник, иначе эксперт примет групповые
+        требования за собственные и не заметит подмены (гард такое не ловит)."""
+        hit = make_hit(product_name="Автокраны", section_roman="III",
+                       okpd2_codes=["29.10.51"], requirement_blocks=[])
+        ctx = format_context([hit])
+        self.assertIn("ТРЕБОВАНИЯ ГРУППЫ", ctx)
+        self.assertIn("Краны грузоподъемные стрелкового типа", ctx)   # источник назван
+        self.assertIn("28.22.14.125", ctx)                            # и его код тоже
+        self.assertIn("Ключевые операции группы:", ctx)               # заголовок отличается от «своих»
+
+    def test_own_requirements_are_not_replaced_by_group(self):
+        # у позиции есть свои требования → наследование не включается
+        hit = make_hit(product_name="Автокраны", section_roman="III", okpd2_codes=["29.10.51"],
+                       requirement_blocks=[{"operations": [{"text": "сварка стрелы", "points": 7}]}])
+        ctx = format_context([hit])
+        self.assertNotIn("ТРЕБОВАНИЯ ГРУППЫ", ctx)
+        self.assertIn("сварка стрелы — 7 балл.", ctx)
+
+    def test_inheritance_lookup_keyed_by_section(self):
+        from app.rag import inheritance
+        self.assertIsNotNone(inheritance.lookup("III", "Автокраны"))
+        # тот же наименование в ЧУЖОМ разделе не должно наследовать
+        self.assertIsNone(inheritance.lookup("XVIII", "Автокраны"))
+        self.assertIsNone(inheritance.lookup(None, None))
+        # сноски и регистр в наименовании не мешают
+        self.assertIsNotNone(inheritance.lookup("III", " автокраны <9> "))
+
+    def test_fragmented_positions_excluded_from_inheritance(self):
+        """R29 и R6 не должны конфликтовать: у позиции с расколотой ячейкой родитель — оборванная
+        вводная, наследовать от него нельзя (потомок получил бы фразу без списка)."""
+        from app.rag import fragments, inheritance
+        for name in ("Аддитивные установки экструзии материала", "Хладон-125 ХП"):
+            self.assertTrue(fragments.is_fragmented(name), name)
+            self.assertIsNone(inheritance.lookup("I", name))
+            self.assertIsNone(inheritance.lookup("XXI", name))
+
     def test_format_context_ranks_relevant_ops(self):
         # мега-продукт: релевантная операция стоит ПОСЛЕ порога усечения
         from app.rag.pipeline import MAX_OPS_PER_HIT
