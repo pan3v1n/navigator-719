@@ -4,7 +4,12 @@
 ключевые требования, источники и чек-лист документов. Вызывает navigate() напрямую
 (in-process), отдельный API-сервер для MVP не нужен.
 
+СТАТУС: ранний MVP, вытеснен веб-чатом 1.0 (`main.py` + `app/web/`). Оставлен как запасной путь и
+демонстрация движка без auth/БД. В рантайме сервиса НЕ участвует, `.dockerignore` исключает
+`frontend/` из образа, поэтому streamlit вынесен из `requirements.txt` в `requirements-dev.txt`.
+
 Запуск (нужен поднятый Qdrant и DEEPSEEK_API_KEY в .env):
+  .venv/Scripts/pip install -r requirements-dev.txt
   .venv/Scripts/streamlit run frontend/streamlit_app.py
 """
 

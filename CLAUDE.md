@@ -87,8 +87,10 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 ├── ROADMAP.md             ← фазы разработки и статус
 ├── .env.example           ← шаблон переменных окружения
 ├── .gitignore
-├── requirements.txt       ← зависимости Python
-├── main.py                ← точка запуска (FastAPI или Streamlit)
+├── .github/workflows/     ← CI: юнит-тесты на push и PR
+├── requirements.txt       ← зависимости сервиса (рантайм)
+├── requirements-dev.txt   ← только для разработчика (streamlit-MVP); тестам не нужен
+├── main.py                ← точка запуска FastAPI (веб-чат 1.0)
 │
 ├── app/                   ← дерево ниже сверено с файлами 2026-08-10
 │   ├── core/
