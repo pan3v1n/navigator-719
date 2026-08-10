@@ -138,6 +138,42 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn("СОВПАДЕНИЕ ПО КОДУ ОКПД2", format_context([make_hit(okpd2_match=True)]))
         self.assertNotIn("СОВПАДЕНИЕ ПО КОДУ ОКПД2", format_context([make_hit(okpd2_match=False)]))
 
+    def test_component_only_block_is_shown_as_requirement(self):
+        """R6: блок без operations, но с текстом в component — это ТРЕБОВАНИЕ, а не заголовок.
+
+        Регресс: `_hit_operations` читал только `operations`, и такие блоки не попадали в контекст
+        вообще — молча терялось 56 449 символов требований по 84 позициям (у 77 из них есть другие
+        операции, поэтому потеря была незаметна). Класс потерянного — «обязательные требования»:
+        права на КД/ТД, сервисный центр."""
+        rights = ("наличие у юридического лица - налогового резидента прав на конструкторскую "
+                  "и техническую документацию на срок не менее 5 лет")
+        hit = make_hit(requirement_blocks=[
+            {"component": rights, "operations": []},
+            {"component": "несущая рама", "operations": [{"text": "сварка рамы", "points": 9}]},
+        ])
+        ctx = format_context([hit])
+        self.assertIn(rights, ctx)                       # требование видно
+        self.assertIn("сварка рамы — 9 балл.", ctx)      # обычные операции не сломаны
+        # баллы требованию не приписаны → промпт выведет его как обязательное
+        self.assertIn(rights + " — баллы в контексте не указаны", ctx)
+        # заголовок узла у блока С операциями требованием НЕ становится
+        self.assertNotIn("несущая рама — баллы", ctx)
+
+    def test_component_only_keeps_source_order(self):
+        # порядок первоисточника важен: обязательные требования стоят первыми и не должны
+        # уезжать в хвост, где их срежет кап MAX_OPS_TARGET
+        hit = make_hit(requirement_blocks=[
+            {"component": "первое обязательное требование позиции", "operations": []},
+            {"component": "узел", "operations": [{"text": "вторая операция", "points": 5}]},
+        ])
+        ops = [o["text"] for o in pipeline_mod._hit_operations(hit)]
+        self.assertEqual(ops, ["первое обязательное требование позиции", "вторая операция"])
+
+    def test_empty_component_without_operations_ignored(self):
+        hit = make_hit(requirement_blocks=[{"component": "", "operations": []},
+                                           {"component": None, "operations": []}])
+        self.assertEqual(pipeline_mod._hit_operations(hit), [])
+
     def test_format_context_ranks_relevant_ops(self):
         # мега-продукт: релевантная операция стоит ПОСЛЕ порога усечения
         from app.rag.pipeline import MAX_OPS_PER_HIT

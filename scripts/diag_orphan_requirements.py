@@ -180,7 +180,17 @@ def load_structured() -> list[dict]:
 
 
 def n_operations(rec: dict) -> int:
-    return sum(len(b.get("operations") or []) for b in (rec.get("requirement_blocks") or []))
+    """Сколько требований позиции РЕАЛЬНО попадёт в контекст ответа.
+
+    Считаем ровно по правилу рантайма (`pipeline._hit_operations`): блок без `operations`, но с
+    текстом в `component`, — это требование, а не заголовок узла. Диагностика обязана мерить то,
+    что видит пользователь; иначе после фикса рендера отчёт продолжал бы показывать «пусто» там,
+    где в ответе уже есть требования."""
+    n = 0
+    for b in (rec.get("requirement_blocks") or []):
+        ops = b.get("operations") or []
+        n += len(ops) if ops else (1 if (b.get("component") or "").strip() else 0)
+    return n
 
 
 def _norm(s: str | None) -> str:
@@ -231,11 +241,19 @@ def match_row(rec: dict, rows: list[Row]) -> Row | None:
     exact = [r for r in prods if _norm(r.name) == name and same_branch(r.codes, codes)]
     if len(exact) == 1:
         return exact[0]
+    # ИМЯ приоритетнее кода. Причина конкретная: в разделах с объединённой ячейкой КОДА (XXI,
+    # фторопласты) у 15 строк подряд код пуст, и «единственной точной по коду» оказывается ЧУЖАЯ
+    # строка выше — сопоставление уезжает на соседний продукт. Имя же там уникально.
     by_name = [r for r in prods if _norm(r.name) == name]
     if len(by_name) == 1:
         return by_name[0]
+    # Точное равенство кода — следующая ступень: выручает обратный случай, когда ИМЯ неоднозначно
+    # («29.10.44» с требованиями и «29.10.44.000» с пустой ячейкой названы одинаково).
+    same_code = [r for r in prods if set(r.codes) & set(codes)]
+    if len(same_code) == 1:
+        return same_code[0]
     if exact:
-        return exact[0]  # несколько одинаковых — берём первую, помечаем ниже как неоднозначную
+        return exact[0]  # несколько одинаковых — берём первую
     by_code = [r for r in prods if same_branch(r.codes, codes)]
     if len(by_code) == 1:
         return by_code[0]
