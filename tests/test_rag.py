@@ -7,6 +7,7 @@ BM25 (токенизация/стемминг/векторы), сборку ко
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -81,6 +82,20 @@ class TestOkpd2Match(unittest.TestCase):
     def test_empty_inputs(self):
         self.assertFalse(okpd2_match([], "29.20"))
         self.assertFalse(okpd2_match(["29.20"], ""))
+
+
+class TestEnvExampleMatchesSettings(unittest.TestCase):
+    """R21: `.env.example` — единственная документация настроек для оператора, и она обязана
+    совпадать с `Settings`. Расходилась на 7 переменных (включая флаги процедурной ветки — оператор
+    не мог узнать, чем она управляется) и содержала `TELEGRAM_BOT_TOKEN`, которого в конфиге нет."""
+
+    def test_no_drift_between_config_and_example(self):
+        from app.core.config import Settings
+        text = (ROOT / ".env.example").read_text(encoding="utf-8")
+        documented = set(re.findall(r"^([A-Z_]+)=", text, re.M))
+        declared = set(Settings.model_fields)
+        self.assertEqual(declared - documented, set(), "нет в .env.example")
+        self.assertEqual(documented - declared, set(), "лишнее в .env.example (нет в Settings)")
 
 
 class TestSectionTitle(unittest.TestCase):
