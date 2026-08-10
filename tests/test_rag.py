@@ -255,6 +255,90 @@ class TestProceduralDeflect(unittest.TestCase):
         self.assertEqual(claim_numbers(procedural.DEFLECTION), [])
 
 
+class TestDeflectionHonesty(unittest.TestCase):
+    """R4: фолбэк не должен врать о состоянии сервиса.
+
+    Регресс: единственное сообщение утверждало «процедурный регламент в базу пока не загружен».
+    После индексации Правил / тела ПП №719 / Приказа №52 это ложь — и звучала она ровно в момент
+    аварии, когда пользователь и так не получил ответа. Теперь два сообщения под две причины."""
+
+    BOTH = ("DEFLECTION", "DEFLECTION_DISABLED")
+
+    def _texts(self):
+        return [(n, getattr(procedural, n)) for n in self.BOTH]
+
+    def test_no_claim_that_corpus_is_missing(self):
+        for name, text in self._texts():
+            low = text.lower()
+            for lie in ("не загружен", "не загружена", "в базу пока", "регламент в базу"):
+                self.assertNotIn(lie, low, f"{name} утверждает, что корпус не загружен")
+
+    def test_no_invented_numbers_or_deadlines(self):
+        # порядок действий и сроки не выдумываем — в сообщениях не должно быть ни баллов, ни сроков
+        for name, text in self._texts():
+            self.assertEqual(claim_numbers(text), [], f"{name}: выдуманные баллы/проценты")
+            self.assertEqual(unverified_deadlines(text, ""), [], f"{name}: выдуманный срок")
+
+    def test_both_point_to_primary_sources(self):
+        for name, text in self._texts():
+            self.assertIn("ГИСП", text, name)
+            self.assertIn("719", text, name)
+            self.assertIn("52", text, name)          # Приказ ТПП РФ №52 — состав документов
+            self.assertIn("ТПП", text, name)
+
+    def test_causes_are_distinguishable(self):
+        # техсбой → предлагаем повторить; выключено настройкой → повтор не поможет, честно об этом
+        self.assertIn("повторить", procedural.DEFLECTION.lower())
+        self.assertIn("отключен", procedural.DEFLECTION_DISABLED.lower())
+        self.assertIn("не поможет", procedural.DEFLECTION_DISABLED.lower())
+        self.assertNotEqual(procedural.DEFLECTION, procedural.DEFLECTION_DISABLED)
+
+    def test_pipeline_picks_message_by_cause(self):
+        orig_flag, orig_search = (pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES,
+                                  pipeline_mod.search_rules)
+        try:
+            pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES = False
+            off = pipeline_mod._answer_procedural("как внести в реестр", "как внести в реестр")
+            self.assertEqual(off.text, procedural.DEFLECTION_DISABLED)
+
+            pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES = True
+            pipeline_mod.search_rules = lambda *a, **k: []  # корпус недоступен/пуст
+            down = pipeline_mod._answer_procedural("как внести в реестр", "как внести в реестр")
+            self.assertEqual(down.text, procedural.DEFLECTION)
+        finally:
+            pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES = orig_flag
+            pipeline_mod.search_rules = orig_search
+
+
+class TestOptionalLookupsDegrade(unittest.TestCase):
+    """R4: падение Qdrant в НЕОБЯЗАТЕЛЬНЫХ обращениях не должно превращаться в 503.
+
+    `search_rules`/`search_cases` обещают в docstring пустой список при недоступном Qdrant, но
+    оборачивали только `collection_exists` — исключение из самого запроса улетало наверх, и
+    честный процедурный дефер был недостижим."""
+
+    def setUp(self):
+        from app.rag import retriever as r
+        self.r = r
+        self._orig = r._client
+
+        class _Dying:
+            def collection_exists(self, name):  # noqa: ARG002
+                return True
+
+            def query_points(self, **kw):
+                raise ConnectionError("Qdrant недоступен")
+
+        r._client = lambda: _Dying()
+
+    def tearDown(self):
+        self.r._client = self._orig
+
+    def test_rules_and_cases_return_empty_instead_of_raising(self):
+        self.assertEqual(self.r.search_rules("порядок внесения в реестр"), [])
+        self.assertEqual(self.r.search_cases("насосы"), [])
+
+
 class TestFormatRulesContext(unittest.TestCase):
     def test_numbers_blocks_and_anchor(self):
         rules = [
@@ -625,6 +709,130 @@ class TestAnswerStream(unittest.TestCase):
         streamed = "".join(t for k, t in pipeline_mod.answer_stream("спасибо!") if k == "delta")
         self.assertEqual(streamed, pipeline_mod.answer("спасибо!").text)
         self.assertEqual(streamed, meta.THANKS)
+
+
+class _FakePoint:
+    """Точка выдачи Qdrant (payload + score) — минимум, который читает `_to_hit`."""
+
+    def __init__(self, payload: dict, score: float = 0.9):
+        self.payload = payload
+        self.score = score
+
+
+class _FakeQdrant:
+    """Заглушка Qdrant-клиента: считает обращения, отдаёт заданную выдачу. Без сети."""
+
+    def __init__(self, points=()):
+        self.points = list(points)
+        self.calls = 0
+
+    def query_points(self, **kw):
+        self.calls += 1
+        return type("Res", (), {"points": self.points})()
+
+    def collection_exists(self, name):  # noqa: ARG002 — сигнатура ради совместимости
+        return True
+
+
+class TestClientCached(unittest.TestCase):
+    """R15: клиент DeepSeek строится ОДИН раз на процесс.
+
+    Регресс: раньше `_client()` конструировал новый OpenAI на каждый вызов — до трёх на один
+    вопрос (контекстуализация → реранкер → генерация), каждый со своим httpx-пулом, то есть
+    заново TCP+TLS. На рваной сети с DPI рвётся первым."""
+
+    def setUp(self):
+        import openai
+        self._orig_ctor = openai.OpenAI
+        self._orig_key = pipeline_mod.settings.DEEPSEEK_API_KEY
+        pipeline_mod.settings.DEEPSEEK_API_KEY = "test-key"
+        pipeline_mod._client.cache_clear()
+
+    def tearDown(self):
+        import openai
+        openai.OpenAI = self._orig_ctor
+        pipeline_mod.settings.DEEPSEEK_API_KEY = self._orig_key
+        pipeline_mod._client.cache_clear()
+
+    def test_constructed_once_per_process(self):
+        import openai
+        calls = []
+        openai.OpenAI = lambda **kw: calls.append(kw) or object()
+
+        first = pipeline_mod._client()
+        for _ in range(4):
+            self.assertIs(pipeline_mod._client(), first)  # тот же объект, а не новый пул
+        self.assertEqual(len(calls), 1, "клиент должен строиться один раз на процесс")
+        # таймаут/ретраи не потеряны при кэшировании
+        self.assertEqual(calls[0]["timeout"], 30.0)
+        self.assertEqual(calls[0]["max_retries"], 1)
+
+    def test_empty_key_raises_and_is_not_cached(self):
+        # исключение lru_cache не кэширует → после заполнения .env клиент поднимется
+        pipeline_mod.settings.DEEPSEEK_API_KEY = ""
+        with self.assertRaises(RuntimeError):
+            pipeline_mod._client()
+        import openai
+        calls = []
+        openai.OpenAI = lambda **kw: calls.append(kw) or object()
+        pipeline_mod.settings.DEEPSEEK_API_KEY = "test-key"
+        pipeline_mod._client()
+        self.assertEqual(len(calls), 1)
+
+
+class TestQueryVectorReused(unittest.TestCase):
+    """R16: dense-вектор запроса считается ОДИН раз на вопрос.
+
+    Регресс: e5-large прогонялся 3–4 раза по одному и тому же тексту — поиск позиций,
+    подстраховка по коду ОКПД2, поиск кейсов, out-of-scope guard. На 2 vCPU это сотни мс впустую."""
+
+    PAYLOAD = {
+        "section_roman": "XIX", "section_title": "Насосы", "product_name": "Насосы гидравлические",
+        "okpd2_codes": ["28.13.14"], "min_threshold": None, "requirement_blocks": [],
+        "source_anchor": "Раздел XIX, поз. 1",
+    }
+
+    def setUp(self):
+        from app.rag import retriever as r
+        self.r = r
+        self.calls = 0
+        self._orig_embed_r, self._orig_embed_p = r.embed_query, pipeline_mod.embed_query
+        self._orig_client = r._client
+        self._orig_rerank = pipeline_mod.settings.RERANK_ENABLED
+
+        def counting_embed(text):
+            self.calls += 1
+            return [0.1] * 4
+
+        r.embed_query = counting_embed
+        pipeline_mod.embed_query = counting_embed
+        self.fake = _FakeQdrant([_FakePoint(dict(self.PAYLOAD))])
+        r._client = lambda: self.fake
+
+    def tearDown(self):
+        self.r.embed_query, pipeline_mod.embed_query = self._orig_embed_r, self._orig_embed_p
+        self.r._client = self._orig_client
+        pipeline_mod.settings.RERANK_ENABLED = self._orig_rerank
+
+    def test_search_embeds_once_even_with_code(self):
+        # с кодом ОКПД2 идут ДВА запроса в Qdrant (пул + подстраховка по префиксам),
+        # но эмбеддинг должен быть один
+        self.r.search("гидравлические насосы", okpd2="28.13.14")
+        self.assertEqual(self.calls, 1)
+        self.assertEqual(self.fake.calls, 2, "подстраховка по коду должна остаться")
+
+    def test_passed_qvec_skips_embedding(self):
+        self.r.search("гидравлические насосы", qvec=[0.1] * 4)
+        self.r.search_cases("гидравлические насосы", qvec=[0.1] * 4)
+        self.r.dense_top1("гидравлические насосы", [0.1] * 4)
+        self.assertEqual(self.calls, 0)
+
+    def test_full_hot_path_embeds_once(self):
+        """Сквозной путь вопроса без кода: поиск + кейсы + guard = ОДИН прогон энкодера."""
+        pipeline_mod.settings.RERANK_ENABLED = False  # реранкер — сеть, здесь не про него
+        planned = pipeline_mod._plan_answer("производим гидравлические насосы")
+        self.assertIsInstance(planned, pipeline_mod._Plan)
+        self.assertEqual(self.calls, 1, "на один вопрос должен приходиться один прогон e5")
 
 
 if __name__ == "__main__":

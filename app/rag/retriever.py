@@ -86,11 +86,16 @@ def _to_hit(p) -> Hit:
     )
 
 
-def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None):
+def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
+            qvec: list[float] | None = None):
+    """Гибрид dense+sparse с RRF. `qvec` — заранее посчитанный dense-вектор запроса: на один
+    вопрос к Qdrant уходит несколько обращений (позиции + подстраховка по коду + кейсы + guard),
+    и e5-large незачем прогонять на каждое. Не передан — считаем сами (обратная совместимость:
+    eval-скрипты зовут search/search_cases напрямую)."""
     from qdrant_client import models
 
-    dvec = embed_query(query)
-    idx, val = query_vector(query)
+    dvec = qvec if qvec is not None else embed_query(query)
+    idx, val = query_vector(query)  # sparse дёшев (mmh3+Snowball локально) — переиспользовать нечего
     res = _client().query_points(
         collection_name=collection or settings.QDRANT_COLLECTION,
         prefetch=[
@@ -109,12 +114,19 @@ def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None)
     return res.points
 
 
-def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40) -> list[Hit]:
+def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
+           qvec: list[float] | None = None) -> list[Hit]:
     """Гибридный поиск. При наличии okpd2 — буст совпадающих по коду позиций и
-    жёсткая подстраховка (отдельный фильтрованный запрос по префиксам кода)."""
+    жёсткая подстраховка (отдельный фильтрованный запрос по префиксам кода).
+
+    `qvec` — заранее посчитанный вектор запроса (см. `_hybrid`). Если не передан, считаем ОДИН
+    раз здесь и переиспользуем в подстраховке по коду — раньше второй запрос эмбеддил тот же
+    текст заново."""
     from qdrant_client import models
 
-    hits = [_to_hit(p) for p in _hybrid(query, pool)]
+    if qvec is None:
+        qvec = embed_query(query)
+    hits = [_to_hit(p) for p in _hybrid(query, pool, qvec=qvec)]
 
     if okpd2:
         for h in hits:
@@ -132,7 +144,7 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40)
                 models.FieldCondition(key="okpd2_prefixes", match=models.MatchAny(any=[okpd2.strip()])),
             ])
             seen = {h.source_anchor for h in hits}
-            for p in _hybrid(query, max(limit, 12), qfilter=qfilter):
+            for p in _hybrid(query, max(limit, 12), qfilter=qfilter, qvec=qvec):
                 h = _to_hit(p)
                 if h.source_anchor not in seen:
                     h.okpd2_match = True
@@ -161,19 +173,23 @@ def dense_top1(query: str, qvec: list[float] | None = None) -> float:
     return float(res.points[0].score) if res.points else 0.0
 
 
-def search_cases(query: str, limit: int = 3) -> list[dict]:
+def search_cases(query: str, limit: int = 3, qvec: list[float] | None = None) -> list[dict]:
     """Поиск по подтверждённым экспертом кейсам (коллекция verified_cases).
 
     Возвращает список payload'ов кейсов со score в `_score`. Если коллекции нет или
-    она пуста — пустой список (петля кейсов опциональна, база работает и без неё)."""
-    client = _client()
+    она пуста — пустой список (петля кейсов опциональна, база работает и без неё).
+    `qvec` — тот же вектор запроса, что и у товарного поиска (см. `_hybrid`).
+
+    Сам запрос тоже под try: кейсы — НЕОБЯЗАТЕЛЬНОЕ обогащение контекста, их сбой не должен
+    ронять уже найденный товарный ответ (раньше исключение из `_hybrid` улетало наверх)."""
     name = settings.QDRANT_CASES_COLLECTION
     try:
+        client = _client()
         if not client.collection_exists(name):
             return []
+        points = _hybrid(query, limit, collection=name, qvec=qvec)
     except Exception:  # noqa: BLE001 — Qdrant недоступен: не валим основной поиск
         return []
-    points = _hybrid(query, limit, collection=name)
     out: list[dict] = []
     for p in points:
         pl = dict(p.payload or {})
@@ -187,16 +203,21 @@ def search_rules(query: str, limit: int = 6) -> list[dict]:
 
     Возвращает payload'ы пунктов Правил со score в `_score`. Если коллекции нет или Qdrant
     недоступен — пустой список (процедурный путь тогда честно деферится, см. pipeline).
-    БЕЗ ОКПД2-буста и реранкера (то и другое заточено под товарные записи, не под прозу норм)."""
-    client = _client()
+    БЕЗ ОКПД2-буста и реранкера (то и другое заточено под товарные записи, не под прозу норм).
+
+    Отказоустойчивость (R4): САМ ЗАПРОС тоже под try — иначе падение Qdrant в момент поиска
+    улетало исключением наверх и превращалось в 503, а честный процедурный дефер (ради которого
+    эта ветка и возвращает пустой список) был недостижим."""
     name = settings.QDRANT_RULES_COLLECTION
     try:
+        client = _client()
         if not client.collection_exists(name):
             return []
+        points = _hybrid(query, limit, collection=name)
     except Exception:  # noqa: BLE001 — Qdrant недоступен: не валим ответ, деферим
         return []
     out: list[dict] = []
-    for p in _hybrid(query, limit, collection=name):
+    for p in points:
         pl = dict(p.payload or {})
         pl["_score"] = p.score
         out.append(pl)

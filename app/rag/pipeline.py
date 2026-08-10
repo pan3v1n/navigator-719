@@ -10,6 +10,7 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from app.core.config import settings
 from app.core.prompts import (
@@ -20,6 +21,7 @@ from app.core.prompts import (
     build_procedural_user_prompt,
 )
 from app.rag import okpd2_ref, sparse
+from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
 
@@ -155,13 +157,26 @@ def format_rules_context(rules: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
+@lru_cache(maxsize=1)
 def _client():
+    """Клиент DeepSeek, ОДИН на процесс (R15).
+
+    Раньше функция строила новый OpenAI() на каждый вызов — а вызовов на один вопрос до трёх
+    (контекстуализация follow-up → реранкер → генерация). Каждый новый клиент = новый httpx-пул,
+    то есть заново TCP+TLS к api.deepseek.com. На рваной сети с DPI (заявленное ограничение
+    проекта) это ровно то, что рвётся первым. Кэш даёт переиспользование keep-alive соединений.
+
+    Кэшируем сам клиент, а не результат запроса — он потокобезопасен (FastAPI гонит sync-эндпоинты
+    в threadpool). Исключение при пустом ключе lru_cache НЕ кэширует → после правки .env и
+    перезапуска всё поднимется; в тестах сбрасывается через `_client.cache_clear()`.
+    """
     from openai import OpenAI
 
     if not settings.DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY пуст — заполни .env")
     # timeout+ретраи: без них openai-дефолт 600с×2 → на рваной РФ-сети зависший запрос держит поток
-    # ~10 мин, эксперт смотрит в спиннер. Покрывает генерацию и контекстуализацию (реранкер — свой клиент).
+    # ~10 мин, эксперт смотрит в спиннер. Дефолт 30с покрывает генерацию и контекстуализацию;
+    # реранкер берёт ЭТОТ ЖЕ клиент, но передаёт свой per-request timeout=20с.
     return OpenAI(
         api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL,
         timeout=30.0, max_retries=1,
@@ -336,15 +351,17 @@ def _answer_procedural(query: str, search_query: str,
                        history: list[dict] | None = None) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
 
-    Фолбэк: если корпус выключен / коллекции нет / ничего не нашлось — ЧЕСТНЫЙ ДЕФЕР
-    (procedural.DEFLECTION): порядок действий и сроки НЕ выдумываем. Иначе генерируем grounded-ответ
-    по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ (unverified_deadlines)."""
+    Фолбэк: порядок действий и сроки НЕ выдумываем ни при каких условиях. Две причины —
+    два РАЗНЫХ честных сообщения (R4): выключено настройкой → `DEFLECTION_DISABLED` (повтор не
+    поможет), корпус недоступен/пуст → `DEFLECTION` (предложить повторить). Иначе генерируем
+    grounded-ответ по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ
+    (unverified_deadlines)."""
     from app.rag import procedural
 
     if not settings.PROCEDURAL_ANSWER_FROM_RULES:
-        return Answer(text=procedural.DEFLECTION, hits=[])
+        return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
     rules = search_rules(search_query, limit=RULES_TOP_K)
-    if not rules:  # коллекции нет / пусто → честный дефер, а не выдумка процедуры
+    if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
         return Answer(text=procedural.DEFLECTION, hits=[])
 
     ctx = format_rules_context(rules)
@@ -442,13 +459,17 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
                 effective_okpd2 = tn_okpd2[0]  # первый — для иерархического буста ретрива
                 tnved = (tn, tn_okpd2)
 
-    hits = search(search_query, okpd2=effective_okpd2, limit=limit)
+    # R16: dense-вектор запроса считаем ОДИН раз и переиспользуем во всех обращениях к Qdrant
+    # (позиции → подстраховка по коду → кейсы → out-of-scope guard). Раньше e5-large прогонялся
+    # на один вопрос 3–4 раза подряд по одному и тому же тексту: на 2 vCPU это сотни мс впустую.
+    qvec = embed_query(search_query)
+    hits = search(search_query, okpd2=effective_okpd2, limit=limit, qvec=qvec)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
     # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
     if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
         from app.rag.reranker import rerank
         hits = rerank(search_query, hits)
-    cases = search_cases(search_query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
+    cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "
@@ -461,7 +482,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     low_rel = (
         not cases
         and not any(h.okpd2_match for h in hits)
-        and dense_top1(search_query) < RELEVANCE_SOFT
+        and dense_top1(search_query, qvec) < RELEVANCE_SOFT  # R16: тот же вектор, без пере-эмбеддинга
     )
 
     # T9: поиск по наименованию без уверенного совпадения (вероятно вне приложения 719) → подсказка
