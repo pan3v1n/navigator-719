@@ -46,6 +46,13 @@ class Settings(BaseSettings):
     PROCEDURAL_DEFLECT_ENABLED: bool = True
     PROCEDURAL_ANSWER_FROM_RULES: bool = True
 
+    # Лимиты частоты запросов (R12), скользящее окно 60 с на процесс. Чат — на пользователя,
+    # вход — на IP. Значения с запасом под живого человека: ответ движка занимает 10–30 с, так
+    # что 20 вопросов в минуту один человек физически не задаёт; 10 попыток входа в минуту с
+    # одного адреса — тоже с запасом, а перебор пароля этим отсекается.
+    RATE_LIMIT_CHAT_PER_MIN: int = 20
+    RATE_LIMIT_LOGIN_PER_MIN: int = 10
+
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000

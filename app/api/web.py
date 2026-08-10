@@ -27,6 +27,7 @@ from app.api.auth import (
     set_remember_cookie,
 )
 from app.api.admin_stats import build_admin_view, system_health
+from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
@@ -83,14 +84,35 @@ def login_page(request: Request):
     return templates.TemplateResponse("login.html", _ctx(request, error=None))
 
 
+# R12: троттлинг входа по IP. bcrypt замедляет перебор, но не останавливает его, а пароли у нас
+# 8-символьные и розданы людям. Ключ — адрес клиента; ⚠ когда перед приложением встанет обратный
+# прокси (R11, TLS), сюда попадёт адрес прокси — тогда брать X-Forwarded-For.
+_login_limit = SlidingWindow(settings.RATE_LIMIT_LOGIN_PER_MIN, window=60.0)
+
+
+def _client_ip(request: Request) -> str:
+    return (request.client.host if request.client else "") or "unknown"
+
+
 @router.post("/login", response_class=HTMLResponse)
 def login_submit(request: Request, username: str = Form(...), password: str = Form(...),
                  remember: str = Form(default="")):
+    ip = _client_ip(request)
+    if not _login_limit.check(f"login:{ip}"):
+        retry = _login_limit.retry_after(f"login:{ip}")
+        return templates.TemplateResponse(
+            "login.html",
+            _ctx(request, error=f"Слишком много попыток входа. Повторите через {retry} с."),
+            status_code=429, headers={"Retry-After": str(retry)},
+        )
     user = authenticate(username.strip(), password)
     if not user:
         return templates.TemplateResponse(
             "login.html", _ctx(request, error="Неверный логин или пароль"), status_code=401
         )
+    # Успешный вход снимает счётчик: человек, вспомнивший пароль с 9-й попытки, не должен
+    # оставаться под лимитом — он бьёт по перебору, а не по забывчивости.
+    _login_limit.reset(f"login:{ip}")
     login_session(request, user)
     resp = RedirectResponse("/", status_code=302)
     if remember:  # «Запомнить меня» → персистентный cookie автовхода

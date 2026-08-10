@@ -27,6 +27,7 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_user, require_user_profiled
+from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.db import queries as q
@@ -36,6 +37,23 @@ from app.rag.pipeline import answer, answer_stream
 from app.tools.navigator import extract_okpd2
 
 router = APIRouter()
+
+# R12: лимит вопросов на ПОЛЬЗОВАТЕЛЯ. Защищает единственную платную статью проекта (токены
+# DeepSeek) от зациклившейся вкладки и от намеренного слива бюджета залогиненным человеком.
+_chat_limit = SlidingWindow(settings.RATE_LIMIT_CHAT_PER_MIN, window=60.0)
+
+
+def _enforce_chat_limit(user_id: int) -> None:
+    """429 при превышении. Проверяем ДО обращения к БД и движку — иначе смысл теряется."""
+    key = f"chat:{user_id}"
+    if not _chat_limit.check(key):
+        retry = _chat_limit.retry_after(key)
+        logger.warning(f"rate-limit: чат, user_id={user_id}, повтор через {retry}с")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Слишком много вопросов подряд. Повторите через {retry} с.",
+            headers={"Retry-After": str(retry)},
+        )
 
 
 class ChatRequest(BaseModel):
@@ -139,6 +157,7 @@ def _load_history(user_id: int, session_id: str, max_msgs: int = 12) -> list[dic
 
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
+    _enforce_chat_limit(user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
     okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а
@@ -183,6 +202,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
 
     Эндпоинт СИНХРОННЫЙ (`def`): Starlette крутит sync-генератор в threadpool (как /api/chat),
     event loop не держим. ⚠ Рваная РФ-сеть: длинный SSE хрупок — на фронте фолбэк обязателен."""
+    _enforce_chat_limit(user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы (пусто для новой беседы)
     okpd2 = extract_okpd2(req.message)
