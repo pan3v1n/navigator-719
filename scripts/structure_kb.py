@@ -208,6 +208,25 @@ def make_req_text(req_cells: list[str], stage_labels: list[str]) -> str:
     return "\n".join(req_cells)
 
 
+def section_title(header: str, fallback: str = "") -> str:
+    """Русское название раздела: ПЕРВАЯ строка заголовка без римского номера (R28).
+
+    В чанке заголовок раздела встречается дважды — markdown-строкой («# XVIII. Продукция
+    судостроения») и строкой-шапкой таблицы («XVIII. Продукция судостроения|»). Прежний
+    `header.split(".", 1)[-1]` склеивал обе и давал «Продукция судостроения\\n\\nXVIII. Продукция
+    судостроения» — так вышло у 913 записей из 1368. Задвоение попадало и в ответ эксперту
+    (`format_context` подставляет его как «раздел «…»»), и в текст эмбеддинга
+    (`load_kb.build_embedding_text`), размывая идентичность у двух третей корпуса."""
+    if not (header or "").strip():
+        return fallback
+    first = header.strip().split("\n")[0].lstrip("#").strip()
+    # Отрезаем «XVIII. » — но только если точка отделяет именно римский номер.
+    left, dot, right = first.partition(".")
+    if dot and re.fullmatch(r"[IVXLC]+", left.strip()):
+        first = right.strip()
+    return first or fallback
+
+
 def parse_section(text: str) -> tuple[str, list[Product]]:
     """Возвращает (заголовок раздела, список продуктов)."""
     header = ""
@@ -551,7 +570,7 @@ def main() -> None:
     roman = args.section or roman_from_name(chunk)
     text = chunk.read_text(encoding="utf-8")
     header, products = parse_section(text)
-    title = header.split(".", 1)[-1].strip() if header else chunk.stem
+    title = section_title(header, chunk.stem)
 
     print(f"Раздел: {roman} — {title}")
     print(f"Файл:   {chunk.relative_to(ROOT)}")

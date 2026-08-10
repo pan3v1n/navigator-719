@@ -83,6 +83,48 @@ class TestOkpd2Match(unittest.TestCase):
         self.assertFalse(okpd2_match(["29.20"], ""))
 
 
+class TestSectionTitle(unittest.TestCase):
+    """R28: название раздела не должно задваиваться — оно идёт и в ответ, и в вектор."""
+
+    def test_doubled_title_is_cleaned(self):
+        from app.rag.retriever import _clean_section_title
+        self.assertEqual(
+            _clean_section_title("Продукция судостроения\n\nXVIII. Продукция судостроения"),
+            "Продукция судостроения")
+        self.assertEqual(_clean_section_title("XVIII. Продукция судостроения"),
+                         "Продукция судостроения")
+        self.assertEqual(_clean_section_title("Продукция судостроения"), "Продукция судостроения")
+        self.assertEqual(_clean_section_title(None), "")
+
+    def test_dot_in_name_is_not_a_roman_prefix(self):
+        # точка внутри названия не должна съедать его начало
+        from app.rag.retriever import _clean_section_title
+        self.assertEqual(_clean_section_title("Оборудование им. Иванова"),
+                         "Оборудование им. Иванова")
+
+    def test_parser_extracts_single_title(self):
+        import sys
+        from pathlib import Path
+        s = str(Path(__file__).resolve().parents[1] / "scripts")
+        if s not in sys.path:
+            sys.path.insert(0, s)
+        from structure_kb import section_title
+        header = "# XVIII. Продукция судостроения\n\nXVIII. Продукция судостроения"
+        self.assertEqual(section_title(header), "Продукция судостроения")
+        self.assertEqual(section_title("", "запасное"), "запасное")
+
+    def test_corpus_has_no_doubled_titles(self):
+        # страховка от возврата дефекта при перепарсинге корпуса
+        import glob
+        import json
+        bad = 0
+        for f in glob.glob(str(ROOT / "knowledge_base" / "pp719" / "structured" / "*.json")):
+            for r in json.loads(open(f, encoding="utf-8").read()):
+                if "\n" in (r.get("section_title") or ""):
+                    bad += 1
+        self.assertEqual(bad, 0)
+
+
 class TestSparseBM25(unittest.TestCase):
     def test_tokenize_lowercase_and_drop_singletons(self):
         toks = sparse.tokenize("Большие Подшипники")

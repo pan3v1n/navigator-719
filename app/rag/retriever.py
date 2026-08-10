@@ -71,12 +71,26 @@ def _client():
     return QdrantClient(url=settings.QDRANT_URL, timeout=30)
 
 
+def _clean_section_title(title: str | None) -> str:
+    """Название раздела без задвоения (R28).
+
+    В части записей `section_title` содержит название дважды через перенос строки
+    («Продукция судостроения\\n\\nXVIII. Продукция судостроения») — дефект нарезки заголовка,
+    исправленный в `structure_kb.section_title`. Здесь подчищаем ЕЩЁ РАЗ, в рантайме: индекс
+    Qdrant переиндексируется не сразу, а искажённое название уходит эксперту в ответ."""
+    first = (title or "").strip().split("\n")[0].lstrip("#").strip()
+    left, dot, right = first.partition(".")
+    if dot and left.strip().isupper() and left.strip("IVXLC ") == "":
+        first = right.strip()
+    return first
+
+
 def _to_hit(p) -> Hit:
     pl = p.payload or {}
     return Hit(
         score=p.score,
         section_roman=pl.get("section_roman", "?"),
-        section_title=pl.get("section_title", ""),
+        section_title=_clean_section_title(pl.get("section_title")),
         product_name=pl.get("product_name", ""),
         okpd2_codes=pl.get("okpd2_codes") or [],
         min_threshold=pl.get("min_threshold"),
