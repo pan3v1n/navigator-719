@@ -308,8 +308,8 @@ class TestContextAndDisclaimer(unittest.TestCase):
 
     def test_format_context_ranks_relevant_ops(self):
         # мега-продукт: релевантная операция стоит ПОСЛЕ порога усечения
-        from app.rag.pipeline import MAX_OPS_PER_HIT
-        fillers = [{"text": f"операция номер {i}", "points": None} for i in range(MAX_OPS_PER_HIT)]
+        from app.rag.pipeline import MAX_OPS_TARGET
+        fillers = [{"text": f"операция номер {i}", "points": None} for i in range(MAX_OPS_TARGET)]
         relevant = {"text": "сварка кузова автомобиля", "points": 400}
         hit = make_hit(requirement_blocks=[{"operations": fillers + [relevant]}])
         # без запроса последняя (релевантная) операция усекается

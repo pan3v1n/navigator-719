@@ -1,6 +1,6 @@
-"""P2 #7 — truncation-impact: сколько информации теряет усечение операций (MAX_OPS_PER_HIT).
+"""P2 #7 — truncation-impact: сколько информации теряет усечение операций (кап MAX_OPS_TARGET).
 
-`format_context` показывает модели максимум MAX_OPS_PER_HIT операций на хит (ранжируя их по
+`format_context` показывает модели максимум MAX_OPS_TARGET операций у ЦЕЛЕВОГО хита (у прочих — MAX_OPS_OTHER) (ранжируя их по
 релевантности запросу через `_rank_operations`). У мега-продуктов операций сотни → модель
 видит лишь верхушку. Вопрос: теряются ли при этом БАЛЛЬНЫЕ требования (то, что эксперт обязан
 свести). Это решает, нужен ли отложенный в 2.0 parent/child-чанкинг или достаточно поднять порог.
@@ -23,7 +23,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.rag.pipeline import MAX_OPS_PER_HIT, _rank_operations  # noqa: E402
+from app.rag.pipeline import MAX_OPS_TARGET, _rank_operations  # noqa: E402
 from scripts.load_kb import load_records  # noqa: E402
 
 
@@ -62,7 +62,7 @@ def evaluate(cap: int):
 def report(recs, rows, cap: int) -> list[str]:
     n_all = len(recs)
     L = ["=" * 78,
-         f"P2 #7 TRUNCATION-IMPACT — MAX_OPS_PER_HIT={cap}, база {n_all} записей",
+         f"P2 #7 TRUNCATION-IMPACT — MAX_OPS_TARGET={cap}, база {n_all} записей",
          "=" * 78,
          f"  мега-продуктов (>{cap} операций): {len(rows)} ({100*len(rows)/n_all:.1f}%)",
          ""]
@@ -109,7 +109,7 @@ def report(recs, rows, cap: int) -> list[str]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description="P2 #7 truncation-impact (детерм., без DeepSeek)")
-    ap.add_argument("--cap", type=int, default=MAX_OPS_PER_HIT)
+    ap.add_argument("--cap", type=int, default=MAX_OPS_TARGET)
     ap.add_argument("--report", type=str, default="")
     args = ap.parse_args()
 

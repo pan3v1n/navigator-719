@@ -22,7 +22,7 @@ from app.api.auth import (
     login_session,
     logout_session,
     needs_profile,
-    require_user,
+    require_admin,
     require_user_profiled,
     set_remember_cookie,
 )
@@ -200,15 +200,19 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
 
 
 @router.get("/api/admin/export")
-def admin_export(request: Request, fmt: str = "json", date_from: str = "", date_to: str = "",
-                 region: str = "", role: str = "") -> Response:
+def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
+                 region: str = "", role: str = "",
+                 admin: User = Depends(require_admin)) -> Response:
     """Выгрузка данных панели (только admin). Учитывает те же фильтры, что и /admin.
     fmt=csv — скоркард: одна строка на оценённый ответ (для Excel, разделитель «;», BOM для кириллицы);
     fmt=json — полная структура (скоркард + разбивки по регионам/пользователям + все оценки + исправления).
-    Заменяет ручной SSH-дамп таблиц с VM."""
-    user = current_user(request)
-    if not user or user.role != "admin":
-        raise HTTPException(status_code=403, detail="Доступ только для admin")
+    Заменяет ручной SSH-дамп таблиц с VM.
+
+    R27: проверка роли — через зависимость `require_admin`, а не ручным `if` в теле. Хелпер
+    существовал с самого начала и не использовался нигде, хотя ROADMAP заявлял его как часть
+    ролевого гейтинга; ручная проверка при этом дублировала его логику. `/admin` (страница)
+    осознанно оставлена на ручной проверке: там не-админа надо РЕДИРЕКТИТЬ в чат, а не отдавать
+    403 — зависимость такого не умеет."""
     with get_session() as db:
         view = build_admin_view(db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
                                 region=region, role=role)

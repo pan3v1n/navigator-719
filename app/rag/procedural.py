@@ -94,12 +94,6 @@ _PRODUCT_HINT_RE = re.compile(r"баллов?|локализац|требова�
 _CODE_RE = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
 
 
-def procedural_markers(query: str) -> list[str]:
-    """Совпавшие процедурные маркеры (для отладки/свипа ложных срабатываний)."""
-    q = query or ""
-    return [m.group(0) for m in list(_STRONG_RE.finditer(q)) + list(_GENERIC_RE.finditer(q))]
-
-
 def is_procedural(query: str, has_code: bool = False) -> bool:
     """True — вопрос процедурный (порядок/сроки/документы по реестру) → отвечаем по Правилам реестра.
 

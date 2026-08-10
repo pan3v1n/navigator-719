@@ -105,14 +105,37 @@ def get_all_messages(db: Session) -> list[Message]:
 
 def get_user_sessions(db: Session, user_id: int) -> list[dict]:
     """Беседы пользователя для сайдбара: [{session_id, title, ts}], новые сверху.
-    Заголовок = первое сообщение эксперта в беседе."""
-    sessions: dict[str, dict] = {}
-    for m in get_messages_for_user(db, user_id):  # по возрастанию ts
-        s = sessions.setdefault(m.session_id, {"session_id": m.session_id, "title": None, "ts": m.ts})
-        if s["title"] is None and m.role == "user":
-            s["title"] = m.content
-        s["ts"] = m.ts  # последняя реплика (проход по возрастанию → остаётся максимум)
-    return sorted(sessions.values(), key=lambda s: s["ts"], reverse=True)
+    Заголовок = первое сообщение эксперта в беседе.
+
+    R24: раньше функция поднимала В ПАМЯТЬ ВСЕ реплики пользователя — включая полные тексты
+    ОТВЕТОВ, которые тут не нужны вовсе и составляют основной объём. И вызывается она на каждом
+    открытии чата. Теперь: время последней активности — агрегатом в SQL (тексты не передаются),
+    заголовки — только из реплик `user`."""
+    from sqlalchemy import func
+
+    last_ts = {
+        sid: ts
+        for sid, ts in db.execute(
+            select(Message.session_id, func.max(Message.ts))
+            .where(Message.user_id == user_id)
+            .group_by(Message.session_id)
+        )
+    }
+    # Идём от НОВЫХ к старым и перезаписываем — в итоге останется первый вопрос беседы
+    # (та же семантика, что у прежнего прохода по возрастанию с «первым непустым»).
+    titles: dict[str, str] = {}
+    for sid, content in db.execute(
+        select(Message.session_id, Message.content)
+        .where(Message.user_id == user_id, Message.role == "user")
+        .order_by(Message.ts.desc(), Message.id.desc())
+    ):
+        titles[sid] = content
+
+    sessions = [
+        {"session_id": sid, "title": titles.get(sid), "ts": ts}
+        for sid, ts in last_ts.items()
+    ]
+    return sorted(sessions, key=lambda s: (s["ts"] is not None, s["ts"]), reverse=True)
 
 
 def get_session_messages(db: Session, user_id: int, session_id: str) -> list[Message]:

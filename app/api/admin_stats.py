@@ -115,11 +115,43 @@ def build_admin_view(
     for m in all_msgs:
         sess_msgs[m.session_id].append(m)
 
+    # Окна трендов считаем ЗАРАНЕЕ (R24): они зависят только от фильтра дат и момента отчёта, зато
+    # позволяют накопить тренды в том же проходе, что и раскладку по пользователям. Раньше здесь
+    # был ОТДЕЛЬНЫЙ полный проход по всем репликам — лишняя работа, растущая линейно с объёмом.
+    ref = (generated_at or datetime.now()).date()
+    if date_from and date_to:
+        cur_from, cur_to = date_from, date_to
+        span = (cur_to - cur_from).days + 1
+        prev_to = cur_from - timedelta(days=1)
+        prev_from = prev_to - timedelta(days=span - 1)
+        trend_label = f"период {span} дн. vs предыдущий"
+    else:  # без фильтра дат — скользящая неделя к предыдущей
+        cur_to, cur_from = ref, ref - timedelta(days=6)
+        prev_to = cur_from - timedelta(days=1)
+        prev_from = prev_to - timedelta(days=6)
+        trend_label = "7 дней vs предыдущие 7"
+    cur_w = {"req": 0, "p": 0, "c": 0, "users": set()}
+    prev_w = {"req": 0, "p": 0, "c": 0, "users": set()}
+
     # Раскладка по пользователю с учётом окна дат (регион/роль уже отфильтрованы через sel_ids).
     msgs_by_user: dict[int, list] = defaultdict(list)
     for m in all_msgs:
-        if m.user_id in sel_ids and _in_window(m.ts, date_from, date_to):
+        if m.user_id not in sel_ids:
+            continue
+        if _in_window(m.ts, date_from, date_to):
             msgs_by_user[m.user_id].append(m)
+        # Тренд считает СВОИ окна и не завязан на фильтр представления — поэтому проверяется
+        # отдельно, на тех же данных, но без условия `_in_window`.
+        if m.ts is not None:
+            d = m.ts.date()
+            w = cur_w if cur_from <= d <= cur_to else (prev_w if prev_from <= d <= prev_to else None)
+            if w is not None:
+                if m.role == "user":
+                    w["req"] += 1
+                    w["users"].add(m.user_id)
+                else:
+                    w["p"] += m.prompt_tokens or 0
+                    w["c"] += m.completion_tokens or 0
     fb_by_user: dict[int, list] = defaultdict(list)
     for f in all_fb:
         if f.user_id in sel_ids and _in_window(f.ts, date_from, date_to):
@@ -305,34 +337,7 @@ def build_admin_view(
 
     accept_pct = _accept_pct(ans_ratings)
 
-    # --- тренды: текущее окно vs предыдущее равной длины (моментум использования) ---
-    ref = (generated_at or datetime.now()).date()
-    if date_from and date_to:
-        cur_from, cur_to = date_from, date_to
-        span = (cur_to - cur_from).days + 1
-        prev_to = cur_from - timedelta(days=1)
-        prev_from = prev_to - timedelta(days=span - 1)
-        trend_label = f"период {span} дн. vs предыдущий"
-    else:  # без фильтра дат — скользящая неделя к предыдущей
-        cur_to, cur_from = ref, ref - timedelta(days=6)
-        prev_to = cur_from - timedelta(days=1)
-        prev_from = prev_to - timedelta(days=6)
-        trend_label = "7 дней vs предыдущие 7"
-    cur_w = {"req": 0, "p": 0, "c": 0, "users": set()}
-    prev_w = {"req": 0, "p": 0, "c": 0, "users": set()}
-    for m in all_msgs:  # тренд считает СВОИ окна (не завязан на фильтр дат представления)
-        if m.user_id not in sel_ids or m.ts is None:
-            continue
-        d = m.ts.date()
-        w = cur_w if cur_from <= d <= cur_to else (prev_w if prev_from <= d <= prev_to else None)
-        if w is None:
-            continue
-        if m.role == "user":
-            w["req"] += 1
-            w["users"].add(m.user_id)
-        else:
-            w["p"] += m.prompt_tokens or 0
-            w["c"] += m.completion_tokens or 0
+    # --- тренды: окна и накопление посчитаны выше, в общем проходе (R24) ---
     trends = {
         "requests": _fmt_trend(cur_w["req"], prev_w["req"], good_up=True),
         "users": _fmt_trend(len(cur_w["users"]), len(prev_w["users"]), good_up=True),
