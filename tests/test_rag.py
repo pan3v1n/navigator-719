@@ -15,12 +15,11 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.prompts import EXPERT_DISCLAIMER, build_navigator_user_prompt  # noqa: E402
+from app.core.prompts import build_navigator_user_prompt  # noqa: E402
 from app.rag import sparse  # noqa: E402
 from app.rag import pipeline as pipeline_mod  # noqa: E402
 from app.rag.pipeline import (  # noqa: E402
     _anchor_code,
-    _ensure_disclaimer,
     _is_continuation,
     claim_numbers,
     format_cases,
@@ -115,13 +114,8 @@ class TestSparseBM25(unittest.TestCase):
 
 
 class TestContextAndDisclaimer(unittest.TestCase):
-    def test_ensure_disclaimer_adds_when_missing(self):
-        out = _ensure_disclaimer("Краткий анализ.")
-        self.assertTrue(out.strip().endswith(EXPERT_DISCLAIMER))
-
-    def test_ensure_disclaimer_no_duplicate(self):
-        text = "Анализ.\n\n" + EXPERT_DISCLAIMER
-        self.assertEqual(_ensure_disclaimer(text).count(EXPERT_DISCLAIMER), 1)
+    # Тесты `_ensure_disclaimer` удалены вместе с функцией (R3): пометка в тело ответа не
+    # добавляется намеренно, её гарантируют UI и выгрузки — см. tests/test_export.py.
 
     def test_format_context_points_and_null(self):
         hit = make_hit(requirement_blocks=[{"operations": [

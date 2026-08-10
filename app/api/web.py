@@ -28,6 +28,7 @@ from app.api.auth import (
 )
 from app.api.admin_stats import build_admin_view, system_health
 from app.core.config import settings
+from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
 from app.db import queries as q
 from app.db.engine import get_session
@@ -212,6 +213,8 @@ def admin_export(request: Request, fmt: str = "json", date_from: str = "", date_
               "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
               "demand_product", "demand_procedural", "orphan_ratings")
     payload = {
+        # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
+        "disclaimer": EXPERT_DISCLAIMER,
         "generated_at": st["generated_at"],
         "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
                     "region": st["filter_region"] or None, "role": st["filter_role"] or None},

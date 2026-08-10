@@ -14,7 +14,6 @@ from functools import lru_cache
 
 from app.core.config import settings
 from app.core.prompts import (
-    EXPERT_DISCLAIMER,
     NAVIGATOR_SYSTEM_PROMPT,
     PROCEDURAL_SYSTEM_PROMPT,
     build_navigator_user_prompt,
@@ -181,10 +180,6 @@ def _client():
         api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL,
         timeout=30.0, max_retries=1,
     )
-
-
-def _ensure_disclaimer(text: str) -> str:
-    return text if EXPERT_DISCLAIMER in text else text.rstrip() + "\n\n" + EXPERT_DISCLAIMER
 
 
 # --- Faithfulness-постпроверка (P0 анти-галлюцинаций) ------------------------------

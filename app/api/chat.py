@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -26,6 +27,8 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_user, require_user_profiled
+from app.core.config import settings
+from app.core.prompts import EXPERT_DISCLAIMER
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -273,35 +276,73 @@ def _serialize_messages(msgs, include_sources: bool = True) -> list[dict]:
 
 
 def _parse_date(s: str):
-    from datetime import datetime
     try:
         return datetime.strptime(s, "%Y-%m-%d").date() if s else None
     except ValueError:
         return None
 
 
+# --- Маркировка выгрузок (R3) -------------------------------------------------------------------
+# Принцип №1 проекта: ответ ИИ — черновик, вердикт за экспертом ТПП. В интерфейсе пометка висит
+# постоянной строкой под полем ввода (chat.html), и добавлять её в тело каждого ответа — осознанно
+# отменённое решение (правило 6 промпта навигатора). Но ЭКСПОРТ уносит ответы за пределы сервиса —
+# заявителю, в переписку, в приложение к заявке, — а туда пометка не попадала ВООБЩЕ.
+#
+# Маркируем документ дважды, и это не избыточность: шапка помечает файл целиком, подпись реплики
+# переживает копирование ОТДЕЛЬНОГО ответа из файла (самый вероятный способ, которым ответ уходит
+# дальше). Полный дисклеймер в подпись не выносим — документ стал бы нечитаемым.
+_AI_LABEL = "Ассистент (ИИ, предварительный анализ)"
+_HUMAN_LABEL = "Эксперт"
+
+
+def _who(role: str) -> str:
+    return _HUMAN_LABEL if role == "user" else _AI_LABEL
+
+
+def _export_stamp() -> str:
+    return datetime.now().strftime("%d.%m.%Y %H:%M")
+
+
+def _md_head(title: str) -> list[str]:
+    """Шапка markdown-выгрузки: заголовок + дисклеймер цитатой + штамп источника."""
+    return [
+        f"# {title}", "",
+        f"> **{EXPERT_DISCLAIMER}**", ">",
+        f"> Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.", "",
+        "---", "",
+    ]
+
+
+def _txt_head(title: str) -> list[str]:
+    """Шапка текстовой выгрузки: у txt нет визуальной иерархии, поэтому отбиваем линиями."""
+    return [
+        title, "=" * 60, "",
+        EXPERT_DISCLAIMER,
+        f"Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.",
+        "=" * 60, "",
+    ]
+
+
 def _convs_to_markdown(user_name: str, picked) -> str:
-    lines = [f"# Экспорт диалогов — {user_name}", ""]
+    lines = _md_head(f"Экспорт диалогов — {user_name}")
     for s, msgs in picked:
         lines.append(f"## {s['title'] or 'Диалог'}")
         if s["ts"]:
             lines.append(f"_{s['ts'].strftime('%d.%m.%Y %H:%M')}_")
         lines.append("")
         for m in msgs:
-            who = "Эксперт" if m.role == "user" else "Ассистент"
-            lines += [f"**{who}:**", "", m.content, ""]
+            lines += [f"**{_who(m.role)}:**", "", m.content, ""]
         lines += ["---", ""]
     return "\n".join(lines)
 
 
 def _convs_to_text(user_name: str, picked) -> str:
-    lines = [f"Экспорт диалогов — {user_name}", "=" * 40, ""]
+    lines = _txt_head(f"Экспорт диалогов — {user_name}")
     for s, msgs in picked:
         stamp = f"  [{s['ts'].strftime('%d.%m.%Y %H:%M')}]" if s["ts"] else ""
         lines += [(s["title"] or "Диалог") + stamp, "-" * 30]
         for m in msgs:
-            who = "Эксперт" if m.role == "user" else "Ассистент"
-            lines += [f"{who}:", m.content, ""]
+            lines += [f"{_who(m.role)}:", m.content, ""]
         lines.append("")
     return "\n".join(lines)
 
@@ -323,18 +364,16 @@ def _download(content: str, media_type: str, filename: str) -> Response:
 
 
 def _conv_to_markdown(title: str, msgs) -> str:
-    lines = [f"# {title}", ""]
+    lines = _md_head(title)
     for m in msgs:
-        who = "Эксперт" if m.role == "user" else "Ассистент"
-        lines += [f"**{who}:**", "", m.content, ""]
+        lines += [f"**{_who(m.role)}:**", "", m.content, ""]
     return "\n".join(lines)
 
 
 def _conv_to_text(title: str, msgs) -> str:
-    lines = [title, "=" * min(len(title), 60), ""]
+    lines = _txt_head(title)
     for m in msgs:
-        who = "Эксперт" if m.role == "user" else "Ассистент"
-        lines += [f"{who}:", m.content, ""]
+        lines += [f"{_who(m.role)}:", m.content, ""]
     return "\n".join(lines)
 
 
@@ -367,7 +406,9 @@ def export_conversations(
         for s, msgs in picked
     ]
     return _json_download(
-        {"user": user.username,
+        {"disclaimer": EXPERT_DISCLAIMER,  # R3: маркировка выгрузки — первым полем, чтобы её видели
+         "exported_at": _export_stamp(), "source": settings.APP_TITLE,
+         "user": user.username,
          "filters": {"date_from": date_from or None, "date_to": date_to or None, "sources": incl_sources},
          "exported_conversations": len(conversations), "conversations": conversations},
         base + ".json",
@@ -386,7 +427,9 @@ def export_conversation(session_id: str, fmt: str = "json", user: User = Depends
     if fmt == "txt":
         return _download(_conv_to_text(title, msgs), "text/plain; charset=utf-8", base + ".txt")
     return _json_download(
-        {"user": user.username, "conversation": {
+        {"disclaimer": EXPERT_DISCLAIMER,  # R3
+         "exported_at": _export_stamp(), "source": settings.APP_TITLE,
+         "user": user.username, "conversation": {
             "session_id": session_id, "title": title, "messages": _serialize_messages(msgs)}},
         base + ".json",
     )
