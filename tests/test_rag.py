@@ -598,6 +598,36 @@ class TestThresholds(unittest.TestCase):
         self.assertIn("10 баллов", lookup_threshold(["32.99.53.130"], "Оборудование для практикума"))
         self.assertIn("15 баллов", lookup_threshold(["32.99.53.130"], "Конструктор робототехнический"))
 
+    def test_threshold_does_not_leak_up_the_hierarchy(self):
+        """R8: порог из примечания для УЗКОГО кода не применяется к более широкой позиции.
+
+        Регресс: матч кодов был симметричным, и порог «утекал» вверх по иерархии. «Устройства
+        ввода или вывода» (26.20.16) получали порог, заданный для «Принтеров для печати этикеток»
+        (26.20.16.120) и «Сканеров штрихкодов» (26.20.16.150). Число дословно из первоисточника,
+        поэтому faithfulness-гард молчал."""
+        from app.rag.thresholds import _code_applies
+        self.assertIsNone(lookup_threshold(["26.20.16"], "Устройства ввода или вывода", "IX"))
+        # направление: предок→потомок можно, потомок→предок нельзя
+        self.assertTrue(_code_applies("22.22", "22.22.11"))
+        self.assertTrue(_code_applies("22.22", "22.22"))
+        self.assertFalse(_code_applies("22.22.11", "22.22"))
+        self.assertFalse(_code_applies("22.11", "22.22"))
+
+    def test_group_level_threshold_is_labelled(self):
+        # порог ветки-предка показываем, но честно называем уровень — иначе читается как свой
+        own = lookup_threshold(["22.22"], "Изделия пластмассовые упаковочные")
+        child = lookup_threshold(["22.22.11"], "Изделия пластмассовые упаковочные")
+        self.assertIn("90 баллов", own)
+        self.assertNotIn("порог задан для группы", own)          # точное совпадение кода
+        self.assertIn("порог задан для группы кодов", child)     # унаследован от 22.22
+
+    def test_exact_note_wins_over_narrower_siblings(self):
+        # у 15.20.14 есть и точная строка примечания, и узкие («Обувь валяная» 15.20.14.130):
+        # после фикса узкие отброшены и остаётся верная
+        thr = lookup_threshold(["15.20.14"], "Обувь с верхом из текстильных материалов", "XVII")
+        self.assertIsNotNone(thr)
+        self.assertNotIn("порог задан для группы", thr)  # это её собственный порог
+
     def test_flat_threshold_none_when_absent(self):
         self.assertIsNone(lookup_threshold(["28.41.1"], "Станки лазерные"))
 

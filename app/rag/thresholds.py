@@ -144,11 +144,24 @@ def _flat_thresholds() -> list[dict]:
     return rows
 
 
-def _code_match(a: str, b: str) -> bool:
-    """Иерархическое совпадение кодов посегментно (22.22 ≡ 22.22.11, но 22.11 ≢ 22.22)."""
-    sa, sb = a.split("."), b.split(".")
-    n = min(len(sa), len(sb))
-    return n > 0 and sa[:n] == sb[:n]
+def _segs(code: str) -> list[str]:
+    return [s for s in str(code).strip().split(".") if s]
+
+
+def _code_applies(note_code: str, pos_code: str) -> bool:
+    """Применим ли порог примечания к позиции. НАПРАВЛЕНИЕ ПРИНЦИПИАЛЬНО (R8).
+
+    Условие: код примечания — ПРЕДОК ИЛИ РАВЕН коду позиции. Тогда позиция лежит внутри ветки,
+    на которую распространяется примечание, и порог к ней относится.
+
+    Раньше матч был симметричным, и порог «утекал» ВВЕРХ по иерархии — примечание для узкого кода
+    применялось ко всей группе. Живые последствия: «Система электродвижения» (27.11) получала порог
+    «Детандер-генераторов жидкостных для СПГ» (27.11.32.120); «Обувь с верхом из текстильных
+    материалов» (15.20.14) — порог «Обуви валяной» (15.20.14.130). Число дословно из первоисточника,
+    поэтому faithfulness-гард молчит: он проверяет заземлённость, а не правильность привязки.
+    Порог — самый дорогой факт продукта, поэтому здесь лучше не показать, чем показать чужой."""
+    n, p = _segs(note_code), _segs(pos_code)
+    return bool(n) and len(n) <= len(p) and p[:len(n)] == n
 
 
 def _name_overlap(product_name: str | None, names: list[str]) -> int:
@@ -156,8 +169,14 @@ def _name_overlap(product_name: str | None, names: list[str]) -> int:
     return max((len(pt & set(re.findall(r"\w{4,}", _norm(nm)))) for nm in names), default=0)
 
 
-def _fmt_flat(r: dict) -> str:
-    return f"{r['threshold']} [прим. {r['note']}]" if r.get("note") else r["threshold"]
+def _fmt_flat(r: dict, group: bool = False) -> str:
+    out = f"{r['threshold']} [прим. {r['note']}]" if r.get("note") else r["threshold"]
+    if group:
+        # Порог задан для ветки-предка, а не для самой позиции: показываем, но честно называем
+        # уровень — иначе групповой порог читается как собственный порог позиции.
+        out += (f" — порог задан для группы кодов {', '.join(r['codes'])}; "
+                f"проверьте применимость к вашей позиции по первоисточнику")
+    return out
 
 
 def lookup_threshold(codes: list[str], product_name: str, section: str | None = None) -> str | None:
@@ -173,19 +192,32 @@ def lookup_threshold(codes: list[str], product_name: str, section: str | None = 
             for r in t["rows"]:
                 if _norm(r["name"]) == name:
                     return _fmt(r, t["note"], t["section"])
-        for t in tables:  # матч имени без ограничения раздела
-            for r in t["rows"]:
-                if _norm(r["name"]) == name:
-                    return _fmt(r, t["note"], t["section"])
+        if section is None:
+            # Матч имени без ограничения раздела — ТОЛЬКО когда раздел неизвестен (R8). Раньше этот
+            # проход выполнялся всегда, и одноимённая позиция из ДРУГОГО раздела могла отдать свой
+            # порог. Сейчас на корпусе это не срабатывает, но защита нужна: данные меняются.
+            for t in tables:
+                for r in t["rows"]:
+                    if _norm(r["name"]) == name:
+                        return _fmt(r, t["note"], t["section"])
     # 2) простые пороги-списки (прим. 7/11/31/52/53…) — матч по КОДУ; при неоднозначности (у кода
     #    несколько строк с разными порогами) разрешаем по наименованию, иначе НЕ гадаем.
     if codes:
-        cands = [r for r in _flat_thresholds()
-                 if any(_code_match(c, rc) for c in codes for rc in r["codes"])]
+        cands: list[tuple[dict, bool]] = []  # (строка примечания, точное ли совпадение кода)
+        for r in _flat_thresholds():
+            exact = None
+            for c in codes:
+                for rc in r["codes"]:
+                    if _code_applies(rc, c):
+                        exact = bool(exact) or (_segs(rc) == _segs(c))
+            if exact is not None:
+                cands.append((r, exact))
         if len(cands) == 1:
-            return _fmt_flat(cands[0])
+            row, is_exact = cands[0]
+            return _fmt_flat(row, group=not is_exact)
         if len(cands) > 1:
-            best = max(cands, key=lambda r: _name_overlap(product_name, r["names"]))
-            if _name_overlap(product_name, best["names"]) >= 2:
-                return _fmt_flat(best)
+            # При равном пересечении имён точное совпадение кода приоритетнее группового.
+            row, is_exact = max(cands, key=lambda rc: (_name_overlap(product_name, rc[0]["names"]), rc[1]))
+            if _name_overlap(product_name, row["names"]) >= 2:
+                return _fmt_flat(row, group=not is_exact)
     return None
