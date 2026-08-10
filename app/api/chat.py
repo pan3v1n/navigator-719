@@ -155,11 +155,32 @@ def _load_history(user_id: int, session_id: str, max_msgs: int = 12) -> list[dic
     ]
 
 
+def _log_question(user_id: int, session_id: str, text: str) -> None:
+    """Записать ВОПРОС до вызова движка (R26).
+
+    Раньше вопрос и ответ писались одной транзакцией ПОСЛЕ успешной генерации — и при падении
+    движка (рваная сеть, недоступный DeepSeek, таймаут) вопрос исчезал бесследно. Терялись ровно
+    те случаи, которые нужнее всего для разбора: те, где сервис не справился.
+
+    Побочный эффект — полезный: расхождение счётчиков «Запросы» и «ответов» в админке становится
+    видимым и показывает долю сбоев, которая прежде была невидима нигде.
+
+    Сбой самой записи не роняет ответ пользователю — как и в остальном логировании."""
+    try:
+        with get_session() as db:
+            q.log_message(db, user_id=user_id, session_id=session_id, role="user", content=text)
+    except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
+        logger.exception(f"chat: не удалось записать вопрос (user_id={user_id})")
+
+
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
     _enforce_chat_limit(user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
+    # R26: вопрос пишем ДО движка — иначе при 503 он теряется. Порядок важен: история загружена
+    # выше, поэтому текущий вопрос в неё не попадёт и не задвоится.
+    _log_question(user.id, session_id, req.message)
     okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а
     try:
         ans = answer(req.message, okpd2=okpd2, history=history)
@@ -171,7 +192,6 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     message_id: int | None = None
     try:
         with get_session() as db:
-            q.log_message(db, user_id=user.id, session_id=session_id, role="user", content=req.message)
             asst = q.log_message(
                 db, user_id=user.id, session_id=session_id, role="assistant", content=ans.text,
                 sources=[s.model_dump() for s in sources],
@@ -201,7 +221,13 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     полный текст). Обрыв/сбой движка → {"type":"error"} → фронт делает фолбэк на /api/chat.
 
     Эндпоинт СИНХРОННЫЙ (`def`): Starlette крутит sync-генератор в threadpool (как /api/chat),
-    event loop не держим. ⚠ Рваная РФ-сеть: длинный SSE хрупок — на фронте фолбэк обязателен."""
+    event loop не держим. ⚠ Рваная РФ-сеть: длинный SSE хрупок — на фронте фолбэк обязателен.
+
+    R26 — почему здесь вопрос НЕ пишется заранее, в отличие от `/api/chat`. Любой сбой стрима
+    (ошибка движка, обрыв, таймаут) фронт отрабатывает фолбэком на `/api/chat`, а тот вопрос
+    ПЕРЕД вызовом движка уже записывает. Пиши мы его и здесь — при каждом фолбэке в беседе
+    появлялся бы дубль вопроса, искажая и историю мультитёрна, и счётчики админки. Так что
+    потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
     _enforce_chat_limit(user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы (пусто для новой беседы)
