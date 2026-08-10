@@ -19,7 +19,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import okpd2_ref, sparse
+from app.rag import fragments, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
@@ -136,6 +136,12 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
                     f"      СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
                     f"{rel}; полный перечень требований и баллов — в первоисточнике ПП №719 (этот раздел)."
                 )
+        # R29: у позиции требования заведомо неполны — общая ячейка группы расколота при конвертации
+        # таблицы, и здесь лежит лишь её обрывок. Помечаем ВСЕГДА (даже когда операций мало и кап не
+        # сработал): иначе фрагмент выглядит как полный перечень. Маркер тот же, что выше, — правило
+        # 2а промпта заставит модель предупредить эксперта и не считать, наберётся ли порог.
+        if fragments.is_fragmented(h.product_name):
+            lines.append("      " + fragments.NOTICE)
         if h.source_anchor:
             lines.append(f"    Источник: {h.source_anchor}")
         blocks.append("\n".join(lines))

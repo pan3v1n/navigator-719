@@ -350,11 +350,47 @@ def classify(rec: dict, rows: list[Row], ops_by_name: dict[str, int] | None = No
 # --------------------------------------------------------------------------- #
 # Отчёт
 # --------------------------------------------------------------------------- #
+# --------------------------------------------------------------------------- #
+# R29: расколотая общая ячейка — требования одной группы разлились по строкам
+# --------------------------------------------------------------------------- #
+# Зачины настоящего требования. Если ячейка следующей строки начинается НЕ с них, а предыдущая
+# оборвана двоеточием — перед нами продолжение одного списка, растащенное по строкам таблицы.
+_OPENER = re.compile(
+    r"^(налич|осуществл|выполн|при производств|до \d|с \d+ января|соблюден|оформлен|применяем|"
+    r"расположен|производств|использован|проведен|обеспечен|\d+\.\s)", re.IGNORECASE)
+
+
+def find_fragmented(rows: list[Row]) -> list[list[Row]]:
+    """Группы строк, между которыми расколот ОДИН список требований.
+
+    Сигнатура: ячейка обрывается двоеточием, а следующая строка-товар начинается не как
+    требование. Пробег продолжаем, пока строки выглядят продолжением (не начинаются с зачина).
+
+    ВАЖНО про `\\d+\\.` в зачинах: без него ловилось ложное срабатывание — «Средства защиты
+    информации» (IX) имеют 27 СОБСТВЕННЫХ требований, просто пронумерованных «1. соответствие
+    заявителя…». Это не обрывок."""
+    prods = [r for r in rows if r.kind == "product"]
+    out: list[list[Row]] = []
+    for k, r in enumerate(prods[:-1]):
+        if not (r.req and r.req.rstrip().endswith(":")):
+            continue
+        run = [r]
+        for nxt in prods[k + 1:]:
+            if not nxt.req or _OPENER.match(nxt.req.strip()):
+                break
+            run.append(nxt)
+        if len(run) > 1:
+            out.append(run)
+    return out
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Диагностика позиций 719 без требований (R6, шаг 1)")
     ap.add_argument("--section", help="ограничить одним разделом (римская цифра, напр. XVIII)")
     ap.add_argument("--limit", type=int, default=0, help="сколько примеров печатать (0 = только сводка)")
     ap.add_argument("--json", help="куда сложить машиночитаемый результат")
+    ap.add_argument("--fragments", metavar="PATH",
+                    help="R29: выгрузить позиции с РАСКОЛОТОЙ общей ячейкой требований")
     args = ap.parse_args()
 
     chunks: dict[str, list[Row]] = {}
@@ -367,6 +403,29 @@ def main() -> None:
         chunks.setdefault(m.group(1), rows)
 
     recs = load_structured()
+
+    if args.fragments:
+        groups = []
+        for sec, rows in chunks.items():
+            for run in find_fragmented(rows):
+                groups.append({
+                    "section": sec,
+                    "reason": "требования группы расколоты между строками таблицы (R29)",
+                    "positions": [{"okpd2_codes": r.codes, "product_name": r.name,
+                                   "req_preview": " ".join(r.req.split())[:120]} for r in run],
+                })
+        out = Path(args.fragments)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
+        n_pos = sum(len(g["positions"]) for g in groups)
+        print(f"R29: групп с расколотой ячейкой {len(groups)}, позиций в них {n_pos} → {out}")
+        for g in groups:
+            print(f"\n  [{g['section']}]")
+            for p in g["positions"]:
+                print(f"     {','.join(p['okpd2_codes']) or '(код объединён)':<16} "
+                      f"{p['product_name'][:46]:<46} {p['req_preview'][:60]}")
+        return
+
     orphans = [r for r in recs if n_operations(r) == 0]
     if args.section:
         orphans = [r for r in orphans if r.get("section_roman") == args.section]

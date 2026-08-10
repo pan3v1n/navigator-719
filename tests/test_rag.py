@@ -174,6 +174,40 @@ class TestContextAndDisclaimer(unittest.TestCase):
                                            {"component": None, "operations": []}])
         self.assertEqual(pipeline_mod._hit_operations(hit), [])
 
+    def test_fragmented_position_marked_incomplete(self):
+        """R29: позиция с расколотой общей ячейкой помечается как НЕПОЛНАЯ.
+
+        «Хладон-218» показывает 4 операции по 100 баллов при пороге 100 — без пометки модель
+        заключила бы «порог набирается», хотя это лишь обрывок общего списка группы (остальные
+        операции значатся у «Хладон-125 ХП» и «Хладон 14»). Маркер намеренно тот же, что у
+        мега-позиций, — тогда срабатывает правило 2а промпта без его правки."""
+        from app.rag import fragments
+        hit = make_hit(product_name="Хладон-218 (октафторпропан)", section_roman="XXI",
+                       okpd2_codes=["20.14.19.120"],
+                       requirement_blocks=[{"operations": [{"text": "пиролиз", "points": 100}]}])
+        ctx = format_context([hit])
+        self.assertIn("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ", ctx)
+        self.assertIn("входит в группу с ОБЩИМИ требованиями", ctx)
+        # обычная позиция пометку не получает
+        self.assertNotIn("входит в группу с ОБЩИМИ требованиями", format_context([make_hit()]))
+        self.assertTrue(fragments.is_fragmented("Хладон-218 (октафторпропан)"))
+        self.assertFalse(fragments.is_fragmented("Подшипники шариковые или роликовые"))
+
+    def test_fragmented_lookup_is_robust(self):
+        from app.rag import fragments
+        # многострочное наименование исходника → сверяем по ПЕРВОЙ строке
+        self.assertTrue(fragments.is_fragmented("Хладон-218 (октафторпропан)\nХладон-23"))
+        self.assertTrue(fragments.is_fragmented("  хладон-218   (октафторпропан)  "))  # регистр/пробелы
+        self.assertFalse(fragments.is_fragmented(None))
+        self.assertFalse(fragments.is_fragmented(""))
+
+    def test_fragmented_list_covers_known_groups(self):
+        # список сгенерирован из чанков детерминированно; страхуемся от его потери/обнуления
+        from app.rag import fragments
+        for name in ("Аддитивные установки экструзии материала", "Светодиоды зеленого диапазона",
+                     "Хладон-125 ХП", "Мономер-6 технический (гексафторпропилен технический)"):
+            self.assertTrue(fragments.is_fragmented(name), name)
+
     def test_format_context_ranks_relevant_ops(self):
         # мега-продукт: релевантная операция стоит ПОСЛЕ порога усечения
         from app.rag.pipeline import MAX_OPS_PER_HIT
