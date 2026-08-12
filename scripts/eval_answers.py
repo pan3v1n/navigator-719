@@ -11,7 +11,12 @@ DeepSeek) на golden set и проверяет ответ ДЕТЕРМИНИР�
     в ОТВЕТЕ обязано присутствовать в КОНТЕКСТЕ, который видела модель (правило 2 промпта).
     Число баллов/%, которого нет в контексте — выдуманное. Считаем долю ответов без выдумок.
   • АТРИБУЦИЯ — упомянут ли в ответе ожидаемый раздел (по русскому наименованию/римской цифре).
-  • ДИСКЛЕЙМЕР — есть ли обязательная пометка эксперта (гарантируется `_ensure_disclaimer`).
+  • ДИСКЛЕЙМЕР ЗДЕСЬ НЕ МЕРЯЕТСЯ (снято 12.08.2026). Пометка эксперта осознанно убрана из тела
+    ответа (R3, правило 6 промпта: внутренний инструмент, повтор в каждой реплике — шум) и живёт
+    в постоянной строке UI и в КАЖДОЙ выгрузке. Функции `_ensure_disclaimer`, на которую метрика
+    опиралась, больше нет. Требование не исчезло — оно проверяется там, где теперь применяется:
+    `tests/test_export.py` (все форматы выгрузки, 6 проверок). Метрика, которая после R3 всегда
+    показывала бы 0/42, вводила бы в заблуждение при чтении отчёта.
   • OUT-OF-SCOPE — на запросах вне 719 ответ должен ОТКАЗАТЬ (а не подгонять «ближайший мусор»).
   • CJK — нет ли утечки иероглифов DeepSeek (известный P2-баг).
 
@@ -38,7 +43,6 @@ if str(ROOT) not in sys.path:
 import json  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
-from app.core.prompts import EXPERT_DISCLAIMER  # noqa: E402
 # Логику faithfulness берём ИЗ пайплайна — рантайм-постпроверка и этот замер меряют одно и то же.
 from app.rag.pipeline import answer, claim_numbers, format_cases, format_context, unverified_numbers  # noqa: E402
 from app.rag.retriever import _client  # noqa: E402
@@ -103,7 +107,6 @@ def evaluate(limit: int, cases_limit: int):
             "attributed": attributed(text, c["expected_section"], ans.hits) if c["in_scope"] else None,
             "declined": bool(DECLINE_RE.search(text)),
             "cited": bool(CITE_RE.search(text)),  # есть ли инлайн-ссылка [N] на позицию
-            "disclaimer": EXPERT_DISCLAIMER[:40] in text,
             "cjk": bool(CJK_RE.search(text)),
             "low_relevance": ans.low_relevance,
         })
@@ -129,7 +132,6 @@ def summarize(rows, limit: int) -> list[str]:
         f_ok, f_n = _rate(ins, lambda r: r["faithful"])
         a_ok, a_n = _rate(ins, lambda r: r["attributed"])
         cit_ok, cit_n = _rate(ins, lambda r: r["cited"])
-        d_ok, d_n = _rate(ins, lambda r: r["disclaimer"])
         c_ok, c_n = _rate(ins, lambda r: not r["cjk"])
         total_claims = sum(r["n_claims"] for r in ins)
         total_halluc = sum(len(r["hallucinated"]) for r in ins)
@@ -143,7 +145,6 @@ def summarize(rows, limit: int) -> list[str]:
                      f"(P0-постпроверка — незаземлённое число не уходит к эксперту незамеченным)")
         L.append(f"  Атрибуция раздела                   = {a_ok}/{a_n} = {a_ok / a_n:.2f}")
         L.append(f"  Инлайн-цитаты [N] на позицию        = {cit_ok}/{cit_n} = {cit_ok / cit_n:.2f}")
-        L.append(f"  Дисклеймер эксперта                 = {d_ok}/{d_n} = {d_ok / d_n:.2f}")
         L.append(f"  Без CJK-иероглифов                  = {c_ok}/{c_n} = {c_ok / c_n:.2f}")
         L.append("")
 
@@ -153,17 +154,16 @@ def summarize(rows, limit: int) -> list[str]:
         L.append(f"  Корректный отказ («вне сферы / уточнить») = {dec_ok}/{dec_n} = {dec_ok / dec_n:.2f}")
         L.append("")
 
-    L.append(f"{'id':>3} {'sc':<3} {'ожид':>5} {'faith':>6} {'attr':>5} {'disc':>5} {'cjk':>4}  запрос")
+    L.append(f"{'id':>3} {'sc':<3} {'ожид':>5} {'faith':>6} {'attr':>5} {'cjk':>4}  запрос")
     L.append("-" * 78)
     for r in rows:
         sc = "IN" if r["in_scope"] else "OUT"
         faith = "✓" if r["faithful"] else f"✗{len(r['hallucinated'])}"
         attr = "—" if r["attributed"] is None else ("✓" if r["attributed"] else "✗")
-        disc = "✓" if r["disclaimer"] else "✗"
         cjk = "!" if r["cjk"] else "·"
         if not r["in_scope"]:
             attr = "↩" if r["declined"] else "✗"  # для OUT: отказал ли
-        L.append(f"{r['id']:>3} {sc:<3} {r['expected']:>5} {faith:>6} {attr:>5} {disc:>5} {cjk:>4}  {r['query'][:30]}")
+        L.append(f"{r['id']:>3} {sc:<3} {r['expected']:>5} {faith:>6} {attr:>5} {cjk:>4}  {r['query'][:30]}")
     L.append("")
 
     bad_faith = [r for r in rows if not r["faithful"]]
