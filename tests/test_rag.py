@@ -1270,8 +1270,14 @@ class TestRulesTopic(unittest.TestCase):
     def test_documents_go_to_tpp_order(self):
         for q in ("какие документы нужны для внесения в реестр",
                   "что такое акт экспертизы и когда он нужен",
-                  "нужен ли сертификат СТ-1", "перечень документов для подачи"):
+                  "нужен ли сертификат СТ-1", "какие документы нужны для акта экспертизы"):
             self.assertEqual(self.topic(q), "tpp_order_52", q)
+
+    def test_ambiguous_query_has_no_topic(self):
+        """Ничья — честный ответ: «перечень документов для подачи» задевает и Приказ №52
+        (перечень документов), и Правила (подача). Навязывать тему при равных признаках хуже,
+        чем не навязывать: квота тогда раздаёт места поровну и решает релевантность."""
+        self.assertIsNone(self.topic("перечень документов для подачи"))
 
     def test_procedure_goes_to_registry_rules(self):
         for q in ("сроки рассмотрения заявления", "какой порядок подачи заявления через ГИСП",
@@ -1331,12 +1337,21 @@ class TestRulesQuota(unittest.TestCase):
         self.assertEqual({c["doc_type"] for c in got},
                          {"tpp_order_52", "rules_registry", "decree_body"})
 
-    def test_order_follows_hybrid_rank_not_quota(self):
-        """Квота меняет СОСТАВ окна, а не порядок: сильнейший пункт остаётся первым."""
+    def test_topic_document_goes_first_rank_preserved_inside(self):
+        """K9 уточнил правило K10. Сначала было «квота меняет состав окна, а не порядок» — но
+        замер атрибуции показал, что этого мало: тема угадывалась в 84 % случаев, а первым в
+        окне оказывался более многословный Приказ №52, и ответ строился вокруг него. Теперь
+        пункты ТЕМАТИЧЕСКОГО документа идут первыми, а внутри каждой группы порядок гибрида
+        сохраняется — релевантность внутри документа не трогаем. Атрибуция@1: 0.72 → 0.92."""
         self._pool(["tpp_order_52"] * 20 + ["rules_registry"] * 4)
         got = self.r.search_rules("сроки рассмотрения заявления", limit=6)
-        scores = [c["_score"] for c in got]
-        self.assertEqual(scores, sorted(scores, reverse=True))
+        self.assertEqual(got[0]["doc_type"], "rules_registry", "первым идёт документ по теме")
+        by_doc = {}
+        for c in got:
+            by_doc.setdefault(c["doc_type"], []).append(c["_score"])
+        for doc, scores in by_doc.items():
+            self.assertEqual(scores, sorted(scores, reverse=True),
+                             f"внутри {doc} порядок гибрида должен сохраняться")
 
     def test_topic_is_reported_in_payload(self):
         self._pool(["rules_registry"] * 6)
