@@ -103,25 +103,53 @@ def _to_hit(p) -> Hit:
     )
 
 
+# M1: точный (переборный) поиск вместо приближённого HNSW. Только для ЗАМЕРОВ.
+#
+# Зачем. `eval_coverage` на неизменном индексе и одной команде давал разные числа: четыре прогона
+# подряд 12.08.2026 дали recall@1 = 0.933 / 0.937 / 0.941 / 0.941, коллизии гуляли 80–92. Причина —
+# приближённый HNSW плюс слияние RRF: на 1380 точках с множеством сиблингов-вариантов top-1 среди
+# почти равных кандидатов перескакивает между прогонами. Разброс ±0.005 оказался БОЛЬШЕ разниц,
+# по которым принимались решения, — то есть метрика мерила себя, а не изменения.
+#
+# Почему не включаем в проде: точный поиск перебирает всю коллекцию. В горячем пути это лишняя
+# латентность на 2 vCPU без всякой пользы — пользователю нужен хороший ответ, а не воспроизводимый
+# до третьего знака. Замер же не в горячем пути, и ему нужна именно повторяемость.
+EXACT_SEARCH = False
+
+
+def _search_params():
+    """Параметры поиска Qdrant: точный перебор при `EXACT_SEARCH`, иначе дефолтный HNSW."""
+    if not EXACT_SEARCH:
+        return None
+    from qdrant_client import models
+    return models.SearchParams(exact=True)
+
+
 def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
             qvec: list[float] | None = None):
     """Гибрид dense+sparse с RRF. `qvec` — заранее посчитанный dense-вектор запроса: на один
     вопрос к Qdrant уходит несколько обращений (позиции + подстраховка по коду + кейсы + guard),
     и e5-large незачем прогонять на каждое. Не передан — считаем сами (обратная совместимость:
-    eval-скрипты зовут search/search_cases напрямую)."""
+    eval-скрипты зовут search/search_cases напрямую).
+
+    При `EXACT_SEARCH` (только замеры, см. M1) обе ветви префетча идут точным перебором —
+    иначе число «плавает» между прогонами сильнее, чем измеряемая разница."""
     from qdrant_client import models
 
     dvec = qvec if qvec is not None else embed_query(query)
     idx, val = query_vector(query)  # sparse дёшев (mmh3+Snowball локально) — переиспользовать нечего
+    sp = _search_params()
     res = _client().query_points(
         collection_name=collection or settings.QDRANT_COLLECTION,
         prefetch=[
-            models.Prefetch(query=dvec, using=DENSE, limit=max(limit, 20), filter=qfilter),
+            models.Prefetch(query=dvec, using=DENSE, limit=max(limit, 20), filter=qfilter,
+                            params=sp),
             models.Prefetch(
                 query=models.SparseVector(indices=idx, values=val),
                 using=SPARSE,
                 limit=max(limit, 20),
                 filter=qfilter,
+                params=sp,
             ),
         ],
         query=models.FusionQuery(fusion=models.Fusion.RRF),

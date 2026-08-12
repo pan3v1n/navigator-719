@@ -35,6 +35,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.rag import retriever  # noqa: E402
 from app.rag.retriever import search  # noqa: E402
 from scripts.load_kb import load_records  # noqa: E402  (тот же набор записей, что в индексе)
 
@@ -153,9 +154,21 @@ def report_name(rows, limit: int) -> list[str]:
     L.append(f"NAME sweep (запрос = product_name, okpd2=None) — {len(rows)} позиций, top-{limit}")
     L.append("=" * 78)
     L.append("PRODUCT-LEVEL ретрив (эталон = source_anchor самой позиции):")
-    L.append(f"  recall@1 = {_recall_at(rows,1):.3f}   recall@3 = {_recall_at(rows,3):.3f}   "
-             f"recall@5 = {_recall_at(rows,5):.3f}   recall@{limit} = {_recall_at(rows,limit):.3f}")
+    # M1: заголовочная метрика — recall@1. Замечание владельца 12.08.2026: эксперт не читает
+    # десять кандидатов, он читает ответ, поэтому recall@10 = 1.000 — метрика для галочки.
+    # Глубокие recall оставлены СПРАВОЧНО, чтобы видеть, «не нашли» или «нашли, но не первым».
+    L.append(f"  recall@1 = {_recall_at(rows,1):.3f}   ← ГЛАВНАЯ: ответ строится вокруг top-1")
     L.append(f"  MRR      = {_mrr(rows):.3f}")
+    L.append(f"  справочно: recall@3 = {_recall_at(rows,3):.3f}  recall@5 = {_recall_at(rows,5):.3f}"
+             f"  recall@{limit} = {_recall_at(rows,limit):.3f} — глубина, которую пользователь не читает")
+    L.append("")
+    # M1: без этой оговорки число занижает продакшен. Реранкер живёт в pipeline, а не в
+    # retriever.search, и включается на запросах БЕЗ совпадения по коду ОКПД2 — то есть ровно
+    # там, где верная позиция стоит на ранге 2. Замер его вклада: 1/12 → 9/12 на
+    # кросс-секционных коллизиях (`--rerank-collisions`).
+    L.append("⚠ Замер БЕЗ LLM-реранкера: он в pipeline, а не в retriever.search. В проде он "
+             "поднимает ранг-2 случаи,")
+    L.append("  поэтому фактический продакшен-recall@1 ВЫШЕ измеренного здесь.")
     L.append("")
 
     # позиции-невидимки: своя позиция не попала даже в top-K
@@ -269,6 +282,33 @@ def rerank_recall3(name_rows, limit: int):
     return L, resid
 
 
+def repeat_block(records, limit: int, times: int, first_rows, progress: bool) -> list[str]:
+    """M1: разброс recall@1 по повторным прогонам — и почему он вообще есть.
+
+    Одиночный прогон не воспроизводим: слияние RRF поверх 8 сегментов коллекции разрешает ничьи
+    между почти равными кандидатами непредсказуемо. Точный поиск (`exact=true`) эту часть НЕ
+    лечит — проверено 12.08.2026: три прогона подряд дали 0.940 / 0.946 / 0.943.
+
+    Разброс оказался БОЛЬШЕ разниц, по которым принимались решения, поэтому одно число тут врёт
+    самой своей точностью. Печатаем среднее и границы: их и надо цитировать."""
+    vals = [_recall_at(first_rows, 1)]
+    for i in range(times - 1):
+        if progress:
+            print(f"  повтор {i + 2}/{times}…")
+        vals.append(_recall_at(sweep(records, limit, by_code=False, progress=False), 1))
+    lo, hi = min(vals), max(vals)
+    mean = sum(vals) / len(vals)
+    return [
+        "",
+        f"РАЗБРОС recall@1 по {times} прогонам: среднее {mean:.3f}, диапазон {lo:.3f}–{hi:.3f} "
+        f"(±{(hi - lo) / 2:.3f})",
+        "  Причина: слияние RRF по сегментам разрешает ничьи непредсказуемо; точный поиск это не",
+        "  лечит. Цитировать нужно среднее с разбросом, а не одно число — иначе различия меньше",
+        f"  ±{(hi - lo) / 2:.3f} будут выглядеть значимыми, не являясь таковыми.",
+        "",
+    ]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Coverage sweep + product-level eval ретрива 719")
     ap.add_argument("--limit", type=int, default=10, help="глубина выдачи top-K")
@@ -280,7 +320,19 @@ def main() -> None:
                     help="продакшен-конфиг: реранкер на всём хвосте rank≥2, full-base recall@3 до/после (+DeepSeek)")
     ap.add_argument("--report", type=str, default="", help="путь для markdown-отчёта")
     ap.add_argument("--no-progress", action="store_true")
+    # M1: по умолчанию замер идёт ТОЧНЫМ поиском — иначе число «плавает» между прогонами
+    # (12.08.2026: четыре прогона одной команды дали 0.933/0.937/0.941/0.941 при разбросе
+    # ±0.005, что БОЛЬШЕ разниц, по которым принимались решения). `--approx` возвращает
+    # приближённый HNSW — то, как ищет продакшен; тогда число читать как оценку, а не как факт.
+    ap.add_argument("--approx", action="store_true",
+                    help="мерить приближённым HNSW (как в проде) вместо точного перебора")
+    # M1: одиночный прогон НЕ воспроизводим — слияние RRF по 8 сегментам разрешает ничьи
+    # непредсказуемо, и точный поиск это НЕ лечит (проверено: 0.940/0.946/0.943). Поэтому
+    # заголовочное число берём как среднее по нескольким прогонам и печатаем разброс.
+    ap.add_argument("--repeat", type=int, default=3,
+                    help="сколько раз повторить NAME sweep для оценки разброса (по умолчанию 3)")
     args = ap.parse_args()
+    retriever.EXACT_SEARCH = not args.approx
 
     try:
         from app.rag.retriever import _client
@@ -298,6 +350,9 @@ def main() -> None:
     if args.sweep in ("name", "both"):
         name_rows = sweep(records, args.limit, by_code=False, progress=not args.no_progress)
         out += report_name(name_rows, args.limit)
+        if args.repeat > 1:
+            out += repeat_block(records, args.limit, args.repeat, name_rows,
+                                progress=not args.no_progress)
     if args.sweep in ("code", "both"):
         rows = sweep(records, args.limit, by_code=True, progress=not args.no_progress)
         out += report_code(rows, args.limit)
