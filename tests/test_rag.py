@@ -985,12 +985,22 @@ class TestAnswerStream(unittest.TestCase):
         self.assertEqual(streamed, meta.THANKS)
 
 
-class _FakePoint:
-    """Точка выдачи Qdrant (payload + score) — минимум, который читает `_to_hit`."""
+_FAKE_ID = iter(range(1, 10_000))
 
-    def __init__(self, payload: dict, score: float = 0.9):
+
+class _FakePoint:
+    """Точка выдачи Qdrant (id + payload + score) — минимум, который читают `_to_hit`
+    и `_case_dense_scores`.
+
+    `id` обязателен (R30): порог релевантности кейсов сопоставляет гибридную выдачу с
+    dense-пробой ПО ID. Без него `search_cases` падала внутрь своего же `except` и молча
+    возвращала пусто — тесты при этом оставались зелёными, потому что проверяли только
+    число прогонов энкодера. Ровно тот случай, когда заглушка скрывает боевой путь."""
+
+    def __init__(self, payload: dict, score: float = 0.9, id: int | None = None):  # noqa: A002
         self.payload = payload
         self.score = score
+        self.id = next(_FAKE_ID) if id is None else id
 
 
 class _FakeQdrant:
@@ -1107,6 +1117,91 @@ class TestQueryVectorReused(unittest.TestCase):
         planned = pipeline_mod._plan_answer("производим гидравлические насосы")
         self.assertIsInstance(planned, pipeline_mod._Plan)
         self.assertEqual(self.calls, 1, "на один вопрос должен приходиться один прогон e5")
+
+
+class TestCaseRelevanceThreshold(unittest.TestCase):
+    """R30: кейс попадает в контекст только при подтверждённой близости.
+
+    Кейс идёт с ВЫСШИМ приоритетом (правило 1а промпта), выше первоисточника, поэтому
+    нерелевантный кейс — не шум, а правдоподобная дезинформация. Раньше порога не было
+    вообще: `search_cases` отдавала top-3 на любой запрос, включая заведомо посторонние
+    («оказываем юридические услуги» → кейс про НИОКР грузового автотранспорта), и заодно
+    гасила out-of-scope-гард в пайплайне.
+
+    Отсечка идёт по ЧИСТОМУ dense-косинусу, а не по фьюжн-score: последний мерит ранг, и
+    на маленькой коллекции топ почти всегда нормируется в 1.0."""
+
+    def setUp(self):
+        from app.rag import retriever as r
+        self.r = r
+        self._orig_min = r.settings.CASE_RELEVANCE_MIN
+        r.settings.CASE_RELEVANCE_MIN = 0.82
+        self._orig_client = r._client
+        r._client = lambda: type("C", (), {"collection_exists": lambda self, n: True})()
+        self._orig_hybrid = r._hybrid
+        self._orig_dense = r._case_dense_scores
+
+    def tearDown(self):
+        self.r.settings.CASE_RELEVANCE_MIN = self._orig_min
+        self.r._client = self._orig_client
+        self.r._hybrid = self._orig_hybrid
+        self.r._case_dense_scores = self._orig_dense
+
+    def _wire(self, points, dense_map):
+        self.r._hybrid = lambda *a, **kw: points
+        self.r._case_dense_scores = lambda qvec, probe: dense_map
+
+    def test_relevant_case_passes_and_carries_dense_score(self):
+        p = _FakePoint({"query": "нет в приложении", "expert_answer": "путь СТ-1"}, score=1.0, id=7)
+        self._wire([p], {7: 0.87})
+        out = self.r.search_cases("продукции нет в перечне", qvec=[0.1] * 4)
+        self.assertEqual(len(out), 1)
+        self.assertEqual(out[0]["_dense"], 0.87)
+        self.assertEqual(out[0]["_score"], 1.0, "гибридный ранг сохраняется, фильтр его не подменяет")
+
+    def test_irrelevant_case_is_dropped_despite_top_fusion_score(self):
+        """Главный регресс: фьюжн-score 1.0 при чужой теме. Раньше такой кейс проходил."""
+        p = _FakePoint({"query": "НИОКР грузовой автотранспорт", "expert_answer": "..."}, score=1.0, id=3)
+        self._wire([p], {3: 0.755})  # замеренный косинус для «юридические услуги»
+        self.assertEqual(self.r.search_cases("оказываем юридические услуги", qvec=[0.1] * 4), [])
+
+    def test_all_below_threshold_gives_empty_so_guard_stays_armed(self):
+        """Пустой список — условие того, чтобы out-of-scope-гард в пайплайне не гасился."""
+        pts = [_FakePoint({"query": f"q{i}", "expert_answer": "a"}, score=1.0, id=i) for i in (1, 2, 3)]
+        self._wire(pts, {1: 0.80, 2: 0.79, 3: 0.76})
+        self.assertEqual(self.r.search_cases("выпекаем хлеб", qvec=[0.1] * 4), [])
+
+    def test_mixed_batch_keeps_only_relevant(self):
+        pts = [_FakePoint({"query": f"q{i}", "expert_answer": "a"}, score=1.0, id=i) for i in (1, 2, 3)]
+        self._wire(pts, {1: 0.90, 2: 0.81, 3: 0.83})
+        got = self.r.search_cases("вопрос", qvec=[0.1] * 4)
+        self.assertEqual([c["query"] for c in got], ["q1", "q3"], "порядок гибрида сохранён, q2 отсечён")
+
+    def test_point_missing_from_dense_probe_is_dropped_not_admitted(self):
+        """Нет данных о близости — отказ, а не пропуск по умолчанию: лучше не показать, чем чужое."""
+        p = _FakePoint({"query": "q", "expert_answer": "a"}, score=1.0, id=42)
+        self._wire([p], {1: 0.99})  # id 42 в пробе отсутствует
+        self.assertEqual(self.r.search_cases("вопрос", qvec=[0.1] * 4), [])
+
+    def test_threshold_is_configurable(self):
+        p = _FakePoint({"query": "q", "expert_answer": "a"}, score=1.0, id=5)
+        self._wire([p], {5: 0.83})
+        self.assertEqual(len(self.r.search_cases("вопрос", qvec=[0.1] * 4)), 1)
+        self.r.settings.CASE_RELEVANCE_MIN = 0.85
+        self.assertEqual(self.r.search_cases("вопрос", qvec=[0.1] * 4), [])
+
+    def test_failure_is_logged_not_swallowed_silently(self):
+        """Беззвучный отказ выключает всю петлю обучения и снаружи неотличим от «не нашлось»."""
+        def boom(*a, **kw):
+            raise RuntimeError("qdrant упал")
+        self.r._hybrid = boom
+        seen = []
+        sink = self.r.logger.add(lambda m: seen.append(str(m)), level="WARNING")
+        try:
+            self.assertEqual(self.r.search_cases("вопрос", qvec=[0.1] * 4), [])
+        finally:
+            self.r.logger.remove(sink)
+        self.assertTrue(any("петля кейсов" in s for s in seen), "сбой петли обязан попасть в лог")
 
 
 if __name__ == "__main__":

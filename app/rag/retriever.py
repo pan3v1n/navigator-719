@@ -9,8 +9,11 @@
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from functools import lru_cache
+
+from loguru import logger
 
 from app.core.config import settings
 from app.rag.embeddings import embed_query
@@ -187,27 +190,89 @@ def dense_top1(query: str, qvec: list[float] | None = None) -> float:
     return float(res.points[0].score) if res.points else 0.0
 
 
+# Код ОКПД2 в тексте запроса. Дубль регулярки из app/tools/navigator, чтобы retriever
+# (нижний слой) не тянул зависимость от tools (верхний) — иначе импорт закольцуется.
+_CODE_IN_TEXT = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
+
+
+def _case_code_hit(query: str, payload: dict) -> bool:
+    """Назван ли в запросе код ОКПД2, попадающий в ветку кода этого кейса.
+
+    Зачем отдельный путь мимо dense-порога: код — детерминированный сигнал, и он
+    АВТОРИТЕТНЕЕ семантики (тот же принцип, что у товарного ОКПД2-буста). Замер показал,
+    что без этого пути порог срезает ровно те кейсы, ради которых заводился лексический
+    канал: «что означает код 27.40.33.130» давал dense 0.847 и отсекался, хотя код в
+    запросе совпадает с кодом кейса буквально."""
+    code = payload.get("okpd2")
+    if not code:
+        return False
+    return any(okpd2_match([str(code)], m) or okpd2_match([m], str(code))
+               for m in _CODE_IN_TEXT.findall(query or ""))
+
+
+def _case_dense_scores(qvec: list[float], probe: int) -> dict:
+    """id точки → ЧИСТЫЙ dense-косинус по коллекции кейсов (для порога релевантности, R30).
+
+    Отдельный лёгкий запрос: фьюжн-score из `_hybrid` мерит РАНГ, а не близость, и для отсечки
+    непригоден. Коллекция кейсов мала (десятки записей), поэтому проба с запасом дешева."""
+    res = _client().query_points(
+        collection_name=settings.QDRANT_CASES_COLLECTION,
+        query=qvec, using=DENSE, limit=probe, with_payload=False,
+    )
+    return {p.id: float(p.score) for p in res.points}
+
+
 def search_cases(query: str, limit: int = 3, qvec: list[float] | None = None) -> list[dict]:
     """Поиск по подтверждённым экспертом кейсам (коллекция verified_cases).
 
-    Возвращает список payload'ов кейсов со score в `_score`. Если коллекции нет или
-    она пуста — пустой список (петля кейсов опциональна, база работает и без неё).
-    `qvec` — тот же вектор запроса, что и у товарного поиска (см. `_hybrid`).
+    Возвращает payload'ы кейсов со score в `_score` и dense-косинусом в `_dense`. Если коллекции
+    нет, она пуста ИЛИ ни один кейс не прошёл порог релевантности — пустой список (петля кейсов
+    опциональна, база работает и без неё). `qvec` — тот же вектор запроса, что и у товарного
+    поиска (см. `_hybrid`).
 
-    Сам запрос тоже под try: кейсы — НЕОБЯЗАТЕЛЬНОЕ обогащение контекста, их сбой не должен
+    ПОРОГ РЕЛЕВАНТНОСТИ (R30) — почему он здесь обязателен. Кейс уходит в контекст с ВЫСШИМ
+    приоритетом (правило 1а промпта навигатора), выше первоисточника. Поэтому нерелевантный
+    кейс — не безобидный шум, а правдоподобная дезинформация: на «оказываем юридические услуги»
+    подтягивался кейс про НИОКР грузового автотранспорта, а на веб-студию — кейс «нет в
+    приложении → идите путём СТ-1». Плюс наличие кейса гасит out-of-scope-гард в пайплайне,
+    так что два предохранителя выключали друг друга.
+
+    Отсекаем по ЧИСТОМУ dense-косинусу, а НЕ по фьюжн-score: последний — результат RRF-слияния
+    рангов, на маленькой коллекции что-то всегда оказывается первым с нормированным 1.0, и
+    абсолютной релевантности в нём нет. На dense-косинусе полоса чистая (замер 12.08.2026,
+    12 кейсов): уместные — от 0.839, посторонние — до 0.803. Порог `CASE_RELEVANCE_MIN`.
+    Ранжирование при этом остаётся гибридным — лексический канал нужен, чтобы кейс находился
+    по коду ОКПД2 и точным терминам.
+
+    Сам запрос под try: кейсы — НЕОБЯЗАТЕЛЬНОЕ обогащение контекста, их сбой не должен
     ронять уже найденный товарный ответ (раньше исключение из `_hybrid` улетало наверх)."""
     name = settings.QDRANT_CASES_COLLECTION
     try:
         client = _client()
         if not client.collection_exists(name):
             return []
-        points = _hybrid(query, limit, collection=name, qvec=qvec)
-    except Exception:  # noqa: BLE001 — Qdrant недоступен: не валим основной поиск
+        dvec = qvec if qvec is not None else embed_query(query)
+        points = _hybrid(query, limit, collection=name, qvec=dvec)
+        if not points:
+            return []
+        # проба с запасом: гибрид мог поднять запись, которой нет в dense-топе того же размера
+        dense = _case_dense_scores(dvec, probe=max(limit * 8, 64))
+    except Exception as e:  # noqa: BLE001 — Qdrant недоступен: не валим основной поиск
+        # но НЕ молча: беззвучный отказ здесь выключает всю петлю обучения, и снаружи это
+        # неотличимо от «подходящих кейсов не нашлось». На таком молчании проект уже горел
+        # (classifiers/*.tsv в T9, POSIX-путь graphify).
+        logger.warning("петля кейсов недоступна, отвечаем без неё: {}: {}", type(e).__name__, e)
         return []
     out: list[dict] = []
     for p in points:
         pl = dict(p.payload or {})
+        cos = dense.get(p.id)
+        by_code = _case_code_hit(query, pl)
+        if not by_code and (cos is None or cos < settings.CASE_RELEVANCE_MIN):
+            continue  # не показать лучше, чем показать чужое
         pl["_score"] = p.score
+        pl["_dense"] = cos
+        pl["_by_code"] = by_code
         out.append(pl)
     return out
 
