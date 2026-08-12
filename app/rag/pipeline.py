@@ -77,10 +77,25 @@ def _hit_operations(h: Hit) -> list[dict]:
     ops: list[dict] = []
     for b in h.requirement_blocks:
         block_ops = b.get("operations") or []
-        if block_ops:
-            ops.extend(block_ops)
-            continue
         comp = (b.get("component") or "").strip()
+        if block_ops:
+            # K4: вводная фраза блока — ЧАСТЬ требования, а не украшение, и до 12.08.2026 она
+            # молча терялась: `ops.extend(block_ops)` брал только подпункты. А формулируется
+            # требование именно в ней — «ОСУЩЕСТВЛЕНИЕ НА ТЕРРИТОРИИ РОССИЙСКОЙ ФЕДЕРАЦИИ
+            # следующих технологических операций: …». Из 3959 блоков корпуса вводную имеют
+            # 3733 (94 %), и у 484 из них она называет территорию — это ровно претензия
+            # июльского теста «отсутствует отсылка на обязательность осуществления операций
+            # на территории РФ» (15 упоминаний). Без вводной ответ показывает подпункты, не
+            # говоря, ЧАСТЬЮ ЧЕГО они являются.
+            #
+            # Дубли отсекаем: у 8.3 % блоков вводная дословно повторяет одну из своих операций —
+            # там она не добавляет смысла, только шум.
+            dup = comp and any(
+                comp.lower() == (o.get("text") or "").strip().lower() for o in block_ops)
+            parent = comp if (comp and not dup) else None
+            for o in block_ops:
+                ops.append({**o, "_parent": parent} if parent else o)
+            continue
         if comp:
             ops.append({"text": comp, "points": None})
     return ops
@@ -149,10 +164,20 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         shown = ops[:cap]
         if shown:
             lines.append("    Ключевые операции группы:" if parent else "    Ключевые операции:")
+            cur_parent = None
             for o in shown:
+                # K4: вводная фраза блока печатается при смене группы — операции перестают
+                # висеть без указания, частью какого требования они являются. При усечении
+                # список пересортирован по релевантности, и заголовок может повториться —
+                # это лучше, чем оставить операцию без её условия.
+                op_parent = o.get("_parent")
+                if op_parent and op_parent != cur_parent:
+                    lines.append(f"      ▸ {op_parent}")
+                cur_parent = op_parent
                 pts = o.get("points")
                 ptxt = f" — {pts} балл." if pts is not None else " — баллы в контексте не указаны"
-                lines.append(f"      • {o.get('text', '')}{ptxt}")
+                indent = "        " if op_parent else "      "
+                lines.append(f"{indent}• {o.get('text', '')}{ptxt}")
             if total > cap:
                 rel = " (показаны наиболее релевантные запросу)" if query else ""
                 lines.append(

@@ -1204,6 +1204,62 @@ class TestCaseRelevanceThreshold(unittest.TestCase):
         self.assertTrue(any("петля кейсов" in s for s in seen), "сбой петли обязан попасть в лог")
 
 
+class TestBlockIntroPreserved(unittest.TestCase):
+    """K4: вводная фраза блока требований доезжает до контекста.
+
+    Регресс, ради которого правка сделана: `_hit_operations` брал из блока только `operations`,
+    а `component` — вводную фразу — отбрасывал. Формулируется же требование именно в ней:
+    «осуществление НА ТЕРРИТОРИИ РОССИЙСКОЙ ФЕДЕРАЦИИ следующих технологических операций: …».
+    Замер по корпусу: вводную имеют 3733 блока из 3959 (94 %), у 484 она называет территорию —
+    это претензия июльского теста «отсутствует отсылка на обязательность осуществления операций
+    на территории РФ» (15 упоминаний). Без неё ответ показывал подпункты, не говоря, частью
+    какого требования они являются."""
+
+    def _hit(self, blocks):
+        from app.rag.retriever import Hit
+        return Hit(score=1.0, section_roman="I", section_title="Раздел", product_name="Изделие",
+                   okpd2_codes=["01.02"], min_threshold=None, requirement_blocks=blocks,
+                   source_anchor=None)
+
+    def test_intro_reaches_operations(self):
+        h = self._hit([{"component": "осуществление на территории Российской Федерации операций:",
+                        "operations": [{"text": "сварка рамы", "points": 10}]}])
+        ops = pipeline_mod._hit_operations(h)
+        self.assertEqual(ops[0]["_parent"], "осуществление на территории Российской Федерации операций:")
+        self.assertEqual(ops[0]["text"], "сварка рамы", "сама операция не должна пострадать")
+
+    def test_intro_rendered_above_its_operations(self):
+        h = self._hit([{"component": "осуществление на территории Российской Федерации операций:",
+                        "operations": [{"text": "сварка рамы", "points": 10}]}])
+        ctx = pipeline_mod.format_context([h], "рама")
+        self.assertIn("территории Российской Федерации", ctx,
+                      "условие о территории обязано попасть в контекст")
+        self.assertLess(ctx.index("территории Российской"), ctx.index("сварка рамы"),
+                        "вводная идёт ПЕРЕД своими операциями")
+
+    def test_duplicate_intro_is_not_repeated(self):
+        """У 8.3 % блоков вводная дословно повторяет свою же операцию — это шум, не смысл."""
+        h = self._hit([{"component": "сварка рамы",
+                        "operations": [{"text": "сварка рамы", "points": 10}]}])
+        ops = pipeline_mod._hit_operations(h)
+        self.assertIsNone(ops[0].get("_parent"))
+        self.assertEqual(pipeline_mod.format_context([h], None).count("сварка рамы"), 1)
+
+    def test_payload_not_mutated(self):
+        """Блоки приходят из payload Qdrant и могут быть переиспользованы — портить их нельзя."""
+        block = {"component": "вводная:", "operations": [{"text": "оп", "points": 1}]}
+        h = self._hit([block])
+        pipeline_mod._hit_operations(h)
+        self.assertNotIn("_parent", block["operations"][0])
+
+    def test_block_without_operations_still_becomes_requirement(self):
+        """R6 шаг 2 не сломан: блок без операций по-прежнему сам является требованием."""
+        h = self._hit([{"component": "наличие сервисного центра", "operations": []}])
+        ops = pipeline_mod._hit_operations(h)
+        self.assertEqual(ops[0]["text"], "наличие сервисного центра")
+        self.assertIsNone(ops[0]["points"])
+
+
 class TestRulesTopic(unittest.TestCase):
     """K10: тема процедурного вопроса определяется детерминированно."""
 
