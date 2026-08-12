@@ -143,12 +143,21 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 │   ├── test_rag.py
 │   └── test_tools.py
 │
-└── docs/
-    ├── LAUNCH.md          ← запуск MVP (Qdrant → индексация → UI)
+└── docs/                  ← сверено с файлами 2026-08-12
+    ├── CONCEPT.md         ← КОНЦЕПЦИЯ + функциональные требования по версиям (FR-0.5…FR-4.0)
+    ├── REVIEW_TZ.md       ← ГЛАВНЫЙ рабочий план: задачи R1–R29 + чек-лист редеплоя §1а
+    ├── KB_EXPANSION_TZ.md ← ТЗ расширения базы знаний: K1–K17 (+ architecture.html — схема)
+    ├── NEXT_SESSION.md    ← оперативный «где остановились и что дальше»
+    ├── POST_TEST1_TZ.md   ← задачи T1–T18 по фидбеку теста №1
+    ├── REPORT_JULY_2026.md← отчёт заказчику: результаты теста 17 региональных ТПП
+    ├── REVIEW_2026-08-10.md ← аудит-снимок на дату (НЕ редактируется)
+    ├── RAG_EXPLAINED.md   ← разбор архитектуры RAG + границы faithfulness-гарда
+    ├── LAUNCH.md · DEPLOY.md · BRANCHING.md · BUDGET.md · SETUP-соседи
     ├── TESTING.md         ← протокол приёмки с экспертом ТПП
+    ├── USER_GUIDE.md      ← инструкция для пользователя/эксперта ТПП
     ├── IDEAS.md           ← бэклог идей/гипотез по доработкам
-    ├── test_cases.md/.csv ← готовые приёмочные кейсы с реальным выводом
-    └── expert_guide.md    ← инструкция для эксперта ТПП
+    ├── eval_*.md          ← отчёты замеров (retrieval, answers, coverage, determinism …)
+    └── test_cases.md/.csv ← готовые приёмочные кейсы с реальным выводом
 
 (SETUP.md и WORK_ON_OTHER_PC.md — в корне репозитория.)
 ```
