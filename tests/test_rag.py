@@ -1204,5 +1204,105 @@ class TestCaseRelevanceThreshold(unittest.TestCase):
         self.assertTrue(any("петля кейсов" in s for s in seen), "сбой петли обязан попасть в лог")
 
 
+class TestRulesTopic(unittest.TestCase):
+    """K10: тема процедурного вопроса определяется детерминированно."""
+
+    def setUp(self):
+        from app.rag import retriever
+        self.topic = retriever.rules_topic
+
+    def test_documents_go_to_tpp_order(self):
+        for q in ("какие документы нужны для внесения в реестр",
+                  "что такое акт экспертизы и когда он нужен",
+                  "нужен ли сертификат СТ-1", "перечень документов для подачи"):
+            self.assertEqual(self.topic(q), "tpp_order_52", q)
+
+    def test_procedure_goes_to_registry_rules(self):
+        for q in ("сроки рассмотрения заявления", "какой порядок подачи заявления через ГИСП",
+                  "как внести изменения в реестровую запись", "где посмотреть выписку"):
+            self.assertEqual(self.topic(q), "rules_registry", q)
+
+    def test_criteria_go_to_decree_body(self):
+        for q in ("какие критерии подтверждения производства установлены",
+                  "что говорит подпункт г пункта 1"):
+            self.assertEqual(self.topic(q), "decree_body", q)
+
+    def test_unrelated_query_has_no_topic(self):
+        self.assertIsNone(self.topic("производим гидравлические насосы"))
+
+
+class TestRulesQuota(unittest.TestCase):
+    """K10: квота на источник — один документ не забирает всё окно.
+
+    Регресс, ради которого квота заведена (замер 12.08.2026): Приказ ТПП №52 — 172 пункта
+    из 244, то есть 71 % корпуса, — занимал 24 места из 30 на пяти контрольных запросах,
+    а на «сроки рассмотрения заявления» все 6, вытеснив Правила реестра, которые эти сроки
+    и устанавливают."""
+
+    def setUp(self):
+        from app.rag import retriever as r
+        self.r = r
+        self._client = r._client
+        self._hybrid = r._hybrid
+        r._client = lambda: type("C", (), {"collection_exists": lambda self, n: True})()
+
+    def tearDown(self):
+        self.r._client = self._client
+        self.r._hybrid = self._hybrid
+
+    def _pool(self, doc_types):
+        pts = [_FakePoint({"doc_type": dt, "point": f"п. {i}", "text": f"t{i}"},
+                          score=1.0 - i / 100, id=i) for i, dt in enumerate(doc_types)]
+        self.r._hybrid = lambda *a, **kw: pts
+
+    def test_dominant_document_does_not_take_whole_window(self):
+        # пул целиком из Приказа, кроме двух пунктов Правил в самом хвосте
+        self._pool(["tpp_order_52"] * 20 + ["rules_registry"] * 4)
+        got = self.r.search_rules("сроки рассмотрения заявления", limit=6)
+        kinds = {c["doc_type"] for c in got}
+        self.assertIn("rules_registry", kinds, "Правила обязаны получить место по квоте темы")
+        self.assertEqual(len(got), 6)
+
+    def test_primary_topic_gets_more_slots_than_others(self):
+        self._pool(["tpp_order_52"] * 12 + ["rules_registry"] * 12)
+        got = self.r.search_rules("сроки подачи заявления", limit=6)
+        n_rules = sum(1 for c in got if c["doc_type"] == "rules_registry")
+        self.assertGreaterEqual(n_rules, self.r.RULES_QUOTA_PRIMARY)
+
+    def test_every_present_document_gets_at_least_one_slot(self):
+        self._pool(["tpp_order_52"] * 20 + ["rules_registry"] * 2 + ["decree_body"] * 2)
+        got = self.r.search_rules("что такое акт экспертизы", limit=6)
+        self.assertEqual({c["doc_type"] for c in got},
+                         {"tpp_order_52", "rules_registry", "decree_body"})
+
+    def test_order_follows_hybrid_rank_not_quota(self):
+        """Квота меняет СОСТАВ окна, а не порядок: сильнейший пункт остаётся первым."""
+        self._pool(["tpp_order_52"] * 20 + ["rules_registry"] * 4)
+        got = self.r.search_rules("сроки рассмотрения заявления", limit=6)
+        scores = [c["_score"] for c in got]
+        self.assertEqual(scores, sorted(scores, reverse=True))
+
+    def test_topic_is_reported_in_payload(self):
+        self._pool(["rules_registry"] * 6)
+        got = self.r.search_rules("сроки рассмотрения заявления", limit=6)
+        self.assertEqual(got[0]["_topic"], "rules_registry")
+
+    def test_empty_pool_gives_empty(self):
+        self.r._hybrid = lambda *a, **kw: []
+        self.assertEqual(self.r.search_rules("сроки", limit=6), [])
+
+    def test_failure_is_logged_not_swallowed_silently(self):
+        def boom(*a, **kw):
+            raise RuntimeError("qdrant упал")
+        self.r._hybrid = boom
+        seen = []
+        sink = self.r.logger.add(lambda m: seen.append(str(m)), level="WARNING")
+        try:
+            self.assertEqual(self.r.search_rules("сроки", limit=6), [])
+        finally:
+            self.r.logger.remove(sink)
+        self.assertTrue(any("корпус Правил" in s for s in seen))
+
+
 if __name__ == "__main__":
     unittest.main()
