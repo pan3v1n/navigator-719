@@ -147,7 +147,9 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
     ├── BACKLOG.md         ← ЗАДАЧНИК: все открытые задачи в порядке исполнения, с фактурой
     │                        (дублируется issues + доска github.com/users/pan3v1n/projects/1)
     ├── CONCEPT.md         ← КОНЦЕПЦИЯ + функциональные требования по версиям (FR-0.5…FR-4.0)
-    ├── REVIEW_TZ.md       ← ГЛАВНЫЙ рабочий план: задачи R1–R29 + чек-лист редеплоя §1а
+    ├── AGENTS_PLAN.md     ← ИИ-агенты в RAG: агенты СБОРКИ данных (A1–A6) — да,
+    │                        запросный агент — только на ветке СТ-1 (B1); чего не делать
+    ├── REVIEW_TZ.md       ← ГЛАВНЫЙ рабочий план: задачи R1–R30 + чек-лист редеплоя §1а
     ├── KB_EXPANSION_TZ.md ← ТЗ расширения базы знаний: K1–K17 (+ architecture.html — схема)
     ├── NEXT_SESSION.md    ← оперативный «где остановились и что дальше»
     ├── POST_TEST1_TZ.md   ← задачи T1–T18 по фидбеку теста №1
