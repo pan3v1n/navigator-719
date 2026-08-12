@@ -1,0 +1,1105 @@
+<title>Навигатор ПП №719 — архитектура RAG: состояние, цель, план</title>
+<style>
+:root{
+  --paper:#E7E9E4; --surface:#F4F5F2; --sunk:#DCDFD9;
+  --ink:#19221F; --ink-70:#3F4A45; --muted:#6E7973; --rule:#C4C9C1;
+  --local:#0E6A57; --local-t:#D6E6E0;
+  --wire:#2B4A99; --wire-t:#DAE0F2;
+  --flag:#A44A22; --flag-t:#EFDED3;
+  --sans:system-ui,"Segoe UI",Roboto,"Helvetica Neue",sans-serif;
+  --serif:Georgia,"Palatino Linotype","Book Antiqua",Palatino,"Times New Roman",serif;
+  --mono:"Cascadia Mono",Consolas,"DejaVu Sans Mono","Liberation Mono",ui-monospace,monospace;
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --paper:#121816; --surface:#1A211E; --sunk:#0E1412;
+    --ink:#E2E7E2; --ink-70:#BAC3BD; --muted:#8B968F; --rule:#333D38;
+    --local:#54C6A8; --local-t:#123028;
+    --wire:#93ADEF; --wire-t:#182242;
+    --flag:#E4906A; --flag-t:#382115;
+  }
+}
+:root[data-theme="dark"]{
+  --paper:#121816; --surface:#1A211E; --sunk:#0E1412;
+  --ink:#E2E7E2; --ink-70:#BAC3BD; --muted:#8B968F; --rule:#333D38;
+  --local:#54C6A8; --local-t:#123028;
+  --wire:#93ADEF; --wire-t:#182242;
+  --flag:#E4906A; --flag-t:#382115;
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0; background:var(--paper); color:var(--ink);
+  font-family:var(--sans); font-size:16px; line-height:1.62;
+  -webkit-font-smoothing:antialiased;
+}
+.page{max-width:1120px; margin:0 auto; padding:clamp(2rem,5vw,4.5rem) clamp(1rem,4vw,2.5rem) 5rem; display:grid; gap:clamp(2.5rem,5vw,4rem)}
+.prose{max-width:66ch; display:grid; gap:1rem}
+p{margin:0}
+a{color:var(--local)}
+
+/* --- шапка --- */
+.masthead{display:grid; gap:1.25rem; border-bottom:2px solid var(--ink); padding-bottom:1.75rem}
+.eyebrow{font-family:var(--mono); font-size:.72rem; letter-spacing:.16em; text-transform:uppercase; color:var(--muted)}
+h1{font-family:var(--serif); font-weight:400; font-size:clamp(2rem,5vw,3.2rem); line-height:1.08; margin:0; text-wrap:balance; letter-spacing:-.015em}
+h1 em{font-style:italic; color:var(--local)}
+.standfirst{max-width:60ch; color:var(--ink-70); font-size:1.06rem}
+
+.specs{display:grid; grid-template-columns:repeat(auto-fit,minmax(150px,1fr)); gap:1px; background:var(--rule); border:1px solid var(--rule)}
+.spec{background:var(--surface); padding:.8rem .9rem; display:grid; gap:.15rem}
+.spec b{font-family:var(--mono); font-size:1.15rem; font-weight:600; font-variant-numeric:tabular-nums; letter-spacing:-.02em}
+.spec span{font-family:var(--mono); font-size:.68rem; letter-spacing:.08em; text-transform:uppercase; color:var(--muted)}
+
+/* --- заголовки секций --- */
+h2{font-family:var(--serif); font-weight:400; font-size:clamp(1.4rem,3vw,1.95rem); line-height:1.2; margin:0; text-wrap:balance}
+.sec{display:grid; gap:1.5rem}
+.sec-head{display:grid; gap:.4rem; border-top:1px solid var(--rule); padding-top:1rem}
+
+/* --- легенда --- */
+.legend{display:grid; grid-template-columns:repeat(auto-fit,minmax(230px,1fr)); gap:1px; background:var(--rule); border:1px solid var(--rule)}
+.leg{background:var(--surface); padding:.9rem 1rem; display:grid; grid-template-columns:14px 1fr; gap:.7rem; align-items:start}
+.swatch{width:14px; height:14px; margin-top:.28rem; border:1.5px solid}
+.s-local{border-color:var(--local); background:var(--local-t)}
+.s-wire{border-color:var(--wire); background:var(--wire-t)}
+.s-flag{border-color:var(--flag); background:var(--flag-t)}
+.leg b{font-size:.9rem; font-weight:600; display:block}
+.leg span{font-size:.82rem; color:var(--muted); line-height:1.45}
+
+/* --- плита (лист чертежа) --- */
+.plate{margin:0; border:1px solid var(--rule); background:var(--surface); display:grid}
+.plate-body{padding:clamp(1rem,3vw,1.75rem); overflow-x:auto}
+.plate svg{display:block; width:100%; height:auto; min-width:520px; color:var(--ink)}
+.plate-split{display:flex; flex-wrap:wrap; gap:1.75rem; align-items:center}
+.plate-split .sv{flex:1 1 380px; min-width:0}
+.plate-split .sv svg{min-width:280px}
+.plate-split .st{flex:1 1 260px; display:grid; gap:1rem; align-content:start}
+figcaption{
+  border-top:1px solid var(--rule); background:var(--sunk);
+  display:grid; grid-template-columns:auto 1fr auto; gap:1rem; align-items:baseline;
+  padding:.7rem clamp(1rem,3vw,1.75rem); font-size:.87rem; color:var(--ink-70);
+}
+figcaption .no{font-family:var(--mono); font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--flag); white-space:nowrap}
+figcaption .ref{font-family:var(--mono); font-size:.72rem; color:var(--muted); white-space:nowrap}
+@media (max-width:640px){
+  figcaption{grid-template-columns:1fr; gap:.35rem}
+  figcaption .ref{white-space:normal}
+}
+
+/* --- таблица моделей --- */
+.tbl{width:100%; border-collapse:collapse; font-size:.92rem}
+.tbl th,.tbl td{text-align:left; padding:.7rem .8rem; border-bottom:1px solid var(--rule); vertical-align:top}
+.tbl th{font-family:var(--mono); font-size:.7rem; letter-spacing:.1em; text-transform:uppercase; color:var(--muted); font-weight:500}
+.tbl td:first-child{font-family:var(--mono); font-weight:600; white-space:nowrap}
+.tbl tr:last-child td{border-bottom:none}
+.tag{font-family:var(--mono); font-size:.72rem; padding:.1rem .4rem; border:1px solid; white-space:nowrap}
+.t-local{color:var(--local); border-color:var(--local)}
+.t-wire{color:var(--wire); border-color:var(--wire)}
+.wrap{overflow-x:auto}
+
+/* --- статистика в плите 7 --- */
+.stat{display:grid; gap:.15rem; border-left:3px solid var(--flag); padding-left:.85rem}
+.stat b{font-family:var(--mono); font-size:1.5rem; font-weight:600; font-variant-numeric:tabular-nums; line-height:1.15}
+.stat span{font-size:.86rem; color:var(--ink-70); line-height:1.45}
+
+/* --- разделители частей --- */
+.part{display:grid; gap:.5rem; border-top:3px solid var(--ink); padding-top:1.1rem}
+.part h2{font-size:clamp(1.7rem,3.8vw,2.35rem)}
+.part p{max-width:66ch; color:var(--ink-70)}
+
+/* --- приоритеты и статусы --- */
+.pri{font-family:var(--mono); font-size:.72rem; font-weight:600; padding:.1rem .4rem; border:1px solid; white-space:nowrap}
+.p0{color:var(--flag); border-color:var(--flag)}
+.p1{color:var(--wire); border-color:var(--wire)}
+.p2{color:var(--muted); border-color:var(--muted)}
+.ok{color:var(--local); border-color:var(--local)}
+.tbl td .pri{display:inline-block}
+.tbl.compact td,.tbl.compact th{padding:.55rem .7rem; font-size:.88rem}
+.tbl td:first-child.wide{white-space:normal; font-family:var(--sans); font-weight:600}
+
+/* --- финальная заметка --- */
+.note{border-left:3px solid var(--local); padding:.15rem 0 .15rem 1.1rem; display:grid; gap:.6rem; max-width:66ch}
+.note h3{font-family:var(--serif); font-weight:400; font-size:1.15rem; margin:0}
+code{font-family:var(--mono); font-size:.88em; background:var(--sunk); padding:.08em .32em}
+
+/* --- SVG-классы (тема через токены) --- */
+.n{fill:var(--surface); stroke:var(--muted); stroke-width:1.2}
+.n-l{fill:var(--local-t); stroke:var(--local); stroke-width:1.4}
+.n-w{fill:var(--wire-t); stroke:var(--wire); stroke-width:1.4}
+.n-f{fill:var(--flag-t); stroke:var(--flag); stroke-width:1.4}
+.n-d{fill:none; stroke:var(--muted); stroke-width:1.1; stroke-dasharray:5 4}
+.n-fd{fill:var(--flag-t); stroke:var(--flag); stroke-width:1.4; stroke-dasharray:5 4}
+.a{fill:none; stroke:var(--ink-70); stroke-width:1.4}
+.a-w{fill:none; stroke:var(--wire); stroke-width:1.4}
+.a-f{fill:none; stroke:var(--flag); stroke-width:1.4}
+.a-l{fill:none; stroke:var(--local); stroke-width:1.4}
+.divider{stroke:var(--muted); stroke-width:1.1; stroke-dasharray:6 5}
+.mask{fill:var(--surface); stroke:none}
+text{font-family:var(--sans); fill:var(--ink)}
+.h{font-size:13px; font-weight:600}
+.sub{font-family:var(--mono); font-size:10.5px; fill:var(--muted)}
+.lb{font-family:var(--mono); font-size:10.5px; fill:var(--ink-70)}
+.lb-l{font-family:var(--mono); font-size:10.5px; fill:var(--local)}
+.lb-w{font-family:var(--mono); font-size:10.5px; fill:var(--wire)}
+.lb-f{font-family:var(--mono); font-size:10.5px; fill:var(--flag)}
+.cap{font-family:var(--mono); font-size:10px; letter-spacing:.12em; fill:var(--muted)}
+.big{font-family:var(--mono); font-size:15px; font-weight:600; fill:var(--ink)}
+</style>
+
+<div class="page">
+
+  <header class="masthead">
+    <div class="eyebrow">Навигатор ПП РФ №719 · Курская ТПП · снимок кода на 10.08.2026</div>
+    <h1>Как устроены <em>архитектура</em> и <em>RAG</em></h1>
+    <p class="standfirst">Двенадцать листов в четырёх частях: как движок устроен сегодня (по фактическому коду), к какой архитектуре он должен прийти, какие нормативные документы добавить и в каком порядке, и план работ волнами. Часть I описывает состояние, части II–IV — решение.</p>
+    <div class="specs">
+      <div class="spec"><b>3</b><span>коллекции Qdrant</span></div>
+      <div class="spec"><b>1&nbsp;379</b><span>точек · pp719</span></div>
+      <div class="spec"><b>242</b><span>пункта · pp719_rules</span></div>
+      <div class="spec"><b>5</b><span>кейсов · verified_cases</span></div>
+      <div class="spec"><b>0–3</b><span>вызова LLM на вопрос</span></div>
+      <div class="spec"><b>1024</b><span>размерность e5-large</span></div>
+    </div>
+  </header>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Условные обозначения</div>
+      <h2>Три цвета, которые повторяются во всех фигурах</h2>
+    </div>
+    <div class="legend">
+      <div class="leg"><i class="swatch s-local"></i><div><b>Локально и детерминированно</b><span>Считается на VM, без сети и без модели: правила, справочники, формулы, векторный поиск. Ноль стоимости, воспроизводимо.</span></div></div>
+      <div class="leg"><i class="swatch s-wire"></i><div><b>Вызов DeepSeek</b><span>Единственное, что уходит за периметр. Платно, недетерминированно по своей природе, зажато промптом и <code>temperature&nbsp;0</code>.</span></div></div>
+      <div class="leg"><i class="swatch s-flag"></i><div><b>Гард, флаг, разрыв</b><span>Места, где система себя проверяет или где цепочка обрывается и требуется человек.</span></div></div>
+    </div>
+    <div class="prose">
+      <p>Ключ к пониманию всей системы: <strong>ищут — две локальные штуки, пишет — одна удалённая</strong>. Первые две не могут соврать, потому что ничего не сочиняют; третья может, поэтому вокруг неё выстроены гарды.</p>
+    </div>
+    <div class="wrap">
+      <table class="tbl">
+        <thead><tr><th>Компонент</th><th>Природа</th><th>Где</th><th>Роль</th></tr></thead>
+        <tbody>
+          <tr><td>e5-large</td><td><span class="tag t-local">модель</span></td><td>в RAM на CPU, ~2–4 ГБ</td><td>текст → смысловой вектор 1024 чисел</td></tr>
+          <tr><td>BM25</td><td><span class="tag t-local">формула</span></td><td><code>app/rag/sparse.py</code></td><td>текст → вектор по словам (mmh3 + Snowball)</td></tr>
+          <tr><td>Qdrant</td><td><span class="tag t-local">хранилище</span></td><td>Docker на той же VM</td><td>хранит, ищет по обоим каналам, сливает через RRF</td></tr>
+          <tr><td>DeepSeek</td><td><span class="tag t-wire">по сети</span></td><td>внешний API</td><td>пишет финальный текст строго по переданному контексту</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="eyebrow">Часть I · листы 1–7</div>
+    <h2>Как движок устроен сегодня</h2>
+    <p>Всё в этой части нарисовано по фактическому коду на 10.08.2026, а не по плану — в нескольких местах они расходятся.</p>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 1 · периметр</div>
+      <h2>Что остаётся на сервере, а что уходит по сети</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 470" role="img" aria-label="Схема периметра: браузер, FastAPI, RAG-пайплайн и локальные хранилища находятся внутри контура на VM; наружу уходит только вызов DeepSeek с вопросом и найденным контекстом">
+          <defs>
+            <marker id="f1a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+            <marker id="f1w" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--wire)"/></marker>
+          </defs>
+
+          <line class="divider" x1="530" y1="20" x2="530" y2="450"/>
+          <text class="cap" x="540" y="34">ГРАНИЦА КОНТУРА · 152-ФЗ</text>
+
+          <rect class="n" x="40" y="56" width="420" height="48"/>
+          <text class="h" x="250" y="78" text-anchor="middle">Браузер · веб-чат эксперта</text>
+          <text class="sub" x="250" y="94" text-anchor="middle">app/web/ · chat.js · Jinja2</text>
+          <path class="a" d="M250 104 L250 130" marker-end="url(#f1a)"/>
+
+          <rect class="n" x="40" y="132" width="420" height="86"/>
+          <text class="h" x="250" y="153" text-anchor="middle">FastAPI</text>
+          <text class="sub" x="250" y="171" text-anchor="middle">auth + RBAC · user / expert / admin</text>
+          <text class="sub" x="250" y="187" text-anchor="middle">POST /api/chat · /api/chat/stream (SSE)</text>
+          <text class="sub" x="250" y="203" text-anchor="middle">/admin · KPI, регионы, триаж ≤2★</text>
+          <path class="a" d="M250 218 L250 244" marker-end="url(#f1a)"/>
+
+          <rect class="n-l" x="40" y="246" width="420" height="52"/>
+          <text class="h" x="250" y="269" text-anchor="middle">RAG-пайплайн</text>
+          <text class="sub" x="250" y="286" text-anchor="middle">_plan_answer → answer / answer_stream</text>
+          <path class="a" d="M250 298 L250 322" marker-end="url(#f1a)"/>
+
+          <rect class="n-d" x="40" y="324" width="420" height="126"/>
+          <text class="cap" x="52" y="342">ЛОКАЛЬНО, БЕЗ СЕТИ</text>
+          <rect class="n-l" x="56" y="350" width="190" height="44"/>
+          <text class="h" x="151" y="370" text-anchor="middle">e5-large</text>
+          <text class="sub" x="151" y="385" text-anchor="middle">1024d · CPU</text>
+          <rect class="n-l" x="254" y="350" width="190" height="44"/>
+          <text class="h" x="349" y="370" text-anchor="middle">BM25</text>
+          <text class="sub" x="349" y="385" text-anchor="middle">формула, не модель</text>
+          <rect class="n-l" x="56" y="400" width="190" height="44"/>
+          <text class="h" x="151" y="420" text-anchor="middle">Qdrant</text>
+          <text class="sub" x="151" y="435" text-anchor="middle">3 коллекции</text>
+          <rect class="n" x="254" y="400" width="190" height="44"/>
+          <text class="h" x="349" y="420" text-anchor="middle">SQLite</text>
+          <text class="sub" x="349" y="435" text-anchor="middle">users · messages · feedback</text>
+
+          <rect class="n-w" x="600" y="240" width="270" height="62"/>
+          <text class="h" x="735" y="264" text-anchor="middle">DeepSeek · deepseek-chat</text>
+          <text class="sub" x="735" y="282" text-anchor="middle">единственный внешний вызов</text>
+
+          <path class="a-w" d="M462 254 L596 254" marker-end="url(#f1w)"/>
+          <rect class="mask" x="435" y="234" width="190" height="15"/>
+          <text class="lb-w" x="529" y="245" text-anchor="middle">вопрос + найденный контекст</text>
+          <path class="a-w" d="M596 292 L462 292" marker-end="url(#f1w)"/>
+          <rect class="mask" x="483" y="301" width="92" height="15"/>
+          <text class="lb-w" x="529" y="312" text-anchor="middle">текст ответа</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 1</span><span>Поиск, данные и все персональные сведения не покидают VM; наружу уходит только генерация — и с ней тот контекст, который мы сами собрали.</span><span class="ref">main.py · app/api/ · app/rag/</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Отсюда следуют две вещи, которые обычно спрашивают отдельно. <strong>Требование к RAM</strong> берётся из e5: модель живёт в памяти резидентно, поэтому 8 ГБ — рекомендация, а 4 — впритык. <strong>Комплаенс по 152-ФЗ</strong> держится на том же рисунке: диалоги, ФИО и регионы лежат в SQLite внутри контура, а за границу уходит только текст вопроса и выдержки из постановления.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 2 · путь запроса</div>
+      <h2>Одиннадцать шагов, из которых только три — вызовы модели</h2>
+    </div>
+    <div class="prose">
+      <p>Это главная фигура. Вопрос не идёт в LLM сразу: перед ней стоит цепочка детерминированных проверок, и три из них умеют завершить диалог вообще без обращения к DeepSeek. Такая архитектура выбрана не ради экономии — <strong>то, что не вызывает модель, не может соврать</strong>.</p>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 560" role="img" aria-label="Путь вопроса через одиннадцать шагов пайплайна: детерминированные гейты meta и translate, переписывание follow-up через LLM, процедурная развилка, якорь-код, единичный эмбеддинг, гибридный поиск, реранк, поиск кейсов, out-of-scope guard, генерация и постпроверка чисел">
+          <defs>
+            <marker id="f2a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+
+          <text class="cap" x="40" y="34">КОЛОНКА A · ДО ПОИСКА</text>
+          <text class="cap" x="470" y="34">КОЛОНКА B · ПОИСК И ГЕНЕРАЦИЯ</text>
+
+          <rect class="n" x="40" y="52" width="390" height="42"/>
+          <text class="h" x="235" y="78" text-anchor="middle">Вопрос + история диалога</text>
+          <path class="a" d="M235 94 L235 124" marker-end="url(#f2a)"/>
+
+          <rect class="n-l" x="40" y="126" width="390" height="44"/>
+          <text class="h" x="235" y="146" text-anchor="middle">meta · translate</text>
+          <text class="sub" x="235" y="162" text-anchor="middle">«что умеешь» · перевод ТН ВЭД ↔ ОКПД2</text>
+          <text class="lb-l" x="40" y="185">выход: готовый текст из справочника · 0 вызовов LLM</text>
+          <path class="a" d="M235 170 L235 200" marker-end="url(#f2a)"/>
+
+          <rect class="n-w" x="40" y="202" width="390" height="44"/>
+          <text class="h" x="235" y="222" text-anchor="middle">_contextualize · LLM ①</text>
+          <text class="sub" x="235" y="238" text-anchor="middle">follow-up → самостоятельный запрос</text>
+          <text class="lb-w" x="40" y="261">только когда ход — уточнение («а какой порог?»)</text>
+          <path class="a" d="M235 246 L235 276" marker-end="url(#f2a)"/>
+
+          <rect class="n-l" x="40" y="278" width="390" height="44"/>
+          <text class="h" x="235" y="298" text-anchor="middle">is_procedural — вопрос о процедуре?</text>
+          <text class="sub" x="235" y="314" text-anchor="middle">реестр · ГИСП · сроки · состав документов</text>
+          <text class="lb-l" x="40" y="337">да → корпус Правил (фиг. 5), товарный поиск не запускается</text>
+          <path class="a" d="M235 322 L235 352" marker-end="url(#f2a)"/>
+
+          <rect class="n-l" x="40" y="354" width="390" height="44"/>
+          <text class="h" x="235" y="374" text-anchor="middle">якорь-код диалога · ТН ВЭД из текста</text>
+          <text class="sub" x="235" y="390" text-anchor="middle">код держим, если ход продолжает позицию</text>
+          <text class="lb-l" x="40" y="413">из истории и переходных ключей, без модели</text>
+          <path class="a" d="M235 398 L235 428" marker-end="url(#f2a)"/>
+
+          <rect class="n-l" x="40" y="430" width="390" height="44"/>
+          <text class="h" x="235" y="450" text-anchor="middle">embed_query() — один раз на вопрос</text>
+          <text class="sub" x="235" y="466" text-anchor="middle">тот же вектор во все обращения к Qdrant</text>
+          <text class="lb-l" x="40" y="489">раньше e5 прогонялся 3–4 раза на один и тот же текст</text>
+
+          <path class="a" d="M432 452 L452 452 L452 74 L466 74" marker-end="url(#f2a)"/>
+
+          <rect class="n-l" x="470" y="52" width="390" height="44"/>
+          <text class="h" x="665" y="72" text-anchor="middle">search() — гибрид + ОКПД2-буст</text>
+          <text class="sub" x="665" y="88" text-anchor="middle">top-8 позиций из pp719 · фиг. 3</text>
+          <path class="a" d="M665 96 L665 126" marker-end="url(#f2a)"/>
+
+          <rect class="n-w" x="470" y="128" width="390" height="44"/>
+          <text class="h" x="665" y="148" text-anchor="middle">реранк · LLM ②</text>
+          <text class="sub" x="665" y="164" text-anchor="middle">пересборка порядка по смыслу запроса</text>
+          <text class="lb-w" x="470" y="187">только если совпадения по коду нет — код авторитетнее</text>
+          <path class="a" d="M665 172 L665 202" marker-end="url(#f2a)"/>
+
+          <rect class="n-l" x="470" y="204" width="390" height="44"/>
+          <text class="h" x="665" y="224" text-anchor="middle">search_cases() → verified_cases</text>
+          <text class="sub" x="665" y="240" text-anchor="middle">подтверждённые экспертом — высший приоритет</text>
+          <path class="a" d="M665 248 L665 278" marker-end="url(#f2a)"/>
+
+          <rect class="n-f" x="470" y="280" width="390" height="44"/>
+          <text class="h" x="665" y="300" text-anchor="middle">out-of-scope guard</text>
+          <text class="sub" x="665" y="316" text-anchor="middle">нет кода · нет кейса · dense top-1 &lt; 0.83</text>
+          <text class="lb-f" x="470" y="339">→ флаг low_relevance: ответ помечается как ненадёжный</text>
+          <path class="a" d="M665 324 L665 354" marker-end="url(#f2a)"/>
+
+          <rect class="n-w" x="470" y="356" width="390" height="44"/>
+          <text class="h" x="665" y="376" text-anchor="middle">генерация · LLM ③ · temperature 0</text>
+          <text class="sub" x="665" y="392" text-anchor="middle">системный промпт + контекст [1]…[8]</text>
+          <text class="lb-w" x="470" y="415">стрим и обычный ответ идут одним и тем же путём</text>
+          <path class="a" d="M665 400 L665 430" marker-end="url(#f2a)"/>
+
+          <rect class="n-f" x="470" y="432" width="390" height="44"/>
+          <text class="h" x="665" y="452" text-anchor="middle">постпроверка чисел</text>
+          <text class="sub" x="665" y="468" text-anchor="middle">баллы и % из ответа сверяются с контекстом</text>
+          <text class="lb-f" x="470" y="491">незаземлённые не стираем — помечаем эксперту в /admin</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 2</span><span>Четыре развилки умеют закрыть вопрос без модели; вызовов DeepSeek на один вопрос от нуля до трёх, и каждый включается по условию, а не всегда.</span><span class="ref">app/rag/pipeline.py · _plan_answer()</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Обратите внимание на порядок: <strong>процедурная развилка стоит до поиска</strong>. Вопрос «какие документы готовить» не должен попадать в товарный индекс — оттуда вернутся ближайшие позиции с баллами, то есть мусор, из которого модель охотно сочинит порядок действий и сроки. Развилка уводит такой вопрос на другой корпус с другим промптом (фиг.&nbsp;5).</p>
+      <p>Постпроверка в конце устроена сознательно «мягко»: незаземлённое число <em>не переписывается</em> — правильное значение системе неизвестно, и выдумать «правильное» было бы хуже, чем показать сомнительное с флагом.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 3 · retrieval</div>
+      <h2>Гибридный поиск: два независимых канала и слияние</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 420" role="img" aria-label="Гибридный поиск: запрос кодируется параллельно моделью e5 в плотный вектор и формулой BM25 в разреженный, Qdrant сливает два списка через RRF, затем применяется иерархический буст по коду ОКПД2 и выдаются восемь позиций">
+          <defs>
+            <marker id="f3a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+
+          <rect class="n" x="30" y="168" width="140" height="52"/>
+          <text class="h" x="100" y="190" text-anchor="middle">Вопрос</text>
+          <text class="sub" x="100" y="207" text-anchor="middle">+ код, если дан</text>
+
+          <path class="a" d="M172 184 L200 148" marker-end="url(#f3a)"/>
+          <path class="a" d="M172 204 L200 244" marker-end="url(#f3a)"/>
+
+          <rect class="n-l" x="202" y="106" width="196" height="56"/>
+          <text class="h" x="300" y="128" text-anchor="middle">e5-large · «query: …»</text>
+          <text class="sub" x="300" y="146" text-anchor="middle">смысл → dense top-20</text>
+
+          <rect class="n-l" x="202" y="230" width="196" height="56"/>
+          <text class="h" x="300" y="252" text-anchor="middle">BM25 локально</text>
+          <text class="sub" x="300" y="270" text-anchor="middle">слова и коды → sparse top-20</text>
+
+          <path class="a" d="M400 138 L458 178" marker-end="url(#f3a)"/>
+          <path class="a" d="M400 254 L458 214" marker-end="url(#f3a)"/>
+
+          <rect class="n-l" x="460" y="152" width="190" height="88"/>
+          <text class="h" x="555" y="180" text-anchor="middle">Qdrant</text>
+          <text class="h" x="555" y="198" text-anchor="middle">FusionQuery(RRF)</text>
+          <text class="sub" x="555" y="218" text-anchor="middle">один ранг из двух списков</text>
+          <text class="sub" x="555" y="232" text-anchor="middle">пул кандидатов — 40</text>
+
+          <path class="a" d="M652 196 L692 196" marker-end="url(#f3a)"/>
+
+          <rect class="n-l" x="694" y="128" width="176" height="94"/>
+          <text class="h" x="782" y="150" text-anchor="middle">ОКПД2-буст</text>
+          <text class="sub" x="782" y="170" text-anchor="middle">родители: код записи</text>
+          <text class="sub" x="782" y="184" text-anchor="middle">= префикс запроса</text>
+          <text class="sub" x="782" y="202" text-anchor="middle">дети: префиксы записи</text>
+          <text class="sub" x="782" y="216" text-anchor="middle">содержат код запроса</text>
+
+          <path class="a" d="M782 224 L782 256" marker-end="url(#f3a)"/>
+          <rect class="n" x="694" y="258" width="176" height="50"/>
+          <text class="h" x="782" y="279" text-anchor="middle">top-8</text>
+          <text class="sub" x="782" y="296" text-anchor="middle">совпавшие по коду выше</text>
+
+          <rect class="n-fd" x="30" y="336" width="840" height="66"/>
+          <text class="lb-f" x="46" y="358">В ИНДЕКС ПОПАДАЕТ ТОЛЬКО ИДЕНТИЧНОСТЬ ПОЗИЦИИ</text>
+          <text class="sub" x="46" y="376">наименование · раздел · код ОКПД2 · порог — и один и тот же текст идёт в оба канала.</text>
+          <text class="sub" x="46" y="392">Формулировок требований («закалка зубьев», «пайка волной») нет ни в dense, ни в sparse.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 3</span><span>Dense ловит смысл, sparse — точные слова и коды, RRF берёт лучшее от обоих; код ОКПД2 стоит выше семантики и подтягивает всю ветку иерархии.</span><span class="ref">app/rag/retriever.py · _hybrid() · search()</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Нижняя рамка — честная оговорка, а не украшение. Индексировать только идентичность решили осознанно: когда в вектор клали ещё и весь «рецепт локализации», многословные типовые операции сборки и сварки топили отличительный сигнал наименования, и позиционный recall@1 просел до 0.886. Убрали операции из вектора — стало 0.972.</p>
+      <p>Но у решения есть обратная сторона: <strong>BM25 при этом потерял свой единственный смысл</strong>. Лексический поиск по формулировкам требований невозможен ни по одному каналу — этих слов просто нет в индексе. Дешёвое лечение известно: сделать каналы асимметричными — dense по идентичности, sparse по полному тексту. Схему коллекции это не меняет.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 4 · индексация</div>
+      <h2>Три корпуса, три конвейера, три коллекции</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 440" role="img" aria-label="Офлайн-индексация: приложение постановления проходит нарезку, структуризацию через DeepSeek и сверку и попадает в коллекцию pp719; проза Правил и Приказа №52 через прозовый чанкер попадает в pp719_rules; кейсы эксперта через seed_cases попадают в verified_cases">
+          <defs>
+            <marker id="f4a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+
+          <text class="cap" x="30" y="30">ИСТОЧНИК</text>
+          <text class="cap" x="330" y="30">КОНВЕЙЕР · ОФЛАЙН, РАЗОВО</text>
+          <text class="cap" x="690" y="30">КОЛЛЕКЦИЯ QDRANT</text>
+
+          <rect class="n" x="30" y="48" width="250" height="136"/>
+          <text class="h" x="155" y="76" text-anchor="middle">Приложение к ПП №719</text>
+          <text class="sub" x="155" y="100" text-anchor="middle">pp719_full.txt</text>
+          <text class="sub" x="155" y="118" text-anchor="middle">29 разделов, таблица позиций</text>
+          <text class="sub" x="155" y="142" text-anchor="middle">ред. от 01.07.2026</text>
+          <text class="sub" x="155" y="166" text-anchor="middle">это НЕ проза, а факты</text>
+
+          <rect class="n-l" x="330" y="48" width="290" height="36"/>
+          <text class="h" x="475" y="71" text-anchor="middle">rechunk_appendix — нарезка на разделы</text>
+          <path class="a" d="M475 84 L475 96" marker-end="url(#f4a)"/>
+          <rect class="n-w" x="330" y="98" width="290" height="36"/>
+          <text class="h" x="475" y="121" text-anchor="middle">structure_kb — парсер на DeepSeek → JSON</text>
+          <path class="a" d="M475 134 L475 146" marker-end="url(#f4a)"/>
+          <rect class="n-f" x="330" y="148" width="290" height="36"/>
+          <text class="h" x="475" y="171" text-anchor="middle">verify · reconcile — сверка с исходником</text>
+
+          <rect class="n-l" x="690" y="83" width="180" height="66"/>
+          <text class="h" x="780" y="109" text-anchor="middle">pp719</text>
+          <text class="sub" x="780" y="127" text-anchor="middle">1 379 точек</text>
+          <text class="sub" x="780" y="141" text-anchor="middle">1 368 позиций + 11 методичек</text>
+
+          <path class="a" d="M282 116 L326 116" marker-end="url(#f4a)"/>
+          <path class="a" d="M622 116 L686 116" marker-end="url(#f4a)"/>
+
+          <rect class="n" x="30" y="212" width="250" height="76"/>
+          <text class="h" x="155" y="238" text-anchor="middle">Процедурные нормы</text>
+          <text class="sub" x="155" y="256" text-anchor="middle">тело ПП №719 · Правила реестра</text>
+          <text class="sub" x="155" y="272" text-anchor="middle">Приказ ТПП РФ №52 · это проза</text>
+
+          <rect class="n-l" x="330" y="222" width="290" height="56"/>
+          <text class="h" x="475" y="245" text-anchor="middle">load_rules_kb</text>
+          <text class="sub" x="475" y="264" text-anchor="middle">прозовый чанкер по пунктам и абзацам</text>
+
+          <rect class="n-l" x="690" y="222" width="180" height="56"/>
+          <text class="h" x="780" y="245" text-anchor="middle">pp719_rules</text>
+          <text class="sub" x="780" y="264" text-anchor="middle">242 пункта</text>
+
+          <path class="a" d="M282 250 L326 250" marker-end="url(#f4a)"/>
+          <path class="a" d="M622 250 L686 250" marker-end="url(#f4a)"/>
+
+          <rect class="n" x="30" y="316" width="250" height="66"/>
+          <text class="h" x="155" y="342" text-anchor="middle">Исправления эксперта</text>
+          <text class="sub" x="155" y="360" text-anchor="middle">knowledge_base/cases/*.json</text>
+
+          <rect class="n-f" x="330" y="316" width="290" height="66"/>
+          <text class="h" x="475" y="342" text-anchor="middle">seed_cases.py</text>
+          <text class="sub" x="475" y="360" text-anchor="middle">запускается руками — см. фиг. 6</text>
+
+          <rect class="n-f" x="690" y="316" width="180" height="66"/>
+          <text class="h" x="780" y="342" text-anchor="middle">verified_cases</text>
+          <text class="sub" x="780" y="360" text-anchor="middle">5 кейсов</text>
+
+          <path class="a" d="M282 349 L326 349" marker-end="url(#f4a)"/>
+          <path class="a" d="M622 349 L686 349" marker-end="url(#f4a)"/>
+
+          <text class="lb" x="30" y="408">Что кладётся в точку: вектор — идентичность позиции (имя, раздел, код, порог);</text>
+          <text class="lb" x="30" y="424">payload — вся структура: операции, баллы, порог, ссылка на источник. Поиск по первому, ответ по второму.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 4</span><span>Разные по природе корпуса нарезаются разными конвейерами и живут в разных коллекциях — проза не смешивается с таблицей позиций.</span><span class="ref">scripts/load_kb.py · load_rules_kb.py · seed_cases.py</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Разделение коллекций — одно из самых удачных решений в проекте, и оно неочевидное. Если бы проза Правил лежала в общей коллекции, она сдвинула бы калибровку товарного out-of-scope guard'а: порог «похоже ли это вообще на продукцию из 719» считается только по <code>pp719</code>, и подмешивание нормативных абзацев сломало бы его тихо.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 5 · две ветки</div>
+      <h2>Товарный вопрос и процедурный обслуживаются по-разному</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 470" role="img" aria-label="Сравнение двух путей: товарный путь идёт по коллекции pp719 с форматированием контекста, навигаторским промптом и проверкой чисел; процедурный путь идёт по коллекции pp719_rules с процедурным промптом, проверкой чисел и сроков и честным фолбэком при недоступности корпуса">
+          <defs>
+            <marker id="f5a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+
+          <line class="divider" x1="450" y1="20" x2="450" y2="452"/>
+
+          <text class="cap" x="30" y="34">ТОВАРНЫЙ ПУТЬ · «ЧТО ТРЕБУЕТСЯ ПО ПОЗИЦИИ»</text>
+          <text class="cap" x="470" y="34">ПРОЦЕДУРНЫЙ ПУТЬ · «КАК ПРОЙТИ ПРОЦЕДУРУ»</text>
+
+          <rect class="n-l" x="30" y="52" width="390" height="42"/>
+          <text class="h" x="225" y="78" text-anchor="middle">pp719 · top-8 позиций</text>
+          <path class="a" d="M225 94 L225 120" marker-end="url(#f5a)"/>
+
+          <rect class="n" x="30" y="122" width="390" height="118"/>
+          <text class="h" x="225" y="146" text-anchor="middle">format_context()</text>
+          <text class="sub" x="225" y="168" text-anchor="middle">целевая позиция — до 60 операций, прочие — по 12</text>
+          <text class="sub" x="225" y="186" text-anchor="middle">порог: из записи, иначе из примечаний (thresholds)</text>
+          <text class="sub" x="225" y="204" text-anchor="middle">пометка «список операций неполный», если урезан</text>
+          <text class="sub" x="225" y="226" text-anchor="middle">обязательные и балльные требования — разными блоками</text>
+          <path class="a" d="M225 240 L225 266" marker-end="url(#f5a)"/>
+
+          <rect class="n-w" x="30" y="268" width="390" height="60"/>
+          <text class="h" x="225" y="292" text-anchor="middle">NAVIGATOR_SYSTEM_PROMPT</text>
+          <text class="sub" x="225" y="311" text-anchor="middle">инлайн-цитаты [N] · читатель — эксперт ТПП</text>
+          <path class="a" d="M225 328 L225 354" marker-end="url(#f5a)"/>
+
+          <rect class="n-f" x="30" y="356" width="390" height="56"/>
+          <text class="h" x="225" y="380" text-anchor="middle">гард: баллы и проценты</text>
+          <text class="sub" x="225" y="398" text-anchor="middle">каждое число должно найтись в контексте</text>
+
+          <rect class="n-l" x="470" y="52" width="390" height="42"/>
+          <text class="h" x="665" y="78" text-anchor="middle">pp719_rules · top-6 пунктов</text>
+          <path class="a" d="M665 94 L665 120" marker-end="url(#f5a)"/>
+
+          <rect class="n" x="470" y="122" width="390" height="118"/>
+          <text class="h" x="665" y="146" text-anchor="middle">format_rules_context()</text>
+          <text class="sub" x="665" y="168" text-anchor="middle">пункты нормы дословно, без пересказа</text>
+          <text class="sub" x="665" y="186" text-anchor="middle">нумерация [1]…[6] → кликабельные источники</text>
+          <text class="sub" x="665" y="204" text-anchor="middle">проза требует синтеза из нескольких пунктов,</text>
+          <text class="sub" x="665" y="222" text-anchor="middle">поэтому окно шире, чем у одной позиции</text>
+          <path class="a" d="M665 240 L665 266" marker-end="url(#f5a)"/>
+
+          <rect class="n-w" x="470" y="268" width="390" height="60"/>
+          <text class="h" x="665" y="292" text-anchor="middle">PROCEDURAL_SYSTEM_PROMPT</text>
+          <text class="sub" x="665" y="311" text-anchor="middle">СТ-1 и «Акт экспертизы» — правильные термины</text>
+          <path class="a" d="M665 328 L665 354" marker-end="url(#f5a)"/>
+
+          <rect class="n-f" x="470" y="356" width="390" height="56"/>
+          <text class="h" x="665" y="380" text-anchor="middle">гард: числа + СРОКИ в днях</text>
+          <text class="sub" x="665" y="398" text-anchor="middle">выдуманный срок опаснее выдуманного балла</text>
+
+          <text class="lb-f" x="470" y="438">Фолбэк, если корпус недоступен: честное «сейчас не могу»</text>
+          <text class="lb-f" x="470" y="454">и указатель на первоисточники. Сроки и порядок не сочиняем.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 5</span><span>Одна развилка на входе разводит вопрос по двум коллекциям с разными промптами и разными гардами — у процедуры проверяются ещё и сроки.</span><span class="ref">pipeline._answer_procedural() · app/core/prompts.py</span></figcaption>
+    </figure>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 6 · петля обучения</div>
+      <h2>Единственный контур, который накапливает — и он разорван</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 300" role="img" aria-label="Петля обучения: ответ получает оценку и исправление эксперта, исправление сохраняется в базу обратной связи, дальше следует ручной участок переноса, затем кейсы загружаются скриптом в коллекцию verified_cases и возвращаются в контекст следующих ответов">
+          <defs>
+            <marker id="f6a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+            <marker id="f6f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--flag)"/></marker>
+            <marker id="f6l" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--local)"/></marker>
+          </defs>
+
+          <rect class="n" x="30" y="56" width="176" height="50"/>
+          <text class="h" x="118" y="80" text-anchor="middle">Ответ ИИ</text>
+          <text class="sub" x="118" y="96" text-anchor="middle">в чате у эксперта</text>
+          <path class="a" d="M208 81 L242 81" marker-end="url(#f6a)"/>
+
+          <rect class="n" x="244" y="56" width="176" height="50"/>
+          <text class="h" x="332" y="80" text-anchor="middle">★ + исправление</text>
+          <text class="sub" x="332" y="96" text-anchor="middle">эталонный ответ текстом</text>
+          <path class="a" d="M422 81 L456 81" marker-end="url(#f6a)"/>
+
+          <rect class="n" x="458" y="56" width="176" height="50"/>
+          <text class="h" x="546" y="80" text-anchor="middle">Feedback.correction</text>
+          <text class="sub" x="546" y="96" text-anchor="middle">SQLite, внутри контура</text>
+          <path class="a-f" d="M636 81 L670 81" marker-end="url(#f6f)"/>
+
+          <rect class="n-fd" x="672" y="56" width="198" height="50"/>
+          <text class="h" x="771" y="80" text-anchor="middle">РУЧНОЙ УЧАСТОК</text>
+          <text class="sub" x="771" y="96" text-anchor="middle">сверка + JSON руками</text>
+          <path class="a-f" d="M771 108 L771 148" marker-end="url(#f6f)"/>
+
+          <rect class="n" x="672" y="150" width="198" height="50"/>
+          <text class="h" x="771" y="174" text-anchor="middle">cases/*.json</text>
+          <text class="sub" x="771" y="190" text-anchor="middle">формат кейса</text>
+          <path class="a" d="M670 175 L636 175" marker-end="url(#f6a)"/>
+
+          <rect class="n" x="458" y="150" width="176" height="50"/>
+          <text class="h" x="546" y="174" text-anchor="middle">seed_cases.py</text>
+          <text class="sub" x="546" y="190" text-anchor="middle">запуск на сервере</text>
+          <path class="a" d="M456 175 L422 175" marker-end="url(#f6a)"/>
+
+          <rect class="n-l" x="244" y="150" width="176" height="50"/>
+          <text class="h" x="332" y="174" text-anchor="middle">verified_cases</text>
+          <text class="sub" x="332" y="190" text-anchor="middle">5 кейсов</text>
+          <path class="a" d="M242 175 L208 175" marker-end="url(#f6a)"/>
+
+          <rect class="n-l" x="30" y="150" width="176" height="50"/>
+          <text class="h" x="118" y="174" text-anchor="middle">search_cases()</text>
+          <text class="sub" x="118" y="190" text-anchor="middle">высший приоритет</text>
+          <path class="a-l" d="M118 148 L118 110" marker-end="url(#f6l)"/>
+          <text class="lb-l" x="130" y="132">кейс в контекст</text>
+
+          <rect class="n-fd" x="244" y="236" width="626" height="46"/>
+          <text class="lb-f" x="262" y="256">26 эталонных исправлений от региональных палат → 5 кейсов в базе.</text>
+          <text class="sub" x="262" y="272">В коде путь замкнут везде, кроме одного участка — перенос делает человек.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 6</span><span>Механика приоритета кейсов реализована и работает; обрыв ровно один — перенос правки эксперта в кейс делается человеком, поэтому контур почти не накапливает.</span><span class="ref">app/db/models.py · retriever.search_cases()</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Это самое дешёвое место приложения усилий во всей системе. Всё остальное — данные, промпты, гарды — требует работы над корпусом; здесь достаточно связать две существующие вещи, и <strong>каждая правка эксперта начнёт работать на все последующие ответы</strong>, вместо того чтобы оставаться строкой в таблице обратной связи.</p>
+    </div>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 7 · слой хранения</div>
+      <h2>Почему «одна позиция = одна точка» упирается в потолок</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body plate-split">
+        <div class="sv">
+          <svg viewBox="0 0 480 300" role="img" aria-label="Структура хранения: родительская группа несёт требования и порог, а дочерние строки хранятся как отдельные точки с пустым списком требований, наследования между ними нет">
+            <defs>
+              <marker id="f7f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--flag)"/></marker>
+            </defs>
+            <rect class="n-l" x="20" y="24" width="440" height="66"/>
+            <text class="h" x="240" y="50" text-anchor="middle">Группа «Из 29.10.5»</text>
+            <text class="sub" x="240" y="70" text-anchor="middle">операции · баллы · порог — всё на месте</text>
+
+            <path class="a-f" d="M240 92 L240 128" marker-end="url(#f7f)"/>
+            <text class="lb-f" x="252" y="116">наследования нет</text>
+
+            <rect class="n-f" x="20" y="130" width="440" height="44"/>
+            <text class="h" x="240" y="150" text-anchor="middle">29.10.51 «Краны»</text>
+            <text class="sub" x="240" y="166" text-anchor="middle">requirement_blocks: []</text>
+
+            <rect class="n-f" x="20" y="182" width="440" height="44"/>
+            <text class="h" x="240" y="202" text-anchor="middle">29.10.59.310</text>
+            <text class="sub" x="240" y="218" text-anchor="middle">requirement_blocks: []</text>
+
+            <rect class="n-f" x="20" y="234" width="440" height="44"/>
+            <text class="h" x="240" y="254" text-anchor="middle">29.10.59.390</text>
+            <text class="sub" x="240" y="270" text-anchor="middle">requirement_blocks: []</text>
+          </svg>
+        </div>
+        <div class="st">
+          <div class="stat"><b>360</b><span>позиций (26 %) не имеют ни одной операции требований — поиск их найдёт, а показать будет нечего</span></div>
+          <div class="stat"><b>4 657</b><span>операций из 15 357 (30 %) без баллов</span></div>
+          <div class="stat"><b>83 %</b><span>записей без собственного порога; часть добирается из примечаний отдельным модулем, остальное — «в контексте не указан»</span></div>
+        </div>
+      </div>
+      <figcaption><span class="no">Фиг. 7</span><span>Каждая строка приложения — независимая точка в векторной БД, поэтому дочерние позиции не видят требований своей группы; это дефект слоя хранения, а не поиска.</span><span class="ref">пересчитано по knowledge_base/pp719/structured/*.json</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Фигуры 1–6 показывают систему, которая работает лучше, чем принято ожидать от RAG: поиск измерен, вокруг модели стоят гарды, детерминированное отделено от вероятностного. Фигура 7 показывает, во что это упирается — <strong>потолок задан слоем хранения, а не качеством пайплайна</strong>.</p>
+      <p>Приложение к постановлению по своей природе не документ, а таблица фактов: позиция ↔ код ↔ раздел ↔ обязательные требования ↔ балльные операции ↔ порог ↔ редакция. Пока эти факты живут как payload у векторных точек, наследование по группам, полнота порогов и расчёт баллов остаются недостижимыми — независимо от того, насколько хорош ретрив.</p>
+    </div>
+
+    <div class="note">
+      <h3>К чему это сходится</h3>
+      <p>Проект уже эволюционирует в правильную сторону: перевод кодов, пороги из примечаний, процедурная развилка, мета-ответы — всё это детерминированные модули, выросшие вокруг RAG там, где чистый RAG не справлялся. Логичное продолжение — <strong>нормализованный слой фактов как источник истины по числам</strong>, Qdrant в роли индекса навигации, LLM в роли объяснения найденного. Тогда постпроверка чисел перестанет быть пластырем: подставлять будет нечего, кроме верного.</p>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="eyebrow">Часть II · листы 8–12</div>
+    <h2>Целевая архитектура</h2>
+    <p>Пять решений, которые нужно принять до того, как корпус вырастет с трёх нормативных документов до восьми. Каждое опирается либо на публичную практику, либо на конкретную претензию из отзывов региональных палат.</p>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 8 · разделение по природе знания</div>
+      <h2>Четыре класса знания — четыре механизма</h2>
+    </div>
+    <div class="prose">
+      <p>Главное правило целевой схемы: <strong>механизм выбирается по природе знания, а не по тому, что источник пришёл файлом.</strong> Перечень условий по кодам ТН ВЭД придёт приложением к соглашению, но это таблица фактов, а не проза, — и класть её в векторный индекс так же неправильно, как класть туда приложение 719.</p>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 540" role="img" aria-label="Четыре класса знания и механизмы их обслуживания: факты-таблицы через нормализованный слой, классификаторы через прямые таблицы, нормы-проза через RAG с фильтрами, практика через отдельную приоритетную коллекцию">
+          <text class="cap" x="30" y="28">КЛАСС ЗНАНИЯ</text>
+          <text class="cap" x="286" y="28">ЧТО ЭТО</text>
+          <text class="cap" x="612" y="28">МЕХАНИЗМ</text>
+
+          <rect class="n-l" x="30" y="44" width="240" height="108"/>
+          <text class="h" x="150" y="80" text-anchor="middle">ФАКТЫ-ТАБЛИЦЫ</text>
+          <text class="sub" x="150" y="102" text-anchor="middle">приложение 719</text>
+          <rect class="n" x="286" y="44" width="310" height="108"/>
+          <text class="sub" x="441" y="76" text-anchor="middle">позиции · операции · баллы · пороги</text>
+          <text class="sub" x="441" y="96" text-anchor="middle">сквозные требования: права на НТД,</text>
+          <text class="sub" x="441" y="112" text-anchor="middle">территория РФ/ЕАЭС, резидентство</text>
+          <text class="lb-f" x="441" y="134" text-anchor="middle">сквозного слоя сейчас нет</text>
+          <rect class="n-l" x="612" y="44" width="258" height="108"/>
+          <text class="sub" x="741" y="76" text-anchor="middle">нормализованный слой фактов,</text>
+          <text class="sub" x="741" y="94" text-anchor="middle">детерминированный lookup;</text>
+          <text class="sub" x="741" y="112" text-anchor="middle">Qdrant — индекс навигации,</text>
+          <text class="sub" x="741" y="130" text-anchor="middle">не источник чисел</text>
+
+          <rect class="n-l" x="30" y="168" width="240" height="108"/>
+          <text class="h" x="150" y="204" text-anchor="middle">КЛАССИФИКАТОРЫ</text>
+          <text class="sub" x="150" y="226" text-anchor="middle">уже правильный паттерн</text>
+          <rect class="n" x="286" y="168" width="310" height="108"/>
+          <text class="sub" x="441" y="200" text-anchor="middle">ОКПД2 · ТН ВЭД · переходные ключи</text>
+          <text class="sub" x="441" y="220" text-anchor="middle">справочник документов ТПП</text>
+          <text class="sub" x="441" y="238" text-anchor="middle">перечень условий по ТН ВЭД · тарифы</text>
+          <text class="lb-f" x="441" y="260" text-anchor="middle">три последних — добавить</text>
+          <rect class="n-l" x="612" y="168" width="258" height="108"/>
+          <text class="sub" x="741" y="204" text-anchor="middle">таблицы на диске,</text>
+          <text class="sub" x="741" y="222" text-anchor="middle">прямой доступ без Qdrant:</text>
+          <text class="sub" x="741" y="240" text-anchor="middle">0 ₽, 0 галлюцинаций</text>
+
+          <rect class="n-w" x="30" y="292" width="240" height="108"/>
+          <text class="h" x="150" y="328" text-anchor="middle">НОРМЫ-ПРОЗА</text>
+          <text class="sub" x="150" y="350" text-anchor="middle">здесь и только здесь — RAG</text>
+          <rect class="n" x="286" y="292" width="310" height="108"/>
+          <text class="sub" x="441" y="322" text-anchor="middle">тело ПП №719 · Правила реестра</text>
+          <text class="sub" x="441" y="340" text-anchor="middle">Приказ ТПП №52</text>
+          <text class="sub" x="441" y="360" text-anchor="middle">+ СТ-1 · Методрекомендации · ГИСП</text>
+          <text class="lb-f" x="441" y="382" text-anchor="middle">три новых документа</text>
+          <rect class="n-w" x="612" y="292" width="258" height="108"/>
+          <text class="sub" x="741" y="322" text-anchor="middle">RAG с фильтрами:</text>
+          <text class="sub" x="741" y="340" text-anchor="middle">topic · doc_type · статус · редакция</text>
+          <text class="sub" x="741" y="358" text-anchor="middle">+ квота на источник</text>
+          <text class="sub" x="741" y="376" text-anchor="middle">(сейчас — плоский top-6)</text>
+
+          <rect class="n" x="30" y="416" width="240" height="108"/>
+          <text class="h" x="150" y="452" text-anchor="middle">ПРАКТИКА</text>
+          <text class="sub" x="150" y="474" text-anchor="middle">не норма</text>
+          <rect class="n" x="286" y="416" width="310" height="108"/>
+          <text class="sub" x="441" y="452" text-anchor="middle">кейсы эксперта · типовые отказы</text>
+          <text class="sub" x="441" y="472" text-anchor="middle">разъяснения и семинары палат</text>
+          <rect class="n" x="612" y="416" width="258" height="108"/>
+          <text class="sub" x="741" y="446" text-anchor="middle">отдельная коллекция,</text>
+          <text class="sub" x="741" y="464" text-anchor="middle">высший приоритет в контексте,</text>
+          <text class="sub" x="741" y="482" text-anchor="middle">явная пометка «не норма»</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 8</span><span>Одна коллекция на класс знания, а не на документ: документы внутри класса разводятся фильтрами, иначе теряются кросс-документные ответы.</span><span class="ref">целевая схема · сейчас реализованы классы 2 и 4</span></figcaption>
+    </figure>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 9 · второй ключ</div>
+      <h2>СТ-1 ломает допущение «один ключ классификации»</h2>
+    </div>
+    <div class="prose">
+      <p>Самый частый документный запрос из отзывов — 26 упоминаний — это путь СТ-1 для продукции, которой нет в приложении. Эксперты формулируют ожидаемое поведение дословно: <em>«у вас итоговый документ скорее всего СТ-1 — укажите код ТН ВЭД, распишу требования»</em>. Здесь скрыто архитектурное следствие: <strong>требования по СТ-1 живут в разрезе ТН ВЭД, а весь наш корпус построен на ОКПД2</strong>.</p>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 430" role="img" aria-label="Два ключа классификации: продукция с позицией в приложении 719 обслуживается по ключу ОКПД2, продукция без позиции уходит на путь СТ-1, где требования привязаны к кодам ТН ВЭД через переходные ключи">
+          <defs>
+            <marker id="f9a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+
+          <rect class="n" x="30" y="58" width="180" height="54"/>
+          <text class="h" x="120" y="82" text-anchor="middle">Продукция + код</text>
+          <text class="sub" x="120" y="100" text-anchor="middle">вопрос заявителя</text>
+          <path class="a" d="M212 85 L246 85" marker-end="url(#f9a)"/>
+
+          <rect class="n-l" x="248" y="50" width="220" height="70"/>
+          <text class="h" x="358" y="78" text-anchor="middle">Есть позиция</text>
+          <text class="h" x="358" y="96" text-anchor="middle">в приложении 719?</text>
+
+          <path class="a" d="M470 70 L516 70" marker-end="url(#f9a)"/>
+          <text class="lb-l" x="474" y="60">да</text>
+          <rect class="n-l" x="518" y="34" width="352" height="72"/>
+          <text class="h" x="694" y="60" text-anchor="middle">ТОВАРНЫЙ ПУТЬ — ключ ОКПД2</text>
+          <text class="sub" x="694" y="80" text-anchor="middle">раздел · операции · баллы · порог</text>
+          <text class="lb-l" x="694" y="98" text-anchor="middle">работает сегодня</text>
+
+          <path class="a" d="M470 104 L494 104 L494 222 L516 222" marker-end="url(#f9a)"/>
+          <text class="lb-f" x="474" y="128">нет</text>
+
+          <rect class="n-l" x="518" y="196" width="176" height="52"/>
+          <text class="sub" x="606" y="218" text-anchor="middle">переходные ключи</text>
+          <text class="sub" x="606" y="234" text-anchor="middle">ОКПД2 → ТН ВЭД</text>
+          <path class="a" d="M696 222 L714 222" marker-end="url(#f9a)"/>
+          <rect class="n-f" x="716" y="196" width="154" height="52"/>
+          <text class="sub" x="793" y="218" text-anchor="middle">Перечень условий</text>
+          <text class="sub" x="793" y="234" text-anchor="middle">по кодам ТН ВЭД</text>
+          <text class="lb-l" x="518" y="188">есть: tnved_okpd2.tsv</text>
+          <text class="lb-f" x="716" y="188">НЕТ В КОРПУСЕ</text>
+
+          <path class="a" d="M793 250 L793 288" marker-end="url(#f9a)"/>
+          <rect class="n-f" x="518" y="290" width="352" height="72"/>
+          <text class="h" x="694" y="316" text-anchor="middle">ПУТЬ СТ-1 — ключ ТН ВЭД</text>
+          <text class="sub" x="694" y="336" text-anchor="middle">достаточная переработка · Соглашение СНГ</text>
+          <text class="sub" x="694" y="354" text-anchor="middle">Положение о выдаче СТ-1 (Приказ ТПП №14)</text>
+
+          <rect class="n-fd" x="30" y="376" width="840" height="42"/>
+          <text class="lb-f" x="46" y="396">Сегодня ключ классификации один — ОКПД2. СТ-1 требует второго измерения, а не ещё одного документа:</text>
+          <text class="sub" x="46" y="412">паспорт записи должен нести key_type (ОКПД2 | ТН ВЭД), а роутер — понимать, по какому ключу отвечать.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 9</span><span>Мост между ключами у нас уже есть — переходные ключи ОКПД2↔ТН ВЭД; не хватает того, что находится по второму ключу.</span><span class="ref">app/rag/okpd2_ref.py · knowledge_base/classifiers/tnved_okpd2.tsv</span></figcaption>
+    </figure>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 10 · сквозные требования</div>
+      <h2>Требования, которые применимы ко всем позициям сразу</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 400" role="img" aria-label="Сравнение: сегодня ответ строится только из требований самой позиции, в целевой схеме к нему добавляются унаследованные от группы, разрешённые примечания и сквозные требования, применимые ко всем позициям">
+          <defs>
+            <marker id="f10a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+          <line class="divider" x1="450" y1="20" x2="450" y2="384"/>
+          <text class="cap" x="30" y="34">СЕЙЧАС</text>
+          <text class="cap" x="470" y="34">ЦЕЛЬ</text>
+
+          <rect class="n" x="30" y="60" width="390" height="46"/>
+          <text class="h" x="225" y="88" text-anchor="middle">Найденная позиция</text>
+          <path class="a" d="M225 106 L225 136" marker-end="url(#f10a)"/>
+          <rect class="n-f" x="30" y="138" width="390" height="64"/>
+          <text class="h" x="225" y="164" text-anchor="middle">только свои requirement_blocks</text>
+          <text class="sub" x="225" y="186" text-anchor="middle">у 26 % позиций этот список пуст</text>
+          <path class="a" d="M225 202 L225 232" marker-end="url(#f10a)"/>
+          <rect class="n" x="30" y="234" width="390" height="46"/>
+          <text class="h" x="225" y="262" text-anchor="middle">Ответ — неполный состав требований</text>
+          <text class="lb-f" x="30" y="304">«Не приведено требование: наличие прав на использование</text>
+          <text class="lb-f" x="30" y="320">нормативно-технической документации…»</text>
+          <text class="lb-f" x="30" y="342">«Отсутствует отсылка на обязательность осуществления</text>
+          <text class="lb-f" x="30" y="358">операций на территории РФ» — 15 упоминаний</text>
+
+          <rect class="n-l" x="470" y="46" width="400" height="40"/>
+          <text class="sub" x="670" y="71" text-anchor="middle">требования самой позиции</text>
+          <rect class="n-l" x="470" y="92" width="400" height="40"/>
+          <text class="sub" x="670" y="117" text-anchor="middle">+ унаследованные от группы-родителя</text>
+          <rect class="n-l" x="470" y="138" width="400" height="40"/>
+          <text class="sub" x="670" y="163" text-anchor="middle">+ разрешённые примечания (7 · 11 · 29 · 31 · 52 · 53 · 55)</text>
+          <rect class="n-f" x="470" y="184" width="400" height="58"/>
+          <text class="sub" x="670" y="206" text-anchor="middle">+ СКВОЗНЫЕ: права на НТД · территория РФ/ЕАЭС</text>
+          <text class="sub" x="670" y="224" text-anchor="middle">налоговое резидентство · обязательные без баллов</text>
+          <path class="a" d="M670 242 L670 272" marker-end="url(#f10a)"/>
+          <rect class="n-l" x="470" y="274" width="400" height="52"/>
+          <text class="h" x="670" y="298" text-anchor="middle">Ответ — полный состав</text>
+          <text class="sub" x="670" y="316" text-anchor="middle">обязательные и балльные разными блоками</text>
+          <text class="lb-l" x="470" y="348">Номера примечаний взяты из отзывов экспертов —</text>
+          <text class="lb-l" x="470" y="364">это готовый приёмочный набор для проверки реализации.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 10</span><span>Сквозные нормы живут в теле и примечаниях и не привязаны ни к одной позиции — архитектура «позиция = одна точка» показать их не может в принципе.</span><span class="ref">источник: 150 текстовых отзывов, выгрузка 25.07.2026</span></figcaption>
+    </figure>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 11 · добавление документа</div>
+      <h2>Как документ попадает в корпус — сейчас и как надо</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 380" role="img" aria-label="Сравнение процесса добавления документа: сегодня требуется правка загрузчика, новый парсер и полная переиндексация без возможности проверки; в целевой схеме документ описывается строкой манифеста, парсится плагином по формату, обновляется инкрементально и проверяется своим набором приёмочных кейсов">
+          <defs>
+            <marker id="f11a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+            <marker id="f11f" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--flag)"/></marker>
+          </defs>
+
+          <text class="cap" x="30" y="34">СЕЙЧАС · ЧЕТЫРЁХШАГОВАЯ ПРАВКА КОДА</text>
+          <rect class="n" x="30" y="52" width="192" height="72"/>
+          <text class="sub" x="126" y="82" text-anchor="middle">новый нормативный</text>
+          <text class="sub" x="126" y="100" text-anchor="middle">документ</text>
+          <path class="a-f" d="M224 88 L242 88" marker-end="url(#f11f)"/>
+          <rect class="n-f" x="246" y="52" width="192" height="72"/>
+          <text class="sub" x="342" y="76" text-anchor="middle">правка load_records</text>
+          <text class="sub" x="342" y="94" text-anchor="middle">+ отдельный парсер</text>
+          <text class="sub" x="342" y="112" text-anchor="middle">под этот документ</text>
+          <path class="a-f" d="M440 88 L458 88" marker-end="url(#f11f)"/>
+          <rect class="n-f" x="462" y="52" width="192" height="72"/>
+          <text class="sub" x="558" y="76" text-anchor="middle">recreate_collection</text>
+          <text class="sub" x="558" y="94" text-anchor="middle">сносит и пересобирает</text>
+          <text class="sub" x="558" y="112" text-anchor="middle">все 242 пункта</text>
+          <path class="a-f" d="M656 88 L674 88" marker-end="url(#f11f)"/>
+          <rect class="n-f" x="678" y="52" width="192" height="72"/>
+          <text class="sub" x="774" y="76" text-anchor="middle">проверить нечем:</text>
+          <text class="sub" x="774" y="94" text-anchor="middle">процедурных кейсов</text>
+          <text class="sub" x="774" y="112" text-anchor="middle">в golden — ноль</text>
+
+          <text class="cap" x="30" y="196">ЦЕЛЬ · ДОКУМЕНТ ОПИСЫВАЕТСЯ, А НЕ ПРОГРАММИРУЕТСЯ</text>
+          <rect class="n-l" x="30" y="214" width="192" height="82"/>
+          <text class="sub" x="126" y="244" text-anchor="middle">строка в manifest</text>
+          <text class="sub" x="126" y="262" text-anchor="middle">doc_id · authority</text>
+          <text class="sub" x="126" y="280" text-anchor="middle">topic · срок · статус</text>
+          <path class="a" d="M224 255 L242 255" marker-end="url(#f11a)"/>
+          <rect class="n-l" x="246" y="214" width="192" height="82"/>
+          <text class="sub" x="342" y="244" text-anchor="middle">парсер по ФОРМАТУ</text>
+          <text class="sub" x="342" y="262" text-anchor="middle">(нумерованные пункты,</text>
+          <text class="sub" x="342" y="280" text-anchor="middle">таблица, FAQ) — плагин</text>
+          <path class="a" d="M440 255 L458 255" marker-end="url(#f11a)"/>
+          <rect class="n-l" x="462" y="214" width="192" height="82"/>
+          <text class="sub" x="558" y="244" text-anchor="middle">upsert по doc_id:</text>
+          <text class="sub" x="558" y="262" text-anchor="middle">остальные документы</text>
+          <text class="sub" x="558" y="280" text-anchor="middle">не переиндексируются</text>
+          <path class="a" d="M656 255 L674 255" marker-end="url(#f11a)"/>
+          <rect class="n-l" x="678" y="214" width="192" height="82"/>
+          <text class="sub" x="774" y="244" text-anchor="middle">5–10 приёмочных</text>
+          <text class="sub" x="774" y="262" text-anchor="middle">кейсов документа</text>
+          <text class="sub" x="774" y="280" text-anchor="middle">+ прогон на регресс</text>
+
+          <rect class="n-fd" x="30" y="318" width="840" height="44"/>
+          <text class="lb-f" x="46" y="338">Порядок обязателен: манифест, паспорт и инкрементальная загрузка делаются ДО первого нового документа.</text>
+          <text class="sub" x="46" y="354">Иначе каждый следующий документ стоит полной переиндексации корпуса, а его влияние на остальные ответы неизмеримо.</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 11</span><span>Добавление нормы должно быть операцией над данными, а не над кодом — иначе восьмой документ обойдётся дороже третьего.</span><span class="ref">scripts/load_rules_kb.py · load_records() · recreate_collection()</span></figcaption>
+    </figure>
+  </section>
+
+  <section class="sec">
+    <div class="sec-head">
+      <div class="eyebrow">Лист 12 · маршрутизация</div>
+      <h2>Три слоя вместо бинарного «товар или процедура»</h2>
+    </div>
+    <figure class="plate">
+      <div class="plate-body">
+        <svg viewBox="0 0 900 490" role="img" aria-label="Трёхслойная маршрутизация: детерминированные замыкания, определение темы вопроса из шести вариантов, затем фильтр действующих норм и квота на источник перед сборкой контекста">
+          <defs>
+            <marker id="f12a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ink-70)"/></marker>
+          </defs>
+
+          <rect class="n" x="350" y="44" width="200" height="42"/>
+          <text class="h" x="450" y="70" text-anchor="middle">Вопрос</text>
+          <path class="a" d="M450 86 L450 110" marker-end="url(#f12a)"/>
+
+          <rect class="n-l" x="150" y="112" width="600" height="52"/>
+          <text class="h" x="450" y="134" text-anchor="middle">Слой 1 — детерминированные замыкания</text>
+          <text class="sub" x="450" y="153" text-anchor="middle">приветствие · перевод ТН ВЭД ↔ ОКПД2 · справочник документов ТПП</text>
+          <path class="a" d="M450 164 L450 188" marker-end="url(#f12a)"/>
+
+          <rect class="n-d" x="60" y="190" width="780" height="124"/>
+          <text class="cap" x="74" y="210">СЛОЙ 2 — ТЕМА ВОПРОСА, А НЕ «ПРОЦЕДУРА ДА/НЕТ»</text>
+          <rect class="n-l" x="70" y="220" width="240" height="40"/>
+          <text class="sub" x="190" y="245" text-anchor="middle">товар — приложение 719</text>
+          <rect class="n-l" x="330" y="220" width="240" height="40"/>
+          <text class="sub" x="450" y="245" text-anchor="middle">реестр и внесение</text>
+          <rect class="n-l" x="590" y="220" width="240" height="40"/>
+          <text class="sub" x="710" y="245" text-anchor="middle">документы и сроки</text>
+          <rect class="n-f" x="70" y="266" width="240" height="40"/>
+          <text class="sub" x="190" y="291" text-anchor="middle">СТ-1 и происхождение</text>
+          <rect class="n-l" x="330" y="266" width="240" height="40"/>
+          <text class="sub" x="450" y="291" text-anchor="middle">классификация кода</text>
+          <rect class="n-l" x="590" y="266" width="240" height="40"/>
+          <text class="sub" x="710" y="291" text-anchor="middle">вне сферы — честный отказ</text>
+          <path class="a" d="M450 314 L450 338" marker-end="url(#f12a)"/>
+
+          <rect class="n-f" x="150" y="340" width="600" height="72"/>
+          <text class="h" x="450" y="364" text-anchor="middle">Слой 3 — фильтры выдачи</text>
+          <text class="sub" x="450" y="384" text-anchor="middle">status = действует · valid_from ≤ сегодня — жёстко, всегда</text>
+          <text class="sub" x="450" y="402" text-anchor="middle">квота на источник: каждый релевантный документ попадает в окно</text>
+          <path class="a" d="M450 412 L450 436" marker-end="url(#f12a)"/>
+
+          <rect class="n-w" x="300" y="438" width="300" height="42"/>
+          <text class="h" x="450" y="464" text-anchor="middle">Контекст → генерация</text>
+        </svg>
+      </div>
+      <figcaption><span class="no">Фиг. 12</span><span>Тема даёт фильтр по документам и свой фрагмент промпта; фильтр актуальности делает цитирование утратившей силу нормы невозможным по построению.</span><span class="ref">app/rag/procedural.py · retriever.search_rules()</span></figcaption>
+    </figure>
+    <div class="prose">
+      <p>Квота на источник — не косметика. Сейчас поиск берёт шесть пунктов по всей коллекции без фильтра, поэтому многословный документ вытесняет остальные. На вопрос «какие документы готовить» в окно должны попасть и Приказ №52, и Методические рекомендации, и тело постановления — а не шесть абзацев из того, что оказался длиннее.</p>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="eyebrow">Часть III</div>
+    <h2>Документы: что добавить и как индексировать</h2>
+    <p>Приоритет выставлен по частоте запроса в отзывах региональных палат, а не только по нормативной значимости. Колонка «как индексировать» — главная: не всё, что приходит документом, должно становиться прозой в векторном индексе.</p>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <table class="tbl compact">
+        <thead><tr><th>Документ</th><th>Класс</th><th>Ключ</th><th>Приор.</th><th>Как индексировать</th></tr></thead>
+        <tbody>
+          <tr>
+            <td class="wide">Сквозные требования ПП №719 — права на НТД, территория РФ/ЕАЭС, налоговое резидентство</td>
+            <td>факты</td><td>—</td><td><span class="pri p0">P0</span></td>
+            <td>Внешний источник не нужен — извлечь из тела и примечаний, которые уже в корпусе, в отдельный слой и подмешивать в каждый товарный ответ</td>
+          </tr>
+          <tr>
+            <td class="wide">Соглашение СНГ о правилах определения страны происхождения (Ялта, 20.11.2009, ред. 08.06.2023) + Правила + <b>Перечень условий по кодам ТН ВЭД</b></td>
+            <td>проза + таблица</td><td>ТН ВЭД</td><td><span class="pri p0">P0</span></td>
+            <td><b>Расщепить:</b> текст Соглашения и Правил — прозовым чанкером в <code>pp719_rules</code>; Перечень условий — <b>таблицей фактов</b> рядом с классификаторами, не в векторный индекс</td>
+          </tr>
+          <tr>
+            <td class="wide">Положение о порядке выдачи сертификатов СТ-1 (Приказ ТПП РФ №14 от 01.03.2024)</td>
+            <td>проза</td><td>—</td><td><span class="pri p0">P0</span></td>
+            <td>Прозовый чанкер, <code>topic: СТ-1</code>, <code>authority: ТПП РФ</code>, <code>legal_force: 3</code></td>
+          </tr>
+          <tr>
+            <td class="wide">Справочник документов ТПП: СТ-1 · Акт экспертизы · сведения о реестровой записи с выпиской</td>
+            <td>классификатор</td><td>—</td><td><span class="pri p0">P0</span></td>
+            <td>Жёсткая таблица, детерминированный ответ. Закрывает выдумку «заключение ТПП» (6 упоминаний) надёжнее, чем правило промпта</td>
+          </tr>
+          <tr>
+            <td class="wide">Методические рекомендации ТПП по подтверждению производства (вер. ~1.18.3)</td>
+            <td>проза</td><td>—</td><td><span class="pri p0">P0</span></td>
+            <td>Прозовый чанкер, <code>topic: документы</code>, <code>legal_force: 4</code> (разъяснение, не норма). По названию в отзывах не упоминается, но закрывает тему №1 — состав документов (31 упоминание)</td>
+          </tr>
+          <tr>
+            <td class="wide">Положение о порядке проведения экспертизы по определению страны происхождения (14.07.2023)</td>
+            <td>проза</td><td>—</td><td><span class="pri p1">P1</span></td>
+            <td>Прозовый чанкер, <code>topic: СТ-1</code></td>
+          </tr>
+          <tr>
+            <td class="wide">Инструкция и FAQ ГИСП «Как попасть в реестр»</td>
+            <td>практика</td><td>—</td><td><span class="pri p1">P1</span></td>
+            <td>В коллекцию практики, <code>legal_force: 5</code>, обязательная пометка «не норма, практическая инструкция»</td>
+          </tr>
+          <tr>
+            <td class="wide">ПП РФ №1875 о нацрежиме (44-ФЗ / 223-ФЗ)</td>
+            <td>проза</td><td>—</td><td><span class="pri p2">P2</span></td>
+            <td>Индексировать <b>выборочно</b> — только пункты о подтверждении происхождения. Альтернатива дешевле: правило промпта «о закупках не рассуждать». Всплыло только в ошибочных ответах модели</td>
+          </tr>
+          <tr>
+            <td class="wide">Приказ ТПП РФ №31 от 28.03.2025 — СТ-1 для целей госзакупок</td>
+            <td>проза</td><td>—</td><td><span class="pri p2">P2</span></td>
+            <td>После P0-волны СТ-1; реквизиты сверить с первоисточником</td>
+          </tr>
+          <tr>
+            <td class="wide">Методика платы за экспертизу (Приказ ТПП РФ №69) + Приложение 5 — предельная стоимость</td>
+            <td>таблица</td><td>раздел</td><td><span class="pri p2">P2</span></td>
+            <td>Таблицей тарифов, не прозой. <b>Приоритет понижен с P0:</b> стоимость не упомянута в отзывах ни разу. Вернуть в P0, если аудитория сместится к заявителям</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <div class="prose">
+      <p>Три позиции из десяти вообще не требуют внешнего сбора: сквозные требования и справочник документов извлекаются из того, что уже в корпусе. Четыре документа <span class="pri p0">P0</span> закрывают два самых частых класса претензий — путь СТ-1 и состав документов.</p>
+    </div>
+  </section>
+
+  <section class="part">
+    <div class="eyebrow">Часть IV</div>
+    <h2>План работ</h2>
+    <p>Волна R идёт сейчас параллельно и здесь не трогается. Ключевое ограничение последовательности: волна D не начинается, пока не закрыты P1, P2 и P4 — иначе каждый новый документ стоит полной переиндексации, а его влияние на остальные ответы нечем измерить.</p>
+  </section>
+
+  <section class="sec">
+    <div class="wrap">
+      <table class="tbl compact">
+        <thead><tr><th>Волна</th><th>Задача</th><th>Даёт</th><th>Когда</th></tr></thead>
+        <tbody>
+          <tr><td><span class="pri ok">R</span></td><td class="wide">Доработки по ревью 10.08 (R1–R27)</td><td>целостность метрики, безопасность, гигиена</td><td>идёт сейчас</td></tr>
+
+          <tr><td><span class="pri p0">A1</span></td><td class="wide">Наследование требований по группам</td><td>закрывает 26 % позиций без требований</td><td rowspan="4">после R</td></tr>
+          <tr><td><span class="pri p0">A2</span></td><td class="wide">Разрешение ссылок на примечания при индексации</td><td>порог там, где сейчас «не указан»; тест-набор — 7 номеров от экспертов</td></tr>
+          <tr><td><span class="pri p1">A3</span></td><td class="wide">Детерминированная контекстуализация чанков</td><td>эффект Contextual Retrieval без вызовов LLM</td></tr>
+          <tr><td><span class="pri p0">A4</span></td><td class="wide">Слой сквозных требований</td><td>НТД, территория, резидентство — ~19 упоминаний</td></tr>
+
+          <tr><td><span class="pri p1">B1</span></td><td class="wide">Асимметричный гибрид: dense — идентичность, sparse — полный текст</td><td>возвращает BM25 смысл: поиск по формулировкам операций</td><td rowspan="3">вместе с переиндексацией A</td></tr>
+          <tr><td><span class="pri p1">B2</span></td><td class="wide">Бюджет контекста вместо капов на хит</td><td>меньше разбавления целевой позиции</td></tr>
+          <tr><td><span class="pri p2">B3</span></td><td class="wide">Реранкер: замерить cross-encoder против LLM-rerank</td><td>решение по цифрам, не по моде</td></tr>
+
+          <tr><td><span class="pri p0">P1</span></td><td class="wide">Паспорт записи + манифест корпуса + статус и срок действия</td><td>устаревшая норма не может попасть в ответ</td><td rowspan="6"><b>до расширения базы</b></td></tr>
+          <tr><td><span class="pri p0">P2</span></td><td class="wide">Процедурный golden set (сейчас 0 кейсов)</td><td>без него рост корпуса неизмерим</td></tr>
+          <tr><td><span class="pri p0">P3</span></td><td class="wide">Фильтр по doc_type / topic + квота на источник</td><td>дёшево: индекс уже создан и не используется</td></tr>
+          <tr><td><span class="pri p0">P4</span></td><td class="wide">Инкрементальная переиндексация по doc_id</td><td>добавление документа перестаёт трогать корпус</td></tr>
+          <tr><td><span class="pri p1">P5</span></td><td class="wide">Тематический роутер вместо бинарного</td><td>шесть тем вместо «процедура да/нет»</td></tr>
+          <tr><td><span class="pri p1">P6</span></td><td class="wide">Юридическая иерархия источников в промпте</td><td>верный ответ при расхождении норм</td></tr>
+
+          <tr><td><span class="pri p0">D1</span></td><td class="wide">Корпус СТ-1 + второй ключ ТН ВЭД</td><td>26 упоминаний — крупнейший документный пробел</td><td rowspan="4"><b>новая сессия</b><br>после P1·P2·P4</td></tr>
+          <tr><td><span class="pri p0">D2</span></td><td class="wide">Методические рекомендации ТПП + справочник документов</td><td>тема №1 — состав документов</td></tr>
+          <tr><td><span class="pri p1">D3</span></td><td class="wide">ГИСП: инструкция и FAQ</td><td>практические шаги внесения</td></tr>
+          <tr><td><span class="pri p2">D4</span></td><td class="wide">Нацрежим, Приказ №31, тарифы</td><td>по мере спроса</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <div class="note">
+      <h3>Одно правило, которое стоит держать в голове всю следующую сессию</h3>
+      <p>Прежде чем класть очередной файл в векторный индекс — определить, к какому из четырёх классов он относится (фиг. 8). Перечень условий по ТН ВЭД, таблица тарифов и справочник документов ТПП приходят нормативными документами, но по природе это таблицы фактов. <strong>Если положить их в RAG как прозу, мы своими руками воспроизведём на новом корпусе ровно тот дефект, который сейчас лечим в приложении 719.</strong></p>
+    </div>
+  </section>
+
+</div>
