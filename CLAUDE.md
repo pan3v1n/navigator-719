@@ -144,6 +144,8 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 │   └── test_tools.py
 │
 └── docs/                  ← сверено с файлами 2026-08-12
+    ├── BACKLOG.md         ← ЗАДАЧНИК: все открытые задачи в порядке исполнения, с фактурой
+    │                        (дублируется issues + доска github.com/users/pan3v1n/projects/1)
     ├── CONCEPT.md         ← КОНЦЕПЦИЯ + функциональные требования по версиям (FR-0.5…FR-4.0)
     ├── REVIEW_TZ.md       ← ГЛАВНЫЙ рабочий план: задачи R1–R29 + чек-лист редеплоя §1а
     ├── KB_EXPANSION_TZ.md ← ТЗ расширения базы знаний: K1–K17 (+ architecture.html — схема)
