@@ -30,6 +30,7 @@ from app.api.auth import require_user, require_user_profiled
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core.prompts import EXPERT_DISCLAIMER
+from app.rag.edition import corpus_line
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -354,6 +355,9 @@ def _md_head(title: str) -> list[str]:
     return [
         f"# {title}", "",
         f"> **{EXPERT_DISCLAIMER}**", ">",
+        # E1: редакция корпуса — рядом с дисклеймером. Выгрузка уносит ответ за пределы сервиса,
+        # и читатель должен видеть, на какой редакции он основан: 719 правится 6+ раз в год.
+        f"> {corpus_line()}.", ">",
         f"> Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.", "",
         "---", "",
     ]
@@ -364,6 +368,7 @@ def _txt_head(title: str) -> list[str]:
     return [
         title, "=" * 60, "",
         EXPERT_DISCLAIMER,
+        f"{corpus_line()}.",  # E1
         f"Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.",
         "=" * 60, "",
     ]
@@ -452,7 +457,7 @@ def export_conversations(
         for s, msgs in picked
     ]
     return _json_download(
-        {"disclaimer": EXPERT_DISCLAIMER,  # R3: маркировка выгрузки — первым полем, чтобы её видели
+        {"disclaimer": EXPERT_DISCLAIMER, "corpus": corpus_line(),  # R3 + E1: маркировка первым полем
          "exported_at": _export_stamp(), "source": settings.APP_TITLE,
          "user": user.username,
          "filters": {"date_from": date_from or None, "date_to": date_to or None, "sources": incl_sources},
@@ -473,7 +478,7 @@ def export_conversation(session_id: str, fmt: str = "json", user: User = Depends
     if fmt == "txt":
         return _download(_conv_to_text(title, msgs), "text/plain; charset=utf-8", base + ".txt")
     return _json_download(
-        {"disclaimer": EXPERT_DISCLAIMER,  # R3
+        {"disclaimer": EXPERT_DISCLAIMER, "corpus": corpus_line(),  # R3 + E1
          "exported_at": _export_stamp(), "source": settings.APP_TITLE,
          "user": user.username, "conversation": {
             "session_id": session_id, "title": title, "messages": _serialize_messages(msgs)}},

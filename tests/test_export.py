@@ -54,6 +54,17 @@ class TestExportMarkedAsAI(unittest.TestCase):
             "одна беседа, txt": chat_mod._conv_to_text("Насосы", DIALOG),
         }
 
+    def test_corpus_edition_in_every_format(self):
+        """E1: выгрузка уносит ответ за пределы сервиса — читатель должен видеть, на какой
+        редакции он основан. ПП №719 правится 6+ раз в год, и 12.08.2026 выяснилось, что корпус
+        отстал на две редакции незаметно."""
+        from app.rag.edition import corpus_edition
+        ed = corpus_edition()
+        self.assertRegex(ed, r"^ред\. от \d{2}\.\d{2}\.\d{4} N \d+$",
+                         "редакция должна выводиться из текста постановления, а не быть заглушкой")
+        for name, doc in self._all_serializers().items():
+            self.assertIn(ed, doc, f"нет редакции корпуса: {name}")
+
     def test_disclaimer_in_every_format(self):
         for name, doc in self._all_serializers().items():
             self.assertIn(EXPERT_DISCLAIMER, doc, f"нет пометки: {name}")

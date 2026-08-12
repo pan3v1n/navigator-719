@@ -31,6 +31,7 @@ from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
+from app.rag.edition import corpus_edition, corpus_line
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -43,7 +44,10 @@ templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " "
 
 
 def _ctx(request: Request, **kw) -> dict:
-    return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME, **kw}
+    # E1: редакция корпуса — во ВСЕ страницы. Выводится из самого текста постановления
+    # (app/rag/edition.py), поэтому не может разойтись с базой молча.
+    return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
+            "corpus_edition": corpus_edition(), **kw}
 
 
 def _parse_date(s: str):
@@ -241,6 +245,7 @@ def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
     payload = {
         # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
         "disclaimer": EXPERT_DISCLAIMER,
+        "corpus": corpus_line(),  # E1: редакция рядом с дисклеймером
         "generated_at": st["generated_at"],
         "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
                     "region": st["filter_region"] or None, "role": st["filter_role"] or None},
