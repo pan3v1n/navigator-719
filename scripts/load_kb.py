@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 from pathlib import Path
 from uuid import NAMESPACE_URL, uuid5
@@ -173,9 +174,53 @@ def _text_key(text: str) -> str:
     return hashlib.sha1(text.encode("utf-8")).hexdigest()
 
 
+def _model_slug(model: str) -> str:
+    """Имя модели, пригодное для имени файла на любой ФС (D7).
+
+    EMBEDDING_MODEL — это либо репозиторий HF (`intfloat/multilingual-e5-large`), либо
+    АБСОЛЮТНЫЙ путь к скачанной папке (`D:/navigator-719/models/...`, см. SETUP.md шаг 5).
+    Прежняя схема подставляла значение как есть, и двоеточие после буквы диска Windows
+    понимал как разделитель альтернативного потока NTFS: на диске оставался файл нулевого
+    размера, а 17 МБ векторов уезжали в поток — невидимый для `du`, бэкапа и обычного
+    копирования папки. Берём последний сегмент пути (читаемо) + хэш полного значения
+    (две разные модели с одинаковым именем папки не делят кэш).
+    """
+    tail = re.split(r"[\\/]+", model.strip().rstrip("\\/"))[-1]
+    safe = re.sub(r"[^0-9A-Za-z._-]+", "_", tail) or "model"
+    return f"{safe}_{hashlib.sha1(model.encode('utf-8')).hexdigest()[:8]}"
+
+
 def _cache_file() -> Path:
-    safe = settings.EMBEDDING_MODEL.replace("/", "_")
-    return CACHE_DIR / f"dense_{safe}.npz"
+    return CACHE_DIR / f"dense_{_model_slug(settings.EMBEDDING_MODEL)}.npz"
+
+
+def _legacy_cache_file() -> Path:
+    """Имя кэша до D7 — нужно ровно для однократного переноса."""
+    return CACHE_DIR / f"dense_{settings.EMBEDDING_MODEL.replace('/', '_')}.npz"
+
+
+def _migrate_legacy_cache() -> None:
+    """Перенести кэш со старого имени на новое — без пересчёта эмбеддингов.
+
+    Без переноса первый прогон после D7 не нашёл бы кэш и посчитал бы e5 по всей базе
+    заново (на CPU это десятки минут), а старые 17 МБ остались бы висеть в NTFS-потоке.
+    """
+    import numpy as np
+
+    new, old = _cache_file(), _legacy_cache_file()
+    if new == old or new.exists() or not old.exists():
+        return
+
+    CACHE_DIR.mkdir(exist_ok=True)
+    with np.load(old, allow_pickle=True) as data:
+        np.savez(new, keys=data["keys"], vecs=data["vecs"])
+    old.unlink()
+    # На Windows старое имя было ПОТОКОМ: удаление потока оставляет пустой файл-носитель
+    # (`.emb_cache/dense_D`) — убираем и его, иначе мусор переживёт миграцию.
+    carrier = CACHE_DIR / old.name.split(":", 1)[0]
+    if carrier != old and carrier.exists() and carrier.stat().st_size == 0:
+        carrier.unlink()
+    print(f"Кэш эмбеддингов перенесён: {old.name} -> {new.name}")
 
 
 def dense_vectors_cached(texts: list[str], batch: int = 128) -> list[list[float]]:
@@ -190,6 +235,8 @@ def dense_vectors_cached(texts: list[str], batch: int = 128) -> list[list[float]
         from tqdm import tqdm
     except ImportError:
         tqdm = None
+
+    _migrate_legacy_cache()
 
     cache: dict[str, "np.ndarray"] = {}
     f = _cache_file()

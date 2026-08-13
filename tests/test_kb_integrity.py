@@ -139,5 +139,85 @@ class TestAppendixFootnotes(unittest.TestCase):
         self.assertIn("appendix_footnotes", RULES_QUOTA_ON_DEMAND)
 
 
+class TestEmbeddingCacheFilename(unittest.TestCase):
+    """D7: имя файла кэша эмбеддингов безопасно для файловой системы.
+
+    EMBEDDING_MODEL часто задают абсолютным путём к скачанной модели, и двоеточие диска
+    Windows понимал как разделитель NTFS-потока: кэш на диске был нулевого размера,
+    а данные — в потоке, который не переживает копирование папки и не виден бэкапу."""
+
+    def _slug(self, model: str) -> str:
+        from scripts import load_kb  # ленивый импорт: модуль тянет embeddings
+
+        return load_kb._model_slug(model)
+
+    def test_windows_path_model_gives_plain_filename(self):
+        slug = self._slug("D:/navigator-719/models/multilingual-e5-large")
+        self.assertNotIn(":", slug)
+        self.assertNotIn("/", slug)
+        self.assertNotIn("\\", slug)
+        self.assertTrue(slug.startswith("multilingual-e5-large_"), slug)
+
+    def test_backslash_path_model_gives_plain_filename(self):
+        slug = self._slug(r"D:\navigator-719\models\multilingual-e5-large")
+        self.assertNotIn("\\", slug)
+        self.assertTrue(slug.startswith("multilingual-e5-large_"), slug)
+
+    def test_hf_repo_model_keeps_readable_name(self):
+        self.assertTrue(
+            self._slug("intfloat/multilingual-e5-large").startswith("multilingual-e5-large_")
+        )
+
+    def test_same_folder_name_different_source_is_different_cache(self):
+        """Локальная папка и репозиторий HF — разные модели; общий кэш дал бы чужие векторы."""
+        self.assertNotEqual(
+            self._slug("intfloat/multilingual-e5-large"),
+            self._slug("D:/navigator-719/models/multilingual-e5-large"),
+        )
+
+    def test_cache_file_lands_in_cache_dir(self):
+        from scripts import load_kb
+
+        f = load_kb._cache_file()
+        self.assertEqual(f.parent, load_kb.CACHE_DIR)
+        self.assertEqual(f.suffix, ".npz")
+        self.assertNotIn(":", f.name)
+
+    def test_legacy_cache_is_migrated_without_recompute(self):
+        """Перенос старого кэша обязателен: иначе первый прогон после D7 считает e5 заново."""
+        import tempfile
+        import unittest.mock as mock
+
+        import numpy as np
+
+        from scripts import load_kb
+
+        with tempfile.TemporaryDirectory() as tmp:
+            cache_dir = Path(tmp)
+            model = "intfloat/multilingual-e5-large"  # без двоеточия — тест кроссплатформенный
+            keys = np.array(["a" * 40, "b" * 40], dtype=object)
+            vecs = np.zeros((2, 4), dtype=np.float32)
+            vecs[1, 0] = 1.0
+
+            with mock.patch.object(load_kb, "CACHE_DIR", cache_dir), mock.patch.object(
+                load_kb.settings, "EMBEDDING_MODEL", model
+            ):
+                legacy = load_kb._legacy_cache_file()
+                np.savez(legacy, keys=keys, vecs=vecs)
+                new = load_kb._cache_file()
+                self.assertNotEqual(new, legacy)
+
+                load_kb._migrate_legacy_cache()
+
+                self.assertTrue(new.exists(), "новый файл кэша не создан")
+                self.assertFalse(legacy.exists(), "старый файл кэша не убран")
+                with np.load(new, allow_pickle=True) as data:
+                    self.assertEqual(list(data["keys"]), list(keys))
+                    self.assertTrue(np.array_equal(data["vecs"], vecs))
+
+                load_kb._migrate_legacy_cache()  # идемпотентность: второй вызов ничего не портит
+                self.assertTrue(new.exists())
+
+
 if __name__ == "__main__":
     unittest.main()
