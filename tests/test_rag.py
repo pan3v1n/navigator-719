@@ -660,6 +660,43 @@ class TestDocumentListRetrieval(unittest.TestCase):
         self.assertIn("копия устава", ctx)
 
 
+class TestTableOutput(unittest.TestCase):
+    """T17: структурируемые данные выводятся таблицей — запрос заказчика (ОТЧ, расширение №4).
+
+    Данные для таблиц уже есть (T2 пороги по годам, T3 обязательные/балльные), но подавались
+    прозой, то есть сделанная работа не доходила до глаз пользователя."""
+
+    def test_navigator_prompt_has_table_rule(self):
+        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT
+
+        self.assertIn("ТАБЛИЦЫ", NAVIGATOR_SYSTEM_PROMPT)
+        self.assertIn("|---|", NAVIGATOR_SYSTEM_PROMPT)
+        # число в ячейке обязано остаться проверяемым для faithfulness-гарда
+        self.assertIn("балл", NAVIGATOR_SYSTEM_PROMPT.split("ТАБЛИЦЫ")[1][:800])
+
+    def test_procedural_prompt_has_table_rule(self):
+        """Состав документов и сроки — первые кандидаты на таблицу (кластер жалоб №1)."""
+        from app.core.prompts import PROCEDURAL_SYSTEM_PROMPT
+
+        tail = PROCEDURAL_SYSTEM_PROMPT.split("ТАБЛИЦЫ")
+        self.assertGreater(len(tail), 1, "в процедурном промпте нет правила таблиц")
+        rule = tail[1][:900]
+        self.assertIn("Документ", rule)
+        self.assertIn("Срок", rule)
+        self.assertIn("рабочих дней", rule)  # единица измерения остаётся в ячейке
+        self.assertIn("НЕ таблицей", rule)   # порядок действий — прозой
+
+    def test_frontend_renders_tables_and_hides_partial_ones(self):
+        """Рендер таблиц и защита от «палок» во время стриминга. JS-раннера в проекте нет, поэтому
+        проверяем инварианты файла — чтобы правка не потерялась при следующей."""
+        js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertIn("tbl-wrap", js, "рендер Markdown-таблиц пропал")
+        self.assertIn("function renderMarkdown(text, streaming)", js)
+        self.assertIn("renderMarkdown(acc, true)", js, "стриминг рендерит без флага — вернутся «палки»")
+        css = (ROOT / "app" / "web" / "static" / "style.css").read_text(encoding="utf-8")
+        self.assertIn("overflow-x: auto", css.split(".tbl-wrap")[1][:200])  # адаптив на мобильном
+
+
 class TestUnverifiedDeadlines(unittest.TestCase):
     def test_flags_fabricated_deadline(self):
         # в контексте только 10 рабочих дней, ответ выдумал 20 → незаземлено

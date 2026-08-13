@@ -104,13 +104,26 @@ function openItemMenu(sid, item, anchor) {
 
 // Минимальный БЕЗОПАСНЫЙ рендер markdown ответа движка (**жирный**, • списки, абзацы).
 // Сначала экранируем HTML (защита от XSS), потом добавляем ТОЛЬКО свои теги.
-function renderMarkdown(text) {
+function renderMarkdown(text, streaming) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const inline = (s) => esc(s).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   // строка-разделитель Markdown-таблицы: |---|:--:|---| и т.п.
   const isSep = (s) => /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
   const cells = (s) => s.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
-  const lines = (text || "").split(/\r?\n/);
+  let lines = (text || "").split(/\r?\n/);
+  // При стриминге таблица приходит по строкам, и до разделителя «|---|---|» её шапка выглядит
+  // строкой с палками. На ответе с перечнем документов это секунды визуального мусора, поэтому
+  // недособранный хвост таблицы просто не показываем — он появится, когда придут данные.
+  if (streaming) {
+    let start = lines.length;
+    while (start > 0 && lines[start - 1].includes("|")) start--;
+    const block = lines.slice(start);
+    if (block.length) {
+      // строк меньше трёх (шапка + разделитель + первая строка данных) — таблицы ещё нет;
+      // иначе прячем только последнюю строку: она может быть недописана на полсимвола
+      lines = block.some(isSep) && block.length >= 3 ? lines.slice(0, -1) : lines.slice(0, start);
+    }
+  }
   let html = "";
   let inList = false;
   const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
@@ -470,7 +483,7 @@ async function askStream(text, pending, bubble) {
         try { ev = JSON.parse(evtext); } catch (e) { continue; }
         if (ev.type === "delta") {
           acc += ev.text;
-          bubble.innerHTML = renderMarkdown(acc);  // инкрементальный рендер накопленного текста
+          bubble.innerHTML = renderMarkdown(acc, true);  // инкрементальный рендер (без хвоста таблицы)
           autoScroll();  // следуем за текстом, только если пользователь не листает выше
         } else if (ev.type === "done") {
           done = ev;
