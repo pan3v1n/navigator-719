@@ -622,3 +622,11 @@ body.tour-on { overflow: hidden; }
   .tour-spot { transition: none; }
   .tour-card.swap { animation: none; }
 }
+
+/* Блокировка отправки: в вопросе нашлись данные, которые нельзя отдавать во внешнюю модель. */
+.input-block { display: flex; align-items: flex-start; gap: 9px; width: 100%; max-width: 50vw;
+               margin: 0 auto 10px; padding: 11px 14px; border-radius: 12px; font-size: 13px;
+               line-height: 1.5; background: #fdf0ec; border: 1px solid #f0c6b8; color: #8a3b1e;
+               animation: fadeInUp .2s ease; }
+.input-block svg { flex-shrink: 0; margin-top: 1px; }
+@media (max-width: 900px) { .input-block { max-width: 100%; } }

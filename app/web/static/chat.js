@@ -502,6 +502,17 @@ function genId() {
     : "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
+// Сервер отклонил вопрос по содержимому (422). Возвращаем текст в поле ввода и показываем причину:
+// человеку нужно отредактировать вопрос, а не потерять его.
+async function handleRejected(r, text, pending) {
+  let msg = "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
+  try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
+  if (pending) pending.remove();
+  input.value = text;
+  input.style.height = "auto";
+  showInputBlock(msg);
+}
+
 async function ask(text) {
   main.classList.remove("empty");
   const isNew = !sessionId;
@@ -541,6 +552,9 @@ async function askStream(text, pending, bubble) {
     });
     if (r.status === 401) { window.location = "/login"; return true; }
     if (r.status === 403) { window.location = "/profile"; return true; }  // профиль/согласие не заполнены
+    // 422 — сервер нашёл в вопросе то, чего нельзя отправлять. Фолбэк бессмысленен: там та же
+    // проверка. Возвращаем вопрос в поле, чтобы человек его отредактировал, а не набирал заново.
+    if (r.status === 422) { await handleRejected(r, text, pending); return true; }
     if (!r.ok || !r.body) return false;  // не стартовал → фолбэк
     const reader = r.body.getReader();
     const dec = new TextDecoder();
@@ -597,6 +611,11 @@ async function askFallback(text, pending, bubble, isNew) {
     });
     if (r.status === 401) { window.location = "/login"; return; }
     if (r.status === 403) { window.location = "/profile"; return; }  // профиль/согласие не заполнены
+    if (r.status === 422) {
+      await handleRejected(r, text, pending);
+      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      return;
+    }
     if (!r.ok) {
       bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
       if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт
@@ -617,10 +636,110 @@ async function askFallback(text, pending, bubble, isNew) {
   }
 }
 
+// Данные, которые нельзя отправлять во внешнюю модель. Правила ПОВТОРЯЮТ серверные
+// (app/core/sensitive.py) намеренно: здесь проверка мгновенная и текст вообще не покидает браузер,
+// там — обязательная, потому что клиентскую можно обойти. Оба списка видов сверяет тест.
+const SENSITIVE_RULES = [
+  { kind: "restricted", name: "пометка ограниченного доступа",
+    re: /совершенно\s+секретно|\bсекретно\b|для\s+служебного\s+пользования|\bдсп\b|коммерческ\w+\s+тайн\w+|служебн\w+\s+тайн\w+|государственн\w+\s+тайн\w+/i },
+  { kind: "passport", name: "данные паспорта", re: /паспорт\w*[^0-9]{0,20}\d{4}\s?\d{6}\b/i },
+  { kind: "snils", name: "СНИЛС", re: /\b\d{3}[\s-]?\d{3}[\s-]?\d{3}[\s-]?\d{2}\b/, check: "snils" },
+  { kind: "inn_person", name: "ИНН физического лица", re: /\b\d{12}\b/, check: "inn12" },
+  { kind: "card", name: "номер банковской карты", re: /\b(?:\d[ -]?){13,19}\b/, check: "luhn" },
+  { kind: "phone", name: "номер телефона",
+    re: /\+7[\s\-()]*\d[\d\s\-()]{8,14}\d|\b8[\s-]*\(\d{3,5}\)[\s-]*\d[\d\s-]{4,10}\d|(?:тел|телефон|моб|звон|whats|viber|вайбер)\w*[^0-9+]{0,12}\+?[78][\d\s\-()]{9,16}\d/i },
+  { kind: "email", name: "адрес электронной почты", re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ },
+];
+
+// Контрольные суммы отделяют документ от случайного совпадения по длине: технический текст полон
+// длинных чисел, и без проверки разрядов блокировка сыпалась бы на кодах и датах.
+function digitsOnly(s) { return (s.match(/\d/g) || []).join(""); }
+function checkValue(kind, d) {
+  if (kind === "snils") {
+    if (d.length !== 11 || /^(\d)\1{8}/.test(d)) return false;
+    let sum = 0;
+    for (let i = 0; i < 9; i++) sum += Number(d[i]) * (9 - i);
+    let c = sum % 101;
+    if (c === 100 || c === 101) c = 0;
+    return c === Number(d.slice(9));
+  }
+  if (kind === "inn12") {
+    if (d.length !== 12) return false;
+    const w1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+    const w2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+    const s1 = w1.reduce((a, w, i) => a + w * Number(d[i]), 0) % 11 % 10;
+    const s2 = w2.reduce((a, w, i) => a + w * Number(d[i]), 0) % 11 % 10;
+    return s1 === Number(d[10]) && s2 === Number(d[11]);
+  }
+  if (kind === "luhn") {
+    if (d.length < 13 || d.length > 19) return false;
+    let sum = 0, alt = false;
+    for (let i = d.length - 1; i >= 0; i--) {
+      let n = Number(d[i]);
+      if (alt) { n *= 2; if (n > 9) n -= 9; }
+      sum += n; alt = !alt;
+    }
+    return sum % 10 === 0;
+  }
+  return true;
+}
+
+function detectSensitive(text) {
+  const found = [];
+  SENSITIVE_RULES.forEach((rule) => {
+    if (!rule.check) {
+      if (rule.re.test(text)) found.push(rule.name);
+      return;
+    }
+    const re = new RegExp(rule.re.source, "g");
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (checkValue(rule.check, digitsOnly(m[0]))) { found.push(rule.name); break; }
+    }
+  });
+  return found;
+}
+
+function sensitiveMessage(names) {
+  if (names.length === 1 && names[0] === "пометка ограниченного доступа") {
+    return "Похоже, в вопросе есть сведения ограниченного доступа. Такие сведения нельзя передавать " +
+           "в сервис — уберите их из текста и отправьте вопрос снова.";
+  }
+  const listed = names.length === 1 ? names[0]
+    : names.slice(0, -1).join(", ") + " и " + names[names.length - 1];
+  return "Похоже, в вопросе есть " + listed + ". Сервис не передаёт персональные данные во внешнюю " +
+         "языковую модель — уберите их из текста и отправьте вопрос снова. Для ответа по ПП №719 " +
+         "достаточно наименования продукции и кода ОКПД2 или ТН ВЭД.";
+}
+
+// Предупреждение над полем ввода. Отправку блокируем: пользователь редактирует вопрос и шлёт снова.
+function showInputBlock(text) {
+  let box = document.getElementById("input-block");
+  if (!box) {
+    box = el("input-block");
+    box.id = "input-block";
+    form.parentNode.insertBefore(box, form);
+  }
+  box.innerHTML = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17"><path d="M12 8v5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="16.4" r="1.1" fill="currentColor"/><path d="M10.3 3.9L2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span></span>';
+  box.querySelector("span").textContent = text;
+  box.classList.remove("hidden");
+  input.focus();
+}
+function hideInputBlock() {
+  const box = document.getElementById("input-block");
+  if (box) box.classList.add("hidden");
+}
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text) return;
+  const found = detectSensitive(text);
+  if (found.length) {
+    showInputBlock(sensitiveMessage(found));
+    return;   // вопрос остаётся в поле — его нужно отредактировать, а не потерять
+  }
+  hideInputBlock();
   input.value = "";
   input.style.height = "auto";
   ask(text);

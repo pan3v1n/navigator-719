@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from app.api.auth import require_user, require_user_profiled
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
+from app.core import sensitive
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.rag.edition import corpus_line
 from app.db import queries as q
@@ -55,6 +56,22 @@ def _enforce_chat_limit(user_id: int) -> None:
             detail=f"Слишком много вопросов подряд. Повторите через {retry} с.",
             headers={"Retry-After": str(retry)},
         )
+
+
+def _reject_sensitive(text: str, user_id: int) -> None:
+    """422, если в вопросе есть данные, которые нельзя отдавать во внешнюю модель.
+
+    Проверка ОБЯЗАНА быть на сервере, даже при такой же проверке в браузере: клиентскую легко
+    обойти, а цена ошибки — персональные данные третьего лица, ушедшие в DeepSeek.
+
+    В журнал пишем ТОЛЬКО вид данных и факт: сам текст сюда попасть не должен, иначе журнал
+    превратится в хранилище ровно тех сведений, ради недопуска которых стоит эта проверка.
+    Вопрос при отказе не сохраняется и в историю диалога не идёт."""
+    kinds = sensitive.detect(text)
+    if not kinds:
+        return
+    logger.warning(f"ввод отклонён: чувствительные данные {kinds}, user_id={user_id}")
+    raise HTTPException(status_code=422, detail=sensitive.message(kinds))
 
 
 class ChatRequest(BaseModel):
@@ -177,6 +194,7 @@ def _log_question(user_id: int, session_id: str, text: str) -> None:
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
     _enforce_chat_limit(user.id)
+    _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
     # R26: вопрос пишем ДО движка — иначе при 503 он теряется. Порядок важен: история загружена
@@ -230,6 +248,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     появлялся бы дубль вопроса, искажая и историю мультитёрна, и счётчики админки. Так что
     потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
     _enforce_chat_limit(user.id)
+    _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы (пусто для новой беседы)
     okpd2 = extract_okpd2(req.message)
