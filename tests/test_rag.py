@@ -297,6 +297,43 @@ class TestContextAndDisclaimer(unittest.TestCase):
         # сноски и регистр в наименовании не мешают
         self.assertIsNotNone(inheritance.lookup("III", " автокраны <9> "))
 
+    def test_inheritance_key_tolerates_trailing_punctuation(self):
+        """D6: имя-перечень из таблицы оставляет висячую « ;» после снятия сноски.
+
+        Из-за неё ключ позиции расходился с ключом записи базы, родитель «не находился»,
+        и 46 позиций молча оставались без требований — при живом родителе в базе."""
+        from app.rag import inheritance
+
+        self.assertEqual(
+            inheritance._key("XVIII", "Оборудование системы опознавания судов <9>;\nкодирующее"),
+            inheritance._key("XVIII", "Оборудование системы опознавания судов"),
+        )
+        # позиция из группы «опознавания судов» действительно наследует требования
+        parent = inheritance.lookup("XVIII", "судовая система охранного оповещения <9>;\nсудовая земная")
+        self.assertIsNotNone(parent, "восстановленная позиция XVIII осталась без требований группы")
+        self.assertTrue(parent["operations"], "у родителя пустой список требований")
+
+    def test_inheritance_map_keys_are_normalised(self):
+        """Инвариант формата карты: ключ не заканчивается пунктуацией — иначе рантайм промахнётся."""
+        from app.rag import inheritance
+
+        parents, children = inheritance._map()
+        bad = [k for k in list(children) + list(parents) if k != k.strip().rstrip(";,. ")]
+        self.assertEqual(bad[:5], [], f"ключи с висячей пунктуацией: {len(bad)}")
+
+    def test_inheritance_key_rule_matches_map_builder(self):
+        """Карту строит скрипт, читает рантайм — правила ключа обязаны совпадать до символа."""
+        from app.rag import inheritance
+        from scripts.diag_orphan_requirements import _map_key
+
+        for section, name in (
+            ("XVIII", "Оборудование системы опознавания судов <9>;\nкодирующее устройство"),
+            ("III", " Автокраны <9> "),
+            ("XXI", "Хладон-125 ХП,"),
+            (None, None),
+        ):
+            self.assertEqual(_map_key(section, name), inheritance._key(section, name))
+
     def test_fragmented_positions_excluded_from_inheritance(self):
         """R29 и R6 не должны конфликтовать: у позиции с расколотой ячейкой родитель — оборванная
         вводная, наследовать от него нельзя (потомок получил бы фразу без списка)."""
