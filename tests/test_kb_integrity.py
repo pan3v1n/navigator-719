@@ -139,6 +139,55 @@ class TestAppendixFootnotes(unittest.TestCase):
         self.assertIn("appendix_footnotes", RULES_QUOTA_ON_DEMAND)
 
 
+class TestIncompleteThresholdNotice(unittest.TestCase):
+    """D9 (страховка): позиции, где в законе несколько порогов, а в записи поместился один.
+
+    Полное исправление — порог на блок + перепарс четырёх разделов. До него дефект делается
+    ВИДИМЫМ: показать один порог как единственный опаснее, чем не показать ничего, — ответ
+    выглядит полным, а недобор по узлу проходит незамеченным."""
+
+    def test_artifact_lists_found_positions(self):
+        from app.rag import fragments
+
+        gaps = fragments._threshold_gaps()
+        if not gaps:
+            self.skipTest("артефакт incomplete_thresholds.json не сгенерирован")
+        self.assertIn(("XXIV", "модульная криогенная автозаправочная станция"), gaps)
+        self.assertIn(("XXV", "инструменты музыкальные струнные смычковые"), gaps)
+
+    def test_notice_is_section_scoped(self):
+        """Одноимённые позиции живут в разных разделах — пометка не должна уезжать к чужой."""
+        from app.rag import fragments
+
+        if not fragments._threshold_gaps():
+            self.skipTest("артефакт не сгенерирован")
+        self.assertTrue(fragments.has_incomplete_thresholds(
+            "XXIV", "Модульная криогенная автозаправочная станция"))
+        self.assertFalse(fragments.has_incomplete_thresholds(
+            "III", "Модульная криогенная автозаправочная станция"))
+        self.assertFalse(fragments.has_incomplete_thresholds("III", "Автокраны"))
+
+    def test_notice_forbids_threshold_conclusion(self):
+        """Текст пометки обязан запрещать вывод «порог набирается» — иначе она бесполезна."""
+        from app.rag import fragments
+
+        self.assertIn("НЕ полностью".lower(), fragments.THRESHOLD_NOTICE.lower())
+        self.assertIn("порог набирается", fragments.THRESHOLD_NOTICE)
+
+    def test_missing_artifact_does_not_break_answer(self):
+        """Файла нет → пометка просто не ставится (как у R29), а не падение ответа."""
+        import unittest.mock as mock
+
+        from app.rag import fragments
+
+        with mock.patch.object(fragments, "_GAPS_PATH", Path("нет-такого-файла.json")):
+            fragments._threshold_gaps.cache_clear()
+            try:
+                self.assertFalse(fragments.has_incomplete_thresholds("XXIV", "Модульная криогенная"))
+            finally:
+                fragments._threshold_gaps.cache_clear()
+
+
 class TestRulesIndexContext(unittest.TestCase):
     """P2: подпункт индексируется вместе с вводной родителя, иначе не находится по своему вопросу."""
 

@@ -111,6 +111,41 @@ def section_points(roman: str, header: str) -> set[float]:
     return _points_in(header) | _points_in(_notes_chunk())
 
 
+def collect_incomplete(romans: list[str]) -> list[dict]:
+    """Позиции, где числа-баллы строки-исходника не покрыты записью, — машинный список для рантайма.
+
+    Из этого файла `app.rag.fragments` ставит пометку неполноты порогов: показать один порог там,
+    где в законе их несколько (по узлам изделия или по видам работ), опаснее, чем не показать
+    ничего, — ответ выглядит полным, а недобор по узлу остаётся незамеченным (`D9`)."""
+    from scripts.structure_kb import parse_section
+
+    out: list[dict] = []
+    for roman in romans:
+        src_f, js_f = chunk_for(roman), struct_for(roman)
+        if not src_f or not js_f:
+            continue
+        header, products = parse_section(src_f.read_text(encoding="utf-8"))
+        outside = section_points(roman, header)
+        data = [r for r in json.loads(js_f.read_text(encoding="utf-8"))
+                if r.get("record_type") != "section_methodology"]
+        if len(products) != len(data):
+            continue
+        for p, rec in zip(products, data):
+            src, got = source_points(p), record_points(rec)
+            lost = sorted(x for x in src - got if x != 0)
+            extra = sorted(got - src - outside)
+            if not lost and not extra:
+                continue
+            out.append({
+                "section": roman,
+                "product_name": (rec.get("product_name") or "").split("\n")[0],
+                "okpd2_codes": rec.get("okpd2_codes") or [],
+                "lost_points": [_fmt(x) for x in lost],
+                "extra_points": [_fmt(x) for x in extra],
+            })
+    return out
+
+
 def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
     """Слой B: сверка баллов ПО ЗАПИСИ. Возвращает (записей проверено, записей с расхождением).
 
@@ -240,9 +275,35 @@ ALL_ROMANS = [
 
 
 def main() -> None:
-    args = [a for a in sys.argv[1:] if a != "--records"]
-    only_records = "--records" in sys.argv[1:]
+    argv = sys.argv[1:]
+    only_records = "--records" in argv
+    dump_to = None
+    if "--json" in argv:
+        i = argv.index("--json")
+        dump_to = argv[i + 1] if i + 1 < len(argv) else None
+        if not dump_to:
+            sys.exit("--json требует путь к файлу")
+        argv = argv[:i] + argv[i + 2:]
+    args = [a for a in argv if a != "--records"]
     romans = args or ALL_ROMANS
+
+    if dump_to:
+        items = collect_incomplete(romans)
+        out = Path(dump_to)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({
+            "_comment": ("Позиции, у которых числа-баллы строки-исходника не покрыты записью "
+                         "(D9: в записи одно поле min_threshold, а в законе порогов несколько — "
+                         "по узлам изделия или по видам работ). Генерируется детерминированно: "
+                         "scripts/verify_structured.py --json <путь>. Правится ТОЛЬКО перегенерацией."),
+            "positions": items,
+        }, ensure_ascii=False, indent=1), encoding="utf-8")
+        print(f"Позиции с неполными порогами → {out}")
+        print(f"  найдено: {len(items)}")
+        for it in items:
+            print(f"    [{it['section']}] {','.join(it['okpd2_codes']) or '—'} "
+                  f"{it['product_name'][:46]!r}: потеряно {it['lost_points']}")
+        return
     if only_records:
         total = bad_total = 0
         for r in romans:

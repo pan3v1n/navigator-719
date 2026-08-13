@@ -190,6 +190,11 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         # 2а промпта заставит модель предупредить эксперта и не считать, наберётся ли порог.
         if fragments.is_fragmented(h.product_name):
             lines.append("      " + fragments.NOTICE)
+        # D9: у позиции в законе несколько порогов (по узлам изделия или видам работ), а в записи
+        # поместился один. Показанный порог выглядит порогом всего изделия, и недобор по узлу
+        # проходит незамеченным — пометка обязательна, пока схема не научится хранить их все.
+        if fragments.has_incomplete_thresholds(h.section_roman, h.product_name):
+            lines.append("      " + fragments.THRESHOLD_NOTICE)
         if h.source_anchor:
             lines.append(f"    Источник: {h.source_anchor}")
         blocks.append("\n".join(lines))
