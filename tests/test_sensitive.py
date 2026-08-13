@@ -18,7 +18,9 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.sensitive import KIND_NAMES, detect, message  # noqa: E402
+from app.core.sensitive import (  # noqa: E402
+    BLOCKING_KINDS, KIND_NAMES, SOFT_KINDS, detect, message, soft_message, split,
+)
 
 
 class TestDetectsRealData(unittest.TestCase):
@@ -73,6 +75,35 @@ class TestDoesNotBlockWork(unittest.TestCase):
             self.assertEqual(detect(t), [], f"ложная блокировка: {t}")
 
 
+class TestSeverity(unittest.TestCase):
+    """Документы и грифы блокируют, контакты только предупреждают.
+
+    Разделение не косметическое: телефон и почта попадают в вопрос по делу («направьте ответ на
+    почту», номер приёмной палаты), и жёсткая блокировка мешала бы работе чаще, чем защищала.
+    А идентификатор человека во внешней модели — то, чего не должно случиться ни разу."""
+
+    def test_documents_and_markings_block(self):
+        self.assertEqual(BLOCKING_KINDS, {"snils", "inn_person", "passport", "card", "restricted"})
+
+    def test_contacts_only_warn(self):
+        self.assertEqual(SOFT_KINDS, {"phone", "email"})
+
+    def test_categories_do_not_overlap_and_cover_everything(self):
+        self.assertFalse(BLOCKING_KINDS & SOFT_KINDS)
+        self.assertEqual(BLOCKING_KINDS | SOFT_KINDS, set(KIND_NAMES))
+
+    def test_split_separates_mixed_input(self):
+        blocking, soft = split(detect("почта a@b.ru и СНИЛС 112-233-445 95"))
+        self.assertEqual(blocking, ["snils"])
+        self.assertEqual(soft, ["email"])
+
+    def test_soft_message_offers_choice_not_refusal(self):
+        m = soft_message(["phone"])
+        self.assertIn("номер телефона", m)
+        self.assertIn("лучше их убрать", m)
+        self.assertNotIn("отправьте вопрос снова", m)  # это формулировка отказа, здесь она неуместна
+
+
 class TestMessage(unittest.TestCase):
     def test_names_what_was_found_and_what_to_do(self):
         m = message(["snils"])
@@ -119,8 +150,17 @@ class TestClientAndServerRulesMatch(unittest.TestCase):
 
     def test_client_blocks_send_and_keeps_the_text(self):
         """Вопрос должен остаться в поле: человеку его редактировать, а не набирать заново."""
-        self.assertIn("showInputBlock(sensitiveMessage(found))", self.js)
+        self.assertIn("showInputBlock(sensitiveMessage(hard))", self.js)
         self.assertIn("return;   // вопрос остаётся в поле", self.js)
+
+    def test_client_marks_the_same_kinds_as_soft(self):
+        soft_js = set(re.findall(r'kind:\s*"([a-z_]+)"[^}]*soft:\s*true', self.rules))
+        self.assertEqual(soft_js, set(SOFT_KINDS), "мягкие виды на клиенте и сервере разошлись")
+
+    def test_soft_warning_lets_user_proceed(self):
+        """Предупреждение без возможности отправить превратилось бы в ту же блокировку."""
+        self.assertIn("showInputBlock(softMessage(soft), proceed)", self.js)
+        self.assertIn("Отправить как есть", self.js)
 
     def test_server_rejection_handled_on_client(self):
         """Клиентскую проверку можно обойти — ответ 422 обязан быть обработан."""

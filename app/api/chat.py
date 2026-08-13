@@ -67,11 +67,15 @@ def _reject_sensitive(text: str, user_id: int) -> None:
     В журнал пишем ТОЛЬКО вид данных и факт: сам текст сюда попасть не должен, иначе журнал
     превратится в хранилище ровно тех сведений, ради недопуска которых стоит эта проверка.
     Вопрос при отказе не сохраняется и в историю диалога не идёт."""
-    kinds = sensitive.detect(text)
-    if not kinds:
+    blocking, soft = sensitive.split(sensitive.detect(text))
+    if soft:
+        # Телефон и почта часто попадают в вопрос по делу — отправку не рвём, но факт фиксируем:
+        # по нему видно, надо ли менять формулировки в интерфейсе.
+        logger.info(f"ввод с контактными данными {soft}, user_id={user_id}")
+    if not blocking:
         return
-    logger.warning(f"ввод отклонён: чувствительные данные {kinds}, user_id={user_id}")
-    raise HTTPException(status_code=422, detail=sensitive.message(kinds))
+    logger.warning(f"ввод отклонён: чувствительные данные {blocking}, user_id={user_id}")
+    raise HTTPException(status_code=422, detail=sensitive.message(blocking))
 
 
 class ChatRequest(BaseModel):

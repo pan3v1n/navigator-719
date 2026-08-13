@@ -630,3 +630,9 @@ body.tour-on { overflow: hidden; }
                animation: fadeInUp .2s ease; }
 .input-block svg { flex-shrink: 0; margin-top: 1px; }
 @media (max-width: 900px) { .input-block { max-width: 100%; } }
+/* Мягкое предупреждение: отправка возможна, решение за человеком — отсюда другой тон и кнопка. */
+.input-block.soft { background: #fdf6e3; border-color: #ecd9a0; color: #7a5c12; align-items: center; }
+.input-block-go { margin-left: auto; flex-shrink: 0; padding: 6px 12px; border: 1px solid #ecd9a0;
+                  border-radius: 9px; background: #fff; color: #7a5c12; font-size: 12.5px;
+                  cursor: pointer; white-space: nowrap; transition: background .15s; }
+.input-block-go:hover { background: #fbf0d6; }

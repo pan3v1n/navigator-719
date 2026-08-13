@@ -646,9 +646,9 @@ const SENSITIVE_RULES = [
   { kind: "snils", name: "СНИЛС", re: /\b\d{3}[\s-]?\d{3}[\s-]?\d{3}[\s-]?\d{2}\b/, check: "snils" },
   { kind: "inn_person", name: "ИНН физического лица", re: /\b\d{12}\b/, check: "inn12" },
   { kind: "card", name: "номер банковской карты", re: /\b(?:\d[ -]?){13,19}\b/, check: "luhn" },
-  { kind: "phone", name: "номер телефона",
+  { kind: "phone", name: "номер телефона", soft: true,
     re: /\+7[\s\-()]*\d[\d\s\-()]{8,14}\d|\b8[\s-]*\(\d{3,5}\)[\s-]*\d[\d\s-]{4,10}\d|(?:тел|телефон|моб|звон|whats|viber|вайбер)\w*[^0-9+]{0,12}\+?[78][\d\s\-()]{9,16}\d/i },
-  { kind: "email", name: "адрес электронной почты", re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ },
+  { kind: "email", name: "адрес электронной почты", soft: true, re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ },
 ];
 
 // Контрольные суммы отделяют документ от случайного совпадения по длине: технический текст полон
@@ -687,17 +687,25 @@ function checkValue(kind, d) {
 function detectSensitive(text) {
   const found = [];
   SENSITIVE_RULES.forEach((rule) => {
+    const hit = { name: rule.name, soft: !!rule.soft };
     if (!rule.check) {
-      if (rule.re.test(text)) found.push(rule.name);
+      if (rule.re.test(text)) found.push(hit);
       return;
     }
     const re = new RegExp(rule.re.source, "g");
     let m;
     while ((m = re.exec(text)) !== null) {
-      if (checkValue(rule.check, digitsOnly(m[0]))) { found.push(rule.name); break; }
+      if (checkValue(rule.check, digitsOnly(m[0]))) { found.push(hit); break; }
     }
   });
   return found;
+}
+
+function softMessage(names) {
+  const listed = names.length === 1 ? names[0]
+    : names.slice(0, -1).join(", ") + " и " + names[names.length - 1];
+  return "Похоже, в вопросе есть " + listed + ". Текст вопроса уходит во внешнюю языковую модель — " +
+         "если эти данные не нужны для ответа, лучше их убрать.";
 }
 
 function sensitiveMessage(names) {
@@ -712,16 +720,28 @@ function sensitiveMessage(names) {
          "достаточно наименования продукции и кода ОКПД2 или ТН ВЭД.";
 }
 
-// Предупреждение над полем ввода. Отправку блокируем: пользователь редактирует вопрос и шлёт снова.
-function showInputBlock(text) {
+// Полоса над полем ввода. Два режима: жёсткий — отправка не пойдёт, пока вопрос не изменят;
+// мягкий — предупреждаем и даём отправить осознанно, кнопкой в самой полосе.
+const WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17"><path d="M12 8v5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="16.4" r="1.1" fill="currentColor"/><path d="M10.3 3.9L2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+
+function showInputBlock(text, onProceed) {
   let box = document.getElementById("input-block");
   if (!box) {
     box = el("input-block");
     box.id = "input-block";
     form.parentNode.insertBefore(box, form);
   }
-  box.innerHTML = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17"><path d="M12 8v5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="16.4" r="1.1" fill="currentColor"/><path d="M10.3 3.9L2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg><span></span>';
+  box.className = "input-block" + (onProceed ? " soft" : "");
+  box.innerHTML = WARN_SVG + "<span></span>";
   box.querySelector("span").textContent = text;
+  if (onProceed) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "input-block-go";
+    btn.textContent = "Отправить как есть";
+    btn.addEventListener("click", () => { hideInputBlock(); onProceed(); });
+    box.appendChild(btn);
+  }
   box.classList.remove("hidden");
   input.focus();
 }
@@ -735,14 +755,22 @@ form.addEventListener("submit", (e) => {
   const text = input.value.trim();
   if (!text) return;
   const found = detectSensitive(text);
-  if (found.length) {
-    showInputBlock(sensitiveMessage(found));
+  const hard = found.filter((f) => !f.soft).map((f) => f.name);
+  const soft = found.filter((f) => f.soft).map((f) => f.name);
+  if (hard.length) {
+    showInputBlock(sensitiveMessage(hard));
     return;   // вопрос остаётся в поле — его нужно отредактировать, а не потерять
   }
-  hideInputBlock();
-  input.value = "";
-  input.style.height = "auto";
-  ask(text);
+  const proceed = () => {
+    hideInputBlock();
+    input.value = "";
+    input.style.height = "auto";
+    ask(text);
+  };
+  // Телефон и почта: предупреждаем, но отправить даём — они часто нужны по делу, и жёсткая
+  // блокировка мешала бы работе чаще, чем защищала.
+  if (soft.length) { showInputBlock(softMessage(soft), proceed); return; }
+  proceed();
 });
 
 // авто-рост textarea; Enter — отправка, Shift+Enter — перенос строки
