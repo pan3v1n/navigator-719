@@ -114,13 +114,18 @@ a { color: inherit; text-decoration: none; }
 .nav-group { position: relative; }
 .nav-caret { margin-left: auto; opacity: .55; transition: transform .15s; }
 .nav-group:hover .nav-caret, .nav-group.open .nav-caret { transform: translateX(2px); }
-.nav-menu { display: none; position: absolute; left: calc(100% - 6px); top: 0; z-index: 40; min-width: 232px;
+/* Раскрывается ВВЕРХ: «Справка» — последний пункт меню и стоит у нижнего края сайдбара,
+   вниз подменю уходило за пределы экрана. */
+.nav-menu { display: none; position: absolute; left: calc(100% - 6px); bottom: 0; z-index: 40; min-width: 232px;
             background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 6px;
             box-shadow: var(--shadow); }
 .nav-group:hover .nav-menu, .nav-group:focus-within .nav-menu, .nav-group.open .nav-menu { display: block; }
-.nav-menu-item { display: block; padding: 8px 10px; border-radius: 8px; font-size: 13.5px; color: var(--text);
-                 white-space: nowrap; transition: background .15s; }
-.nav-menu-item:hover { background: var(--hover); }
+/* Пункты — и ссылки, и кнопка запуска тура: сбрасываем браузерные стили кнопки, иначе она выглядит
+   выделенной среди ссылок сама по себе, без наведения. */
+.nav-menu-item { display: block; width: 100%; padding: 8px 10px; border: none; background: none;
+                 border-radius: 8px; font: inherit; font-size: 13.5px; color: var(--text); text-align: left;
+                 white-space: nowrap; cursor: pointer; transition: background .15s; }
+.nav-menu-item:hover, .nav-menu-item:focus-visible { background: var(--hover); }
 /* в свёрнутом сайдбаре подменю выезжает от иконки и не должно перекрывать саму полосу */
 .app.collapsed .nav-menu { left: calc(100% + 4px); }
 
@@ -587,12 +592,15 @@ body.tour-on { overflow: hidden; }
              transition: top .42s cubic-bezier(.22,.8,.24,1), left .42s cubic-bezier(.22,.8,.24,1),
                          width .42s cubic-bezier(.22,.8,.24,1), height .42s cubic-bezier(.22,.8,.24,1); }
 
-.tour-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+/* Карточка не центрируется вслепую: `top` ей задаёт JS, выбирая свободную сторону от подсветки —
+   иначе на шаге про поле ввода (оно внизу экрана) карточка накрывает ровно то, что подсвечивает. */
+.tour-card { position: fixed; left: 50%; top: 50%; transform: translateX(-50%);
              width: min(430px, calc(100vw - 40px)); background: var(--bg); border-radius: 18px;
-             box-shadow: 0 18px 50px rgba(0,0,0,.28); padding: 26px 26px 20px; text-align: center; }
+             box-shadow: 0 18px 50px rgba(0,0,0,.28); padding: 26px 26px 20px; text-align: center;
+             transition: top .42s cubic-bezier(.22,.8,.24,1); }
 .tour-card.swap { animation: tourIn .34s cubic-bezier(.22,.8,.24,1); }
-@keyframes tourIn { from { opacity: 0; transform: translate(-50%, calc(-50% + 10px)); }
-                    to   { opacity: 1; transform: translate(-50%, -50%); } }
+@keyframes tourIn { from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+                    to   { opacity: 1; transform: translateX(-50%) translateY(0); } }
 .tour-step-no { font-size: 11.5px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
 .tour-card h2 { font-size: 19px; margin: 8px 0 8px; }
 .tour-card p { font-size: 14px; line-height: 1.6; color: #444; margin: 0; }

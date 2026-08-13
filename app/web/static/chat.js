@@ -775,6 +775,21 @@ const TOUR_STEPS = [
     return t && t.getBoundingClientRect().width > 0 && t.getBoundingClientRect().height > 0;
   };
 
+  // Карточка встаёт в свободную сторону от подсветки, а не в центр экрана: поле ввода живёт внизу,
+  // и центрированная карточка накрывала ровно ту область, которую подсвечивает.
+  function placeCard(r) {
+    const gap = 20;
+    const h = card.offsetHeight;
+    const vh = window.innerHeight;
+    const above = r.top - gap;                 // сколько места над подсветкой
+    const below = vh - r.bottom - gap;         // и под ней
+    let top;
+    if (above >= h) top = r.top - gap - h;             // цель внизу → карточка выше неё
+    else if (below >= h) top = r.bottom + gap;         // цель вверху → карточка ниже
+    else top = above >= below ? gap : Math.max(gap, vh - h - gap);  // не помещается — в большую часть
+    card.style.top = Math.max(gap, Math.min(top, vh - h - gap)) + "px";
+  }
+
   function place() {
     const step = steps[i];
     const target = document.querySelector(step.sel);
@@ -785,8 +800,6 @@ const TOUR_STEPS = [
     spot.style.left = (r.left - pad) + "px";
     spot.style.width = (r.width + pad * 2) + "px";
     spot.style.height = (r.height + pad * 2) + "px";
-    // карточка всегда по центру экрана: у краёв и на мобильном привязка к элементу
-    // упирается в границы вьюпорта, а центр читается одинаково на любом шаге
     titleEl.textContent = step.title;
     textEl.textContent = step.text;
     stepNo.textContent = "Шаг " + (i + 1) + " из " + steps.length;
@@ -796,6 +809,7 @@ const TOUR_STEPS = [
     card.classList.remove("swap");
     void card.offsetWidth;   // рестарт анимации появления текста
     card.classList.add("swap");
+    placeCard(r);
   }
 
   function go(k) { i = Math.max(0, Math.min(steps.length - 1, k)); place(); }

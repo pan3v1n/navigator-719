@@ -175,6 +175,38 @@ class TestOnboardingTour(unittest.TestCase):
     def test_reduced_motion_respected(self):
         self.assertIn("prefers-reduced-motion", self.css)
 
+    def test_card_never_covers_the_highlight(self):
+        """Поле ввода живёт внизу экрана: центрированная карточка накрывала то, что подсвечивает."""
+        self.assertIn("function placeCard", self.js)
+        self.assertIn("if (above >= h) top = r.top - gap - h", self.js)   # цель внизу → карточка выше
+        self.assertIn("Math.min(top, vh - h - gap)", self.js)             # и не вылезает за экран
+        self.assertIn("transition: top", self.css)
+
+
+class TestHelpMenuLayout(unittest.TestCase):
+    """Подменю «Справка» — последний пункт у нижнего края сайдбара."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.css = (WEB / "static" / "style.css").read_text(encoding="utf-8")
+
+    def test_menu_opens_upwards(self):
+        """Вниз оно уходило за пределы экрана."""
+        import re
+
+        block = re.search(r"\.nav-menu \{[^}]*\}", self.css).group(0)
+        self.assertIn("bottom: 0", block)
+        self.assertNotIn("top: 0", block)
+
+    def test_button_item_looks_like_the_links(self):
+        """Кнопка запуска тура среди ссылок не должна выглядеть выделенной сама по себе."""
+        import re
+
+        block = re.search(r"\.nav-menu-item \{[^}]*\}", self.css).group(0)
+        self.assertIn("background: none", block)
+        self.assertIn("border: none", block)
+        self.assertIn(".nav-menu-item:hover, .nav-menu-item:focus-visible", self.css)
+
 
 if __name__ == "__main__":
     unittest.main()
