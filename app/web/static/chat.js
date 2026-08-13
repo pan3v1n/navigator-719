@@ -178,7 +178,9 @@ function addAssistant(text, sources) {
   const b = el("bubble");
   b.innerHTML = renderMarkdown(text);
   wrap.appendChild(b);
+  wrap.dataset.raw = text;  // исходный markdown — его и копируем, а не текст из DOM
   messages.appendChild(wrap);
+  addAnswerTools(wrap);
   if (sources) addSources(wrap, sources);
   return wrap;
 }
@@ -269,6 +271,79 @@ function flash(anchor, text) {
   f.textContent = text;
   clearTimeout(f._t);
   f._t = setTimeout(() => { f.textContent = ""; }, 2000);
+}
+
+// Подпись к вынесенному ответу. R3: ответ, покинувший сервис (экспорт, копирование, пересылка),
+// обязан нести пометку о происхождении — получатель не должен принять черновик ИИ за заключение.
+const SHARE_NOTE =
+  "\n\n— Ответ ИИ-ассистента «Навигатор ПП №719» (предварительно; окончательное решение " +
+  "принимает уполномоченный эксперт ТПП).";
+
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  // http-контекст (пилот работает без TLS) — clipboard API недоступен, нужен старый путь
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy") ? resolve() : reject(); } catch (e) { reject(e); }
+    document.body.removeChild(ta);
+  });
+}
+
+// Кнопки под ответом: копировать и поделиться. Живут отдельно от панели оценки — та требует
+// message_id, а копировать нужно уметь всегда, даже если запись в лог не удалась.
+function addAnswerTools(wrap) {
+  const tools = el("msg-tools");
+
+  const mkTool = (tip, svg, onClick) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tool-btn";
+    b.dataset.tip = tip;              // подпись показывается по hover/фокусу (CSS ::after)
+    b.setAttribute("aria-label", tip);
+    b.innerHTML = svg;
+    b.addEventListener("click", () => onClick(b));
+    return b;
+  };
+
+  const done = (btn, tip) => {
+    const prev = btn.dataset.tip;
+    btn.dataset.tip = tip;
+    btn.classList.add("ok");
+    setTimeout(() => { btn.dataset.tip = prev; btn.classList.remove("ok"); }, 1600);
+  };
+
+  const raw = () => (wrap.dataset.raw || wrap.querySelector(".bubble")?.innerText || "");
+
+  const copySvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
+    + '<rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>'
+    + '<path d="M5 15V5a2 2 0 0 1 2-2h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  const shareSvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
+    + '<path d="M12 16V4m0 0L8 8m4-4l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+    + '<path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+
+  tools.appendChild(mkTool("Копировать ответ", copySvg, (btn) => {
+    copyText(raw() + SHARE_NOTE)
+      .then(() => done(btn, "Скопировано"))
+      .catch(() => done(btn, "Не удалось скопировать"));
+  }));
+
+  tools.appendChild(mkTool("Поделиться", shareSvg, (btn) => {
+    const text = raw() + SHARE_NOTE;
+    // Системный шаринг там, где он есть (мобильные, часть десктопов); иначе — в буфер обмена:
+    // публичной ссылки на диалог у сервиса нет и быть не должно — переписка персональная.
+    if (navigator.share) {
+      navigator.share({ title: "Навигатор ПП №719", text }).catch(() => {});
+      return;
+    }
+    copyText(text)
+      .then(() => done(btn, "Ответ в буфере — вставьте в письмо"))
+      .catch(() => done(btn, "Не удалось скопировать"));
+  }));
+
+  wrap.appendChild(tools);
 }
 
 function addFeedbackBar(wrap, messageId, sid) {
@@ -496,6 +571,8 @@ async function askStream(text, pending, bubble) {
     sessionId = done.session_id;
     setActive(sessionId);
     bubble.innerHTML = renderMarkdown(acc);  // финальный ре-рендер полного текста
+    pending.dataset.raw = acc;
+    addAnswerTools(pending);
     addUnverifiedFlag(pending, done.unverified_numbers);
     addSources(pending, done.sources);
     addFeedbackBar(pending, done.message_id, sessionId);
@@ -685,6 +762,24 @@ loadConversations();
   let seen = false;
   try { seen = localStorage.getItem("onboarding719Seen") === "1"; } catch (e) {}
   if (!seen) open();
+})();
+
+// Меню «Справка» в сайдбаре. Раскрытие по наведению делает CSS; здесь — клик и клавиатура:
+// на тач-экране hover не существует, и без этого до пунктов нельзя добраться вовсе.
+(function initHelpMenu() {
+  const group = document.getElementById("help-group");
+  const toggle = document.getElementById("help-toggle");
+  if (!group || !toggle) return;
+  const set = (on) => {
+    group.classList.toggle("open", on);
+    toggle.setAttribute("aria-expanded", on ? "true" : "false");
+  };
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    set(!group.classList.contains("open"));
+  });
+  document.addEventListener("click", (e) => { if (!group.contains(e.target)) set(false); });
+  group.addEventListener("keydown", (e) => { if (e.key === "Escape") { set(false); toggle.focus(); } });
 })();
 
 // Мобильная «шторка»-сайдбар: гамбургер открывает, бэкдроп / переход по пункту — закрывает.

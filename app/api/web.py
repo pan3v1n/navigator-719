@@ -88,6 +88,38 @@ def login_page(request: Request):
     return templates.TemplateResponse("login.html", _ctx(request, error=None))
 
 
+# --------------------------------------------------------------------------- #
+# Правовые и справочные страницы
+#
+# ПУБЛИЧНЫЕ, без входа: их читают ДО того, как согласиться. Политику конфиденциальности,
+# спрятанную за авторизацией, невозможно прочитать перед тем, как дать согласие в профиле, —
+# а согласие даётся именно на её условиях. Дата редакции задаётся здесь и показывается на
+# странице: молча меняющийся правовой документ хуже отсутствующего.
+# --------------------------------------------------------------------------- #
+DOCS_UPDATED = "13.08.2026"
+
+
+def _doc(request: Request, template: str, page_title: str, active: str) -> HTMLResponse:
+    return templates.TemplateResponse(template, _ctx(
+        request, page_title=page_title, active=active, updated=DOCS_UPDATED,
+        user=current_user(request)))
+
+
+@router.get("/terms", response_class=HTMLResponse)
+def terms_page(request: Request):
+    return _doc(request, "terms.html", "Условия использования", "terms")
+
+
+@router.get("/privacy", response_class=HTMLResponse)
+def privacy_page(request: Request):
+    return _doc(request, "privacy.html", "Политика конфиденциальности", "privacy")
+
+
+@router.get("/help", response_class=HTMLResponse)
+def help_page(request: Request):
+    return _doc(request, "help.html", "Справочный центр", "help")
+
+
 # R12: троттлинг входа по IP. bcrypt замедляет перебор, но не останавливает его, а пароли у нас
 # 8-символьные и розданы людям. Ключ — адрес клиента; ⚠ когда перед приложением встанет обратный
 # прокси (R11, TLS), сюда попадёт адрес прокси — тогда брать X-Forwarded-For.

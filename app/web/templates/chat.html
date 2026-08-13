@@ -58,6 +58,21 @@
         <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M12 16v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="8" r="1.1" fill="currentColor"/></svg>
         <span class="nc-text">Как пользоваться</span>
       </button>
+
+      {# Справка: подменю открывается по наведению, но держится и на клике/Tab — иначе с клавиатуры
+         и на тач-экране до пунктов не добраться (hover там не существует). #}
+      <div class="nav-group" id="help-group">
+        <button class="nav-item" id="help-toggle" type="button" aria-haspopup="true" aria-expanded="false">
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.2 2.4c-.6.2-.9.7-.9 1.3v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.1" fill="currentColor"/></svg>
+          <span class="nc-text">Справка</span>
+          <svg class="nav-caret nc-text" viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </button>
+        <div class="nav-menu" role="menu" aria-labelledby="help-toggle">
+          <a class="nav-menu-item" role="menuitem" href="/help">Справочный центр</a>
+          <a class="nav-menu-item" role="menuitem" href="/terms">Условия использования</a>
+          <a class="nav-menu-item" role="menuitem" href="/privacy">Политика конфиденциальности</a>
+        </div>
+      </div>
     </nav>
 
     <div class="side-bottom">
@@ -87,7 +102,13 @@
     <div class="composer-area">
       <div class="hero" id="hero">
         <h1>Чем помочь по ПП №719?</h1>
-        <p>Опишите продукцию, укажите код ОКПД2 или ТН ВЭД — подскажу позицию приложения, требования и баллы.</p>
+        <p>Опишите продукцию, укажите код ОКПД2 или ТН ВЭД — подскажу позицию приложения, требования и баллы.
+          База в {{ corpus_edition }}.</p>
+      </div>
+      {# Появляется, когда диалог начат: у пустого экрана роль дисклеймера играет hero-блок,
+         а над активной перепиской нужна короткая постоянная оговорка (E1 — редакция базы тут же). #}
+      <div class="composer-notice" id="composer-notice">
+        {{ app_title }} — это ИИ и может ошибаться. Проверяйте важное по первоисточнику · база в {{ corpus_edition }}
       </div>
       <form id="chat-form" class="composer">
         <textarea id="input" rows="1" placeholder="Спросите про 719 — продукцию, код ОКПД2 или ТН ВЭД…" autofocus></textarea>
@@ -99,8 +120,10 @@
         </button>
       </form>
       <div class="composer-disclaimer">
-        Навигатор 719 — ИИ-ассистент по <a href="https://normativ.kontur.ru/document?moduleId=1&amp;documentId=506899" target="_blank" rel="noopener">Постановлению Правительства РФ №719</a> — база в {{ corpus_edition }}.
-        Ответы предварительны, окончательное решение принимает уполномоченный эксперт ТПП. Диалоги сохраняются и могут использоваться для улучшения сервиса.
+        {{ app_title }} — это ИИ. Пользуясь сервисом, вы соглашаетесь с <a href="/terms">Условиями использования</a>
+        и <a href="/privacy">Политикой конфиденциальности</a>. Диалоги сохраняются и могут просматриваться
+        организаторами для улучшения сервиса; окончательное решение принимает уполномоченный эксперт ТПП.
+        <a href="/help">Подробнее</a>
       </div>
     </div>
   </main>
