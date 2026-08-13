@@ -53,6 +53,10 @@ RULES_FILES = [
 # Приказ ТПП РФ №52 (порядок выдачи документов: состав документов, сроки, акт на компоненты).
 BODY_PATH = CHUNKS_DIR / "01_postanovlenie.txt"
 ORDER52_PATH = CHUNKS_DIR.parent / "prikaz52_tpp_full.txt"  # knowledge_base/pp719/
+# Определения сносок приложения (<1>…<56>). Ссылок на них в требованиях сотни, а определения
+# до D3 доставались чанку XXIX и не были доступны поиску вообще: чанки приложения в индекс не
+# идут (в pp719 попадает structured/*.json), а процедурный корпус их не знал.
+FOOTNOTES_PATH = CHUNKS_DIR / "131_SNOSKI_prilozheniya.txt"
 DENSE = "dense"
 SPARSE = "bm25"
 
@@ -71,6 +75,9 @@ SMOKE_QUERIES = [
 _POINT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3})*)\.\s")
 # Пометка редакции: «(в ред. Постановления Правительства РФ от 13.04.2026 N 400)».
 _AMEND_RE = re.compile(r"от\s+(\d{1,2}\.\d{1,2}\.(\d{4}))\s+N\s*(\d+)")
+# Определение сноски приложения начинается с маркера в начале строки: «<44> В случае …».
+# Ссылки на сноски внутри требований идут в середине строки и сюда не попадают.
+_FOOTNOTE_RE = re.compile(r"^(<\d+(?:\.\d+)?>)\s")
 
 
 def _normalize(text: str) -> str:
@@ -234,6 +241,38 @@ def parse_order52(path: Path) -> list[dict]:
     return records
 
 
+def parse_footnotes(path: Path) -> list[dict]:
+    """Определения сносок приложения: одна запись на сноску, ключ — её номер («<44>»).
+
+    Сноска — не процедурная норма, но живёт в той же коллекции: она отвечает на вопрос
+    «что значит <44> в требовании», а вопрос этот не товарный (позиция тут ни при чём).
+    Исключённые сноски («<7> Сноска исключена») отбрасываем — отвечать ими не на что."""
+    raw = _normalize(path.read_text(encoding="utf-8"))
+    records: list[dict] = []
+    cur, buf = None, []
+
+    def _flush() -> None:
+        if not cur or not buf:
+            return
+        text = "\n".join(buf).strip()
+        if re.match(r"^<\d+(?:\.\d+)?>\s*[Сс]носка исключена", text):
+            return
+        records.append({
+            "doc_type": "appendix_footnotes", "section_roman": "",
+            "section_title": "Сноски к приложению ПП №719",
+            "point": cur, "text": text,
+            "source_anchor": f"Приложение к ПП №719, сноска {cur}"})
+
+    for ln in raw.split("\n"):
+        m = _FOOTNOTE_RE.match(ln)
+        if m:
+            _flush(); cur, buf = m.group(1), [ln]
+        elif cur and ln.strip():
+            buf.append(ln)
+    _flush()
+    return records
+
+
 def detect_edition(all_text: str) -> str:
     """Последняя (по дате) пометка «(в ред. … от ДД.ММ.ГГГГ N …)» во всём корпусе — честный штамп
     редакции индексируемого текста."""
@@ -296,6 +335,18 @@ def load_records() -> tuple[list[dict], str]:
         print(f"Приказ ТПП РФ №52: {len(order)} пунктов")
     else:
         print(f"⚠️  нет {ORDER52_PATH} — состав документов/сроки/акт на компоненты не проиндексированы")
+
+    # 4) Определения сносок приложения (<1>…<56>), doc_type=appendix_footnotes
+    if FOOTNOTES_PATH.exists():
+        foot = parse_footnotes(FOOTNOTES_PATH)
+        _stamp_edition(foot, _normalize(FOOTNOTES_PATH.read_text(encoding="utf-8")))
+        if not foot:
+            print(f"⚠️  {FOOTNOTES_PATH.name}: сноски не распознаны")
+        recs.extend(foot)
+        print(f"Сноски приложения: {len(foot)} определений")
+    else:
+        print(f"⚠️  нет {FOOTNOTES_PATH} — определения сносок не проиндексированы "
+              f"(пересобрать: scripts/rechunk_appendix.py --write)")
 
     if not recs:
         sys.exit("Процедурный корпус пуст — проверь knowledge_base/pp719/chunks/11..15")

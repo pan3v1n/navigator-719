@@ -346,10 +346,21 @@ _RULES_TOPIC: tuple[tuple[str, tuple[re.Pattern, ...]], ...] = (
         re.compile(r"стади\w*\s+(технологическ\w*\s+)?процесс\w*\s+производств|лекарственн", re.I),
         re.compile(r"требовани\w*,?\s+предусмотренн\w*\s+приложени|отнесени\w*\s+к\s+российск", re.I),
     )),
+    # Сноски приложения: «что означает <44>», «сноска 6 к требованию» (D3)
+    ("appendix_footnotes", (
+        re.compile(r"сноск|<\s*\d{1,2}(?:\.\d)?\s*>", re.I),
+        re.compile(r"что\s+(означа|значит)\w*\s+(значок|обозначени|отсылк)", re.I),
+    )),
 )
 
 RULES_QUOTA_MIN = 1  # мест, гарантированных КАЖДОМУ документу, у которого есть кандидаты
 RULES_QUOTA_PRIMARY = 3  # мест, гарантированных документу по теме вопроса
+# Документы «по запросу»: место в окне НЕ резервируется, пока документ не стал темой вопроса.
+# Сноски — не процедурная норма: они уточняют требование и нужны ровно тогда, когда спросили про
+# сноску. Дай им гарантированное место наравне с Правилами — и на КАЖДОМ процедурном вопросе одно
+# из шести мест уходило бы определению сноски, вытесняя норму. По общему рангу они конкурируют
+# на общих основаниях: если сноска действительно релевантна, она войдёт в окно и без квоты.
+RULES_QUOTA_ON_DEMAND = frozenset({"appendix_footnotes"})
 
 
 def rules_topic(query: str) -> str | None:
@@ -428,7 +439,12 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None) ->
 
     chosen: set[int] = set()
     for doc_type, idxs in by_doc.items():  # квота: сначала представительство
-        quota = RULES_QUOTA_PRIMARY if doc_type == primary else RULES_QUOTA_MIN
+        if doc_type == primary:
+            quota = RULES_QUOTA_PRIMARY
+        elif doc_type in RULES_QUOTA_ON_DEMAND:
+            quota = 0  # документ «по запросу» — только по общему рангу
+        else:
+            quota = RULES_QUOTA_MIN
         chosen.update(idxs[:quota])
     for i in range(len(points)):  # остаток окна — по общему рангу
         if len(chosen) >= limit:

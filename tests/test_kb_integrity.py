@@ -88,5 +88,56 @@ class TestCorpusHasNoExcludedStubs(unittest.TestCase):
         self.assertEqual(offenders, [], f"остались записи-заглушки: {offenders}")
 
 
+class TestAppendixFootnotes(unittest.TestCase):
+    """D3: определения сносок приложения режутся отдельным чанком и попадают в корпус."""
+
+    def test_footnotes_chunk_exists_and_is_separate(self):
+        chunks = ROOT / "knowledge_base" / "pp719" / "chunks"
+        if not chunks.exists():
+            self.skipTest("chunks/ отсутствует")
+        foot = chunks / "131_SNOSKI_prilozheniya.txt"
+        self.assertTrue(foot.exists(), "нет чанка сносок — пересобрать rechunk_appendix.py --write")
+        xxix = next(iter(chunks.glob("*XXIX*.txt")), None)
+        self.assertIsNotNone(xxix, "нет чанка XXIX")
+        body = xxix.read_text(encoding="utf-8")
+        self.assertNotIn(
+            "<1> Комплектующие изделия, произведенные на территории стран",
+            body,
+            "определения сносок снова прилипли к разделу XXIX",
+        )
+
+    def test_footnote_44_is_parsed_with_current_edition(self):
+        """<44> ужесточена ред. N 923: требование засчитывается только при акте экспертизы ТПП."""
+        from scripts.load_rules_kb import FOOTNOTES_PATH, parse_footnotes
+
+        if not FOOTNOTES_PATH.exists():
+            self.skipTest("чанк сносок отсутствует")
+        recs = parse_footnotes(FOOTNOTES_PATH)
+        by_point = {r["point"]: r for r in recs}
+        self.assertIn("<44>", by_point)
+        r = by_point["<44>"]
+        self.assertEqual(r["doc_type"], "appendix_footnotes")
+        self.assertEqual(r["source_anchor"], "Приложение к ПП №719, сноска <44>")
+        self.assertIn("акт", r["text"].lower())
+
+    def test_excluded_footnotes_are_dropped(self):
+        """«<7> Сноска исключена» отвечать нечем — в корпус не идёт."""
+        from scripts.load_rules_kb import FOOTNOTES_PATH, parse_footnotes
+
+        if not FOOTNOTES_PATH.exists():
+            self.skipTest("чанк сносок отсутствует")
+        for r in parse_footnotes(FOOTNOTES_PATH):
+            self.assertNotRegex(r["text"], r"^<\d+>\s*[Сс]носка исключена")
+
+    def test_footnotes_do_not_reserve_a_slot_in_every_answer(self):
+        """Сноски — документ «по запросу»: без темы они не занимают место в окне процедурного ответа.
+
+        Иначе на КАЖДОМ процедурном вопросе одно из шести мест уходило бы определению сноски,
+        вытесняя норму — ровно тот дефект, который чинила K10 для Приказа №52."""
+        from app.rag.retriever import RULES_QUOTA_ON_DEMAND
+
+        self.assertIn("appendix_footnotes", RULES_QUOTA_ON_DEMAND)
+
+
 if __name__ == "__main__":
     unittest.main()
