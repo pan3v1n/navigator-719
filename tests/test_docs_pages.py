@@ -157,6 +157,22 @@ class TestOnboardingTour(unittest.TestCase):
         menu = self.html[self.html.index('class="nav-menu"'):self.html.index("</nav>")]
         self.assertIn('id="ob-open"', menu, "кнопку запуска не перенесли в «Справку»")
 
+    def test_seen_flag_is_versioned(self):
+        """Старый онбординг писал onboarding719Seen, и его видели все 17 палат в июле.
+
+        Оставь мы прежнее имя ключа — обновлённый тур не показался бы ни одному из участников:
+        сервис решил бы, что знакомство уже прошло. Ключ обязан быть версионированным."""
+        import re
+
+        self.assertIn("TOUR_SEEN_KEY", self.js)
+        key = re.search(r'const TOUR_SEEN_KEY = "([^"]+)"', self.js)
+        self.assertIsNotNone(key, "ключ флага не найден")
+        self.assertNotEqual(key.group(1), "onboarding719Seen", "ключ не сменили — тур не покажется")
+        self.assertRegex(key.group(1), r"_v\d+$", "в ключе нет версии — следующий тур снова не покажут")
+        # обращения к localStorage идут только через константу
+        self.assertNotIn('localStorage.setItem("onboarding719Seen"', self.js)
+        self.assertNotIn('localStorage.getItem("onboarding719Seen"', self.js)
+
     def test_step_without_visible_target_is_skipped(self):
         """Сайдбар скрыт на узком экране, часть пунктов — только у админа: шаг обязан отпасть."""
         self.assertIn("getBoundingClientRect().width > 0", self.js)

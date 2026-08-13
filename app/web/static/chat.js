@@ -899,6 +899,12 @@ const TOUR_STEPS = [
           "использования и политика конфиденциальности." },
 ];
 
+// Ключ ВЕРСИОНИРОВАННЫЙ. Старый онбординг (модальные карточки) писал в localStorage
+// "onboarding719Seen", и все участники июльского теста его уже видели. Оставь мы прежнее имя —
+// обновлённый тур не показался бы ни одному из них: сервис решил бы, что знакомство уже прошло.
+// Правило на будущее: существенно поменяли тур — подняли версию ключа.
+const TOUR_SEEN_KEY = "tour719Seen_v1";
+
 (function initTour() {
   const root = document.getElementById("tour");
   if (!root) return;
@@ -984,7 +990,7 @@ const TOUR_STEPS = [
     root.classList.add("hidden");
     root.setAttribute("aria-hidden", "true");
     document.body.classList.remove("tour-on");
-    try { localStorage.setItem("onboarding719Seen", "1"); } catch (e) {}
+    try { localStorage.setItem(TOUR_SEEN_KEY, "1"); } catch (e) {}
   }
 
   prevBtn.addEventListener("click", () => go(i - 1));
@@ -1005,7 +1011,7 @@ const TOUR_STEPS = [
   if (openBtn) openBtn.addEventListener("click", open);
 
   let seen = false;
-  try { seen = localStorage.getItem("onboarding719Seen") === "1"; } catch (e) {}
+  try { seen = localStorage.getItem(TOUR_SEEN_KEY) === "1"; } catch (e) {}
   if (!seen) setTimeout(open, 400);  // даём интерфейсу отрисоваться, иначе позиции «прыгают»
 })();
 
