@@ -139,6 +139,90 @@ class TestAppendixFootnotes(unittest.TestCase):
         self.assertIn("appendix_footnotes", RULES_QUOTA_ON_DEMAND)
 
 
+class TestPerRecordPointsCheck(unittest.TestCase):
+    """D8: сверка баллов ПО ЗАПИСИ ловит то, к чему сверка по разделу слепа.
+
+    Слой по разделу сравнивает множества раздела, поэтому перенос балла из одной позиции в
+    соседнюю для него невидим: множество не меняется. Именно так на перегенерации XVIII
+    проехали 13 из 15 потерянных чисел."""
+
+    SECTION = "XXIII"  # маленький раздел (11 записей), на текущем корпусе расхождений не даёт
+
+    def _verify(self):
+        from scripts import verify_structured  # ленивый импорт: тянет structure_kb
+
+        return verify_structured
+
+    def test_bracketed_points_form_is_recognised(self):
+        """«мотор-генератора 36 (баллов)» — форма самого приложения, а не опечатка."""
+        vs = self._verify()
+        self.assertEqual(vs._points_in("производство мотор-генератора 36 (баллов);"), {36.0})
+        self.assertEqual(vs._points_in("силового генератора (20 баллов)"), {20.0})
+
+    def test_component_text_counts_as_record_points(self):
+        """Балл, «переехавший» в component, — на месте, а не потерян (второе слепое пятно)."""
+        vs = self._verify()
+        rec = {"requirement_blocks": [{"component": "сборка изделия - 45 баллов", "operations": []}]}
+        self.assertIn(45.0, vs.record_points(rec))
+
+    def test_points_field_counts_even_without_word(self):
+        vs = self._verify()
+        rec = {"requirement_blocks": [{"component": "сборка", "operations": [
+            {"text": "сварка рамы", "points": 12}]}]}
+        self.assertIn(12.0, vs.record_points(rec))
+
+    def test_clean_section_has_no_discrepancies(self):
+        """На неиспорченном корпусе ложных срабатываний быть не должно."""
+        vs = self._verify()
+        if not vs.struct_for(self.SECTION) or not vs.chunk_for(self.SECTION):
+            self.skipTest("нет данных раздела")
+        checked, bad = vs.check_records(self.SECTION)
+        self.assertGreater(checked, 0)
+        self.assertEqual(bad, 0, f"ложные срабатывания на чистом разделе {self.SECTION}")
+
+    def test_points_moved_between_records_is_caught(self):
+        """Главный критерий: балл убран из одной записи и приписан соседней — обе видны."""
+        import json as _json
+        import tempfile
+        import unittest.mock as mock
+
+        vs = self._verify()
+        src = vs.struct_for(self.SECTION)
+        if not src:
+            self.skipTest("нет данных раздела")
+        data = _json.loads(src.read_text(encoding="utf-8"))
+
+        donor = acceptor = None
+        for r in data:
+            if r.get("record_type") == "section_methodology":
+                continue
+            ops = [o for b in (r.get("requirement_blocks") or [])
+                   for o in (b.get("operations") or []) if o.get("points") is not None]
+            if not ops:
+                continue
+            if donor is None:
+                donor, donor_ops = r, ops
+            elif acceptor is None:
+                acceptor, acceptor_ops = r, ops
+                break
+        if donor is None or acceptor is None:
+            self.skipTest("в разделе нет двух записей с баллами")
+
+        moved = donor_ops[0]["points"]
+        donor_ops[0]["points"] = None          # у одной позиции балл исчез
+        donor_ops[0]["text"] = "операция без балла"
+        acceptor_ops[0]["points"] = moved      # у соседней — появился чужой
+
+        with tempfile.TemporaryDirectory() as tmp:
+            d = Path(tmp)
+            (d / src.name).write_text(_json.dumps(data, ensure_ascii=False), encoding="utf-8")
+            with mock.patch.object(vs, "STRUCT", d):
+                checked, bad = vs.check_records(self.SECTION)
+
+        self.assertGreater(checked, 0)
+        self.assertGreaterEqual(bad, 1, "перенос балла между записями остался незамеченным")
+
+
 class TestEmbeddingCacheFilename(unittest.TestCase):
     """D7: имя файла кэша эмбеддингов безопасно для файловой системы.
 
