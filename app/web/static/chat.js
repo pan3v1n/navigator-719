@@ -726,42 +726,126 @@ document.getElementById("fb-form").addEventListener("submit", async (e) => {
 loadConversations();
 
 // --- онбординг: попап при первом входе (localStorage) + кнопка «Как пользоваться» ---
-(function initOnboarding() {
-  const modal = document.getElementById("onboarding-modal");
-  if (!modal) return;
-  const steps = Array.from(modal.querySelectorAll(".ob-step"));
-  const dotsWrap = document.getElementById("ob-dots");
-  const prevBtn = document.getElementById("ob-prev");
-  const nextBtn = document.getElementById("ob-next");
-  const skipBtn = document.getElementById("ob-skip");
+// Онбординг-тур: затемняем экран, оставляя «окно» вокруг одной области, и объясняем её назначение.
+// Затемнение делает не отдельный оверлей, а огромная тень самого окна (box-shadow на 9999px):
+// так подсветка и затемнение — один элемент, и перемещение между шагами анимируется одним transition,
+// без рассинхрона слоёв.
+const TOUR_STEPS = [
+  { sel: "#input", title: "Спросите своими словами",
+    text: "Опишите продукцию («требования к чиллерам»), укажите код ОКПД2 или код ТН ВЭД из " +
+          "сертификата — его переведу в ОКПД2 по переходному ключу. Код даёт точную привязку к позиции." },
+  { sel: "#chat-scroll", title: "Ответ со ссылками на первоисточник", pad: 6,
+    text: "Под ответом — источники: позиция приложения, пункт Правил или Приказа №52. Числа в баллах " +
+          "и сроки проверяются автоматически, неподтверждённые помечаются. Ответ ИИ — предварительный " +
+          "ориентир: решение принимает уполномоченный эксперт ТПП." },
+  { sel: "#new-chat", title: "Новый диалог под новую тему",
+    text: "Сервис помнит контекст беседы и удерживает код, о котором идёт речь. Для другой продукции " +
+          "начните новый диалог — так контексты не смешаются." },
+  { sel: "#history", title: "История и экспорт", pad: 4,
+    text: "Диалоги сохраняются: к ним можно вернуться, найти нужный поиском, а по «⋮» — выгрузить " +
+          "или удалить. В любой выгрузке остаётся пометка о предварительном характере ответов." },
+  { sel: "#fb-open", title: "Оценка — главный способ улучшить сервис",
+    text: "Под каждым ответом есть «Оценить ответ» и «отметить ошибку». Разбор ошибок экспертами " +
+          "попадает в базу проверенных случаев, и сервис начинает отвечать верно — без дообучения модели." },
+  { sel: "#help-group", title: "Справка всегда рядом",
+    text: "Здесь — знакомство с интерфейсом, справочный центр с частыми вопросами, условия " +
+          "использования и политика конфиденциальности." },
+];
+
+(function initTour() {
+  const root = document.getElementById("tour");
+  if (!root) return;
+  const spot = document.getElementById("tour-spot");
+  const card = document.getElementById("tour-card");
+  const titleEl = document.getElementById("tour-title");
+  const textEl = document.getElementById("tour-text");
+  const stepNo = document.getElementById("tour-step-no");
+  const dotsWrap = document.getElementById("tour-dots");
+  const prevBtn = document.getElementById("tour-prev");
+  const nextBtn = document.getElementById("tour-next");
+  const skipBtn = document.getElementById("tour-skip");
+
+  let steps = [];
   let i = 0;
-  const dots = steps.map((_, k) => {
-    const d = document.createElement("span");
-    d.className = "ob-dot";
-    d.addEventListener("click", () => go(k));
-    dotsWrap.appendChild(d);
-    return d;
-  });
-  function render() {
-    steps.forEach((s, k) => s.classList.toggle("hidden", k !== i));
-    dots.forEach((d, k) => d.classList.toggle("on", k === i));
+
+  // Шаг без видимой цели пропускаем: сайдбар скрыт на узком экране, «Логи диалогов» есть только у
+  // админа — подсвечивать пустоту хуже, чем не показать шаг вовсе.
+  const visible = (s) => {
+    const t = document.querySelector(s.sel);
+    return t && t.getBoundingClientRect().width > 0 && t.getBoundingClientRect().height > 0;
+  };
+
+  function place() {
+    const step = steps[i];
+    const target = document.querySelector(step.sel);
+    if (!target) { next(); return; }
+    const r = target.getBoundingClientRect();
+    const pad = step.pad === undefined ? 8 : step.pad;
+    spot.style.top = (r.top - pad) + "px";
+    spot.style.left = (r.left - pad) + "px";
+    spot.style.width = (r.width + pad * 2) + "px";
+    spot.style.height = (r.height + pad * 2) + "px";
+    // карточка всегда по центру экрана: у краёв и на мобильном привязка к элементу
+    // упирается в границы вьюпорта, а центр читается одинаково на любом шаге
+    titleEl.textContent = step.title;
+    textEl.textContent = step.text;
+    stepNo.textContent = "Шаг " + (i + 1) + " из " + steps.length;
     prevBtn.style.visibility = i === 0 ? "hidden" : "visible";
-    nextBtn.textContent = i === steps.length - 1 ? "Начать работу" : "Далее";
+    nextBtn.textContent = i === steps.length - 1 ? "Понятно" : "Далее";
+    Array.from(dotsWrap.children).forEach((d, k) => d.classList.toggle("on", k === i));
+    card.classList.remove("swap");
+    void card.offsetWidth;   // рестарт анимации появления текста
+    card.classList.add("swap");
   }
-  function go(k) { i = Math.max(0, Math.min(steps.length - 1, k)); render(); }
-  function open() { go(0); modal.classList.remove("hidden"); }
+
+  function go(k) { i = Math.max(0, Math.min(steps.length - 1, k)); place(); }
+  function next() { if (i >= steps.length - 1) close(); else go(i + 1); }
+
+  function open() {
+    steps = TOUR_STEPS.filter(visible);
+    if (!steps.length) return;
+    dotsWrap.innerHTML = "";
+    steps.forEach((_, k) => {
+      const d = document.createElement("span");
+      d.className = "tour-dot";
+      d.addEventListener("click", () => go(k));
+      dotsWrap.appendChild(d);
+    });
+    i = 0;
+    root.classList.remove("hidden");
+    root.setAttribute("aria-hidden", "false");
+    document.body.classList.add("tour-on");
+    place();
+    nextBtn.focus();
+  }
+
   function close() {
-    modal.classList.add("hidden");
+    root.classList.add("hidden");
+    root.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("tour-on");
     try { localStorage.setItem("onboarding719Seen", "1"); } catch (e) {}
   }
+
   prevBtn.addEventListener("click", () => go(i - 1));
-  nextBtn.addEventListener("click", () => { if (i === steps.length - 1) close(); else go(i + 1); });
+  nextBtn.addEventListener("click", next);
   if (skipBtn) skipBtn.addEventListener("click", close);
+  document.addEventListener("keydown", (e) => {
+    if (root.classList.contains("hidden")) return;
+    if (e.key === "Escape") close();
+    if (e.key === "ArrowRight") next();
+    if (e.key === "ArrowLeft") go(i - 1);
+  });
+  // окно меняет размер / страница скроллится — подсветка обязана оставаться на цели
+  const follow = () => { if (!root.classList.contains("hidden")) place(); };
+  window.addEventListener("resize", follow);
+  window.addEventListener("scroll", follow, true);
+
   const openBtn = document.getElementById("ob-open");
   if (openBtn) openBtn.addEventListener("click", open);
+
   let seen = false;
   try { seen = localStorage.getItem("onboarding719Seen") === "1"; } catch (e) {}
-  if (!seen) open();
+  if (!seen) setTimeout(open, 400);  // даём интерфейсу отрисоваться, иначе позиции «прыгают»
 })();
 
 // Меню «Справка» в сайдбаре. Раскрытие по наведению делает CSS; здесь — клик и клавиатура:

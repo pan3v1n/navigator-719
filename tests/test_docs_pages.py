@@ -127,5 +127,54 @@ class TestAnswerTools(unittest.TestCase):
         self.assertIn(".tool-btn:focus-visible::after", self.css)  # и доступна с клавиатуры
 
 
+class TestOnboardingTour(unittest.TestCase):
+    """Онбординг-тур: затемняет экран, оставляя подсвеченной одну область, и объясняет её."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.html = (WEB / "templates" / "chat.html").read_text(encoding="utf-8")
+        cls.js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
+        cls.css = (WEB / "static" / "style.css").read_text(encoding="utf-8")
+
+    def test_every_step_points_at_existing_node(self):
+        """Мёртвая цель = подсветка пустоты. Проверяем на разметке, а не на глаз."""
+        import re
+
+        sels = re.findall(r'\{\s*sel:\s*"([^"]+)"', self.js)
+        self.assertGreaterEqual(len(sels), 5, "шагов слишком мало")
+        for sel in sels:
+            node = f'id="{sel[1:]}"' if sel.startswith("#") else sel
+            self.assertIn(node, self.html, f"цель шага {sel} отсутствует в разметке")
+
+    def test_tour_markup_present_and_old_modal_removed(self):
+        for node in ("tour-spot", "tour-card", "tour-title", "tour-dots", "tour-next", "tour-skip"):
+            self.assertIn(f'id="{node}"', self.html)
+        self.assertNotIn("onboarding-modal", self.html, "старый онбординг остался в разметке")
+        self.assertNotIn("ob-step", self.html)
+        self.assertNotIn(".ob-card", self.css, "мёртвые стили старого онбординга не убраны")
+
+    def test_launcher_lives_in_help_menu(self):
+        menu = self.html[self.html.index('class="nav-menu"'):self.html.index("</nav>")]
+        self.assertIn('id="ob-open"', menu, "кнопку запуска не перенесли в «Справку»")
+
+    def test_step_without_visible_target_is_skipped(self):
+        """Сайдбар скрыт на узком экране, часть пунктов — только у админа: шаг обязан отпасть."""
+        self.assertIn("getBoundingClientRect().width > 0", self.js)
+
+    def test_spotlight_follows_layout_and_is_keyboard_operable(self):
+        self.assertIn('window.addEventListener("resize"', self.js)
+        self.assertIn('"scroll", follow', self.js)
+        self.assertIn('e.key === "Escape"', self.js)
+        self.assertIn('e.key === "ArrowRight"', self.js)
+
+    def test_dimming_is_one_element_and_animated(self):
+        """Затемнение — тень самой подсветки: иначе слои расходятся при переходе между шагами."""
+        self.assertIn("box-shadow: 0 0 0 9999px", self.css)
+        self.assertIn("transition: top", self.css)
+
+    def test_reduced_motion_respected(self):
+        self.assertIn("prefers-reduced-motion", self.css)
+
+
 if __name__ == "__main__":
     unittest.main()

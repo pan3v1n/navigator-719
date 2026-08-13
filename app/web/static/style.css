@@ -287,26 +287,6 @@ a { color: inherit; text-decoration: none; }
 .modal-card label.checkbox { flex-direction: row; align-items: center; gap: 8px; }
 .modal-card label.checkbox input { width: auto; }
 
-/* ---------- онбординг-попап ---------- */
-.ob-card { width: 470px; max-width: 100%; padding: 0; overflow: hidden; position: relative; gap: 0; }
-.ob-skip { position: absolute; top: 12px; right: 14px; border: none; background: none; color: var(--muted);
-           font-size: 13px; cursor: pointer; z-index: 2; padding: 4px 6px; border-radius: 8px; }
-.ob-skip:hover { color: var(--text); background: var(--hover); }
-.ob-steps { padding: 42px 34px 6px; }
-.ob-step { display: flex; flex-direction: column; align-items: center; text-align: center; animation: fadeInUp .25s ease; }
-.ob-art { width: 118px; height: 118px; color: var(--text); margin-bottom: 18px; }
-.ob-art svg { width: 100%; height: 100%; }
-.ob-step h2 { font-size: 19px; font-weight: 600; margin: 0 0 10px; }
-.ob-step p { font-size: 14px; line-height: 1.62; color: #555; margin: 0; }
-.ob-dots { display: flex; justify-content: center; gap: 7px; padding: 18px 0 4px; }
-.ob-dot { width: 7px; height: 7px; border-radius: 50%; background: #d4d4d4; cursor: pointer;
-          transition: background .15s, transform .15s; }
-.ob-dot.on { background: var(--accent); transform: scale(1.28); }
-.ob-nav { display: flex; justify-content: space-between; gap: 10px; padding: 8px 24px 24px; }
-.ob-nav button { padding: 11px 20px; border-radius: 11px; border: none; background: var(--accent); color: #fff;
-                 font-size: 14px; cursor: pointer; transition: opacity .15s; min-width: 128px; }
-.ob-nav button:hover { opacity: .88; }
-
 /* ---------- admin ---------- */
 .admin-header { height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 22px;
                 border-bottom: 1px solid var(--border); }
@@ -595,3 +575,42 @@ a { color: inherit; text-decoration: none; }
 .login-legal { margin: 14px 0 0; font-size: 12px; line-height: 1.5; color: var(--muted); text-align: center; }
 .login-legal a { color: var(--muted); text-decoration: underline; }
 .login-legal a:hover { color: var(--text); }
+
+/* ---------- онбординг-тур: подсветка области + карточка по центру ---------- */
+.tour { position: fixed; inset: 0; z-index: 90; }
+body.tour-on { overflow: hidden; }
+
+/* Затемнение — тень самого «окна»: подсветка и фон это один элемент, поэтому переход между
+   шагами анимируется одним transition и слои не расходятся. */
+.tour-spot { position: fixed; border-radius: 12px; pointer-events: none;
+             box-shadow: 0 0 0 9999px rgba(13, 13, 13, .62), 0 0 0 2px rgba(255, 255, 255, .9);
+             transition: top .42s cubic-bezier(.22,.8,.24,1), left .42s cubic-bezier(.22,.8,.24,1),
+                         width .42s cubic-bezier(.22,.8,.24,1), height .42s cubic-bezier(.22,.8,.24,1); }
+
+.tour-card { position: fixed; left: 50%; top: 50%; transform: translate(-50%, -50%);
+             width: min(430px, calc(100vw - 40px)); background: var(--bg); border-radius: 18px;
+             box-shadow: 0 18px 50px rgba(0,0,0,.28); padding: 26px 26px 20px; text-align: center; }
+.tour-card.swap { animation: tourIn .34s cubic-bezier(.22,.8,.24,1); }
+@keyframes tourIn { from { opacity: 0; transform: translate(-50%, calc(-50% + 10px)); }
+                    to   { opacity: 1; transform: translate(-50%, -50%); } }
+.tour-step-no { font-size: 11.5px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+.tour-card h2 { font-size: 19px; margin: 8px 0 8px; }
+.tour-card p { font-size: 14px; line-height: 1.6; color: #444; margin: 0; }
+.tour-skip { position: absolute; top: 12px; right: 14px; border: none; background: none; cursor: pointer;
+             color: var(--muted); font-size: 12.5px; padding: 4px 6px; border-radius: 7px; }
+.tour-skip:hover { background: var(--hover); color: var(--text); }
+.tour-dots { display: flex; justify-content: center; gap: 6px; margin: 18px 0 14px; }
+.tour-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); cursor: pointer;
+            transition: background .2s, transform .2s; }
+.tour-dot.on { background: var(--accent); transform: scale(1.25); }
+.tour-nav { display: flex; gap: 10px; justify-content: center; }
+.tour-nav button { padding: 10px 20px; border: none; border-radius: 11px; background: var(--accent);
+                   color: var(--accent-text); font-size: 14px; cursor: pointer; transition: opacity .15s; }
+.tour-nav button:hover { opacity: .88; }
+.tour-nav .btn-secondary { background: var(--sidebar); color: var(--text); border: 1px solid var(--border); }
+
+/* Уважаем системную настройку «меньше движения»: подсветка перескакивает сразу, без анимации. */
+@media (prefers-reduced-motion: reduce) {
+  .tour-spot { transition: none; }
+  .tour-card.swap { animation: none; }
+}
