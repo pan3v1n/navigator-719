@@ -611,6 +611,55 @@ class TestFormatRulesContext(unittest.TestCase):
         self.assertLess(len(ctx), pipeline_mod.RULES_TEXT_CAP + 200)
 
 
+class TestDocumentListRetrieval(unittest.TestCase):
+    """P2: вопрос о составе документов — кластер жалоб №1 июльского теста (31 упоминание).
+
+    Квота K10 доводит до окна нужный ДОКУМЕНТ, но внутри него раздел 4 Приказа №52 проигрывал по
+    рангу: его пункты длинные, а короткие пункты про сроки и печати содержат те же слова. Ответ
+    честно писал, что «перечень содержится в разделе 4 (в контексте не представлен)»."""
+
+    def test_detects_document_list_questions(self):
+        from app.rag.retriever import asks_document_list
+
+        for q in ("какие документы нужны для акта экспертизы",
+                  "перечень документов для подачи заявки",
+                  "что подготовить для включения в реестр",
+                  "какой пакет документов собрать",
+                  "состав документов для подтверждения производства"):
+            self.assertTrue(asks_document_list(q), q)
+
+    def test_does_not_fire_on_other_procedural_questions(self):
+        """Детектор узкий: он забирает половину окна, и ложное срабатывание вытеснит норму."""
+        from app.rag.retriever import asks_document_list
+
+        for q in ("сроки рассмотрения заявления о включении в реестр",
+                  "что делать при отказе ТПП в выдаче акта экспертизы",
+                  "как внести изменения в реестровую запись",
+                  "требования к прицепам по 719"):
+            self.assertFalse(asks_document_list(q), q)
+
+    def test_doc_list_point_is_not_truncated_by_common_cap(self):
+        """Перечень стоит В КОНЦЕ пункта: общий кап оставлял от п. 4.1 одну вводную фразу."""
+        long_text = "Вводная. " + "А" * pipeline_mod.RULES_TEXT_CAP + " КОНЕЦ-ПЕРЕЧНЯ"
+        ctx = format_rules_context([{"point": "4.1", "section_roman": "4",
+                                     "section_title": "Документы", "text": long_text,
+                                     "_doc_list": True}])
+        self.assertIn("КОНЕЦ-ПЕРЕЧНЯ", ctx)
+        ctx_capped = format_rules_context([{"point": "4.1", "section_roman": "4",
+                                            "section_title": "Документы", "text": long_text}])
+        self.assertNotIn("КОНЕЦ-ПЕРЕЧНЯ", ctx_capped)
+
+    def test_parent_intro_reaches_context(self):
+        """«4.2.1. Правоустанавливающие документы…» без вводной родителя — список неизвестно к чему."""
+        ctx = format_rules_context([{
+            "point": "4.2.1", "section_roman": "4", "section_title": "Документы",
+            "text": "4.2.1. Правоустанавливающие и регистрационные документы заявителя: копия устава.",
+            "parent_intro": "4.2. К заявке на включение сведений в реестр прилагаются следующие документы",
+        }])
+        self.assertIn("прилагаются следующие документы", ctx)
+        self.assertIn("копия устава", ctx)
+
+
 class TestUnverifiedDeadlines(unittest.TestCase):
     def test_flags_fabricated_deadline(self):
         # в контексте только 10 рабочих дней, ответ выдумал 20 → незаземлено
@@ -1010,6 +1059,27 @@ class TestOkpd2Ref(unittest.TestCase):
         p2 = build_navigator_user_prompt("вопрос", "ctx", okpd2_suggestions=[("25.73.40.110", "Сверла")])
         self.assertIn("классификатор", p2.lower())
         self.assertIn("25.73.40.110", p2)
+
+    def test_navigator_prompt_says_when_tnved_not_resolved(self):
+        """Код ТН ВЭД дан, но в переходном ключе его нет — пользователь обязан это узнать.
+
+        Иначе позиции подобраны по наименованию, а выглядит как ответ по его коду: молчаливая
+        деградация того же класса, что молчаливый отказ наследования."""
+        p = build_navigator_user_prompt("вопрос", "ctx", tnved=("9999 99 999", []))
+        self.assertIn("НЕ РАЗРЕШЁН", p)
+        self.assertIn("9999 99 999", p)
+        self.assertIn("по наименованию", p.lower())
+        self.assertNotIn("соответствует ОКПД2:", p)  # нечему соответствовать
+
+    def test_resolve_tnved_distinguishes_absent_from_unresolved(self):
+        """Три исхода, и «код дан, но не разрешён» обязан отличаться от «кода нет»."""
+        from app.rag.pipeline import _resolve_tnved
+
+        self.assertIsNone(_resolve_tnved("производим насосы, требования по 719"))
+        self.assertEqual(_resolve_tnved("код ТН ВЭД 9999 99 999 0"), ("9999 99 999", []))
+        code, okpd = _resolve_tnved("код ТН ВЭД 8471 30 000 0")
+        self.assertEqual(code, "8471 30 000")
+        self.assertIn("26.20.11", okpd)
 
 
 class TestTranslateIntent(unittest.TestCase):

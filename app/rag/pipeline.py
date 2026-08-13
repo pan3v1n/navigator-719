@@ -209,6 +209,11 @@ def format_cases(cases: list[dict]) -> str:
 
 
 RULES_TEXT_CAP = 1400  # символов на пункт Правил в контексте (длинные усекаем, помечая)
+# Пункт с перечнем документов (P2) — исключение из капа: перечень стоит В КОНЦЕ пункта, и общий
+# кап оставлял от п. 4.1 (3844 знака) одну вводную фразу. Ответ на самый частый вопрос июля
+# («какие документы готовить», 31 упоминание) снова превращался в отсылку «см. раздел 4».
+# Расширенный кап действует ТОЛЬКО на пункты, добранные под этот вопрос (не более двух).
+RULES_TEXT_CAP_DOC_LIST = 4000
 
 
 def format_rules_context(rules: list[dict]) -> str:
@@ -225,8 +230,15 @@ def format_rules_context(rules: list[dict]) -> str:
             sect = r.get("section_title") or r.get("section_roman") or ""
             head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
         text = (r.get("text") or "").strip()
-        if len(text) > RULES_TEXT_CAP:
-            text = text[:RULES_TEXT_CAP].rstrip() + " …(пункт приведён не полностью; полный текст — в первоисточнике)"
+        cap = RULES_TEXT_CAP_DOC_LIST if r.get("_doc_list") else RULES_TEXT_CAP
+        if len(text) > cap:
+            text = text[:cap].rstrip() + " …(пункт приведён не полностью; полный текст — в первоисточнике)"
+        # Вводная фраза родительского пункта (P2): без неё «4.2.1. Правоустанавливающие и
+        # регистрационные документы заявителя…» — список неизвестно к чему. То же правило, что
+        # K4 применила к требованиям приложения.
+        intro = (r.get("parent_intro") or "").strip()
+        if intro and intro not in text:
+            text = f"(в контексте пункта: {intro})\n{text}"
         blocks.append(head + "\n" + text)
     return "\n\n".join(blocks)
 
@@ -471,6 +483,17 @@ class _Plan:
     low_relevance: bool
 
 
+def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
+    """(код ТН ВЭД из запроса, его ОКПД2 по переходным ключам) либо None, если кода нет.
+
+    ПУСТОЙ список — тоже результат, а не «ничего не нашли»: код дан, но соответствия в ключе нет.
+    Раньше в этом случае механизм молча выключался — позиции подбирались по наименованию, а
+    пользователь считал, что ответ дан по его коду. Прямой путь перевода (`translate`) о таком
+    говорит честно, товарный молчал."""
+    tn = okpd2_ref.extract_tnved(query)
+    return (tn, okpd2_ref.tnved_to_okpd2(tn)) if tn else None
+
+
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
                  history: list[dict] | None = None) -> "Answer | _Plan":
     """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
@@ -520,14 +543,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
 
     # T9: код ТН ВЭД в запросе (из сертификата/декларации) → перевод в ОКПД2 по переходным ключам,
     # затем обычный поиск/проверка в приложении 719. Только если своего кода ОКПД2 нет.
-    tnved = None
-    if effective_okpd2 is None:
-        tn = okpd2_ref.extract_tnved(query)
-        if tn:
-            tn_okpd2 = okpd2_ref.tnved_to_okpd2(tn)
-            if tn_okpd2:
-                effective_okpd2 = tn_okpd2[0]  # первый — для иерархического буста ретрива
-                tnved = (tn, tn_okpd2)
+    tnved = _resolve_tnved(query) if effective_okpd2 is None else None
+    if tnved and tnved[1]:
+        effective_okpd2 = tnved[1][0]  # первый — для иерархического буста ретрива
 
     # R16: dense-вектор запроса считаем ОДИН раз и переиспользуем во всех обращениях к Qdrant
     # (позиции → подстраховка по коду → кейсы → out-of-scope guard). Раньше e5-large прогонялся

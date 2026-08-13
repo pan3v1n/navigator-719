@@ -139,6 +139,49 @@ class TestAppendixFootnotes(unittest.TestCase):
         self.assertIn("appendix_footnotes", RULES_QUOTA_ON_DEMAND)
 
 
+class TestRulesIndexContext(unittest.TestCase):
+    """P2: подпункт индексируется вместе с вводной родителя, иначе не находится по своему вопросу."""
+
+    def _recs(self):
+        from scripts.load_rules_kb import ORDER52_PATH, add_index_text, parse_order52
+
+        if not ORDER52_PATH.exists():
+            self.skipTest("нет текста Приказа №52")
+        recs = [r for r in parse_order52(ORDER52_PATH)
+                if not str(r.get("section_roman") or "").startswith("прил")]
+        add_index_text(recs)
+        return {r["point"]: r for r in recs}
+
+    def test_subpoint_carries_parent_intro(self):
+        r = self._recs()["4.2.1"]
+        self.assertIn("прилагаются следующие документы", r["parent_intro"])
+        self.assertIn("прилагаются следующие документы", r["index_text"])
+        self.assertIn("Правоустанавливающие", r["index_text"])
+
+    def test_parent_lookup_stays_inside_its_section(self):
+        """В формах приложений нумерация начинается заново: без раздела в ключе п. 4.2 получил бы
+        родителем кусок чужой формы («4. Заключение: при изготовлении компонентов…»)."""
+        r = self._recs()["4.2"]
+        self.assertNotIn("Заключение: при изготовлении компонентов", r.get("parent_intro") or "")
+        self.assertNotIn("Заключение: при изготовлении компонентов", r["index_text"])
+
+    def test_long_parent_is_not_glued(self):
+        """Длинный пункт — самостоятельная норма, а не заголовок перечня: п. 4.1 (3844 знака)
+        не должен приклеиваться к подпунктам, иначе он их утопит."""
+        from scripts.load_rules_kb import PARENT_INTRO_CAP
+
+        recs = self._recs()
+        for point, r in recs.items():
+            intro = r.get("parent_intro") or ""
+            self.assertLessEqual(len(intro), PARENT_INTRO_CAP, point)
+
+    def test_section_title_not_glued_into_index_text(self):
+        """Замер 13.08: заголовок раздела, приклеенный ко всем 172 пунктам, уравнивает их и роняет
+        атрибуцию@1 0.92 → 0.88. В индекс идёт только точечная вводная родителя."""
+        r = self._recs()["6.7"]
+        self.assertNotIn("Порядок принятия и рассмотрения документов", r["index_text"])
+
+
 class TestPerRecordPointsCheck(unittest.TestCase):
     """D8: сверка баллов ПО ЗАПИСИ ловит то, к чему сверка по разделу слепа.
 

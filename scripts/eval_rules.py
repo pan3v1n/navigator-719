@@ -49,6 +49,11 @@ def evaluate(limit: int) -> list[dict]:
     for c in data["cases"]:
         hits = retriever.search_rules(c["query"], limit=limit)
         docs = [h.get("doc_type") for h in hits]
+        # P2: атрибуция по ДОКУМЕНТУ слепа к тому, какие пункты внутри него попали в окно.
+        # На кейсе 17 она давала ✓, хотя раздела 4 (где и лежит состав документов) в окне не было
+        # вовсе, и ответ честно писал «перечень в контексте не представлен».
+        want = c.get("expect_points") or []
+        got_points = [str(h.get("point") or "") for h, d in zip(hits, docs) if d == c["expect"]]
         rows.append({
             "id": c["id"], "query": c["query"], "expect": c["expect"], "why": c.get("why", ""),
             "topic": retriever.rules_topic(c["query"]),
@@ -56,6 +61,9 @@ def evaluate(limit: int) -> list[dict]:
             "present": c["expect"] in docs,
             "share": sum(1 for d in docs if d == c["expect"]),
             "n": len(docs),
+            "want_points": want,
+            "point_ok": any(p.startswith(w) for p in got_points for w in want) if want else None,
+            "got_points": got_points,
         })
     return rows
 
@@ -71,8 +79,14 @@ def report(rows: list[dict], limit: int) -> list[str]:
          "Эталон — ДОКУМЕНТ-ИСТОЧНИК (doc_type), а не текст пункта.", "",
          f"  ТОЧНОСТЬ ТЕМЫ    = {topic_ok}/{n} = {topic_ok / n:.2f}   (rules_topic угадал документ)",
          f"  АТРИБУЦИЯ@1      = {attr_ok}/{n} = {attr_ok / n:.2f}   ← ГЛАВНАЯ: чей пункт первый в окне",
-         f"  ПРЕДСТАВЛЕННОСТЬ = {present}/{n} = {present / n:.2f}   (документ вообще попал в окно)",
-         ""]
+         f"  ПРЕДСТАВЛЕННОСТЬ = {present}/{n} = {present / n:.2f}   (документ вообще попал в окно)"]
+
+    scoped = [r for r in rows if r["point_ok"] is not None]
+    if scoped:
+        pt_ok = sum(1 for r in scoped if r["point_ok"])
+        L.append(f"  НУЖНЫЙ ПУНКТ     = {pt_ok}/{len(scoped)} = {pt_ok / len(scoped):.2f}   "
+                 f"(в окне есть пункт из ожидаемого раздела — P2)")
+    L.append("")
 
     by_doc = Counter(r["expect"] for r in rows)
     L.append("По документам:")
@@ -84,6 +98,14 @@ def report(rows: list[dict], limit: int) -> list[str]:
         L.append(f"  {NAMES.get(dt, dt):18} кейсов {total:>2}  атрибуция@1 {a}/{total}  "
                  f"в окне {p}/{total}  доля окна {share:.0%}")
     L.append("")
+
+    miss_pt = [r for r in rows if r["point_ok"] is False]
+    if miss_pt:
+        L.append(f"ПРОМАХИ ПО ПУНКТУ ({len(miss_pt)}):")
+        for r in miss_pt:
+            L.append(f"  #{r['id']:>2} ждали пункт из {r['want_points']}, в окне: "
+                     f"{r['got_points'] or '— (документа нет в окне)'}  ← {r['query'][:46]}")
+        L.append("")
 
     bad = [r for r in rows if r["top1"] != r["expect"]]
     if bad:

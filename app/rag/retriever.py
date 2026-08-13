@@ -362,6 +362,33 @@ RULES_QUOTA_PRIMARY = 3  # мест, гарантированных докуме
 # на общих основаниях: если сноска действительно релевантна, она войдёт в окно и без квоты.
 RULES_QUOTA_ON_DEMAND = frozenset({"appendix_footnotes"})
 
+# P2: вопрос «какие документы готовить» — кластер жалоб №1 июльского теста (31 упоминание).
+# Квота K10 доводит до окна нужный ДОКУМЕНТ (Приказ №52), но внутри него отбор идёт общим рангом,
+# и раздел 4 («Документы, необходимые для получения акта экспертизы…») проигрывает: его пункты
+# длинные (4.1 — 3842 знака, BM25 штрафует длину), а короткие пункты про сроки, печати и
+# электронную подпись содержат те же слова «документы» и «акт экспертизы». Итог — ответ честно
+# сообщал, что «перечень содержится в разделе 4 (в контексте не представлен)».
+_ASKS_DOC_LIST = (
+    re.compile(r"как\w*\s+документ|перечен\w*\s+документ|список\s+документ|состав\w*\s+документ", re.I),
+    re.compile(r"пакет\s+документ|как\w*\s+бумаг|что\s+(нужно\s+)?(подготовит|приложит|представит|предостав)", re.I),
+    re.compile(r"документ\w*\s+(для|необходим\w*\s+для)\s+(получени|подтвержден|подач)", re.I),
+)
+# Раздел Приказа №52 с самим перечнем и места, гарантированные ему в окне.
+RULES_DOC_LIST_SECTION = "4"
+RULES_QUOTA_DOC_LIST = 3
+# Ответ «какие документы» собирается из ТРЁХ разных частей раздела 4, и брать просто топ-3 по
+# релевантности нельзя: выигрывают 4.1 и 4.4 (в них есть слова «акт экспертизы»), а сам перечень
+# приложений лежит в 4.2.x, где таких слов нет — там «копия устава», «выписка из ЕГРЮЛ».
+# Поэтому берём ЛУЧШИЙ пункт из каждой подгруппы: заявка и сведения в ней · приложения к заявке ·
+# документы под конкретные критерии 719.
+RULES_DOC_LIST_GROUPS = ("4.1", "4.2", "4.3")
+
+
+def asks_document_list(query: str) -> bool:
+    """Вопрос о СОСТАВЕ документов — тот класс, ради которого держим раздел 4 Приказа №52."""
+    q = query or ""
+    return any(p.search(q) for p in _ASKS_DOC_LIST)
+
 
 def rules_topic(query: str) -> str | None:
     """`doc_type` документа, которому адресован процедурный вопрос, либо None при ничьей.
@@ -437,7 +464,40 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None) ->
         except Exception as e:  # noqa: BLE001 — подстраховка необязательна, не валим ответ
             logger.warning("добор темы «{}» не удался: {}: {}", primary, type(e).__name__, e)
 
-    chosen: set[int] = set()
+    # P2: на вопрос о составе документов раздел 4 Приказа №52 добираем отдельным запросом с
+    # фильтром — ровно так же, как выше добирается тематический документ. Без этого перечень в
+    # окно не попадал: его пункты длинные и проигрывают по рангу коротким пунктам про сроки и печати.
+    doc_list_idxs: list[int] = []
+    if asks_document_list(query):
+        try:
+            from qdrant_client import models
+            extra = _hybrid(query, 12, collection=name, qvec=qvec,
+                            qfilter=models.Filter(must=[
+                                models.FieldCondition(key="doc_type",
+                                                      match=models.MatchValue(value="tpp_order_52")),
+                                models.FieldCondition(key="section_roman",
+                                                      match=models.MatchValue(value=RULES_DOC_LIST_SECTION)),
+                            ]))
+            # Пункт может уже лежать в широком пуле — тогда берём ЕГО индекс, а не пропускаем:
+            # «в пуле» не значит «в окне», квота отбирает только первые по рангу, и п. 4.1
+            # (3844 знака, второй в разделе) в окно так и не попадал.
+            known = {(p.payload or {}).get("point"): i for i, p in enumerate(points)}
+            taken_groups: set[str] = set()
+            for p in extra:
+                point = str((p.payload or {}).get("point") or "")
+                group = next((g for g in RULES_DOC_LIST_GROUPS if point.startswith(g)), None)
+                if group is None or group in taken_groups:
+                    continue  # либо не часть перечня (4.4/4.5), либо эта часть уже представлена
+                taken_groups.add(group)
+                if point in known:
+                    doc_list_idxs.append(known[point])
+                else:
+                    doc_list_idxs.append(len(points))
+                    points.append(p)
+        except Exception as e:  # noqa: BLE001 — добор необязателен, ответ не валим
+            logger.warning("добор состава документов не удался: {}: {}", type(e).__name__, e)
+
+    chosen: set[int] = set(doc_list_idxs[:RULES_QUOTA_DOC_LIST])
     for doc_type, idxs in by_doc.items():  # квота: сначала представительство
         if doc_type == primary:
             quota = RULES_QUOTA_PRIMARY
@@ -456,13 +516,24 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None) ->
     # стояла на 72 % — ответ строится вокруг ПЕРВОГО источника, и если сверху оказывался более
     # многословный Приказ №52, вопрос о сроках уходил к нему, а не к Правилам. Внутри документа
     # релевантность не трогаем — переставляем только группы.
+    # P2: пункт с перечнем документов идёт ПЕРВЫМ, когда спросили именно о составе документов.
+    # K9 показал, что ответ строится вокруг первого источника: 4.1 в хвосте окна модель
+    # использовала как ссылку («предусмотрено разделом 4»), а не как перечень.
+    doc_list_set = set(doc_list_idxs)
     order = sorted(chosen, key=lambda i: (
+        0 if i in doc_list_set else 1,
         0 if (points[i].payload or {}).get("doc_type") == primary else 1, i))
 
     out: list[dict] = []
+    doc_list_set = set(doc_list_idxs)
     for i in order[:limit]:
         pl = dict(points[i].payload or {})
         pl["_score"] = points[i].score
         pl["_topic"] = primary
+        # Пометка для форматтера контекста: это пункт с самим перечнем документов, его нельзя
+        # резать общим капом — перечень стоит в конце пункта, и обрезка оставляет одну вводную
+        # фразу («заявитель представляет…»), из-за чего ответ снова уходил в отсылку к разделу 4.
+        if i in doc_list_set:
+            pl["_doc_list"] = True
         out.append(pl)
     return out
