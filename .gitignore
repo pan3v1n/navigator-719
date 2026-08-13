@@ -63,3 +63,7 @@ navigator-export/
 backups/
 *_backup*.db
 dump_tables.json
+
+# рабочие worktree Claude Code и посторонние файлы в корне — не код проекта
+.claude/worktrees/
+/*.xlsx
