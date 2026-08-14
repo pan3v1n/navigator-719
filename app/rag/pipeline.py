@@ -86,12 +86,22 @@ def _clip_note(note: str, limit: int) -> str:
             + " … (условие показано не полностью — полный текст в первоисточнике)")
 
 
-def _block_intro(component: str, note: str, note_cap: int) -> str | None:
-    """Вводная строка блока: узел/вводная фраза + условие, при котором блок читается.
+def _same_threshold(a: str | None, b: str | None) -> bool:
+    """Один и тот же порог, записанный с разными пробелами/регистром."""
+    norm = lambda s: " ".join((s or "").split()).strip(" .;:").lower()  # noqa: E731
+    return bool(norm(a)) and norm(a) == norm(b)
 
-    Условие приклеиваем к вводной, а не выводим отдельной строкой, чтобы порог узла нельзя было
-    прочитать как порог всей позиции: он стоит вплотную к названию узла, к которому относится."""
-    note = _clip_note(note, note_cap) if note else ""
+
+def _block_intro(component: str, note: str, note_cap: int, threshold: str | None = None) -> str | None:
+    """Вводная строка блока: узел/вводная фраза + ЕГО порог и условие, при котором блок читается.
+
+    Порог узла (D9) и условие приклеиваем к вводной, а не выводим отдельными строками, чтобы их
+    нельзя было прочитать как порог всей позиции: они стоят вплотную к названию узла, к которому
+    относятся. Ровно эту форму разбирает правило 2б промпта («криогенный насос низкого давления —
+    не менее 100 баллов» → порог УЗЛА, никогда не в строку «Порог»)."""
+    tail = "; ".join(x for x in ((threshold or "").strip(),
+                                 _clip_note(note, note_cap) if note else "") if x)
+    note = tail  # ниже вводная собирается из «имя — хвост»
     if component and note:
         return f"{component} — {note}"
     if component:
@@ -105,7 +115,8 @@ def _block_intro(component: str, note: str, note_cap: int) -> str | None:
     return f"Условие блока: {note}" if note else None
 
 
-def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET) -> list[dict]:
+def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET,
+                    position_threshold: str | None = None) -> list[dict]:
     """Плоский список требований хита в порядке первоисточника (из всех requirement_blocks).
 
     R6: блок БЕЗ `operations`, но с текстом в `component` — это ТРЕБОВАНИЕ, а не заголовок узла.
@@ -139,6 +150,13 @@ def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET) -> list[dict]:
         block_ops = b.get("operations") or []
         comp = (b.get("component") or "").strip()
         note = (b.get("note") or "").strip()
+        # D9: у блока может быть СВОЙ порог — по узлу изделия («криогенный насос низкого
+        # давления (не менее 100 баллов)») или своя шкала по годам у вида работ («Изготовление
+        # смычков» — 80→110 отдельно от 170→200 у инструментов). В схеме записи он лежит в
+        # `requirement_blocks[].min_threshold`; повтор порога позиции глушим, чтобы не удваивать.
+        thr = (b.get("min_threshold") or "").strip()
+        if thr and _same_threshold(thr, position_threshold):
+            thr = ""
         if block_ops:
             # K4: вводная фраза блока — ЧАСТЬ требования, а не украшение, и до 12.08.2026 она
             # молча терялась: `ops.extend(block_ops)` брал только подпункты. А формулируется
@@ -153,12 +171,12 @@ def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET) -> list[dict]:
             # там она не добавляет смысла, только шум.
             dup = comp and any(
                 comp.lower() == (o.get("text") or "").strip().lower() for o in block_ops)
-            parent = _block_intro(comp if not dup else "", note, note_cap)
+            parent = _block_intro(comp if not dup else "", note, note_cap, thr)
             for o in block_ops:
                 ops.append({**o, "_parent": parent} if parent else o)
             continue
         # Блок без операций: весь смысл в `component`, а условие уточняет, как его читать.
-        text = _block_intro(comp, note, note_cap)
+        text = _block_intro(comp, note, note_cap, thr)
         if text:
             ops.append({"text": text, "points": None})
     return ops
@@ -195,7 +213,7 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         # (thresholds.py; напр. Чиллеры разд.XVI прим.77). Числа дословны → заземлены для гарда.
         mt = h.min_threshold or (lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
                                  if is_target else None)
-        ops = _hit_operations(h, NOTE_CAP_TARGET if is_target else NOTE_CAP_OTHER)
+        ops = _hit_operations(h, NOTE_CAP_TARGET if is_target else NOTE_CAP_OTHER, mt)
         # R6 шаг 3: своих требований нет → показываем требования ГРУППЫ с явной атрибуцией.
         # Подмены не происходит: строка-атрибуция называет позицию-источник, а промпт обязан
         # это воспроизвести. Баллы не суммируем — это решает эксперт по первоисточнику.

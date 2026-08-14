@@ -66,9 +66,17 @@ def struct_for(roman: str) -> Path | None:
     return None
 
 
+# Величина технологической операции из формулы приложения. Источник пишет «(Втоп = 30 баллов)»,
+# а разбор сохраняет саму формулу — «Расчет баллов по формуле: Втоп = 30 * К». Число то же самое,
+# но без слова «баллов» рядом, и сверка объявляла верно сохранённую величину ПОТЕРЯННОЙ: ровно так
+# в список D9 попала позиция IX «Устройства автоматической обработки данных прочие».
+FORMULA_POINTS_RE = re.compile(r"\bВтоп\s*=\s*(\d+(?:[.,]\d+)?)", re.I)
+
+
 def _points_in(text: str | None) -> set[float]:
-    """Числа, записанные в тексте как «N баллов»."""
-    return {_num(x) for x in POINTS_RE.findall(text or "")}
+    """Числа, записанные в тексте как «N баллов» или как величина формулы «Втоп = N»."""
+    t = text or ""
+    return {_num(x) for x in POINTS_RE.findall(t)} | {_num(x) for x in FORMULA_POINTS_RE.findall(t)}
 
 
 def record_points(rec: dict) -> set[float]:
@@ -82,6 +90,7 @@ def record_points(rec: dict) -> set[float]:
     for b in rec.get("requirement_blocks") or []:
         pts |= _points_in(b.get("component"))
         pts |= _points_in(b.get("note"))
+        pts |= _points_in(b.get("min_threshold"))  # D9: у блока свой порог (узел / вид работ)
         for o in b.get("operations") or []:
             pts |= _points_in(o.get("text"))
             if o.get("points") is not None:

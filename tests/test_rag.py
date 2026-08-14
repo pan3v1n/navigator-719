@@ -1022,6 +1022,65 @@ class TestBlockNote(unittest.TestCase):
         self.assertNotIn("—", ctx.split("▸")[1].split("\n")[0])  # вводная без хвоста
 
 
+class TestBlockThreshold(unittest.TestCase):
+    """D9: у блока свой порог — по узлу изделия или по виду работ.
+
+    В схеме записи одно поле `min_threshold`, а закон задаёт для части позиций несколько порогов:
+    «криогенный насос низкого давления (не менее 100 баллов)», а у «Изготовления смычков» своя
+    шкала по годам при другой шкале у инструментов. Потерянный порог узла читается как отсутствие
+    требования: сумма по изделию сходится, недобор по узлу не виден никому."""
+
+    NODES = [
+        {"component": "криогенный насос низкого давления", "min_threshold": "не менее 100 баллов",
+         "operations": [{"text": "производство насоса", "points": 20}]},
+        {"component": "термоизолированный резервуар", "min_threshold": "не менее 60 баллов",
+         "operations": [{"text": "производство сосудов", "points": 20}]},
+    ]
+
+    def test_node_thresholds_reach_context(self):
+        ctx = format_context([make_hit(min_threshold="не менее 180 баллов",
+                                       requirement_blocks=self.NODES)])
+        self.assertIn("криогенный насос низкого давления — не менее 100 баллов", ctx)
+        self.assertIn("термоизолированный резервуар — не менее 60 баллов", ctx)
+
+    def test_node_threshold_never_becomes_position_threshold(self):
+        """Строка «Порог:» — только про позицию: иначе порог узла выдаётся за порог изделия."""
+        ctx = format_context([make_hit(min_threshold="не менее 180 баллов",
+                                       requirement_blocks=self.NODES)])
+        thr_lines = [ln.strip() for ln in ctx.splitlines() if ln.strip().startswith("Порог:")]
+        self.assertEqual(thr_lines, ["Порог: не менее 180 баллов"])
+
+    def test_same_threshold_not_repeated_at_block(self):
+        """У блока работ порог совпадает с порогом позиции — дубль был бы шумом."""
+        blocks = [{"component": "Изготовление инструментов",
+                   "min_threshold": "не менее 170 баллов",
+                   "operations": [{"text": "распиловка древесины", "points": 5}]}]
+        ctx = format_context([make_hit(min_threshold="не менее 170 баллов",
+                                       requirement_blocks=blocks)])
+        self.assertIn("▸ Изготовление инструментов", ctx)
+        self.assertNotIn("Изготовление инструментов — не менее 170", ctx)
+
+    def test_threshold_and_note_coexist(self):
+        blocks = [{"component": "узел учета", "min_threshold": "не менее 40 баллов",
+                   "note": "обязательное требование",
+                   "operations": [{"text": "сборка", "points": 5}]}]
+        ctx = format_context([make_hit(requirement_blocks=blocks)])
+        self.assertIn("узел учета — не менее 40 баллов; обязательное требование", ctx)
+
+    def test_corpus_has_no_positions_with_lost_thresholds(self):
+        """Список D9 обязан быть пуст: непустой означает, что кто-то из пользователей видит
+        пометку «пороги показаны не полностью». Файл генерируется
+        `verify_structured.py --json`; если он снова непуст — вернуть пороги
+        `scripts/backfill_block_thresholds.py --write`, а не править файл руками."""
+        path = ROOT / "knowledge_base/pp719/incomplete_thresholds.json"
+        if not path.exists():
+            self.skipTest("список неполных порогов не сгенерирован")
+        positions = json.loads(path.read_text(encoding="utf-8")).get("positions") or []
+        self.assertEqual(
+            [f"{p.get('section')} · {p.get('product_name', '')[:40]}" for p in positions], [],
+            "у позиций снова потеряны пороги — см. scripts/backfill_block_thresholds.py")
+
+
 class TestRulesLoader(unittest.TestCase):
     """Парсер корпуса Правил (scripts/load_rules_kb) — без Qdrant/e5."""
 
