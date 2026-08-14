@@ -86,6 +86,42 @@ class TestPlural(unittest.TestCase):
                 self.assertEqual(checklist._plural(n, "позиция", "позиции", "позиций"), expected)
 
 
+class TestPointsForm(unittest.TestCase):
+    """Баллы в листе сверки читает человек: «1 балл», а не «1 баллов»."""
+
+    def test_integer_forms(self):
+        for pts, expected in {1: "1 балл", 2: "2 балла", 4: "4 балла", 5: "5 баллов",
+                              11: "11 баллов", 100: "100 баллов", 300: "300 баллов"}.items():
+            with self.subTest(pts=pts):
+                self.assertEqual(checklist._points(pts), expected)
+
+    def test_fractional_points_survive(self):
+        """Дробные баллы в корпусе есть (0,5, раздел VII) — целочисленная форма их исказит."""
+        self.assertEqual(checklist._points(0.5), "0,5 балла")
+
+    def test_zero_is_a_value_not_an_absence(self):
+        """`if pts` съедал бы 0 вместе с None, а «0 баллов» — это значение градации."""
+        self.assertEqual(checklist._ops_line({"text": "операция", "points": 0}),
+                         "операция — **0 баллов**")
+        self.assertEqual(checklist._ops_line({"text": "операция", "points": None}), "операция")
+
+
+class TestNoServiceTokensLeak(unittest.TestCase):
+    """В графу «Что уточнить» не должен попадать служебный токен категории."""
+
+    TOKENS = ("NO_MATCH", "PARSER_LOSS", "EXCLUDED", "NO_PARENT", "INHERIT",
+              "IN_COMPONENT", "NO_SOURCE", "HIGH", "MEDIUM")
+
+    def test_generated_document_has_no_raw_categories(self):
+        doc = ROOT / "docs/EXPERT_CHECKLIST_WAVE3.md"
+        if not doc.exists():
+            self.skipTest("лист сверки не сгенерирован")
+        text = doc.read_text(encoding="utf-8")
+        for token in self.TOKENS:
+            with self.subTest(token=token):
+                self.assertNotIn(token, text)
+
+
 class TestDamagedNameFallback(unittest.TestCase):
     """У повреждённых записей первая строка — обрывок ячейки, по нему позицию не опознать."""
 

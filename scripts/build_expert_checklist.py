@@ -115,14 +115,31 @@ def walk_inheritance(recs, chunks, keyfn):
     return children, refused
 
 
+def _norm_key(k: str) -> str:
+    """Ключ старой сборки в виде текущей — иначе две сборки несопоставимы: менялся сам ключ."""
+    sec, _, tail = k.partition("|")
+    return f"{sec}|{tail.strip(';,.').strip()}"
+
+
+def _parent_id(entry: dict) -> tuple:
+    p = entry["parent"]
+    return (p.get("section_roman"), (p.get("product_name") or "").split("\n")[0])
+
+
 def fresh_after_keyfix(recs, chunks):
-    """Позиции, ставшие наследниками ТОЛЬКО после фикса ключа (R6-5)."""
+    """Позиции, ставшие наследниками ТОЛЬКО после фикса ключа (R6-5).
+
+    Возвращает ещё и `flipped` — позиции, которые были наследниками и ДО фикса, но получили
+    ДРУГОГО родителя. Диффа по ключу ребёнка для них недостаточно: такая позиция в список не
+    попадёт, а требования у неё сменятся молча. Сегодня их ноль, и проверка нужна именно затем,
+    чтобы это перестало быть догадкой при следующей перегенерации корпуса."""
     new, refused_new = walk_inheritance(recs, chunks, diag._map_key)
     old, _ = walk_inheritance(recs, chunks, _old_map_key)
-    # Ключи двух сборок несопоставимы напрямую — сам ключ и менялся. Сводим по нормализованному виду.
-    old_norm = {f"{k.split('|', 1)[0]}|{k.split('|', 1)[1].strip(';,.').strip()}" for k in old}
-    fresh = {k: v for k, v in new.items() if k not in old_norm}
-    return fresh, refused_new, len(new), len(old)
+    old_by_norm = {_norm_key(k): v for k, v in old.items()}
+    fresh = {k: v for k, v in new.items() if k not in old_by_norm}
+    flipped = {k: v for k, v in new.items()
+               if k in old_by_norm and _parent_id(v) != _parent_id(old_by_norm[k])}
+    return fresh, flipped, refused_new, len(new), len(old)
 
 
 def _plural(n: int, one: str, few: str, many: str) -> str:
@@ -159,10 +176,21 @@ def _name_full(rec, limit: int = 110) -> str:
     return head[:limit] + ("…" if len(head) > limit else "")
 
 
+def _points(pts) -> str:
+    """«1 балл», «2 балла», «5 баллов», «0,5 балла» — документ читает эксперт, а не парсер.
+
+    Дробные баллы в корпусе есть (все 0,5, раздел VII), и целочисленная форма их бы исказила."""
+    if isinstance(pts, float) and not pts.is_integer():
+        return f"{pts:g}".replace(".", ",") + " балла"
+    return _plural(int(pts), "балл", "балла", "баллов")
+
+
 def _ops_line(op) -> str:
     txt = " ".join(op["text"].split())
     pts = op.get("points")
-    return f"{txt} — **{pts} баллов**" if pts else txt
+    # Именно `is None`: 0 — это значение («менее 25 процентов — 0 баллов»), а не отсутствие,
+    # и проверка на истинность молча съедала бы его вместе с None.
+    return txt if pts is None else f"{txt} — **{_points(pts)}**"
 
 
 def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
@@ -266,6 +294,10 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
         "NO_PARENT": "Ячейка требований пуста, и группы выше нет. Подтвердите, что требований действительно нет.",
         "родитель не найден в базе": "Требования, по-видимому, наследуются от позиции выше, но её не удалось найти. От какой позиции берутся требования?",
         "у родителя самого нет требований": "Позиция входит в группу, но и у первой позиции группы требований нет. Где искать требования этой группы?",
+        # INHERIT попадает сюда только с уверенностью ниже HIGH — тогда наследование не применяется.
+        # Сегодня таких нет, но без этой строки в графу «Что уточнить» уехал бы голый токен
+        # «INHERIT»: `ASK.get(cat, cat)` подставляет ключ, и эксперт получил бы служебное слово.
+        "INHERIT": "Похоже, требования наследуются от позиции выше по группе, но уверенности для автоматического переноса недостаточно. От какой позиции берутся требования?",
     }
 
     total_b = len(manual) + len(refused)
@@ -373,7 +405,7 @@ def main() -> None:
     recs, chunks = load_corpus()
     buf = io.StringIO()
     with redirect_stdout(buf):  # классификатор разговорчив, нам нужен только результат
-        fresh, refused, n_new, n_old = fresh_after_keyfix(recs, chunks)
+        fresh, flipped, refused, n_new, n_old = fresh_after_keyfix(recs, chunks)
     text = render(recs, chunks, fresh, refused, n_new, n_old)
 
     out = ROOT / args.out
@@ -387,6 +419,11 @@ def main() -> None:
           f"{len({diag._map_key(v['parent'].get('section_roman'), v['parent'].get('product_name')) for v in fresh.values()})}")
     print(f"  Б. без требований: {len(refused)} отказов сборки карты + категории ручного разбора")
     print(f"  наследников всего: старым ключом {n_old}, текущим {n_new}")
+    if flipped:
+        # Молчать здесь нельзя: у этих позиций требования сменились, а в лист сверки они не попали.
+        print(f"  ⚠ СМЕНИЛИ ИСТОЧНИК, но в блок А не попадают ({len(flipped)}) — добавить вручную:")
+        for v in flipped.values():
+            print(f"      [{v['rec'].get('section_roman')}] {_name(v['rec'])[:60]} → «{_name(v['parent'])[:50]}»")
 
 
 if __name__ == "__main__":
