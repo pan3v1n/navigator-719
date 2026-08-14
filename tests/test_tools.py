@@ -80,6 +80,19 @@ class TestBuildChecklist(unittest.TestCase):
         ], payload={"requirement_type": "operations"})
         self.assertIn("4.3.4", self._points(build_checklist(hit)))
 
+    def test_block_note_is_read_too(self):
+        """D9: у 12 позиций признак условного пункта живёт ТОЛЬКО в `note` блока.
+
+        «Процентная доля», «доля массы», баллы — по ним включаются п. 4.3.5/4.3.6/4.3.7, и без
+        чтения `note` чек-лист /navigate молча приходил неполным (напр. «Асфальтоукладчики» III,
+        «Установка для обезвреживания медицинских отходов» VII)."""
+        hit = make_hit(requirement_blocks=[{
+            "component": "сборка",
+            "note": "процентная доля стоимости иностранных материалов не более 30 процентов",
+            "operations": [{"text": "сборка", "points": None}]}],
+            payload={"requirement_type": "operations"})
+        self.assertIn("4.3.6", self._points(build_checklist(hit)))
+
     def test_points_model_adds_operations_point_and_threshold(self):
         hit = make_hit(min_threshold="не менее 25 баллов",
                        requirement_blocks=[{"operations": [{"text": "сварка", "points": 5}]}],

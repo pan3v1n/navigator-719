@@ -15,7 +15,10 @@
 from __future__ import annotations
 
 import importlib.util
+import re
 import sys
+import token
+import tokenize
 import unittest
 from pathlib import Path
 
@@ -136,6 +139,75 @@ class TestDamagedNameFallback(unittest.TestCase):
     def test_normal_name_left_alone(self):
         rec = {"product_name": "Аппараты автоматического плазмафереза донорского\nвторая строка"}
         self.assertNotIn("вторая строка", checklist._name_full(rec))
+
+
+class TestSourceThresholdMatchesRuntime(unittest.TestCase):
+    """Порог источника лист обязан считать ТЕМ ЖЕ правилом, что и рантайм.
+
+    Регресс, найденный ревью 14.08: лист читал только `min_threshold` записи, а
+    `pipeline.format_context` берёт `min_threshold or thresholds.lookup_threshold(...)`.
+    У блока А1 (раздел XXI, 26 позиций) поле пусто, но примечание 7 даёт «не менее 300 баллов» —
+    документ печатал «порог не указан», поднимал врезку «пользователь видит баллы без минимума»
+    и просил эксперта разобраться с этим В ПЕРВУЮ ОЧЕРЕДЬ. Просьба закрыть несуществующий пробел
+    дороже любой опечатки: внимание эксперта — самый дефицитный ресурс волны, а после рассылки
+    документ уже не исправить."""
+
+    def test_document_threshold_equals_runtime_threshold(self):
+        from app.rag.thresholds import lookup_threshold
+        doc = ROOT / "docs/EXPERT_CHECKLIST_WAVE3.md"
+        if not doc.exists():
+            self.skipTest("лист сверки не сгенерирован")
+        text = doc.read_text(encoding="utf-8")
+        by_key = {}
+        for rec in diag.load_structured():
+            by_key.setdefault((rec.get("section_roman"), checklist._name(rec)), rec)
+
+        heads = re.findall(r"^### (А\d+)\. Раздел (\S+) · источник «(.+?)»", text, re.M)
+        self.assertTrue(heads, "блок А исчез из документа")
+        for tag, sec, src in heads:
+            with self.subTest(block=tag):
+                rec = by_key.get((sec, src))
+                self.assertIsNotNone(rec, f"{tag}: источник «{src[:40]}» не найден в корпусе")
+                expected = rec.get("min_threshold") or lookup_threshold(
+                    rec.get("okpd2_codes") or [], checklist._name(rec), rec.get("section_roman"))
+                block = text.split(f"### {tag}.", 1)[1].split("\n### ", 1)[0]
+                line = next(ln for ln in block.splitlines()
+                            if ln.startswith("**Порог для источника:**"))
+                if expected:
+                    self.assertIn(expected, line, f"{tag}: рантайм показывает «{expected}»")
+                    self.assertNotIn("пользователь видит баллы без минимума", block)
+                else:
+                    self.assertIn("_не указан_", line)
+
+
+class TestPython311Compatible(unittest.TestCase):
+    """Обратный слэш внутри выражения f-строки разрешён только с Python 3.12 (PEP 701).
+
+    `SETUP.md` обещает «3.11+ тоже работает», а CI гоняет один 3.12 — расхождение тихое.
+    В `_old_map_key` такой f-string стоял, и этот файл импортирует скрипт на уровне модуля:
+    на 3.11 упала бы ВСЯ батарея на этапе сборки тестов, а не один тест."""
+
+    def test_no_backslash_inside_fstring_expressions(self):
+        if not hasattr(token, "FSTRING_START"):
+            self.skipTest("токенизатор до 3.12 не разбирает f-строки на части")
+        files = [*(ROOT / "app").rglob("*.py"), *(ROOT / "scripts").glob("*.py"),
+                 *(ROOT / "tests").glob("*.py"), ROOT / "main.py"]
+        offenders = []
+        for path in files:
+            depth = 0
+            try:
+                with tokenize.open(path) as fh:
+                    for tok in tokenize.generate_tokens(fh.readline):
+                        name = tokenize.tok_name.get(tok.type, "")
+                        if name == "FSTRING_START":
+                            depth += 1
+                        elif name == "FSTRING_END":
+                            depth = max(0, depth - 1)
+                        elif depth and name == "STRING" and "\\" in tok.string:
+                            offenders.append(f"{path.relative_to(ROOT)}:{tok.start[0]}")
+            except (tokenize.TokenError, SyntaxError):  # файл не разбирается — не наша проверка
+                continue
+        self.assertEqual(offenders, [], f"f-строки со слэшем внутри выражения: {offenders}")
 
 
 if __name__ == "__main__":

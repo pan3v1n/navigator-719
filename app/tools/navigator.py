@@ -54,6 +54,11 @@ def build_checklist(hit: Hit | None) -> list[str]:
         parts.extend((o.get("text") or "") for o in ops)
         if not ops:
             parts.append(b.get("component") or "")
+        # D9: условие блока (`note`) — такой же текст требования, как операции. У 12 позиций
+        # признак условного пункта Приказа живёт ТОЛЬКО там («процентная доля», «доля массы»,
+        # «баллы»), и чек-лист /navigate молча терял п. 4.3.5 / 4.3.6 / 4.3.7 — напр. у
+        # «Асфальтоукладчиков» (III) и «Установки для обезвреживания медицинских отходов» (VII).
+        parts.append(b.get("note") or "")
     joined = " ".join(p for p in parts if p)
     rtype = hit.payload.get("requirement_type")
     has_points = rtype in ("points", "mixed") or any(
