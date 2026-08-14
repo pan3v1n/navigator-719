@@ -13,6 +13,11 @@
       <label class="remember"><input type="checkbox" name="remember"> Запомнить меня</label>
       <button type="submit">Войти</button>
     </form>
+    {# Ссылки видны ДО входа: правила и политику читают перед тем, как ими пользоваться. #}
+    <p class="login-legal">
+      Входя, вы принимаете <a href="/terms">Условия использования</a>
+      и <a href="/privacy">Политику конфиденциальности</a> · <a href="/help">Справка</a>
+    </p>
   </div>
 </div>
 {% endblock %}

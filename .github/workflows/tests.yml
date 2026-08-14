@@ -1,0 +1,48 @@
+# CI: юнит-тесты на каждый push и PR (R20).
+#
+# Зачем. 168 тестов зелёные, но до сих пор их запускал только человек и только на одной машине —
+# «зелёные» держались на дисциплине. Здесь они становятся условием влития в main.
+#
+# Тесты ПОЛНОСТЬЮ ОФЛАЙН: не нужны ни Qdrant, ни ключ DeepSeek, ни `.env` (в `Settings` есть
+# дефолты, а сетевые вызовы в тестах подменяются). Проверено на чистом `git archive`-checkout.
+name: tests
+
+on:
+  push:
+    branches: [dev, main, prod]
+  pull_request:
+
+# Новый push в ту же ветку отменяет предыдущий прогон — не жжём минуты на устаревшем коде.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  unittest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # CPU-сборка torch ставится ОТДЕЛЬНО и ПЕРВОЙ: иначе pip тянет CUDA-вариант (~2.5 ГБ),
+      # который в CI бесполезен. Тот же приём, что в Dockerfile — держим их согласованными.
+      - name: torch (CPU-сборка)
+        run: pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu
+
+      - name: Зависимости
+        run: pip install -r requirements.txt
+
+      # Ключа DeepSeek и Qdrant здесь нет и не должно быть: тест, которому они понадобятся,
+      # упадёт — и это правильный сигнал, что он перестал быть офлайновым.
+      - name: Юнит-тесты
+        run: python -m unittest discover -s tests -v
+
+      - name: Синтаксис фронтенда
+        run: node --check app/web/static/chat.js

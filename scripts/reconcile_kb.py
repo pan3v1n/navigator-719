@@ -100,10 +100,27 @@ def check(roman: str, canon_bodies: dict[str, str], verbose: bool) -> bool:
         f"в чанке но не в JSON={lost_b or '—'}; в JSON но не в чанке={extra_b or '—'}"
     )
 
+    # Названная причина вместо голого расхождения счётчиков: бескодовые строки-варианты
+    # («|судовая система охранного оповещения <9>;» — ячейка кода пуста, код наследуется от
+    # группы) парсер восстанавливает как самостоятельные продукты с августа 2026. JSON,
+    # сгенерированный до этой правки, записей для них не содержит. Это НЕ потеря данных
+    # разбором, а отставание JSON от парсера — лечится перегенерацией раздела (D4).
+    b_cause = ""
+    if not b_ok:
+        variants = [p for p in chunk_products if p.parent_name]
+        if variants and len(chunk_seq) - len(json_seq) == len(variants) and not extra_b:
+            rows = "; ".join(
+                (p.name_raw.strip().splitlines() or [""])[0][:60] for p in variants
+            )
+            b_cause = (
+                f"\n    ⓘ причина: {len(variants)} бескодовых строк-вариантов восстановлены "
+                f"парсером, но в JSON записей для них нет (JSON старше правки). Строки: {rows}"
+            )
+
     flag = "✅" if (a_ok and b_ok) else "⚠"
     print(f"=== Раздел {roman} {flag} ===")
     print(f"  A (чанк↔исходник): {'✅' if a_ok else '⚠'}  {a_msg}")
-    print(f"  B (JSON↔чанк):     {'✅' if b_ok else '⚠'}  {b_msg}")
+    print(f"  B (JSON↔чанк):     {'✅' if b_ok else '⚠'}  {b_msg}{b_cause}")
     if verbose:
         print(f"    коды чанка:  {_flat(chunk_seq)}")
         print(f"    коды JSON:   {_flat(json_seq)}")

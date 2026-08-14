@@ -189,6 +189,10 @@
         <h3>Флаги движка</h3>
         <div class="fb-stat">Непроверенные числа (guard): <b class="{{ 'fail' if stats.flags_unverified else '' }}">{{ stats.flags_unverified }}</b></div>
         <div class="fb-stat">Низкая релевантность: <b class="{{ 'fail' if stats.flags_lowrel else '' }}">{{ stats.flags_lowrel }}</b></div>
+        {% if stats.orphan_ratings %}
+        <div class="fb-stat" title="Оценки, чей ответ не найден (беседа удалена). В приёмочную метрику НЕ включены — иначе гейт считался бы по ответам, которых уже нет.">
+          Оценки без ответа (вне приёмки): <b class="fail">{{ stats.orphan_ratings }}</b></div>
+        {% endif %}
       </div>
 
       <div class="card">

@@ -6,6 +6,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -14,7 +15,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.tools.navigator import BASE_CHECKLIST, build_checklist, extract_okpd2  # noqa: E402
+from app.tools.checklist import checklist_for  # noqa: E402
+from app.tools.navigator import build_checklist, extract_okpd2  # noqa: E402
 
 from tests.test_rag import make_hit  # noqa: E402  — переиспользуем фабрику Hit
 
@@ -39,32 +41,69 @@ class TestExtractOkpd2(unittest.TestCase):
 
 
 class TestBuildChecklist(unittest.TestCase):
-    def test_none_hit_returns_base(self):
-        self.assertEqual(build_checklist(None), BASE_CHECKLIST)
+    """R25: чек-лист строится из раздела 4 Приказа ТПП РФ №52, а не из зашитого списка.
 
-    def test_points_type_adds_score_item(self):
-        hit = make_hit(payload={"requirement_type": "points"})
-        items = build_checklist(hit)
-        self.assertTrue(any("Расчёт набранных баллов" in i for i in items))
+    Прежний `BASE_CHECKLIST` — шесть правдоподобных, но ВЫДУМАННЫХ пунктов без ссылки на норму:
+    ровно то, за что проект ругает языковую модель. Теперь у каждого пункта есть номер, по
+    которому эксперт сверится с первоисточником."""
 
-    def test_threshold_adds_item(self):
+    BASE = ("4.2.1", "4.2.2", "4.2.3")
+
+    def _points(self, items):
+        return {m for i in items for m in re.findall(r"п\. (4(?:\.\d+)+)", i)}
+
+    def test_base_points_always_present_and_sourced(self):
+        for items in (build_checklist(None), build_checklist(make_hit())):
+            self.assertTrue(set(self.BASE) <= self._points(items))
+            for i in items:
+                if "Расчёт набранных баллов" in i:
+                    continue  # прикладное напоминание, помечено как не-пункт Приказа
+                self.assertIn("Приказ ТПП РФ №52", i, i[:60])
+
+    def test_service_center_requirement_adds_its_point(self):
+        hit = make_hit(requirement_blocks=[{"operations": [
+            {"text": "наличие сервисного центра, уполномоченного осуществлять ремонт", "points": None}
+        ]}], payload={"requirement_type": "operations"})
+        self.assertIn("4.3.4", self._points(build_checklist(hit)))
+
+    def test_kd_td_requirement_adds_its_point(self):
+        hit = make_hit(requirement_blocks=[{"operations": [
+            {"text": "наличие прав на конструкторскую и технологическую документацию", "points": None}
+        ]}], payload={"requirement_type": "operations"})
+        self.assertIn("4.3.1", self._points(build_checklist(hit)))
+
+    def test_component_only_block_is_read_too(self):
+        # обязательные условия часто лежат в `component` без операций (см. pipeline._hit_operations),
+        # и раньше подбор условных пунктов их бы не увидел
+        hit = make_hit(requirement_blocks=[
+            {"component": "наличие сервисного центра на территории ЕАЭС", "operations": []}
+        ], payload={"requirement_type": "operations"})
+        self.assertIn("4.3.4", self._points(build_checklist(hit)))
+
+    def test_points_model_adds_operations_point_and_threshold(self):
         hit = make_hit(min_threshold="не менее 25 баллов",
-                       payload={"requirement_type": "mixed"})
+                       requirement_blocks=[{"operations": [{"text": "сварка", "points": 5}]}],
+                       payload={"requirement_type": "points"})
         items = build_checklist(hit)
+        self.assertIn("4.3.5", self._points(items))
         self.assertTrue(any("не менее 25 баллов" in i for i in items))
 
-    def test_kd_td_item_when_operations_mention_docs(self):
-        hit = make_hit(requirement_blocks=[{"operations": [
-            {"text": "разработка конструкторской документации", "points": None}
-        ]}], payload={"requirement_type": "operations"})
-        items = build_checklist(hit)
-        self.assertTrue(any("конструкторскую и техническую документацию" in i for i in items))
+    def test_plain_operations_do_not_pull_unrelated_points(self):
+        hit = make_hit(requirement_blocks=[{"operations": [{"text": "сборка узла", "points": None}]}],
+                       payload={"requirement_type": "operations"})
+        pts = self._points(build_checklist(hit))
+        self.assertNotIn("4.3.4", pts)   # сервисного центра в требованиях нет
+        self.assertNotIn("4.3.8", pts)   # адвалорной доли тоже
 
-    def test_no_extra_items_for_plain_operations(self):
-        hit = make_hit(requirement_blocks=[{"operations": [
-            {"text": "сборка узла", "points": None}
-        ]}], payload={"requirement_type": "operations"})
-        self.assertEqual(build_checklist(hit), BASE_CHECKLIST)
+    def test_missing_source_yields_empty_not_invented(self):
+        # нет первоисточника → пустой список; выдумывать документы нельзя
+        import app.tools.checklist as ch
+        orig = ch._points
+        ch._points = lambda: {}
+        try:
+            self.assertEqual(checklist_for("что угодно", has_points=True), [])
+        finally:
+            ch._points = orig
 
 
 if __name__ == "__main__":

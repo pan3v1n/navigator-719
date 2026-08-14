@@ -104,13 +104,26 @@ function openItemMenu(sid, item, anchor) {
 
 // Минимальный БЕЗОПАСНЫЙ рендер markdown ответа движка (**жирный**, • списки, абзацы).
 // Сначала экранируем HTML (защита от XSS), потом добавляем ТОЛЬКО свои теги.
-function renderMarkdown(text) {
+function renderMarkdown(text, streaming) {
   const esc = (s) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const inline = (s) => esc(s).replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   // строка-разделитель Markdown-таблицы: |---|:--:|---| и т.п.
   const isSep = (s) => /^\|?\s*:?-{2,}:?\s*(\|\s*:?-{2,}:?\s*)+\|?\s*$/.test(s);
   const cells = (s) => s.replace(/^\s*\|/, "").replace(/\|\s*$/, "").split("|").map((c) => c.trim());
-  const lines = (text || "").split(/\r?\n/);
+  let lines = (text || "").split(/\r?\n/);
+  // При стриминге таблица приходит по строкам, и до разделителя «|---|---|» её шапка выглядит
+  // строкой с палками. На ответе с перечнем документов это секунды визуального мусора, поэтому
+  // недособранный хвост таблицы просто не показываем — он появится, когда придут данные.
+  if (streaming) {
+    let start = lines.length;
+    while (start > 0 && lines[start - 1].includes("|")) start--;
+    const block = lines.slice(start);
+    if (block.length) {
+      // строк меньше трёх (шапка + разделитель + первая строка данных) — таблицы ещё нет;
+      // иначе прячем только последнюю строку: она может быть недописана на полсимвола
+      lines = block.some(isSep) && block.length >= 3 ? lines.slice(0, -1) : lines.slice(0, start);
+    }
+  }
   let html = "";
   let inList = false;
   const closeList = () => { if (inList) { html += "</ul>"; inList = false; } };
@@ -165,7 +178,9 @@ function addAssistant(text, sources) {
   const b = el("bubble");
   b.innerHTML = renderMarkdown(text);
   wrap.appendChild(b);
+  wrap.dataset.raw = text;  // исходный markdown — его и копируем, а не текст из DOM
   messages.appendChild(wrap);
+  addAnswerTools(wrap);
   if (sources) addSources(wrap, sources);
   return wrap;
 }
@@ -256,6 +271,79 @@ function flash(anchor, text) {
   f.textContent = text;
   clearTimeout(f._t);
   f._t = setTimeout(() => { f.textContent = ""; }, 2000);
+}
+
+// Подпись к вынесенному ответу. R3: ответ, покинувший сервис (экспорт, копирование, пересылка),
+// обязан нести пометку о происхождении — получатель не должен принять черновик ИИ за заключение.
+const SHARE_NOTE =
+  "\n\n— Ответ ИИ-ассистента «Навигатор ПП №719» (предварительно; окончательное решение " +
+  "принимает уполномоченный эксперт ТПП).";
+
+function copyText(text) {
+  if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+  // http-контекст (пилот работает без TLS) — clipboard API недоступен, нужен старый путь
+  return new Promise((resolve, reject) => {
+    const ta = document.createElement("textarea");
+    ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.appendChild(ta); ta.select();
+    try { document.execCommand("copy") ? resolve() : reject(); } catch (e) { reject(e); }
+    document.body.removeChild(ta);
+  });
+}
+
+// Кнопки под ответом: копировать и поделиться. Живут отдельно от панели оценки — та требует
+// message_id, а копировать нужно уметь всегда, даже если запись в лог не удалась.
+function addAnswerTools(wrap) {
+  const tools = el("msg-tools");
+
+  const mkTool = (tip, svg, onClick) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "tool-btn";
+    b.dataset.tip = tip;              // подпись показывается по hover/фокусу (CSS ::after)
+    b.setAttribute("aria-label", tip);
+    b.innerHTML = svg;
+    b.addEventListener("click", () => onClick(b));
+    return b;
+  };
+
+  const done = (btn, tip) => {
+    const prev = btn.dataset.tip;
+    btn.dataset.tip = tip;
+    btn.classList.add("ok");
+    setTimeout(() => { btn.dataset.tip = prev; btn.classList.remove("ok"); }, 1600);
+  };
+
+  const raw = () => (wrap.dataset.raw || wrap.querySelector(".bubble")?.innerText || "");
+
+  const copySvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
+    + '<rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>'
+    + '<path d="M5 15V5a2 2 0 0 1 2-2h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+  const shareSvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
+    + '<path d="M12 16V4m0 0L8 8m4-4l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
+    + '<path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
+
+  tools.appendChild(mkTool("Копировать ответ", copySvg, (btn) => {
+    copyText(raw() + SHARE_NOTE)
+      .then(() => done(btn, "Скопировано"))
+      .catch(() => done(btn, "Не удалось скопировать"));
+  }));
+
+  tools.appendChild(mkTool("Поделиться", shareSvg, (btn) => {
+    const text = raw() + SHARE_NOTE;
+    // Системный шаринг там, где он есть (мобильные, часть десктопов); иначе — в буфер обмена:
+    // публичной ссылки на диалог у сервиса нет и быть не должно — переписка персональная.
+    if (navigator.share) {
+      navigator.share({ title: "Навигатор ПП №719", text }).catch(() => {});
+      return;
+    }
+    copyText(text)
+      .then(() => done(btn, "Ответ в буфере — вставьте в письмо"))
+      .catch(() => done(btn, "Не удалось скопировать"));
+  }));
+
+  wrap.appendChild(tools);
 }
 
 function addFeedbackBar(wrap, messageId, sid) {
@@ -414,6 +502,17 @@ function genId() {
     : "c" + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
 }
 
+// Сервер отклонил вопрос по содержимому (422). Возвращаем текст в поле ввода и показываем причину:
+// человеку нужно отредактировать вопрос, а не потерять его.
+async function handleRejected(r, text, pending) {
+  let msg = "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
+  try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
+  if (pending) pending.remove();
+  input.value = text;
+  input.style.height = "auto";
+  showInputBlock(msg);
+}
+
 async function ask(text) {
   main.classList.remove("empty");
   const isNew = !sessionId;
@@ -453,6 +552,9 @@ async function askStream(text, pending, bubble) {
     });
     if (r.status === 401) { window.location = "/login"; return true; }
     if (r.status === 403) { window.location = "/profile"; return true; }  // профиль/согласие не заполнены
+    // 422 — сервер нашёл в вопросе то, чего нельзя отправлять. Фолбэк бессмысленен: там та же
+    // проверка. Возвращаем вопрос в поле, чтобы человек его отредактировал, а не набирал заново.
+    if (r.status === 422) { await handleRejected(r, text, pending); return true; }
     if (!r.ok || !r.body) return false;  // не стартовал → фолбэк
     const reader = r.body.getReader();
     const dec = new TextDecoder();
@@ -470,7 +572,7 @@ async function askStream(text, pending, bubble) {
         try { ev = JSON.parse(evtext); } catch (e) { continue; }
         if (ev.type === "delta") {
           acc += ev.text;
-          bubble.innerHTML = renderMarkdown(acc);  // инкрементальный рендер накопленного текста
+          bubble.innerHTML = renderMarkdown(acc, true);  // инкрементальный рендер (без хвоста таблицы)
           autoScroll();  // следуем за текстом, только если пользователь не листает выше
         } else if (ev.type === "done") {
           done = ev;
@@ -483,6 +585,8 @@ async function askStream(text, pending, bubble) {
     sessionId = done.session_id;
     setActive(sessionId);
     bubble.innerHTML = renderMarkdown(acc);  // финальный ре-рендер полного текста
+    pending.dataset.raw = acc;
+    addAnswerTools(pending);
     addUnverifiedFlag(pending, done.unverified_numbers);
     addSources(pending, done.sources);
     addFeedbackBar(pending, done.message_id, sessionId);
@@ -507,6 +611,11 @@ async function askFallback(text, pending, bubble, isNew) {
     });
     if (r.status === 401) { window.location = "/login"; return; }
     if (r.status === 403) { window.location = "/profile"; return; }  // профиль/согласие не заполнены
+    if (r.status === 422) {
+      await handleRejected(r, text, pending);
+      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      return;
+    }
     if (!r.ok) {
       bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
       if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт
@@ -527,13 +636,141 @@ async function askFallback(text, pending, bubble, isNew) {
   }
 }
 
+// Данные, которые нельзя отправлять во внешнюю модель. Правила ПОВТОРЯЮТ серверные
+// (app/core/sensitive.py) намеренно: здесь проверка мгновенная и текст вообще не покидает браузер,
+// там — обязательная, потому что клиентскую можно обойти. Оба списка видов сверяет тест.
+const SENSITIVE_RULES = [
+  { kind: "restricted", name: "пометка ограниченного доступа",
+    re: /совершенно\s+секретно|\bсекретно\b|для\s+служебного\s+пользования|\bдсп\b|коммерческ\w+\s+тайн\w+|служебн\w+\s+тайн\w+|государственн\w+\s+тайн\w+/i },
+  { kind: "passport", name: "данные паспорта", re: /паспорт\w*[^0-9]{0,20}\d{4}\s?\d{6}\b/i },
+  { kind: "snils", name: "СНИЛС", re: /\b\d{3}[\s-]?\d{3}[\s-]?\d{3}[\s-]?\d{2}\b/, check: "snils" },
+  { kind: "inn_person", name: "ИНН физического лица", re: /\b\d{12}\b/, check: "inn12" },
+  { kind: "card", name: "номер банковской карты", re: /\b(?:\d[ -]?){13,19}\b/, check: "luhn" },
+  { kind: "phone", name: "номер телефона", soft: true,
+    re: /\+7[\s\-()]*\d[\d\s\-()]{8,14}\d|\b8[\s-]*\(\d{3,5}\)[\s-]*\d[\d\s-]{4,10}\d|(?:тел|телефон|моб|звон|whats|viber|вайбер)\w*[^0-9+]{0,12}\+?[78][\d\s\-()]{9,16}\d/i },
+  { kind: "email", name: "адрес электронной почты", soft: true, re: /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/ },
+];
+
+// Контрольные суммы отделяют документ от случайного совпадения по длине: технический текст полон
+// длинных чисел, и без проверки разрядов блокировка сыпалась бы на кодах и датах.
+function digitsOnly(s) { return (s.match(/\d/g) || []).join(""); }
+function checkValue(kind, d) {
+  if (kind === "snils") {
+    if (d.length !== 11 || /^(\d)\1{8}/.test(d)) return false;
+    let sum = 0;
+    for (let i = 0; i < 9; i++) sum += Number(d[i]) * (9 - i);
+    let c = sum % 101;
+    if (c === 100 || c === 101) c = 0;
+    return c === Number(d.slice(9));
+  }
+  if (kind === "inn12") {
+    if (d.length !== 12) return false;
+    const w1 = [7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+    const w2 = [3, 7, 2, 4, 10, 3, 5, 9, 4, 6, 8];
+    const s1 = w1.reduce((a, w, i) => a + w * Number(d[i]), 0) % 11 % 10;
+    const s2 = w2.reduce((a, w, i) => a + w * Number(d[i]), 0) % 11 % 10;
+    return s1 === Number(d[10]) && s2 === Number(d[11]);
+  }
+  if (kind === "luhn") {
+    if (d.length < 13 || d.length > 19) return false;
+    let sum = 0, alt = false;
+    for (let i = d.length - 1; i >= 0; i--) {
+      let n = Number(d[i]);
+      if (alt) { n *= 2; if (n > 9) n -= 9; }
+      sum += n; alt = !alt;
+    }
+    return sum % 10 === 0;
+  }
+  return true;
+}
+
+function detectSensitive(text) {
+  const found = [];
+  SENSITIVE_RULES.forEach((rule) => {
+    const hit = { name: rule.name, soft: !!rule.soft };
+    if (!rule.check) {
+      if (rule.re.test(text)) found.push(hit);
+      return;
+    }
+    const re = new RegExp(rule.re.source, "g");
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      if (checkValue(rule.check, digitsOnly(m[0]))) { found.push(hit); break; }
+    }
+  });
+  return found;
+}
+
+function softMessage(names) {
+  const listed = names.length === 1 ? names[0]
+    : names.slice(0, -1).join(", ") + " и " + names[names.length - 1];
+  return "Похоже, в вопросе есть " + listed + ". Текст вопроса уходит во внешнюю языковую модель — " +
+         "если эти данные не нужны для ответа, лучше их убрать.";
+}
+
+function sensitiveMessage(names) {
+  if (names.length === 1 && names[0] === "пометка ограниченного доступа") {
+    return "Похоже, в вопросе есть сведения ограниченного доступа. Такие сведения нельзя передавать " +
+           "в сервис — уберите их из текста и отправьте вопрос снова.";
+  }
+  const listed = names.length === 1 ? names[0]
+    : names.slice(0, -1).join(", ") + " и " + names[names.length - 1];
+  return "Похоже, в вопросе есть " + listed + ". Сервис не передаёт персональные данные во внешнюю " +
+         "языковую модель — уберите их из текста и отправьте вопрос снова. Для ответа по ПП №719 " +
+         "достаточно наименования продукции и кода ОКПД2 или ТН ВЭД.";
+}
+
+// Полоса над полем ввода. Два режима: жёсткий — отправка не пойдёт, пока вопрос не изменят;
+// мягкий — предупреждаем и даём отправить осознанно, кнопкой в самой полосе.
+const WARN_SVG = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17"><path d="M12 8v5" stroke="currentColor" stroke-width="1.9" stroke-linecap="round"/><circle cx="12" cy="16.4" r="1.1" fill="currentColor"/><path d="M10.3 3.9L2.6 17.4A2 2 0 0 0 4.3 20.4h15.4a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>';
+
+function showInputBlock(text, onProceed) {
+  let box = document.getElementById("input-block");
+  if (!box) {
+    box = el("input-block");
+    box.id = "input-block";
+    form.parentNode.insertBefore(box, form);
+  }
+  box.className = "input-block" + (onProceed ? " soft" : "");
+  box.innerHTML = WARN_SVG + "<span></span>";
+  box.querySelector("span").textContent = text;
+  if (onProceed) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "input-block-go";
+    btn.textContent = "Отправить как есть";
+    btn.addEventListener("click", () => { hideInputBlock(); onProceed(); });
+    box.appendChild(btn);
+  }
+  box.classList.remove("hidden");
+  input.focus();
+}
+function hideInputBlock() {
+  const box = document.getElementById("input-block");
+  if (box) box.classList.add("hidden");
+}
+
 form.addEventListener("submit", (e) => {
   e.preventDefault();
   const text = input.value.trim();
   if (!text) return;
-  input.value = "";
-  input.style.height = "auto";
-  ask(text);
+  const found = detectSensitive(text);
+  const hard = found.filter((f) => !f.soft).map((f) => f.name);
+  const soft = found.filter((f) => f.soft).map((f) => f.name);
+  if (hard.length) {
+    showInputBlock(sensitiveMessage(hard));
+    return;   // вопрос остаётся в поле — его нужно отредактировать, а не потерять
+  }
+  const proceed = () => {
+    hideInputBlock();
+    input.value = "";
+    input.style.height = "auto";
+    ask(text);
+  };
+  // Телефон и почта: предупреждаем, но отправить даём — они часто нужны по делу, и жёсткая
+  // блокировка мешала бы работе чаще, чем защищала.
+  if (soft.length) { showInputBlock(softMessage(soft), proceed); return; }
+  proceed();
 });
 
 // авто-рост textarea; Enter — отправка, Shift+Enter — перенос строки
@@ -636,42 +873,164 @@ document.getElementById("fb-form").addEventListener("submit", async (e) => {
 loadConversations();
 
 // --- онбординг: попап при первом входе (localStorage) + кнопка «Как пользоваться» ---
-(function initOnboarding() {
-  const modal = document.getElementById("onboarding-modal");
-  if (!modal) return;
-  const steps = Array.from(modal.querySelectorAll(".ob-step"));
-  const dotsWrap = document.getElementById("ob-dots");
-  const prevBtn = document.getElementById("ob-prev");
-  const nextBtn = document.getElementById("ob-next");
-  const skipBtn = document.getElementById("ob-skip");
+// Онбординг-тур: затемняем экран, оставляя «окно» вокруг одной области, и объясняем её назначение.
+// Затемнение делает не отдельный оверлей, а огромная тень самого окна (box-shadow на 9999px):
+// так подсветка и затемнение — один элемент, и перемещение между шагами анимируется одним transition,
+// без рассинхрона слоёв.
+const TOUR_STEPS = [
+  { sel: "#input", title: "Спросите своими словами",
+    text: "Опишите продукцию («требования к чиллерам»), укажите код ОКПД2 или код ТН ВЭД из " +
+          "сертификата — его переведу в ОКПД2 по переходному ключу. Код даёт точную привязку к позиции." },
+  { sel: "#chat-scroll", title: "Ответ со ссылками на первоисточник", pad: 6,
+    text: "Под ответом — источники: позиция приложения, пункт Правил или Приказа №52. Числа в баллах " +
+          "и сроки проверяются автоматически, неподтверждённые помечаются. Ответ ИИ — предварительный " +
+          "ориентир: решение принимает уполномоченный эксперт ТПП." },
+  { sel: "#new-chat", title: "Новый диалог под новую тему",
+    text: "Сервис помнит контекст беседы и удерживает код, о котором идёт речь. Для другой продукции " +
+          "начните новый диалог — так контексты не смешаются." },
+  { sel: "#history", title: "История и экспорт", pad: 4,
+    text: "Диалоги сохраняются: к ним можно вернуться, найти нужный поиском, а по «⋮» — выгрузить " +
+          "или удалить. В любой выгрузке остаётся пометка о предварительном характере ответов." },
+  { sel: "#fb-open", title: "Оценка — главный способ улучшить сервис",
+    text: "Под каждым ответом есть «Оценить ответ» и «отметить ошибку». Разбор ошибок экспертами " +
+          "попадает в базу проверенных случаев, и сервис начинает отвечать верно — без дообучения модели." },
+  { sel: "#help-group", title: "Справка всегда рядом",
+    text: "Здесь — знакомство с интерфейсом, справочный центр с частыми вопросами, условия " +
+          "использования и политика конфиденциальности." },
+];
+
+// Ключ ВЕРСИОНИРОВАННЫЙ. Старый онбординг (модальные карточки) писал в localStorage
+// "onboarding719Seen", и все участники июльского теста его уже видели. Оставь мы прежнее имя —
+// обновлённый тур не показался бы ни одному из них: сервис решил бы, что знакомство уже прошло.
+// Правило на будущее: существенно поменяли тур — подняли версию ключа.
+const TOUR_SEEN_KEY = "tour719Seen_v1";
+
+(function initTour() {
+  const root = document.getElementById("tour");
+  if (!root) return;
+  const spot = document.getElementById("tour-spot");
+  const card = document.getElementById("tour-card");
+  const titleEl = document.getElementById("tour-title");
+  const textEl = document.getElementById("tour-text");
+  const stepNo = document.getElementById("tour-step-no");
+  const dotsWrap = document.getElementById("tour-dots");
+  const prevBtn = document.getElementById("tour-prev");
+  const nextBtn = document.getElementById("tour-next");
+  const skipBtn = document.getElementById("tour-skip");
+
+  let steps = [];
   let i = 0;
-  const dots = steps.map((_, k) => {
-    const d = document.createElement("span");
-    d.className = "ob-dot";
-    d.addEventListener("click", () => go(k));
-    dotsWrap.appendChild(d);
-    return d;
-  });
-  function render() {
-    steps.forEach((s, k) => s.classList.toggle("hidden", k !== i));
-    dots.forEach((d, k) => d.classList.toggle("on", k === i));
+
+  // Шаг без видимой цели пропускаем: сайдбар скрыт на узком экране, «Логи диалогов» есть только у
+  // админа — подсвечивать пустоту хуже, чем не показать шаг вовсе.
+  const visible = (s) => {
+    const t = document.querySelector(s.sel);
+    return t && t.getBoundingClientRect().width > 0 && t.getBoundingClientRect().height > 0;
+  };
+
+  // Карточка встаёт в свободную сторону от подсветки, а не в центр экрана: поле ввода живёт внизу,
+  // и центрированная карточка накрывала ровно ту область, которую подсвечивает.
+  function placeCard(r) {
+    const gap = 20;
+    const h = card.offsetHeight;
+    const vh = window.innerHeight;
+    const above = r.top - gap;                 // сколько места над подсветкой
+    const below = vh - r.bottom - gap;         // и под ней
+    let top;
+    if (above >= h) top = r.top - gap - h;             // цель внизу → карточка выше неё
+    else if (below >= h) top = r.bottom + gap;         // цель вверху → карточка ниже
+    else top = above >= below ? gap : Math.max(gap, vh - h - gap);  // не помещается — в большую часть
+    card.style.top = Math.max(gap, Math.min(top, vh - h - gap)) + "px";
+  }
+
+  function place() {
+    const step = steps[i];
+    const target = document.querySelector(step.sel);
+    if (!target) { next(); return; }
+    const r = target.getBoundingClientRect();
+    const pad = step.pad === undefined ? 8 : step.pad;
+    spot.style.top = (r.top - pad) + "px";
+    spot.style.left = (r.left - pad) + "px";
+    spot.style.width = (r.width + pad * 2) + "px";
+    spot.style.height = (r.height + pad * 2) + "px";
+    titleEl.textContent = step.title;
+    textEl.textContent = step.text;
+    stepNo.textContent = "Шаг " + (i + 1) + " из " + steps.length;
     prevBtn.style.visibility = i === 0 ? "hidden" : "visible";
-    nextBtn.textContent = i === steps.length - 1 ? "Начать работу" : "Далее";
+    nextBtn.textContent = i === steps.length - 1 ? "Понятно" : "Далее";
+    Array.from(dotsWrap.children).forEach((d, k) => d.classList.toggle("on", k === i));
+    card.classList.remove("swap");
+    void card.offsetWidth;   // рестарт анимации появления текста
+    card.classList.add("swap");
+    placeCard(r);
   }
-  function go(k) { i = Math.max(0, Math.min(steps.length - 1, k)); render(); }
-  function open() { go(0); modal.classList.remove("hidden"); }
+
+  function go(k) { i = Math.max(0, Math.min(steps.length - 1, k)); place(); }
+  function next() { if (i >= steps.length - 1) close(); else go(i + 1); }
+
+  function open() {
+    steps = TOUR_STEPS.filter(visible);
+    if (!steps.length) return;
+    dotsWrap.innerHTML = "";
+    steps.forEach((_, k) => {
+      const d = document.createElement("span");
+      d.className = "tour-dot";
+      d.addEventListener("click", () => go(k));
+      dotsWrap.appendChild(d);
+    });
+    i = 0;
+    root.classList.remove("hidden");
+    root.setAttribute("aria-hidden", "false");
+    document.body.classList.add("tour-on");
+    place();
+    nextBtn.focus();
+  }
+
   function close() {
-    modal.classList.add("hidden");
-    try { localStorage.setItem("onboarding719Seen", "1"); } catch (e) {}
+    root.classList.add("hidden");
+    root.setAttribute("aria-hidden", "true");
+    document.body.classList.remove("tour-on");
+    try { localStorage.setItem(TOUR_SEEN_KEY, "1"); } catch (e) {}
   }
+
   prevBtn.addEventListener("click", () => go(i - 1));
-  nextBtn.addEventListener("click", () => { if (i === steps.length - 1) close(); else go(i + 1); });
+  nextBtn.addEventListener("click", next);
   if (skipBtn) skipBtn.addEventListener("click", close);
+  document.addEventListener("keydown", (e) => {
+    if (root.classList.contains("hidden")) return;
+    if (e.key === "Escape") close();
+    if (e.key === "ArrowRight") next();
+    if (e.key === "ArrowLeft") go(i - 1);
+  });
+  // окно меняет размер / страница скроллится — подсветка обязана оставаться на цели
+  const follow = () => { if (!root.classList.contains("hidden")) place(); };
+  window.addEventListener("resize", follow);
+  window.addEventListener("scroll", follow, true);
+
   const openBtn = document.getElementById("ob-open");
   if (openBtn) openBtn.addEventListener("click", open);
+
   let seen = false;
-  try { seen = localStorage.getItem("onboarding719Seen") === "1"; } catch (e) {}
-  if (!seen) open();
+  try { seen = localStorage.getItem(TOUR_SEEN_KEY) === "1"; } catch (e) {}
+  if (!seen) setTimeout(open, 400);  // даём интерфейсу отрисоваться, иначе позиции «прыгают»
+})();
+
+// Меню «Справка» в сайдбаре. Раскрытие по наведению делает CSS; здесь — клик и клавиатура:
+// на тач-экране hover не существует, и без этого до пунктов нельзя добраться вовсе.
+(function initHelpMenu() {
+  const group = document.getElementById("help-group");
+  const toggle = document.getElementById("help-toggle");
+  if (!group || !toggle) return;
+  const set = (on) => {
+    group.classList.toggle("open", on);
+    toggle.setAttribute("aria-expanded", on ? "true" : "false");
+  };
+  toggle.addEventListener("click", (e) => {
+    e.stopPropagation();
+    set(!group.classList.contains("open"));
+  });
+  document.addEventListener("click", (e) => { if (!group.contains(e.target)) set(false); });
+  group.addEventListener("keydown", (e) => { if (e.key === "Escape") { set(false); toggle.focus(); } });
 })();
 
 // Мобильная «шторка»-сайдбар: гамбургер открывает, бэкдроп / переход по пункту — закрывает.

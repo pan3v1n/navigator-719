@@ -1,6 +1,7 @@
 """RAG-пайплайн навигатора: запрос → гибрид-поиск → контекст → DeepSeek → ответ.
 
-Ответ всегда снабжён обязательной пометкой (AI — черновик, вердикт за экспертом ТПП).
+Пометка «ИИ — черновик, вердикт за экспертом ТПП» в ТЕЛО ответа не добавляется (решение R3):
+в интерфейсе она висит постоянной строкой, а маркируется каждая ВЫГРУЗКА диалогов.
 Запуск как смоук (нужен поднятый Qdrant с коллекцией и DEEPSEEK_API_KEY в .env):
   .venv/Scripts/python.exe -m app.rag.pipeline "производим прицепы для легковых авто" 29.20.23
 """
@@ -10,16 +11,17 @@ from __future__ import annotations
 import re
 import sys
 from dataclasses import dataclass, field
+from functools import lru_cache
 
 from app.core.config import settings
 from app.core.prompts import (
-    EXPERT_DISCLAIMER,
     NAVIGATOR_SYSTEM_PROMPT,
     PROCEDURAL_SYSTEM_PROMPT,
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import okpd2_ref, sparse
+from app.rag import fragments, inheritance, okpd2_ref, sparse
+from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
 
@@ -32,7 +34,6 @@ from app.rag.thresholds import lookup_threshold
 # лечится parent/child auto-merge — отложено в 2.0.
 MAX_OPS_TARGET = 60
 MAX_OPS_OTHER = 12
-MAX_OPS_PER_HIT = MAX_OPS_TARGET  # обратная совместимость (test_rag / eval_truncation берут как дефолт)
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
 RULES_TOP_K = 6  # сколько пунктов Правил реестра тянуть для процедурного ответа (проза → синтез из нескольких)
 # Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
@@ -56,18 +57,103 @@ class Answer:
     rule_sources: list[dict] = field(default_factory=list)
 
 
-def _hit_operations(h: Hit) -> list[dict]:
-    """Плоский список операций хита (из всех requirement_blocks)."""
+# Условие блока (`note`) — норма, а не комментарий, поэтому режем его щедро и только по границе
+# предложения. 600 символов покрывают 493 из 503 условий корпуса; кандидатам (не целевому хиту)
+# хватает 200 — там задача лишь показать, что условие есть.
+NOTE_CAP_TARGET = 600
+NOTE_CAP_OTHER = 200
+
+
+def _clip_note(note: str, limit: int) -> str:
+    """Обрезает условие блока по границе предложения и ГОВОРИТ об усечении.
+
+    Молча обрезанное условие опаснее показанного не полностью: «до 1 января 2024 г. - не менее 510
+    баллов, с 1 января 2024 г. - не менее 780» после тихого реза превращается в один порог, и это
+    ровно тот класс «правдоподобно, но неверно», ради которого заведена D9."""
+    note = " ".join(note.split())
+    if len(note) <= limit:
+        return note
+    cut = max(note.rfind("; ", 0, limit), note.rfind(". ", 0, limit))
+    if cut < limit // 2:  # подходящей границы нет — режем по лимиту, чем терять условие целиком
+        cut = limit
+    return (note[:cut].rstrip(" ;.")
+            + " … (условие показано не полностью — полный текст в первоисточнике)")
+
+
+def _block_intro(component: str, note: str, note_cap: int) -> str | None:
+    """Вводная строка блока: узел/вводная фраза + условие, при котором блок читается.
+
+    Условие приклеиваем к вводной, а не выводим отдельной строкой, чтобы порог узла нельзя было
+    прочитать как порог всей позиции: он стоит вплотную к названию узла, к которому относится."""
+    note = _clip_note(note, note_cap) if note else ""
+    if component and note:
+        return f"{component} — {note}"
+    return component or note or None
+
+
+def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET) -> list[dict]:
+    """Плоский список требований хита в порядке первоисточника (из всех requirement_blocks).
+
+    R6: блок БЕЗ `operations`, но с текстом в `component` — это ТРЕБОВАНИЕ, а не заголовок узла.
+    По схеме парсера `component` = «название компонента/узла ИЛИ ОПЕРАЦИИ ВЕРХНЕГО УРОВНЯ»: когда
+    операций в блоке нет, весь смысл лежит именно там. Раньше такие блоки не показывались вообще —
+    из контекста молча выпадало 56 449 символов требований по 84 позициям, причём у 77 из них есть
+    другие операции, поэтому потеря была незаметна ни в ответе, ни в метриках.
+
+    Класс потерянного — ровно тот, на который жаловались эксперты (отчёт за июль, «обязательные
+    требования не показаны»): права на конструкторскую/техническую документацию, наличие сервисного
+    центра, регистрационное удостоверение. Проверено на корпусе: все 168 таких блоков несут
+    полноценный текст требования (ни одной висячей вводной фразы, ни одного дубля существующей
+    операции, ни одного короткого ярлыка), поэтому правило безусловное.
+
+    Баллы им НЕ приписываем (`points=None`) — промпт выведет их в блок «Обязательные требования
+    (без балльной оценки)», как и положено требованию без балльной оценки.
+
+    D9: поле `note` блока до 14.08.2026 не читалось ВООБЩЕ — ни здесь, ни где-либо ещё в рантайме,
+    хотя `load_kb` кладёт запись в payload целиком. А там лежит условие, при котором блок читается:
+    503 блока у 259 позиций (19 % корпуса), из них 305 — рядом с балльными операциями, где условие
+    прямо меняет прочтение баллов. Внутри: пороги отдельных узлов изделия («криогенный насос низкого
+    давления — не менее 100 баллов»), пометки «обязательное требование» (54), правила начисления
+    («при неприменении компонента баллы за него не начисляются»), периоды действия.
+
+    Хуже всего был случай «Оборудование для многостадийного ГРП»: девять узлов, у каждого свой порог
+    по годам, а `min_threshold` записи — null. Пользователь видел баллы вообще без порога. В список
+    D9 позиция не попала, потому что `verify_structured` сверяет ЗАПИСЬ, а числа в записи есть —
+    слепая зона проверки ровно там же, где слепая зона рантайма."""
     ops: list[dict] = []
     for b in h.requirement_blocks:
-        ops.extend(b.get("operations") or [])
+        block_ops = b.get("operations") or []
+        comp = (b.get("component") or "").strip()
+        note = (b.get("note") or "").strip()
+        if block_ops:
+            # K4: вводная фраза блока — ЧАСТЬ требования, а не украшение, и до 12.08.2026 она
+            # молча терялась: `ops.extend(block_ops)` брал только подпункты. А формулируется
+            # требование именно в ней — «ОСУЩЕСТВЛЕНИЕ НА ТЕРРИТОРИИ РОССИЙСКОЙ ФЕДЕРАЦИИ
+            # следующих технологических операций: …». Из 3959 блоков корпуса вводную имеют
+            # 3733 (94 %), и у 484 из них она называет территорию — это ровно претензия
+            # июльского теста «отсутствует отсылка на обязательность осуществления операций
+            # на территории РФ» (15 упоминаний). Без вводной ответ показывает подпункты, не
+            # говоря, ЧАСТЬЮ ЧЕГО они являются.
+            #
+            # Дубли отсекаем: у 8.3 % блоков вводная дословно повторяет одну из своих операций —
+            # там она не добавляет смысла, только шум.
+            dup = comp and any(
+                comp.lower() == (o.get("text") or "").strip().lower() for o in block_ops)
+            parent = _block_intro(comp if not dup else "", note, note_cap)
+            for o in block_ops:
+                ops.append({**o, "_parent": parent} if parent else o)
+            continue
+        # Блок без операций: весь смысл в `component`, а условие уточняет, как его читать.
+        text = _block_intro(comp, note, note_cap)
+        if text:
+            ops.append({"text": text, "points": None})
     return ops
 
 
 def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     """Переставляет операции так, чтобы релевантные запросу шли первыми.
 
-    Нужно для мега-продуктов (сотни операций): усечение до MAX_OPS_PER_HIT иначе режет
+    Нужно для мега-продуктов (сотни операций): усечение до MAX_OPS_TARGET иначе режет
     нужное, оставляя первые попавшиеся. Скоринг — пересечение стем-токенов операции и
     запроса (локальный токенизатор BM25, без сети/модели). Сортировка стабильна: при
     равной релевантности исходный порядок сохраняется. Без запроса/совпадений — без изменений."""
@@ -95,25 +181,69 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         # (thresholds.py; напр. Чиллеры разд.XVI прим.77). Числа дословны → заземлены для гарда.
         mt = h.min_threshold or (lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
                                  if is_target else None)
+        ops = _hit_operations(h, NOTE_CAP_TARGET if is_target else NOTE_CAP_OTHER)
+        # R6 шаг 3: своих требований нет → показываем требования ГРУППЫ с явной атрибуцией.
+        # Подмены не происходит: строка-атрибуция называет позицию-источник, а промпт обязан
+        # это воспроизвести. Баллы не суммируем — это решает эксперт по первоисточнику.
+        parent = None if ops else inheritance.lookup(h.section_roman, h.product_name)
+        attribution_line = None
+        if parent:
+            attribution_line = "    " + inheritance.attribution(parent)
+            ops = list(parent.get("operations") or [])
+            if parent.get("min_threshold") and not mt:
+                mt = (f"{parent['min_threshold']} — порог ГРУППЫ, указан у позиции "
+                      f"«{parent.get('product_name', '')}»")
+        # R7: различаем «порог не нашли» и «порога НЕТ в 719». Если требования позиции — перечень
+        # обязательных операций без баллов (модель «operations»), то порога не существует, и молчание
+        # заставляло модель писать «в контексте не указан» — читается как пробел в данных и было
+        # жалобой №1 теста. Утверждаем это только при ДВУХ согласных признаках: ни у одной операции
+        # нет баллов И тип требований не балльный. При «points»/«mixed» без баллов молчим — там
+        # возможна потеря при разборе, и выдумывать «порога нет» нельзя.
+        rtype = (h.payload or {}).get("requirement_type")
         if mt:
             lines.append(f"    Порог: {mt}")
-        ops = _hit_operations(h)
+        elif ops and not any(o.get("points") is not None for o in ops) and rtype in (None, "operations"):
+            lines.append("    Порог: не предусмотрен — требования этой позиции заданы ПЕРЕЧНЕМ "
+                         "обязательных операций, баллы за них не начисляются.")
+        if attribution_line:
+            lines.append(attribution_line)
         total = len(ops)
         if total > cap:
             ops = _rank_operations(ops, query)
         shown = ops[:cap]
         if shown:
-            lines.append("    Ключевые операции:")
+            lines.append("    Ключевые операции группы:" if parent else "    Ключевые операции:")
+            cur_parent = None
             for o in shown:
+                # K4: вводная фраза блока печатается при смене группы — операции перестают
+                # висеть без указания, частью какого требования они являются. При усечении
+                # список пересортирован по релевантности, и заголовок может повториться —
+                # это лучше, чем оставить операцию без её условия.
+                op_parent = o.get("_parent")
+                if op_parent and op_parent != cur_parent:
+                    lines.append(f"      ▸ {op_parent}")
+                cur_parent = op_parent
                 pts = o.get("points")
                 ptxt = f" — {pts} балл." if pts is not None else " — баллы в контексте не указаны"
-                lines.append(f"      • {o.get('text', '')}{ptxt}")
+                indent = "        " if op_parent else "      "
+                lines.append(f"{indent}• {o.get('text', '')}{ptxt}")
             if total > cap:
                 rel = " (показаны наиболее релевантные запросу)" if query else ""
                 lines.append(
                     f"      СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
                     f"{rel}; полный перечень требований и баллов — в первоисточнике ПП №719 (этот раздел)."
                 )
+        # R29: у позиции требования заведомо неполны — общая ячейка группы расколота при конвертации
+        # таблицы, и здесь лежит лишь её обрывок. Помечаем ВСЕГДА (даже когда операций мало и кап не
+        # сработал): иначе фрагмент выглядит как полный перечень. Маркер тот же, что выше, — правило
+        # 2а промпта заставит модель предупредить эксперта и не считать, наберётся ли порог.
+        if fragments.is_fragmented(h.product_name):
+            lines.append("      " + fragments.NOTICE)
+        # D9: у позиции в законе несколько порогов (по узлам изделия или видам работ), а в записи
+        # поместился один. Показанный порог выглядит порогом всего изделия, и недобор по узлу
+        # проходит незамеченным — пометка обязательна, пока схема не научится хранить их все.
+        if fragments.has_incomplete_thresholds(h.section_roman, h.product_name):
+            lines.append("      " + fragments.THRESHOLD_NOTICE)
         if h.source_anchor:
             lines.append(f"    Источник: {h.source_anchor}")
         blocks.append("\n".join(lines))
@@ -133,6 +263,11 @@ def format_cases(cases: list[dict]) -> str:
 
 
 RULES_TEXT_CAP = 1400  # символов на пункт Правил в контексте (длинные усекаем, помечая)
+# Пункт с перечнем документов (P2) — исключение из капа: перечень стоит В КОНЦЕ пункта, и общий
+# кап оставлял от п. 4.1 (3844 знака) одну вводную фразу. Ответ на самый частый вопрос июля
+# («какие документы готовить», 31 упоминание) снова превращался в отсылку «см. раздел 4».
+# Расширенный кап действует ТОЛЬКО на пункты, добранные под этот вопрос (не более двух).
+RULES_TEXT_CAP_DOC_LIST = 4000
 
 
 def format_rules_context(rules: list[dict]) -> str:
@@ -149,27 +284,43 @@ def format_rules_context(rules: list[dict]) -> str:
             sect = r.get("section_title") or r.get("section_roman") or ""
             head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
         text = (r.get("text") or "").strip()
-        if len(text) > RULES_TEXT_CAP:
-            text = text[:RULES_TEXT_CAP].rstrip() + " …(пункт приведён не полностью; полный текст — в первоисточнике)"
+        cap = RULES_TEXT_CAP_DOC_LIST if r.get("_doc_list") else RULES_TEXT_CAP
+        if len(text) > cap:
+            text = text[:cap].rstrip() + " …(пункт приведён не полностью; полный текст — в первоисточнике)"
+        # Вводная фраза родительского пункта (P2): без неё «4.2.1. Правоустанавливающие и
+        # регистрационные документы заявителя…» — список неизвестно к чему. То же правило, что
+        # K4 применила к требованиям приложения.
+        intro = (r.get("parent_intro") or "").strip()
+        if intro and intro not in text:
+            text = f"(в контексте пункта: {intro})\n{text}"
         blocks.append(head + "\n" + text)
     return "\n\n".join(blocks)
 
 
+@lru_cache(maxsize=1)
 def _client():
+    """Клиент DeepSeek, ОДИН на процесс (R15).
+
+    Раньше функция строила новый OpenAI() на каждый вызов — а вызовов на один вопрос до трёх
+    (контекстуализация follow-up → реранкер → генерация). Каждый новый клиент = новый httpx-пул,
+    то есть заново TCP+TLS к api.deepseek.com. На рваной сети с DPI (заявленное ограничение
+    проекта) это ровно то, что рвётся первым. Кэш даёт переиспользование keep-alive соединений.
+
+    Кэшируем сам клиент, а не результат запроса — он потокобезопасен (FastAPI гонит sync-эндпоинты
+    в threadpool). Исключение при пустом ключе lru_cache НЕ кэширует → после правки .env и
+    перезапуска всё поднимется; в тестах сбрасывается через `_client.cache_clear()`.
+    """
     from openai import OpenAI
 
     if not settings.DEEPSEEK_API_KEY:
         raise RuntimeError("DEEPSEEK_API_KEY пуст — заполни .env")
     # timeout+ретраи: без них openai-дефолт 600с×2 → на рваной РФ-сети зависший запрос держит поток
-    # ~10 мин, эксперт смотрит в спиннер. Покрывает генерацию и контекстуализацию (реранкер — свой клиент).
+    # ~10 мин, эксперт смотрит в спиннер. Дефолт 30с покрывает генерацию и контекстуализацию;
+    # реранкер берёт ЭТОТ ЖЕ клиент, но передаёт свой per-request timeout=20с.
     return OpenAI(
         api_key=settings.DEEPSEEK_API_KEY, base_url=settings.DEEPSEEK_BASE_URL,
         timeout=30.0, max_retries=1,
     )
-
-
-def _ensure_disclaimer(text: str) -> str:
-    return text if EXPERT_DISCLAIMER in text else text.rstrip() + "\n\n" + EXPERT_DISCLAIMER
 
 
 # --- Faithfulness-постпроверка (P0 анти-галлюцинаций) ------------------------------
@@ -336,15 +487,17 @@ def _answer_procedural(query: str, search_query: str,
                        history: list[dict] | None = None) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
 
-    Фолбэк: если корпус выключен / коллекции нет / ничего не нашлось — ЧЕСТНЫЙ ДЕФЕР
-    (procedural.DEFLECTION): порядок действий и сроки НЕ выдумываем. Иначе генерируем grounded-ответ
-    по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ (unverified_deadlines)."""
+    Фолбэк: порядок действий и сроки НЕ выдумываем ни при каких условиях. Две причины —
+    два РАЗНЫХ честных сообщения (R4): выключено настройкой → `DEFLECTION_DISABLED` (повтор не
+    поможет), корпус недоступен/пуст → `DEFLECTION` (предложить повторить). Иначе генерируем
+    grounded-ответ по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ
+    (unverified_deadlines)."""
     from app.rag import procedural
 
     if not settings.PROCEDURAL_ANSWER_FROM_RULES:
-        return Answer(text=procedural.DEFLECTION, hits=[])
+        return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
     rules = search_rules(search_query, limit=RULES_TOP_K)
-    if not rules:  # коллекции нет / пусто → честный дефер, а не выдумка процедуры
+    if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
         return Answer(text=procedural.DEFLECTION, hits=[])
 
     ctx = format_rules_context(rules)
@@ -382,6 +535,17 @@ class _Plan:
     hits: list[Hit]
     cases: list[dict]
     low_relevance: bool
+
+
+def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
+    """(код ТН ВЭД из запроса, его ОКПД2 по переходным ключам) либо None, если кода нет.
+
+    ПУСТОЙ список — тоже результат, а не «ничего не нашли»: код дан, но соответствия в ключе нет.
+    Раньше в этом случае механизм молча выключался — позиции подбирались по наименованию, а
+    пользователь считал, что ответ дан по его коду. Прямой путь перевода (`translate`) о таком
+    говорит честно, товарный молчал."""
+    tn = okpd2_ref.extract_tnved(query)
+    return (tn, okpd2_ref.tnved_to_okpd2(tn)) if tn else None
 
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
@@ -433,22 +597,21 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
 
     # T9: код ТН ВЭД в запросе (из сертификата/декларации) → перевод в ОКПД2 по переходным ключам,
     # затем обычный поиск/проверка в приложении 719. Только если своего кода ОКПД2 нет.
-    tnved = None
-    if effective_okpd2 is None:
-        tn = okpd2_ref.extract_tnved(query)
-        if tn:
-            tn_okpd2 = okpd2_ref.tnved_to_okpd2(tn)
-            if tn_okpd2:
-                effective_okpd2 = tn_okpd2[0]  # первый — для иерархического буста ретрива
-                tnved = (tn, tn_okpd2)
+    tnved = _resolve_tnved(query) if effective_okpd2 is None else None
+    if tnved and tnved[1]:
+        effective_okpd2 = tnved[1][0]  # первый — для иерархического буста ретрива
 
-    hits = search(search_query, okpd2=effective_okpd2, limit=limit)
+    # R16: dense-вектор запроса считаем ОДИН раз и переиспользуем во всех обращениях к Qdrant
+    # (позиции → подстраховка по коду → кейсы → out-of-scope guard). Раньше e5-large прогонялся
+    # на один вопрос 3–4 раза подряд по одному и тому же тексту: на 2 vCPU это сотни мс впустую.
+    qvec = embed_query(search_query)
+    hits = search(search_query, okpd2=effective_okpd2, limit=limit, qvec=qvec)
     # Реранкер (стадия 2): переупорядочивает top-k через DeepSeek, но ТОЛЬКО при отсутствии
     # совпадения по коду ОКПД2 (код авторитетнее). Поднял recall@1 0.95→0.98 без регресса.
     if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
         from app.rag.reranker import rerank
         hits = rerank(search_query, hits)
-    cases = search_cases(search_query, limit=MAX_CASES)  # подтверждённые экспертом — высший приоритет
+    cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "
@@ -458,10 +621,17 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
 
     # Out-of-scope guard: совпадение по коду ОКПД2 или подтверждённый кейс = высокая
     # уверенность, флаг не поднимаем. Иначе смотрим dense top-1 (один лёгкий запрос).
+    #
+    # R30: `not cases` снова означает то, что здесь подразумевалось. Раньше `search_cases`
+    # возвращала top-3 БЕЗ порога — кейс находился на любой запрос, включая заведомо
+    # посторонние, и гасил этот гард. Два предохранителя выключали друг друга: нерелевантный
+    # кейс и подмешивался в контекст с высшим приоритетом, и снимал флаг «похоже, вне сферы».
+    # Теперь кейс проходит отсечку по dense-косинусу (`CASE_RELEVANCE_MIN`), поэтому сам факт
+    # его наличия — уже сигнал уверенности, и подавление флага здесь корректно.
     low_rel = (
         not cases
         and not any(h.okpd2_match for h in hits)
-        and dense_top1(search_query) < RELEVANCE_SOFT
+        and dense_top1(search_query, qvec) < RELEVANCE_SOFT  # R16: тот же вектор, без пере-эмбеддинга
     )
 
     # T9: поиск по наименованию без уверенного совпадения (вероятно вне приложения 719) → подсказка

@@ -85,6 +85,12 @@ def log_message(
     return m
 
 
+def get_message(db: Session, message_id: int) -> Message | None:
+    """Реплика по id — для проверки владельца перед сохранением оценки (см. web.submit_feedback).
+    Без этой проверки любой залогиненный мог оценить ЧУЖОЙ ответ, и оценка попадала в приёмку."""
+    return db.get(Message, message_id)
+
+
 def get_messages_for_user(db: Session, user_id: int) -> list[Message]:
     return list(
         db.execute(
@@ -99,14 +105,37 @@ def get_all_messages(db: Session) -> list[Message]:
 
 def get_user_sessions(db: Session, user_id: int) -> list[dict]:
     """Беседы пользователя для сайдбара: [{session_id, title, ts}], новые сверху.
-    Заголовок = первое сообщение эксперта в беседе."""
-    sessions: dict[str, dict] = {}
-    for m in get_messages_for_user(db, user_id):  # по возрастанию ts
-        s = sessions.setdefault(m.session_id, {"session_id": m.session_id, "title": None, "ts": m.ts})
-        if s["title"] is None and m.role == "user":
-            s["title"] = m.content
-        s["ts"] = m.ts  # последняя реплика (проход по возрастанию → остаётся максимум)
-    return sorted(sessions.values(), key=lambda s: s["ts"], reverse=True)
+    Заголовок = первое сообщение эксперта в беседе.
+
+    R24: раньше функция поднимала В ПАМЯТЬ ВСЕ реплики пользователя — включая полные тексты
+    ОТВЕТОВ, которые тут не нужны вовсе и составляют основной объём. И вызывается она на каждом
+    открытии чата. Теперь: время последней активности — агрегатом в SQL (тексты не передаются),
+    заголовки — только из реплик `user`."""
+    from sqlalchemy import func
+
+    last_ts = {
+        sid: ts
+        for sid, ts in db.execute(
+            select(Message.session_id, func.max(Message.ts))
+            .where(Message.user_id == user_id)
+            .group_by(Message.session_id)
+        )
+    }
+    # Идём от НОВЫХ к старым и перезаписываем — в итоге останется первый вопрос беседы
+    # (та же семантика, что у прежнего прохода по возрастанию с «первым непустым»).
+    titles: dict[str, str] = {}
+    for sid, content in db.execute(
+        select(Message.session_id, Message.content)
+        .where(Message.user_id == user_id, Message.role == "user")
+        .order_by(Message.ts.desc(), Message.id.desc())
+    ):
+        titles[sid] = content
+
+    sessions = [
+        {"session_id": sid, "title": titles.get(sid), "ts": ts}
+        for sid, ts in last_ts.items()
+    ]
+    return sorted(sessions, key=lambda s: (s["ts"] is not None, s["ts"]), reverse=True)
 
 
 def get_session_messages(db: Session, user_id: int, session_id: str) -> list[Message]:
@@ -120,16 +149,37 @@ def get_session_messages(db: Session, user_id: int, session_id: str) -> list[Mes
     )
 
 
-def delete_session(db: Session, user_id: int, session_id: str) -> int:
-    """Удаляет беседу пользователя (все её реплики). Фильтр по user_id — чужое не тронуть.
-    Возвращает число удалённых реплик."""
-    from sqlalchemy import delete as _delete
+def delete_session(db: Session, user_id: int, session_id: str) -> tuple[int, int]:
+    """Удаляет беседу пользователя: её реплики И привязанную к ним обратную связь.
 
+    Оценки удаляем ВМЕСТЕ с репликами (R2). Раньше уходили только `Message`, а строки `Feedback`
+    оставались висеть на несуществующем `message_id` — и продолжали учитываться в приёмочной
+    метрике (гейт 1.0), при том что вопрос и ответ в скоркарте были пустые. То есть пользователь,
+    удаляя свой чат, тихо искажал главную метрику проекта.
+
+    Фильтр по `user_id` везде — чужое не тронуть. Всё в одной транзакции.
+    Возвращает (удалено реплик, удалено записей обратной связи)."""
+    from sqlalchemy import delete as _delete, or_
+
+    msg_ids = list(
+        db.execute(
+            select(Message.id).where(
+                Message.user_id == user_id, Message.session_id == session_id
+            )
+        ).scalars()
+    )
+    # Оценка привязана к беседе (session_id) ИЛИ к конкретной реплике (message_id) — чистим оба следа.
+    fb_where = [Feedback.session_id == session_id]
+    if msg_ids:
+        fb_where.append(Feedback.message_id.in_(msg_ids))
+    fb_res = db.execute(
+        _delete(Feedback).where(Feedback.user_id == user_id, or_(*fb_where))
+    )
     res = db.execute(
         _delete(Message).where(Message.user_id == user_id, Message.session_id == session_id)
     )
     db.commit()
-    return res.rowcount or 0
+    return res.rowcount or 0, fb_res.rowcount or 0
 
 
 # --- feedback ------------------------------------------------------------

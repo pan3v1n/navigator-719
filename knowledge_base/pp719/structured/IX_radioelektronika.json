@@ -7305,23 +7305,6 @@
   {
     "section_roman": "IX",
     "section_title": "Продукция радиоэлектроники <5>",
-    "product_name": "Продукция радиоэлектроники",
-    "okpd2_codes": [
-      "26.51.20.121"
-    ],
-    "tnved_codes": [],
-    "requirement_type": "points",
-    "min_threshold": null,
-    "requirement_blocks": [],
-    "amendments": [
-      "(в ред. Постановления Правительства РФ от 16.03.2024 N 317)"
-    ],
-    "source_anchor": "Приложение к ПП №719, Раздел IX, позиция 75",
-    "notes": null
-  },
-  {
-    "section_roman": "IX",
-    "section_title": "Продукция радиоэлектроники <5>",
     "product_name": "Приборы автоматические регулирующие и контрольно измерительные прочие",
     "okpd2_codes": [
       "26.51.70.190"

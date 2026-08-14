@@ -1,0 +1,30 @@
+{# Базовый макет правовых и справочных страниц (Условия, Политика, Справочный центр).
+   Публичные: открываются без входа — их читают ДО того, как согласиться. #}
+{% extends "base.html" %}
+{% block title %}{{ page_title }} — {{ app_title }}{% endblock %}
+{% block body %}
+<div class="doc-wrap">
+  <header class="doc-head">
+    <a class="doc-logo" href="{{ '/chat' if user else '/login' }}" title="К сервису">719</a>
+    <nav class="doc-nav">
+      <a href="/terms" {% if active == 'terms' %}class="on"{% endif %}>Условия использования</a>
+      <a href="/privacy" {% if active == 'privacy' %}class="on"{% endif %}>Политика конфиденциальности</a>
+      <a href="/help" {% if active == 'help' %}class="on"{% endif %}>Справочный центр</a>
+    </nav>
+    <a class="doc-back" href="{{ '/chat' if user else '/login' }}">{{ 'К чату' if user else 'Войти' }}</a>
+  </header>
+
+  <main class="doc-body">
+    <h1>{{ page_title }}</h1>
+    {% if updated %}<p class="doc-meta">Редакция от {{ updated }} · оператор — {{ org }}</p>{% endif %}
+    {% block doc %}{% endblock %}
+  </main>
+
+  <footer class="doc-foot">
+    <span>{{ app_title }} · {{ org }}</span>
+    <span class="doc-foot-links">
+      <a href="/terms">Условия</a> · <a href="/privacy">Конфиденциальность</a> · <a href="/help">Справка</a>
+    </span>
+  </footer>
+</div>
+{% endblock %}

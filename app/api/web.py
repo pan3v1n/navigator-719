@@ -22,13 +22,16 @@ from app.api.auth import (
     login_session,
     logout_session,
     needs_profile,
-    require_user,
+    require_admin,
     require_user_profiled,
     set_remember_cookie,
 )
 from app.api.admin_stats import build_admin_view, system_health
+from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
+from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
+from app.rag.edition import corpus_edition, corpus_line
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -41,7 +44,10 @@ templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " "
 
 
 def _ctx(request: Request, **kw) -> dict:
-    return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME, **kw}
+    # E1: редакция корпуса — во ВСЕ страницы. Выводится из самого текста постановления
+    # (app/rag/edition.py), поэтому не может разойтись с базой молча.
+    return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
+            "corpus_edition": corpus_edition(), **kw}
 
 
 def _parse_date(s: str):
@@ -82,14 +88,67 @@ def login_page(request: Request):
     return templates.TemplateResponse("login.html", _ctx(request, error=None))
 
 
+# --------------------------------------------------------------------------- #
+# Правовые и справочные страницы
+#
+# ПУБЛИЧНЫЕ, без входа: их читают ДО того, как согласиться. Политику конфиденциальности,
+# спрятанную за авторизацией, невозможно прочитать перед тем, как дать согласие в профиле, —
+# а согласие даётся именно на её условиях. Дата редакции задаётся здесь и показывается на
+# странице: молча меняющийся правовой документ хуже отсутствующего.
+# --------------------------------------------------------------------------- #
+DOCS_UPDATED = "13.08.2026"
+
+
+def _doc(request: Request, template: str, page_title: str, active: str) -> HTMLResponse:
+    return templates.TemplateResponse(template, _ctx(
+        request, page_title=page_title, active=active, updated=DOCS_UPDATED,
+        user=current_user(request)))
+
+
+@router.get("/terms", response_class=HTMLResponse)
+def terms_page(request: Request):
+    return _doc(request, "terms.html", "Условия использования", "terms")
+
+
+@router.get("/privacy", response_class=HTMLResponse)
+def privacy_page(request: Request):
+    return _doc(request, "privacy.html", "Политика конфиденциальности", "privacy")
+
+
+@router.get("/help", response_class=HTMLResponse)
+def help_page(request: Request):
+    return _doc(request, "help.html", "Справочный центр", "help")
+
+
+# R12: троттлинг входа по IP. bcrypt замедляет перебор, но не останавливает его, а пароли у нас
+# 8-символьные и розданы людям. Ключ — адрес клиента; ⚠ когда перед приложением встанет обратный
+# прокси (R11, TLS), сюда попадёт адрес прокси — тогда брать X-Forwarded-For.
+_login_limit = SlidingWindow(settings.RATE_LIMIT_LOGIN_PER_MIN, window=60.0)
+
+
+def _client_ip(request: Request) -> str:
+    return (request.client.host if request.client else "") or "unknown"
+
+
 @router.post("/login", response_class=HTMLResponse)
 def login_submit(request: Request, username: str = Form(...), password: str = Form(...),
                  remember: str = Form(default="")):
+    ip = _client_ip(request)
+    if not _login_limit.check(f"login:{ip}"):
+        retry = _login_limit.retry_after(f"login:{ip}")
+        return templates.TemplateResponse(
+            "login.html",
+            _ctx(request, error=f"Слишком много попыток входа. Повторите через {retry} с."),
+            status_code=429, headers={"Retry-After": str(retry)},
+        )
     user = authenticate(username.strip(), password)
     if not user:
         return templates.TemplateResponse(
             "login.html", _ctx(request, error="Неверный логин или пароль"), status_code=401
         )
+    # Успешный вход снимает счётчик: человек, вспомнивший пароль с 9-й попытки, не должен
+    # оставаться под лимитом — он бьёт по перебору, а не по забывчивости.
+    _login_limit.reset(f"login:{ip}")
     login_session(request, user)
     resp = RedirectResponse("/", status_code=302)
     if remember:  # «Запомнить меня» → персистентный cookie автовхода
@@ -177,15 +236,19 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
 
 
 @router.get("/api/admin/export")
-def admin_export(request: Request, fmt: str = "json", date_from: str = "", date_to: str = "",
-                 region: str = "", role: str = "") -> Response:
+def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
+                 region: str = "", role: str = "",
+                 admin: User = Depends(require_admin)) -> Response:
     """Выгрузка данных панели (только admin). Учитывает те же фильтры, что и /admin.
     fmt=csv — скоркард: одна строка на оценённый ответ (для Excel, разделитель «;», BOM для кириллицы);
     fmt=json — полная структура (скоркард + разбивки по регионам/пользователям + все оценки + исправления).
-    Заменяет ручной SSH-дамп таблиц с VM."""
-    user = current_user(request)
-    if not user or user.role != "admin":
-        raise HTTPException(status_code=403, detail="Доступ только для admin")
+    Заменяет ручной SSH-дамп таблиц с VM.
+
+    R27: проверка роли — через зависимость `require_admin`, а не ручным `if` в теле. Хелпер
+    существовал с самого начала и не использовался нигде, хотя ROADMAP заявлял его как часть
+    ролевого гейтинга; ручная проверка при этом дублировала его логику. `/admin` (страница)
+    осознанно оставлена на ручной проверке: там не-админа надо РЕДИРЕКТИТЬ в чат, а не отдавать
+    403 — зависимость такого не умеет."""
     with get_session() as db:
         view = build_admin_view(db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
                                 region=region, role=role)
@@ -210,8 +273,11 @@ def admin_export(request: Request, fmt: str = "json", date_from: str = "", date_
     scalar = ("users_total", "users", "experts", "admins", "conversations", "requests", "answers",
               "tokens", "cost", "answer_ratings", "avg_stars", "accept_pct", "accept_user",
               "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
-              "demand_product", "demand_procedural")
+              "demand_product", "demand_procedural", "orphan_ratings")
     payload = {
+        # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
+        "disclaimer": EXPERT_DISCLAIMER,
+        "corpus": corpus_line(),  # E1: редакция рядом с дисклеймером
         "generated_at": st["generated_at"],
         "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
                     "region": st["filter_region"] or None, "role": st["filter_role"] or None},
@@ -255,6 +321,15 @@ def submit_feedback(fb: FeedbackIn, user: User = Depends(require_user_profiled))
         if comment is None:
             return {"ok": True, "skipped": True}
     with get_session() as db:
+        if kind == "answer":
+            # R2: оценить можно ТОЛЬКО свой ответ ассистента. Раньше проверки не было — любой
+            # залогиненный мог проставить оценку чужому message_id, и она засчитывалась в приёмку
+            # (гейт 1.0) от лица своей роли и своего региона. Метрика должна быть защищена.
+            msg = q.get_message(db, fb.message_id)
+            if msg is None or msg.user_id != user.id:
+                raise HTTPException(status_code=403, detail="Оценить можно только свой ответ")
+            if msg.role != "assistant":
+                raise HTTPException(status_code=422, detail="Оценка ставится ответу ассистента")
         q.save_feedback(
             db, user_id=user.id, kind=kind, rating=fb.rating,
             matched=(fb.matched if kind == "service" else None),

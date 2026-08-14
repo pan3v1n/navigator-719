@@ -53,6 +53,10 @@ RULES_FILES = [
 # Приказ ТПП РФ №52 (порядок выдачи документов: состав документов, сроки, акт на компоненты).
 BODY_PATH = CHUNKS_DIR / "01_postanovlenie.txt"
 ORDER52_PATH = CHUNKS_DIR.parent / "prikaz52_tpp_full.txt"  # knowledge_base/pp719/
+# Определения сносок приложения (<1>…<56>). Ссылок на них в требованиях сотни, а определения
+# до D3 доставались чанку XXIX и не были доступны поиску вообще: чанки приложения в индекс не
+# идут (в pp719 попадает structured/*.json), а процедурный корпус их не знал.
+FOOTNOTES_PATH = CHUNKS_DIR / "131_SNOSKI_prilozheniya.txt"
 DENSE = "dense"
 SPARSE = "bm25"
 
@@ -71,6 +75,9 @@ SMOKE_QUERIES = [
 _POINT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3})*)\.\s")
 # Пометка редакции: «(в ред. Постановления Правительства РФ от 13.04.2026 N 400)».
 _AMEND_RE = re.compile(r"от\s+(\d{1,2}\.\d{1,2}\.(\d{4}))\s+N\s*(\d+)")
+# Определение сноски приложения начинается с маркера в начале строки: «<44> В случае …».
+# Ссылки на сноски внутри требований идут в середине строки и сюда не попадают.
+_FOOTNOTE_RE = re.compile(r"^(<\d+(?:\.\d+)?>)\s")
 
 
 def _normalize(text: str) -> str:
@@ -234,6 +241,87 @@ def parse_order52(path: Path) -> list[dict]:
     return records
 
 
+def parse_footnotes(path: Path) -> list[dict]:
+    """Определения сносок приложения: одна запись на сноску, ключ — её номер («<44>»).
+
+    Сноска — не процедурная норма, но живёт в той же коллекции: она отвечает на вопрос
+    «что значит <44> в требовании», а вопрос этот не товарный (позиция тут ни при чём).
+    Исключённые сноски («<7> Сноска исключена») отбрасываем — отвечать ими не на что."""
+    raw = _normalize(path.read_text(encoding="utf-8"))
+    records: list[dict] = []
+    cur, buf = None, []
+
+    def _flush() -> None:
+        if not cur or not buf:
+            return
+        text = "\n".join(buf).strip()
+        if re.match(r"^<\d+(?:\.\d+)?>\s*[Сс]носка исключена", text):
+            return
+        records.append({
+            "doc_type": "appendix_footnotes", "section_roman": "",
+            "section_title": "Сноски к приложению ПП №719",
+            "point": cur, "text": text,
+            "source_anchor": f"Приложение к ПП №719, сноска {cur}"})
+
+    for ln in raw.split("\n"):
+        m = _FOOTNOTE_RE.match(ln)
+        if m:
+            _flush(); cur, buf = m.group(1), [ln]
+        elif cur and ln.strip():
+            buf.append(ln)
+    _flush()
+    return records
+
+
+# Вводный пункт приклеивается к подпунктам только если он короткий: 4.2 («К заявке прилагаются
+# следующие документы») — 122 символа, 4.3 — 350. Длинные пункты вроде 4.1 (3842) — самостоятельная
+# норма, а не заголовок перечня; приклеив их, мы бы утопили подпункт в чужом тексте.
+PARENT_INTRO_CAP = 600
+
+
+def _parent_point(point: str | None) -> str | None:
+    """«4.2.1» → «4.2», «4.2» → «4», «6» → None."""
+    parts = [p for p in (point or "").split(".") if p]
+    return ".".join(parts[:-1]) if len(parts) > 1 else None
+
+
+def add_index_text(recs: list[dict]) -> None:
+    """Проставляет `index_text` — текст пункта для векторов, с контекстом его места в документе.
+
+    ЗАЧЕМ (P2, кластер жалоб №1 июльского теста — 31 упоминание). Перечни документов лежат в
+    ПОДПУНКТАХ («4.2.1. Правоустанавливающие и регистрационные документы заявителя: копия устава…»),
+    а слова, которыми их спрашивают, — в РОДИТЕЛЬСКОМ пункте 4.2 («К заявке на включение сведений в
+    реестр прилагаются следующие документы»). Подпункт не содержит ни «заявки», ни «перечня», ни
+    «прилагаются», поэтому на вопрос «какие документы нужны» проигрывал пунктам про сроки, печати и
+    электронную подпись — и ответ честно сообщал, что перечень «в контексте не представлен».
+
+    Тот же приём, что `K4` применила к требованиям приложения: вводная фраза обязана доезжать до
+    индекса вместе с тем, к чему относится. Сам `text` НЕ меняем — он идёт в ответ как цитата, и по
+    его началу считается `point_id`."""
+    # Раздел в ключе ОБЯЗАТЕЛЕН: в формах приложений Приказа №52 нумерация начинается заново
+    # («4. Заключение: при изготовлении компонентов…»), и без раздела пункт 4.2 получил бы
+    # родителем кусок чужой формы. Ровно та же коллизия, ради которой `point_id` держит раздел.
+    by_key = {(r.get("doc_type"), r.get("section_roman"), r.get("point")): r for r in recs}
+    for r in recs:
+        intros: list[str] = []
+        p = _parent_point(r.get("point"))
+        while p:
+            parent = by_key.get((r.get("doc_type"), r.get("section_roman"), p))
+            if parent and len(parent.get("text") or "") <= PARENT_INTRO_CAP:
+                intros.append(parent["text"].strip())
+            p = _parent_point(p)
+        # ЗАГОЛОВОК РАЗДЕЛА СЮДА НЕ ИДЁТ — проверено замером: приклеенный ко всем 172 пунктам
+        # Приказа, он делает их одинаково похожими на «какие документы нужны для акта экспертизы»
+        # (ровно эти слова стоят в названии раздела 4) и роняет атрибуцию@1 0.92 → 0.88.
+        # Работает только точечная вводная родителя — она различает подпункты, а не уравнивает их.
+        head = [t for t in reversed(intros) if t]
+        r["index_text"] = "\n".join([*head, r.get("text") or ""]) if head else (r.get("text") or "")
+        # Вводная родителя нужна и в ОТВЕТЕ: без неё перечень документов выглядит списком
+        # неизвестно к чему. Кладём отдельным полем — цитату пункта не подменяем.
+        if intros:
+            r["parent_intro"] = intros[0]
+
+
 def detect_edition(all_text: str) -> str:
     """Последняя (по дате) пометка «(в ред. … от ДД.ММ.ГГГГ N …)» во всём корпусе — честный штамп
     редакции индексируемого текста."""
@@ -297,8 +385,24 @@ def load_records() -> tuple[list[dict], str]:
     else:
         print(f"⚠️  нет {ORDER52_PATH} — состав документов/сроки/акт на компоненты не проиндексированы")
 
+    # 4) Определения сносок приложения (<1>…<56>), doc_type=appendix_footnotes
+    if FOOTNOTES_PATH.exists():
+        foot = parse_footnotes(FOOTNOTES_PATH)
+        _stamp_edition(foot, _normalize(FOOTNOTES_PATH.read_text(encoding="utf-8")))
+        if not foot:
+            print(f"⚠️  {FOOTNOTES_PATH.name}: сноски не распознаны")
+        recs.extend(foot)
+        print(f"Сноски приложения: {len(foot)} определений")
+    else:
+        print(f"⚠️  нет {FOOTNOTES_PATH} — определения сносок не проиндексированы "
+              f"(пересобрать: scripts/rechunk_appendix.py --write)")
+
     if not recs:
         sys.exit("Процедурный корпус пуст — проверь knowledge_base/pp719/chunks/11..15")
+
+    add_index_text(recs)  # P2: подпункт индексируется вместе с вводной родителя и разделом
+    with_intro = sum(1 for r in recs if r.get("parent_intro"))
+    print(f"Контекст в индексе: {with_intro} подпунктов несут вводную родителя")
     return recs, rules_edition
 
 
@@ -345,7 +449,9 @@ def index_all(client, recs: list[dict], batch: int = 64) -> None:
         tqdm = None
 
     name = settings.QDRANT_RULES_COLLECTION
-    texts = [r["text"] for r in recs]  # эмбеддим содержание пункта (Правила ищутся по смыслу нормы)
+    # Эмбеддим содержание пункта ВМЕСТЕ с его местом в документе (P2): для подпунктов это заголовок
+    # раздела и вводная фраза родителя, для остальных — просто текст.
+    texts = [r.get("index_text") or r["text"] for r in recs]
     lengths = [doc_length(t) for t in texts]
     avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
     print(f"Пунктов Правил: {len(recs)} | avgdl (токенов): {avgdl:.1f} | макс={max(lengths)} мин={min(lengths)}")
@@ -359,7 +465,9 @@ def index_all(client, recs: list[dict], batch: int = 64) -> None:
             j = start + k
             rec, text = recs[j], texts[j]
             idx, val = document_vector(text, avgdl)
-            payload = dict(rec)
+            # index_text — служебная склейка для векторов; в payload не кладём, иначе он поедет
+            # в контекст ответа дублем к самому пункту.
+            payload = {k: v for k, v in rec.items() if k != "index_text"}
             points.append(models.PointStruct(
                 id=point_id(rec),
                 vector={DENSE: dvec, SPARSE: models.SparseVector(indices=idx, values=val)},

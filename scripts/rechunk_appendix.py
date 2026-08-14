@@ -36,6 +36,13 @@ NOTES_RE = re.compile(r"(?m)^Примечания:$")
 # Конец блока примечаний = начало утратившего силу блока «ПРАВИЛА ВЫДАЧИ ЗАКЛЮЧЕНИЯ».
 NOTES_END_RE = re.compile(r"(?m)^ПРАВИЛА ВЫДАЧИ ЗАКЛЮЧЕНИЯ")
 
+# Блок ОПРЕДЕЛЕНИЙ СНОСОК приложения (<1>, <2>, … <56>) лежит между последним разделом
+# (XXIX) и строкой «Примечания:». Строка-определение начинается с маркера в начале строки —
+# ссылки на сноски внутри требований идут в середине строки и сюда не попадают.
+# Без отдельной границы блок доставался чанку XXIX: 209 строк чужого текста в разделе
+# «Оборудование для разведки нефти и газа» (D3).
+FOOTNOTES_RE = re.compile(r"(?m)^<\d+(?:\.\d+)?>\s")
+
 _ROMAN = {"I": 1, "V": 5, "X": 10, "L": 50, "C": 100}
 
 
@@ -87,6 +94,8 @@ TARGETS: dict[str, tuple[int | str, str]] = {
 OLD_X = CHUNKS / "10_X_stroymaterialy.txt"
 # Отдельный чанк сквозных примечаний приложения (пункты 1–80) — doc_type='appendix_notes'.
 NOTES_CHUNK = CHUNKS / "130_PRIMECHANIYA_prilozheniya.txt"
+# Отдельный чанк определений сносок приложения (<1>…<56>) — doc_type='appendix_footnotes'.
+FOOTNOTES_CHUNK = CHUNKS / "131_SNOSKI_prilozheniya.txt"
 
 
 def find_appendix_sections(text: str):
@@ -103,17 +112,24 @@ def find_appendix_sections(text: str):
             run.append([roman, title, m.start(), None])
             expected += 1
     notes = NOTES_RE.search(text)
+    footnotes = FOOTNOTES_RE.search(text)
     for i, item in enumerate(run):
         if i + 1 < len(run):
             item[3] = run[i + 1][2]
         else:
-            # Конец ПОСЛЕДНЕГО раздела (XXIX) = строка «Примечания:» (конец продуктовых
-            # таблиц). НЕ следующий римский заголовок: между XXIX и «I. Общие положения»
-            # Правил лежат сквозные пункты-примечания 1–80 — они не продукция и иначе
-            # влились бы в XXIX (~270 фантомных «продуктов»: краны, медизделия и т.п.).
+            # Конец ПОСЛЕДНЕГО раздела (XXIX) = начало блока определений сносок, а если его
+            # нет — строка «Примечания:» (конец продуктовых таблиц). НЕ следующий римский
+            # заголовок: между XXIX и «I. Общие положения» Правил лежат определения сносок
+            # и сквозные пункты-примечания 1–80 — они не продукция и иначе влились бы в XXIX
+            # (~270 фантомных «продуктов»: краны, медизделия и т.п.).
             # Fallback — следующий заголовок / конец файла.
-            if notes and notes.start() > item[2]:
-                item[3] = notes.start()
+            bounds = [
+                m.start()
+                for m in (footnotes, notes)
+                if m is not None and m.start() > item[2]
+            ]
+            if bounds:
+                item[3] = min(bounds)
             else:
                 nxt = [s for s in starts if s > item[2]]
                 item[3] = nxt[0] if nxt else len(text)
@@ -129,6 +145,21 @@ def find_notes_block(text: str) -> str | None:
     if not start:
         return None
     end = NOTES_END_RE.search(text, start.end())
+    return text[start.start():(end.start() if end else len(text))].strip()
+
+
+def find_footnotes_block(text: str) -> str | None:
+    """Блок определений сносок приложения (<1>…<56>): от первой строки-определения до
+    строки «Примечания:» (а если её нет — до конца файла).
+
+    Это НЕ продукция и НЕ методические примечания: сноски уточняют отдельные требования
+    («<44> засчитывается, если применимо по разделу IX и подтверждено актом экспертизы
+    ТПП РФ» — ред. N 923). Ссылок на них в тексте приложения сотни, а определения до
+    правки D3 доставались чанку XXIX и не были доступны поиску отдельно."""
+    start = FOOTNOTES_RE.search(text)
+    if not start:
+        return None
+    end = NOTES_RE.search(text, start.end())
     return text[start.start():(end.start() if end else len(text))].strip()
 
 
@@ -172,6 +203,12 @@ def main() -> None:
     print(f"\nБлок примечаний приложения: "
           + (f"{n_notes} пунктов, {len(notes)} символов → {NOTES_CHUNK.name}" if notes else "НЕ найден"))
 
+    footnotes = find_footnotes_block(text)
+    n_foot = len(FOOTNOTES_RE.findall(footnotes)) if footnotes else 0
+    print(f"Блок определений сносок:    "
+          + (f"{n_foot} сносок, {len(footnotes)} символов → {FOOTNOTES_CHUNK.name}"
+             if footnotes else "НЕ найден"))
+
     if args.write:
         if OLD_X.exists():
             OLD_X.unlink()
@@ -179,6 +216,11 @@ def main() -> None:
         if notes:
             NOTES_CHUNK.write_text(f"# Примечания к приложению ПП №719\n\n{notes}\n", encoding="utf-8")
             written.append(NOTES_CHUNK.name)
+        if footnotes:
+            FOOTNOTES_CHUNK.write_text(
+                f"# Сноски к приложению ПП №719\n\n{footnotes}\n", encoding="utf-8"
+            )
+            written.append(FOOTNOTES_CHUNK.name)
         print(f"Записано чанков: {len(written)}")
         for n in written:
             print("  +", n)

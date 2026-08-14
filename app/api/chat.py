@@ -1,16 +1,24 @@
-"""Чат-эндпоинт веб-UI 1.0: вопрос эксперта → движок навигатора → лог диалога в БД → ответ.
+"""Чат-эндпоинты веб-UI 1.0: вопрос эксперта → движок навигатора → лог диалога в БД → ответ.
 
-Эндпоинт СИНХРОННЫЙ (`def`) — FastAPI исполняет его в threadpool (как `/navigate`); движок
-(`pipeline.answer`: e5 + Qdrant + DeepSeek) блокирующий, event loop не держим. Диалог группируется
-по `session_id` (одна беседа = один id). Реплики (вопрос + ответ + флаги качества) логируются в БД —
-их видит admin. History-aware follow-up («а какой порог?») — отложенный fast-follow: сейчас каждый
-вопрос самостоятелен.
+Две ручки на один движок: `POST /api/chat` (обычный ответ) и `POST /api/chat/stream` (SSE-стриминг,
+T18) — фронт сперва пробует стрим, при обрыве откатывается на первую. Обе СИНХРОННЫЕ (`def`):
+FastAPI исполняет их в threadpool (как `/navigate`), движок (e5 + Qdrant + DeepSeek) блокирующий,
+event loop не держим.
+
+Диалог группируется по `session_id` (одна беседа = один id). Реплики (вопрос + ответ + флаги
+качества + токены) логируются в БД — их видит admin.
+
+МУЛЬТИТЁРН: реализован. `_load_history` поднимает последние 12 реплик беседы и передаёт их движку;
+уточняющий вопрос («а какой порог?») понимается в контексте прошлых ходов — контекстуализация для
+поиска и якорь-код диалога живут в `pipeline._plan_answer`. Для новой беседы история пуста →
+поведение как у одиночного вопроса.
 """
 
 from __future__ import annotations
 
 import json
 import uuid
+from datetime import datetime
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -19,6 +27,11 @@ from loguru import logger
 from pydantic import BaseModel, Field
 
 from app.api.auth import require_user, require_user_profiled
+from app.api.ratelimit import SlidingWindow
+from app.core.config import settings
+from app.core import sensitive
+from app.core.prompts import EXPERT_DISCLAIMER
+from app.rag.edition import corpus_line
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -26,6 +39,43 @@ from app.rag.pipeline import answer, answer_stream
 from app.tools.navigator import extract_okpd2
 
 router = APIRouter()
+
+# R12: лимит вопросов на ПОЛЬЗОВАТЕЛЯ. Защищает единственную платную статью проекта (токены
+# DeepSeek) от зациклившейся вкладки и от намеренного слива бюджета залогиненным человеком.
+_chat_limit = SlidingWindow(settings.RATE_LIMIT_CHAT_PER_MIN, window=60.0)
+
+
+def _enforce_chat_limit(user_id: int) -> None:
+    """429 при превышении. Проверяем ДО обращения к БД и движку — иначе смысл теряется."""
+    key = f"chat:{user_id}"
+    if not _chat_limit.check(key):
+        retry = _chat_limit.retry_after(key)
+        logger.warning(f"rate-limit: чат, user_id={user_id}, повтор через {retry}с")
+        raise HTTPException(
+            status_code=429,
+            detail=f"Слишком много вопросов подряд. Повторите через {retry} с.",
+            headers={"Retry-After": str(retry)},
+        )
+
+
+def _reject_sensitive(text: str, user_id: int) -> None:
+    """422, если в вопросе есть данные, которые нельзя отдавать во внешнюю модель.
+
+    Проверка ОБЯЗАНА быть на сервере, даже при такой же проверке в браузере: клиентскую легко
+    обойти, а цена ошибки — персональные данные третьего лица, ушедшие в DeepSeek.
+
+    В журнал пишем ТОЛЬКО вид данных и факт: сам текст сюда попасть не должен, иначе журнал
+    превратится в хранилище ровно тех сведений, ради недопуска которых стоит эта проверка.
+    Вопрос при отказе не сохраняется и в историю диалога не идёт."""
+    blocking, soft = sensitive.split(sensitive.detect(text))
+    if soft:
+        # Телефон и почта часто попадают в вопрос по делу — отправку не рвём, но факт фиксируем:
+        # по нему видно, надо ли менять формулировки в интерфейсе.
+        logger.info(f"ввод с контактными данными {soft}, user_id={user_id}")
+    if not blocking:
+        return
+    logger.warning(f"ввод отклонён: чувствительные данные {blocking}, user_id={user_id}")
+    raise HTTPException(status_code=422, detail=sensitive.message(blocking))
 
 
 class ChatRequest(BaseModel):
@@ -127,10 +177,33 @@ def _load_history(user_id: int, session_id: str, max_msgs: int = 12) -> list[dic
     ]
 
 
+def _log_question(user_id: int, session_id: str, text: str) -> None:
+    """Записать ВОПРОС до вызова движка (R26).
+
+    Раньше вопрос и ответ писались одной транзакцией ПОСЛЕ успешной генерации — и при падении
+    движка (рваная сеть, недоступный DeepSeek, таймаут) вопрос исчезал бесследно. Терялись ровно
+    те случаи, которые нужнее всего для разбора: те, где сервис не справился.
+
+    Побочный эффект — полезный: расхождение счётчиков «Запросы» и «ответов» в админке становится
+    видимым и показывает долю сбоев, которая прежде была невидима нигде.
+
+    Сбой самой записи не роняет ответ пользователю — как и в остальном логировании."""
+    try:
+        with get_session() as db:
+            q.log_message(db, user_id=user_id, session_id=session_id, role="user", content=text)
+    except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
+        logger.exception(f"chat: не удалось записать вопрос (user_id={user_id})")
+
+
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
+    _enforce_chat_limit(user.id)
+    _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
+    # R26: вопрос пишем ДО движка — иначе при 503 он теряется. Порядок важен: история загружена
+    # выше, поэтому текущий вопрос в неё не попадёт и не задвоится.
+    _log_question(user.id, session_id, req.message)
     okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а
     try:
         ans = answer(req.message, okpd2=okpd2, history=history)
@@ -142,7 +215,6 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     message_id: int | None = None
     try:
         with get_session() as db:
-            q.log_message(db, user_id=user.id, session_id=session_id, role="user", content=req.message)
             asst = q.log_message(
                 db, user_id=user.id, session_id=session_id, role="assistant", content=ans.text,
                 sources=[s.model_dump() for s in sources],
@@ -172,7 +244,15 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     полный текст). Обрыв/сбой движка → {"type":"error"} → фронт делает фолбэк на /api/chat.
 
     Эндпоинт СИНХРОННЫЙ (`def`): Starlette крутит sync-генератор в threadpool (как /api/chat),
-    event loop не держим. ⚠ Рваная РФ-сеть: длинный SSE хрупок — на фронте фолбэк обязателен."""
+    event loop не держим. ⚠ Рваная РФ-сеть: длинный SSE хрупок — на фронте фолбэк обязателен.
+
+    R26 — почему здесь вопрос НЕ пишется заранее, в отличие от `/api/chat`. Любой сбой стрима
+    (ошибка движка, обрыв, таймаут) фронт отрабатывает фолбэком на `/api/chat`, а тот вопрос
+    ПЕРЕД вызовом движка уже записывает. Пиши мы его и здесь — при каждом фолбэке в беседе
+    появлялся бы дубль вопроса, искажая и историю мультитёрна, и счётчики админки. Так что
+    потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
+    _enforce_chat_limit(user.id)
+    _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы (пусто для новой беседы)
     okpd2 = extract_okpd2(req.message)
@@ -246,10 +326,13 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
 
 @router.delete("/api/conversations/{session_id}")
 def delete_conversation(session_id: str, user: User = Depends(require_user)) -> dict:
-    """Удалить беседу пользователя (только свою — фильтр по user_id)."""
+    """Удалить беседу пользователя (только свою — фильтр по user_id).
+
+    Вместе с репликами уходят и оценки этой беседы (R2) — иначе они оставались сиротами и
+    продолжали учитываться в приёмочной метрике без вопроса и ответа."""
     with get_session() as db:
-        removed = q.delete_session(db, user.id, session_id)
-    return {"ok": True, "removed": removed}
+        removed, removed_feedback = q.delete_session(db, user.id, session_id)
+    return {"ok": True, "removed": removed, "removed_feedback": removed_feedback}
 
 
 def _serialize_messages(msgs, include_sources: bool = True) -> list[dict]:
@@ -263,35 +346,77 @@ def _serialize_messages(msgs, include_sources: bool = True) -> list[dict]:
 
 
 def _parse_date(s: str):
-    from datetime import datetime
     try:
         return datetime.strptime(s, "%Y-%m-%d").date() if s else None
     except ValueError:
         return None
 
 
+# --- Маркировка выгрузок (R3) -------------------------------------------------------------------
+# Принцип №1 проекта: ответ ИИ — черновик, вердикт за экспертом ТПП. В интерфейсе пометка висит
+# постоянной строкой под полем ввода (chat.html), и добавлять её в тело каждого ответа — осознанно
+# отменённое решение (правило 6 промпта навигатора). Но ЭКСПОРТ уносит ответы за пределы сервиса —
+# заявителю, в переписку, в приложение к заявке, — а туда пометка не попадала ВООБЩЕ.
+#
+# Маркируем документ дважды, и это не избыточность: шапка помечает файл целиком, подпись реплики
+# переживает копирование ОТДЕЛЬНОГО ответа из файла (самый вероятный способ, которым ответ уходит
+# дальше). Полный дисклеймер в подпись не выносим — документ стал бы нечитаемым.
+_AI_LABEL = "Ассистент (ИИ, предварительный анализ)"
+_HUMAN_LABEL = "Эксперт"
+
+
+def _who(role: str) -> str:
+    return _HUMAN_LABEL if role == "user" else _AI_LABEL
+
+
+def _export_stamp() -> str:
+    return datetime.now().strftime("%d.%m.%Y %H:%M")
+
+
+def _md_head(title: str) -> list[str]:
+    """Шапка markdown-выгрузки: заголовок + дисклеймер цитатой + штамп источника."""
+    return [
+        f"# {title}", "",
+        f"> **{EXPERT_DISCLAIMER}**", ">",
+        # E1: редакция корпуса — рядом с дисклеймером. Выгрузка уносит ответ за пределы сервиса,
+        # и читатель должен видеть, на какой редакции он основан: 719 правится 6+ раз в год.
+        f"> {corpus_line()}.", ">",
+        f"> Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.", "",
+        "---", "",
+    ]
+
+
+def _txt_head(title: str) -> list[str]:
+    """Шапка текстовой выгрузки: у txt нет визуальной иерархии, поэтому отбиваем линиями."""
+    return [
+        title, "=" * 60, "",
+        EXPERT_DISCLAIMER,
+        f"{corpus_line()}.",  # E1
+        f"Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.",
+        "=" * 60, "",
+    ]
+
+
 def _convs_to_markdown(user_name: str, picked) -> str:
-    lines = [f"# Экспорт диалогов — {user_name}", ""]
+    lines = _md_head(f"Экспорт диалогов — {user_name}")
     for s, msgs in picked:
         lines.append(f"## {s['title'] or 'Диалог'}")
         if s["ts"]:
             lines.append(f"_{s['ts'].strftime('%d.%m.%Y %H:%M')}_")
         lines.append("")
         for m in msgs:
-            who = "Эксперт" if m.role == "user" else "Ассистент"
-            lines += [f"**{who}:**", "", m.content, ""]
+            lines += [f"**{_who(m.role)}:**", "", m.content, ""]
         lines += ["---", ""]
     return "\n".join(lines)
 
 
 def _convs_to_text(user_name: str, picked) -> str:
-    lines = [f"Экспорт диалогов — {user_name}", "=" * 40, ""]
+    lines = _txt_head(f"Экспорт диалогов — {user_name}")
     for s, msgs in picked:
         stamp = f"  [{s['ts'].strftime('%d.%m.%Y %H:%M')}]" if s["ts"] else ""
         lines += [(s["title"] or "Диалог") + stamp, "-" * 30]
         for m in msgs:
-            who = "Эксперт" if m.role == "user" else "Ассистент"
-            lines += [f"{who}:", m.content, ""]
+            lines += [f"{_who(m.role)}:", m.content, ""]
         lines.append("")
     return "\n".join(lines)
 
@@ -313,18 +438,16 @@ def _download(content: str, media_type: str, filename: str) -> Response:
 
 
 def _conv_to_markdown(title: str, msgs) -> str:
-    lines = [f"# {title}", ""]
+    lines = _md_head(title)
     for m in msgs:
-        who = "Эксперт" if m.role == "user" else "Ассистент"
-        lines += [f"**{who}:**", "", m.content, ""]
+        lines += [f"**{_who(m.role)}:**", "", m.content, ""]
     return "\n".join(lines)
 
 
 def _conv_to_text(title: str, msgs) -> str:
-    lines = [title, "=" * min(len(title), 60), ""]
+    lines = _txt_head(title)
     for m in msgs:
-        who = "Эксперт" if m.role == "user" else "Ассистент"
-        lines += [f"{who}:", m.content, ""]
+        lines += [f"{_who(m.role)}:", m.content, ""]
     return "\n".join(lines)
 
 
@@ -357,7 +480,9 @@ def export_conversations(
         for s, msgs in picked
     ]
     return _json_download(
-        {"user": user.username,
+        {"disclaimer": EXPERT_DISCLAIMER, "corpus": corpus_line(),  # R3 + E1: маркировка первым полем
+         "exported_at": _export_stamp(), "source": settings.APP_TITLE,
+         "user": user.username,
          "filters": {"date_from": date_from or None, "date_to": date_to or None, "sources": incl_sources},
          "exported_conversations": len(conversations), "conversations": conversations},
         base + ".json",
@@ -376,7 +501,9 @@ def export_conversation(session_id: str, fmt: str = "json", user: User = Depends
     if fmt == "txt":
         return _download(_conv_to_text(title, msgs), "text/plain; charset=utf-8", base + ".txt")
     return _json_download(
-        {"user": user.username, "conversation": {
+        {"disclaimer": EXPERT_DISCLAIMER, "corpus": corpus_line(),  # R3 + E1
+         "exported_at": _export_stamp(), "source": settings.APP_TITLE,
+         "user": user.username, "conversation": {
             "session_id": session_id, "title": title, "messages": _serialize_messages(msgs)}},
         base + ".json",
     )

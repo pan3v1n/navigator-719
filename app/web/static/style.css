@@ -109,6 +109,39 @@ a { color: inherit; text-decoration: none; }
 .nav-item:hover { background: var(--hover); }
 .nav-item.active { background: var(--hover); font-weight: 500; }
 .nav-item svg { width: 17px; height: 17px; opacity: .7; flex-shrink: 0; }
+/* «Справка» с подменю. Раскрывается по наведению И по фокусу/классу open — на тач-экране и с
+   клавиатуры hover недоступен, а пункты меню должны быть достижимы всегда. */
+.nav-group { position: relative; }
+.nav-caret { margin-left: auto; opacity: .55; transition: transform .15s; }
+.nav-group:hover .nav-caret, .nav-group.open .nav-caret { transform: translateX(2px); }
+/* Раскрывается ВВЕРХ: «Справка» — последний пункт меню и стоит у нижнего края сайдбара,
+   вниз подменю уходило за пределы экрана. */
+.nav-menu { display: none; position: absolute; left: calc(100% - 6px); bottom: 0; z-index: 40; min-width: 232px;
+            background: var(--bg); border: 1px solid var(--border); border-radius: 12px; padding: 6px;
+            box-shadow: var(--shadow); }
+.nav-group:hover .nav-menu, .nav-group:focus-within .nav-menu, .nav-group.open .nav-menu { display: block; }
+/* Пункты — и ссылки, и кнопка запуска тура: сбрасываем браузерные стили кнопки, иначе она выглядит
+   выделенной среди ссылок сама по себе, без наведения. */
+.nav-menu-item { display: block; width: 100%; padding: 8px 10px; border: none; background: none;
+                 border-radius: 8px; font: inherit; font-size: 13.5px; color: var(--text); text-align: left;
+                 white-space: nowrap; cursor: pointer; transition: background .15s; }
+.nav-menu-item:hover, .nav-menu-item:focus-visible { background: var(--hover); }
+/* в свёрнутом сайдбаре подменю выезжает от иконки и не должно перекрывать саму полосу */
+.app.collapsed .nav-menu { left: calc(100% + 4px); }
+
+/* Инструменты под ответом: копировать и поделиться. Подпись — по hover/фокусу, без JS-тултипов. */
+.msg-tools { display: flex; gap: 4px; margin-top: 6px; }
+.tool-btn { position: relative; display: inline-flex; align-items: center; justify-content: center;
+            width: 30px; height: 30px; border: none; border-radius: 8px; background: none; cursor: pointer;
+            color: var(--muted); transition: background .15s, color .15s; }
+.tool-btn:hover { background: var(--hover); color: var(--text); }
+.tool-btn.ok { color: #16794c; }
+.tool-btn::after { content: attr(data-tip); position: absolute; bottom: calc(100% + 6px); left: 50%;
+                   transform: translateX(-50%); padding: 5px 9px; border-radius: 7px; font-size: 12px;
+                   line-height: 1.3; white-space: nowrap; background: var(--accent); color: var(--accent-text);
+                   opacity: 0; pointer-events: none; transition: opacity .12s; }
+.tool-btn:hover::after, .tool-btn:focus-visible::after, .tool-btn.ok::after { opacity: 1; }
+
 .side-bottom { margin-top: auto; border-top: 1px solid var(--border); padding-top: 10px;
                display: flex; align-items: center; gap: 8px; }
 .user-chip { display: flex; align-items: center; gap: 9px; flex: 1; min-width: 0; }
@@ -184,6 +217,12 @@ a { color: inherit; text-decoration: none; }
                        font-size: 12px; line-height: 1.5; }
 .composer-disclaimer a { color: var(--muted); text-decoration: underline; }
 .composer-disclaimer a:hover { color: var(--text); }
+/* Короткая оговорка над полем ввода — только когда диалог начат: на пустом экране ту же роль
+   играет hero-блок, и две надписи подряд превращаются в шум. */
+.composer-notice { display: none; width: 100%; max-width: 50vw; margin: 0 auto 8px; text-align: center;
+                   color: var(--muted); font-size: 12px; line-height: 1.4; }
+.main:not(.empty) .composer-notice { display: block; }
+
 /* пустой экран: скролл прячем, приветствие + инпут + дисклеймер по центру; после ввода композер уходит вниз */
 .main.empty .chat-scroll { display: none; }
 .main.empty .composer-area { flex: 1; justify-content: center; }
@@ -252,26 +291,6 @@ a { color: inherit; text-decoration: none; }
                                  font-size: 14px; font-family: inherit; }
 .modal-card label.checkbox { flex-direction: row; align-items: center; gap: 8px; }
 .modal-card label.checkbox input { width: auto; }
-
-/* ---------- онбординг-попап ---------- */
-.ob-card { width: 470px; max-width: 100%; padding: 0; overflow: hidden; position: relative; gap: 0; }
-.ob-skip { position: absolute; top: 12px; right: 14px; border: none; background: none; color: var(--muted);
-           font-size: 13px; cursor: pointer; z-index: 2; padding: 4px 6px; border-radius: 8px; }
-.ob-skip:hover { color: var(--text); background: var(--hover); }
-.ob-steps { padding: 42px 34px 6px; }
-.ob-step { display: flex; flex-direction: column; align-items: center; text-align: center; animation: fadeInUp .25s ease; }
-.ob-art { width: 118px; height: 118px; color: var(--text); margin-bottom: 18px; }
-.ob-art svg { width: 100%; height: 100%; }
-.ob-step h2 { font-size: 19px; font-weight: 600; margin: 0 0 10px; }
-.ob-step p { font-size: 14px; line-height: 1.62; color: #555; margin: 0; }
-.ob-dots { display: flex; justify-content: center; gap: 7px; padding: 18px 0 4px; }
-.ob-dot { width: 7px; height: 7px; border-radius: 50%; background: #d4d4d4; cursor: pointer;
-          transition: background .15s, transform .15s; }
-.ob-dot.on { background: var(--accent); transform: scale(1.28); }
-.ob-nav { display: flex; justify-content: space-between; gap: 10px; padding: 8px 24px 24px; }
-.ob-nav button { padding: 11px 20px; border-radius: 11px; border: none; background: var(--accent); color: #fff;
-                 font-size: 14px; cursor: pointer; transition: opacity .15s; min-width: 128px; }
-.ob-nav button:hover { opacity: .88; }
 
 /* ---------- admin ---------- */
 .admin-header { height: 54px; display: flex; align-items: center; gap: 14px; padding: 0 22px;
@@ -500,3 +519,120 @@ a { color: inherit; text-decoration: none; }
 .jump-item:hover { background: var(--hover); }
 .msg.q-flash .bubble { animation: qflash 1.2s ease; }
 @keyframes qflash { 0%, 100% { background: var(--user); } 30% { background: #ffe9a8; } }
+
+/* ---------- правовые и справочные страницы (Условия, Политика, Справочный центр) ---------- */
+.doc-wrap { max-width: 860px; margin: 0 auto; padding: 0 20px 60px; }
+.doc-head { display: flex; align-items: center; gap: 16px; padding: 16px 0; margin-bottom: 8px;
+            border-bottom: 1px solid var(--border); position: sticky; top: 0; background: var(--bg); z-index: 5; }
+.doc-logo { display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px;
+            background: var(--accent); color: #fff; border-radius: 9px; font-size: 12px; font-weight: 700;
+            flex-shrink: 0; }
+.doc-nav { display: flex; gap: 14px; flex-wrap: wrap; font-size: 13.5px; }
+.doc-nav a { color: var(--muted); padding: 4px 0; border-bottom: 2px solid transparent; }
+.doc-nav a:hover { color: var(--text); }
+.doc-nav a.on { color: var(--text); border-bottom-color: var(--accent); }
+.doc-back { margin-left: auto; font-size: 13.5px; color: var(--muted); white-space: nowrap; }
+.doc-back:hover { color: var(--text); }
+
+.doc-body h1 { font-size: 27px; margin: 26px 0 6px; }
+.doc-body h2 { font-size: 17px; margin: 30px 0 10px; }
+.doc-body p, .doc-body li { font-size: 15px; line-height: 1.65; }
+.doc-body ul { padding-left: 20px; }
+.doc-body li { margin: 5px 0; }
+.doc-body a { color: #2563eb; text-decoration: underline; }
+.doc-lead { color: var(--text); background: var(--sidebar); border: 1px solid var(--border);
+            border-radius: 12px; padding: 14px 16px; margin: 14px 0 4px; }
+.doc-meta { color: var(--muted); font-size: 13px; margin: 0 0 8px; }
+.doc-note { color: var(--muted); font-size: 13.5px; border-top: 1px solid var(--border);
+            margin-top: 28px; padding-top: 14px; }
+
+.doc-table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; display: block;
+             overflow-x: auto; }
+.doc-table th, .doc-table td { border: 1px solid var(--border); padding: 8px 11px; text-align: left;
+                               vertical-align: top; }
+.doc-table thead th { background: var(--sidebar); font-weight: 600; }
+
+/* FAQ: раскрывающиеся вопросы — без JS, на details/summary */
+.faq { border: 1px solid var(--border); border-radius: 12px; padding: 2px 14px; margin: 8px 0;
+       background: var(--bg); }
+.faq summary { cursor: pointer; padding: 12px 0; font-weight: 500; list-style: none; display: flex;
+               align-items: center; gap: 10px; }
+.faq summary::-webkit-details-marker { display: none; }
+.faq summary::before { content: "+"; color: var(--muted); font-size: 17px; line-height: 1; width: 14px;
+                       flex-shrink: 0; }
+.faq[open] summary::before { content: "–"; }
+.faq[open] summary { border-bottom: 1px solid var(--border); }
+.faq p { margin: 12px 0; }
+
+.doc-foot { display: flex; flex-wrap: wrap; gap: 10px 16px; justify-content: space-between;
+            border-top: 1px solid var(--border); margin-top: 34px; padding-top: 14px;
+            color: var(--muted); font-size: 13px; }
+.doc-foot a { color: var(--muted); text-decoration: underline; }
+.doc-foot a:hover { color: var(--text); }
+
+@media (max-width: 720px) {
+  .doc-head { flex-wrap: wrap; gap: 10px; }
+  .doc-nav { order: 3; width: 100%; }
+  .doc-body h1 { font-size: 22px; }
+}
+
+/* ссылки на правовые страницы под формой входа */
+.login-legal { margin: 14px 0 0; font-size: 12px; line-height: 1.5; color: var(--muted); text-align: center; }
+.login-legal a { color: var(--muted); text-decoration: underline; }
+.login-legal a:hover { color: var(--text); }
+
+/* ---------- онбординг-тур: подсветка области + карточка по центру ---------- */
+.tour { position: fixed; inset: 0; z-index: 90; }
+body.tour-on { overflow: hidden; }
+
+/* Затемнение — тень самого «окна»: подсветка и фон это один элемент, поэтому переход между
+   шагами анимируется одним transition и слои не расходятся. */
+.tour-spot { position: fixed; border-radius: 12px; pointer-events: none;
+             box-shadow: 0 0 0 9999px rgba(13, 13, 13, .62), 0 0 0 2px rgba(255, 255, 255, .9);
+             transition: top .42s cubic-bezier(.22,.8,.24,1), left .42s cubic-bezier(.22,.8,.24,1),
+                         width .42s cubic-bezier(.22,.8,.24,1), height .42s cubic-bezier(.22,.8,.24,1); }
+
+/* Карточка не центрируется вслепую: `top` ей задаёт JS, выбирая свободную сторону от подсветки —
+   иначе на шаге про поле ввода (оно внизу экрана) карточка накрывает ровно то, что подсвечивает. */
+.tour-card { position: fixed; left: 50%; top: 50%; transform: translateX(-50%);
+             width: min(430px, calc(100vw - 40px)); background: var(--bg); border-radius: 18px;
+             box-shadow: 0 18px 50px rgba(0,0,0,.28); padding: 26px 26px 20px; text-align: center;
+             transition: top .42s cubic-bezier(.22,.8,.24,1); }
+.tour-card.swap { animation: tourIn .34s cubic-bezier(.22,.8,.24,1); }
+@keyframes tourIn { from { opacity: 0; transform: translateX(-50%) translateY(10px); }
+                    to   { opacity: 1; transform: translateX(-50%) translateY(0); } }
+.tour-step-no { font-size: 11.5px; letter-spacing: .5px; text-transform: uppercase; color: var(--muted); }
+.tour-card h2 { font-size: 19px; margin: 8px 0 8px; }
+.tour-card p { font-size: 14px; line-height: 1.6; color: #444; margin: 0; }
+.tour-skip { position: absolute; top: 12px; right: 14px; border: none; background: none; cursor: pointer;
+             color: var(--muted); font-size: 12.5px; padding: 4px 6px; border-radius: 7px; }
+.tour-skip:hover { background: var(--hover); color: var(--text); }
+.tour-dots { display: flex; justify-content: center; gap: 6px; margin: 18px 0 14px; }
+.tour-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--border); cursor: pointer;
+            transition: background .2s, transform .2s; }
+.tour-dot.on { background: var(--accent); transform: scale(1.25); }
+.tour-nav { display: flex; gap: 10px; justify-content: center; }
+.tour-nav button { padding: 10px 20px; border: none; border-radius: 11px; background: var(--accent);
+                   color: var(--accent-text); font-size: 14px; cursor: pointer; transition: opacity .15s; }
+.tour-nav button:hover { opacity: .88; }
+.tour-nav .btn-secondary { background: var(--sidebar); color: var(--text); border: 1px solid var(--border); }
+
+/* Уважаем системную настройку «меньше движения»: подсветка перескакивает сразу, без анимации. */
+@media (prefers-reduced-motion: reduce) {
+  .tour-spot { transition: none; }
+  .tour-card.swap { animation: none; }
+}
+
+/* Блокировка отправки: в вопросе нашлись данные, которые нельзя отдавать во внешнюю модель. */
+.input-block { display: flex; align-items: flex-start; gap: 9px; width: 100%; max-width: 50vw;
+               margin: 0 auto 10px; padding: 11px 14px; border-radius: 12px; font-size: 13px;
+               line-height: 1.5; background: #fdf0ec; border: 1px solid #f0c6b8; color: #8a3b1e;
+               animation: fadeInUp .2s ease; }
+.input-block svg { flex-shrink: 0; margin-top: 1px; }
+@media (max-width: 900px) { .input-block { max-width: 100%; } }
+/* Мягкое предупреждение: отправка возможна, решение за человеком — отсюда другой тон и кнопка. */
+.input-block.soft { background: #fdf6e3; border-color: #ecd9a0; color: #7a5c12; align-items: center; }
+.input-block-go { margin-left: auto; flex-shrink: 0; padding: 6px 12px; border: 1px solid #ecd9a0;
+                  border-radius: 9px; background: #fff; color: #7a5c12; font-size: 12.5px;
+                  cursor: pointer; white-space: nowrap; transition: background .15s; }
+.input-block-go:hover { background: #fbf0d6; }

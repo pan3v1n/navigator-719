@@ -115,11 +115,43 @@ def build_admin_view(
     for m in all_msgs:
         sess_msgs[m.session_id].append(m)
 
+    # Окна трендов считаем ЗАРАНЕЕ (R24): они зависят только от фильтра дат и момента отчёта, зато
+    # позволяют накопить тренды в том же проходе, что и раскладку по пользователям. Раньше здесь
+    # был ОТДЕЛЬНЫЙ полный проход по всем репликам — лишняя работа, растущая линейно с объёмом.
+    ref = (generated_at or datetime.now()).date()
+    if date_from and date_to:
+        cur_from, cur_to = date_from, date_to
+        span = (cur_to - cur_from).days + 1
+        prev_to = cur_from - timedelta(days=1)
+        prev_from = prev_to - timedelta(days=span - 1)
+        trend_label = f"период {span} дн. vs предыдущий"
+    else:  # без фильтра дат — скользящая неделя к предыдущей
+        cur_to, cur_from = ref, ref - timedelta(days=6)
+        prev_to = cur_from - timedelta(days=1)
+        prev_from = prev_to - timedelta(days=6)
+        trend_label = "7 дней vs предыдущие 7"
+    cur_w = {"req": 0, "p": 0, "c": 0, "users": set()}
+    prev_w = {"req": 0, "p": 0, "c": 0, "users": set()}
+
     # Раскладка по пользователю с учётом окна дат (регион/роль уже отфильтрованы через sel_ids).
     msgs_by_user: dict[int, list] = defaultdict(list)
     for m in all_msgs:
-        if m.user_id in sel_ids and _in_window(m.ts, date_from, date_to):
+        if m.user_id not in sel_ids:
+            continue
+        if _in_window(m.ts, date_from, date_to):
             msgs_by_user[m.user_id].append(m)
+        # Тренд считает СВОИ окна и не завязан на фильтр представления — поэтому проверяется
+        # отдельно, на тех же данных, но без условия `_in_window`.
+        if m.ts is not None:
+            d = m.ts.date()
+            w = cur_w if cur_from <= d <= cur_to else (prev_w if prev_from <= d <= prev_to else None)
+            if w is not None:
+                if m.role == "user":
+                    w["req"] += 1
+                    w["users"].add(m.user_id)
+                else:
+                    w["p"] += m.prompt_tokens or 0
+                    w["c"] += m.completion_tokens or 0
     fb_by_user: dict[int, list] = defaultdict(list)
     for f in all_fb:
         if f.user_id in sel_ids and _in_window(f.ts, date_from, date_to):
@@ -135,6 +167,7 @@ def build_admin_view(
     matched_counts = {"да": 0, "частично": 0, "нет": 0}
     ratings: list[int] = []                                  # service-оценки 1..5
     ans_ratings: list[int] = []                              # звёзды ответов 0..5 (kind='answer')
+    orphan_ratings = 0                                       # оценки без найденного ответа — вне метрики (R2)
     ans_ratings_by_role: dict[str, list[int]] = defaultdict(list)
     region_acc: dict[str, dict] = defaultdict(
         lambda: {"users": 0, "ratings": [], "requests": 0, "tokens": 0, "cost": 0.0}
@@ -210,19 +243,28 @@ def build_admin_view(
                     matched_counts[f.matched] += 1
             elif kind == "answer":
                 orig = msg_by_id.get(f.message_id)
+                # R2: оценка-СИРОТА — ответ, к которому она привязана, не найден (беседа удалена
+                # либо легаси-строка). Такую оценку в ПРИЁМОЧНУЮ МЕТРИКУ не берём: раньше она
+                # учитывалась безусловно, и гейт 1.0 тихо искажался ответами, которых уже нет.
+                # Считаем отдельно и показываем в «Сигналах качества» — потеря данных должна быть
+                # видимой, а не молчаливой. Комментарии и исправления сохраняем в любом случае:
+                # они ценны сами по себе (обучающий материал петли кейсов).
+                orphan = orig is None
                 ans_txt = orig.content if orig else ""
                 snippet = (ans_txt[:220] + "…") if len(ans_txt) > 220 else ans_txt
-                if f.rating is not None:
+                if f.rating is not None and orphan:
+                    orphan_ratings += 1
+                elif f.rating is not None:
                     ans_ratings.append(f.rating)
                     ans_ratings_by_role[u.role].append(f.rating)
                     region_acc[u_region]["ratings"].append(f.rating)
                     answer_rows.append({  # каждый оценённый ответ (триаж ≤2★ и экспорт-скоркард)
                         "user": u.username, "region": u_region, "role": u.role,
                         "rating": f.rating, "ts": _fmt(f.ts), "_sort_ts": f.ts,
-                        "question": _question_for(orig, sess_msgs) if orig else "",
+                        "question": _question_for(orig, sess_msgs),
                         "answer": ans_txt,
-                        "unverified": orig.unverified_json if orig else None,
-                        "low_relevance": bool(orig.low_relevance) if orig else False,
+                        "unverified": orig.unverified_json,
+                        "low_relevance": bool(orig.low_relevance),
                         "comment": f.comment or "", "correction": f.correction or "",
                         "session_id": f.session_id,
                     })
@@ -295,34 +337,7 @@ def build_admin_view(
 
     accept_pct = _accept_pct(ans_ratings)
 
-    # --- тренды: текущее окно vs предыдущее равной длины (моментум использования) ---
-    ref = (generated_at or datetime.now()).date()
-    if date_from and date_to:
-        cur_from, cur_to = date_from, date_to
-        span = (cur_to - cur_from).days + 1
-        prev_to = cur_from - timedelta(days=1)
-        prev_from = prev_to - timedelta(days=span - 1)
-        trend_label = f"период {span} дн. vs предыдущий"
-    else:  # без фильтра дат — скользящая неделя к предыдущей
-        cur_to, cur_from = ref, ref - timedelta(days=6)
-        prev_to = cur_from - timedelta(days=1)
-        prev_from = prev_to - timedelta(days=6)
-        trend_label = "7 дней vs предыдущие 7"
-    cur_w = {"req": 0, "p": 0, "c": 0, "users": set()}
-    prev_w = {"req": 0, "p": 0, "c": 0, "users": set()}
-    for m in all_msgs:  # тренд считает СВОИ окна (не завязан на фильтр дат представления)
-        if m.user_id not in sel_ids or m.ts is None:
-            continue
-        d = m.ts.date()
-        w = cur_w if cur_from <= d <= cur_to else (prev_w if prev_from <= d <= prev_to else None)
-        if w is None:
-            continue
-        if m.role == "user":
-            w["req"] += 1
-            w["users"].add(m.user_id)
-        else:
-            w["p"] += m.prompt_tokens or 0
-            w["c"] += m.completion_tokens or 0
+    # --- тренды: окна и накопление посчитаны выше, в общем проходе (R24) ---
     trends = {
         "requests": _fmt_trend(cur_w["req"], prev_w["req"], good_up=True),
         "users": _fmt_trend(len(cur_w["users"]), len(prev_w["users"]), good_up=True),
@@ -370,6 +385,9 @@ def build_admin_view(
         "demand_procedural": len(procedural_questions),
         "flags_unverified": flags_unverified,
         "flags_lowrel": flags_lowrel,
+        # Оценки, чей ответ не найден: в приёмку НЕ включены (R2). Ненулевое значение — сигнал,
+        # что часть сигнала качества потеряна вместе с удалёнными беседами.
+        "orphan_ratings": orphan_ratings,
         "per_user": per_user_stat,
         "per_day": per_day_list,
         "max_requests": per_user_stat[0]["requests"] if per_user_stat else 0,

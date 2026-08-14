@@ -13,21 +13,14 @@ from dataclasses import dataclass, field
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.rag.pipeline import answer
 from app.rag.retriever import Hit
+from app.tools import checklist
 
 # Код ОКПД2 в свободном тексте: 29.20.23, 28.41, 21.20.21.110 …
 OKPD2_IN_TEXT = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
 
-# Базовый перечень документов для подтверждения производства по 719 (экспертиза ТПП).
-BASE_CHECKLIST = [
-    "Заявление на проведение экспертизы (по форме ТПП).",
-    "Учредительные документы предприятия-изготовителя.",
-    "Конструкторская и техническая документация на продукцию.",
-    "Технологические карты / описание техпроцесса по каждой заявленной операции, "
-    "выполняемой на территории РФ.",
-    "Договоры и первичные документы с поставщиками материалов и комплектующих "
-    "(с подтверждением страны происхождения, сертификаты СТ-1 при наличии).",
-    "Перечень и документы на производственное оборудование.",
-]
+# Перечень документов больше НЕ зашит в код (R25): он строится из раздела 4 Приказа ТПП РФ №52
+# со ссылками на номера пунктов — см. app/tools/checklist.py. Прежний хардкод из шести пунктов
+# был правдоподобным, но выдуманным: ровно то, за что проект ругает языковую модель.
 
 
 @dataclass
@@ -46,25 +39,28 @@ def extract_okpd2(text: str) -> str | None:
 
 
 def build_checklist(hit: Hit | None) -> list[str]:
-    items = list(BASE_CHECKLIST)
+    """Перечень документов по найденной позиции — из Приказа ТПП РФ №52 (R25).
+
+    Базовые пункты 4.2.x нужны всегда; условные 4.3.x подбираются по ТЕКСТУ требований позиции
+    (права на КД/ТД, сервисный центр, техоперации, процентная доля). У каждого пункта в выводе
+    стоит его номер — эксперт сверится с первоисточником, а не поверит на слово."""
     if hit is None:
-        return items
+        return checklist.checklist_for()
+    # Текст требований позиции: и операции, и «component»-блоки (там лежат обязательные условия —
+    # см. pipeline._hit_operations), иначе условные пункты 4.3.x подбирались бы вслепую.
+    parts: list[str] = []
+    for b in hit.requirement_blocks or []:
+        ops = b.get("operations") or []
+        parts.extend((o.get("text") or "") for o in ops)
+        if not ops:
+            parts.append(b.get("component") or "")
+    joined = " ".join(p for p in parts if p)
     rtype = hit.payload.get("requirement_type")
-    if rtype in ("points", "mixed"):
-        items.append(
-            "Расчёт набранных баллов по операциям (с привязкой к подтверждающим документам)."
-        )
-    if hit.min_threshold:
-        items.append(f"Подтверждение достижения порога: {hit.min_threshold}.")
-    # Права на КД/ТД упоминаются в требованиях ряда позиций
-    joined = " ".join(
-        (o.get("text") or "")
-        for b in hit.requirement_blocks
+    has_points = rtype in ("points", "mixed") or any(
+        o.get("points") is not None for b in (hit.requirement_blocks or [])
         for o in (b.get("operations") or [])
     )
-    if "конструкторск" in joined.lower() or "документац" in joined.lower():
-        items.append("Документы, подтверждающие права на конструкторскую и техническую документацию.")
-    return items
+    return checklist.checklist_for(joined, has_points=has_points, threshold=hit.min_threshold)
 
 
 def navigate(query: str, okpd2: str | None = None, limit: int = 5) -> Navigation:

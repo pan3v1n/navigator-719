@@ -29,8 +29,9 @@ pydantic==2.9.2
 pydantic-settings==2.6.1
 python-dotenv==1.0.1
 
-# Frontend (MVP)
-streamlit==1.39.0
+# Frontend: ранний Streamlit-MVP (frontend/streamlit_app.py) вытеснен веб-чатом 1.0 и в рантайме
+# сервиса НЕ используется — .dockerignore исключает frontend/ из образа, а зависимость всё равно
+# ставилась. Вынесена в requirements-dev.txt (R22).
 
 # Web UI 1.0 (чат + auth + роли: FastAPI + Jinja2 + сессии)
 jinja2==3.1.4              # server-rendered страницы (login/чат/админ)
