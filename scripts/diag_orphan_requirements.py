@@ -413,16 +413,20 @@ def record_operations(rec: dict) -> list[dict]:
         ops = b.get("operations") or []
         comp = (b.get("component") or "").strip()
         note = (b.get("note") or "").strip()
+        # D9: порог блока — часть вводной строки, и наследник обязан видеть его так же, как
+        # прямой путь. Порог позиции сюда не передаём: у наследника он свой (или отсутствует),
+        # а глушение дубля — забота рантайма, который знает обе величины.
+        thr = (b.get("min_threshold") or "").strip()
         if ops:
             dup = comp and any(comp.lower() == (o.get("text") or "").strip().lower() for o in ops)
-            parent = _block_intro(comp if not dup else "", note, NOTE_CAP_TARGET)
+            parent = _block_intro(comp if not dup else "", note, NOTE_CAP_TARGET, thr)
             for o in ops:
                 item = {"text": (o.get("text") or ""), "points": o.get("points")}
                 if parent:
                     item["_parent"] = parent
                 out.append(item)
             continue
-        text = _block_intro(comp, note, NOTE_CAP_TARGET)
+        text = _block_intro(comp, note, NOTE_CAP_TARGET, thr)
         if text:
             out.append({"text": text, "points": None})
     return out

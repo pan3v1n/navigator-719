@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -140,32 +141,58 @@ class TestAppendixFootnotes(unittest.TestCase):
 
 
 class TestIncompleteThresholdNotice(unittest.TestCase):
-    """D9 (страховка): позиции, где в законе несколько порогов, а в записи поместился один.
+    """D9: позиции, где в законе несколько порогов, а в записи помещался один.
 
-    Полное исправление — порог на блок + перепарс четырёх разделов. До него дефект делается
-    ВИДИМЫМ: показать один порог как единственный опаснее, чем не показать ничего, — ответ
-    выглядит полным, а недобор по узлу проходит незамеченным."""
+    ⚠ **Сама D9 закрыта 14.08.2026**: порог получил место в схеме блока
+    (`requirement_blocks[].min_threshold`), и `backfill_block_thresholds.py` вернул пороги узлов
+    и вторых шкал из первоисточника — список стал пустым (это проверяет
+    `TestBlockThreshold.test_corpus_has_no_positions_with_lost_thresholds`).
 
-    def test_artifact_lists_found_positions(self):
+    Механизм пометки оставлен СЕТКОЙ: новая редакция приложения может снова принести позицию с
+    несколькими порогами, и тогда дефект обязан стать видимым, а не молчаливым. Поэтому тесты
+    ниже проверяют механизм на синтетическом артефакте, а не на живом корпусе: привязка к
+    содержимому корпуса превращала их в «зелёные молча» ровно в тот день, когда список опустел."""
+
+    def _with_artifact(self, positions):
+        """Подсовывает модулю синтетический артефакт и возвращает контекст-менеджер."""
+        import contextlib
+        import tempfile
+        import unittest.mock as mock
+
         from app.rag import fragments
 
-        gaps = fragments._threshold_gaps()
-        if not gaps:
-            self.skipTest("артефакт incomplete_thresholds.json не сгенерирован")
-        self.assertIn(("XXIV", "модульная криогенная автозаправочная станция"), gaps)
-        self.assertIn(("XXV", "инструменты музыкальные струнные смычковые"), gaps)
+        @contextlib.contextmanager
+        def ctx():
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp) / "incomplete_thresholds.json"
+                path.write_text(json.dumps({"positions": positions}, ensure_ascii=False),
+                                encoding="utf-8")
+                with mock.patch.object(fragments, "_GAPS_PATH", path):
+                    fragments._threshold_gaps.cache_clear()
+                    try:
+                        yield fragments
+                    finally:
+                        fragments._threshold_gaps.cache_clear()
+        return ctx()
+
+    def test_notice_follows_the_artifact(self):
+        """Позиция из артефакта помечается, соседняя — нет."""
+        with self._with_artifact([
+            {"section": "XXIV", "product_name": "Модульная криогенная автозаправочная станция"},
+        ]) as fragments:
+            self.assertTrue(fragments.has_incomplete_thresholds(
+                "XXIV", "Модульная криогенная автозаправочная станция"))
+            self.assertFalse(fragments.has_incomplete_thresholds("XXIV", "Автокраны"))
 
     def test_notice_is_section_scoped(self):
         """Одноимённые позиции живут в разных разделах — пометка не должна уезжать к чужой."""
-        from app.rag import fragments
-
-        if not fragments._threshold_gaps():
-            self.skipTest("артефакт не сгенерирован")
-        self.assertTrue(fragments.has_incomplete_thresholds(
-            "XXIV", "Модульная криогенная автозаправочная станция"))
-        self.assertFalse(fragments.has_incomplete_thresholds(
-            "III", "Модульная криогенная автозаправочная станция"))
-        self.assertFalse(fragments.has_incomplete_thresholds("III", "Автокраны"))
+        with self._with_artifact([
+            {"section": "XXIV", "product_name": "Модульная криогенная автозаправочная станция"},
+        ]) as fragments:
+            self.assertTrue(fragments.has_incomplete_thresholds(
+                "XXIV", "Модульная криогенная автозаправочная станция"))
+            self.assertFalse(fragments.has_incomplete_thresholds(
+                "III", "Модульная криогенная автозаправочная станция"))
 
     def test_notice_forbids_threshold_conclusion(self):
         """Текст пометки обязан запрещать вывод «порог набирается» — иначе она бесполезна."""
