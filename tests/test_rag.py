@@ -987,6 +987,33 @@ class TestBlockNote(unittest.TestCase):
         self.assertGreater(with_intro, total * 0.8,
                            "вводная фраза блока перестала попадать в карту наследования")
 
+    def test_bare_note_is_not_rendered_as_a_node_name(self):
+        """Условие без имени узла (60 блоков корпуса) выводилось строкой «▸ …».
+
+        Правило 2б промпта читает «▸» как УЗЕЛ ИЗДЕЛИЯ вместе с условием, поэтому
+        «▸ 100 баллов для главной энергетической установки; 40 — для вспомогательной»
+        (разд. XVIII) могло уехать в ответ порогами узлов: класс «правдоподобно, но неверно»,
+        ради которого заведена D9. Условие без узла обязано быть подписано."""
+        blocks = [{"component": "сборка корпуса",
+                   "note": "100 баллов для главной энергетической установки; "
+                           "40 баллов для вспомогательной",
+                   "operations": [{"text": "сборка корпуса", "points": None}]}]
+        ctx = format_context([make_hit(requirement_blocks=blocks)])
+        intros = [ln.strip() for ln in ctx.splitlines() if ln.strip().startswith("▸")]
+        self.assertTrue(intros, "вводная строка блока исчезла")
+        for line in intros:
+            self.assertTrue(line.startswith("▸ Условие блока:"), line)
+
+    def test_clip_never_invents_a_number(self):
+        """Рез по лимиту внутри числа рождает число, которого в первоисточнике НЕТ.
+
+        «ГОСТ 3.1129-93» превращался в «…3.1», а постпроверка `unverified_numbers` сверяет
+        ответ с КОНТЕКСТОМ — и молча признала бы подделку заземлённой."""
+        note = "х" * 190 + " ГОСТ 3.1129-93 и далее по тексту"
+        clipped = pipeline_mod._clip_note(note, 200)
+        self.assertIn("условие показано не полностью", clipped)
+        self.assertNotIn("3.1", clipped)
+
     def test_block_without_note_renders_as_before(self):
         ctx = format_context([make_hit(requirement_blocks=[
             {"component": "осуществление на территории РФ следующих операций",

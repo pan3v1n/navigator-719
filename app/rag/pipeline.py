@@ -74,8 +74,14 @@ def _clip_note(note: str, limit: int) -> str:
     if len(note) <= limit:
         return note
     cut = max(note.rfind("; ", 0, limit), note.rfind(". ", 0, limit))
-    if cut < limit // 2:  # подходящей границы нет — режем по лимиту, чем терять условие целиком
-        cut = limit
+    if cut < limit // 2:
+        # Границы предложения нет — режем по лимиту, чем терять условие целиком, но ТОЛЬКО по
+        # границе слова: рез внутри числа рождает число, которого в первоисточнике нет
+        # («ГОСТ 3.1129-93» → «…3.1»), а постпроверка `unverified_numbers` сверяет ответ
+        # с КОНТЕКСТОМ и такую подделку молча признает заземлённой.
+        cut = note.rfind(" ", 0, limit)
+        if cut < limit // 2:
+            cut = limit
     return (note[:cut].rstrip(" ;.")
             + " … (условие показано не полностью — полный текст в первоисточнике)")
 
@@ -88,7 +94,15 @@ def _block_intro(component: str, note: str, note_cap: int) -> str | None:
     note = _clip_note(note, note_cap) if note else ""
     if component and note:
         return f"{component} — {note}"
-    return component or note or None
+    if component:
+        return component
+    # Условие БЕЗ имени узла (60 блоков корпуса: 59 — «обязательное требование», один — шкала
+    # баллов по узлам разд. XVIII) выводилось строкой «▸ …» ровно там, где правило 2б промпта
+    # велит читать «▸» как УЗЕЛ ИЗДЕЛИЯ вместе с условием. Для «100 баллов для главной
+    # энергетической установки; 40 баллов для вспомогательной» это значит, что баллы блока могут
+    # уехать в ответ порогами узлов — тот самый класс «правдоподобно, но неверно», ради которого
+    # заведена D9. Поэтому условие без узла подписываем явно, а не выдаём за название узла.
+    return f"Условие блока: {note}" if note else None
 
 
 def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET) -> list[dict]:

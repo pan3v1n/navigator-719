@@ -38,6 +38,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from app.rag.thresholds import lookup_threshold  # noqa: E402  (только после sys.path)
+
 
 def _load_diag():
     """Диагностика лежит скриптом, а не пакетом — подгружаем по пути."""
@@ -60,7 +62,12 @@ def _old_map_key(section: str | None, name: str | None) -> str:
     """
     first = (name or "").strip().split("\n")[0]
     first = diag._FOOTNOTE.sub(" ", first)
-    return f"{section or '?'}|{re.sub(r'\s+', ' ', first).strip().lower()}"
+    # Обратный слэш внутри выражения f-строки — SyntaxError до Python 3.12 (PEP 701), а SETUP.md
+    # обещает «3.11+ тоже работает». `tests/test_expert_checklist.py` импортирует этот файл на
+    # уровне модуля, поэтому на 3.11 падала бы вся батарея на этапе сборки тестов, а CI (3.12)
+    # не увидел бы этого никогда.
+    key = re.sub(r"\s+", " ", first).strip().lower()
+    return f"{section or '?'}|{key}"
 
 
 def load_corpus():
@@ -250,8 +257,17 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
         add(f"### А{i}. Раздел {sec} · источник «{_name(p)}» ({_codes(p)}) · "
             f"{_plural(len(items), 'позиция', 'позиции', 'позиций')}")
         add("")
-        thr = p.get("min_threshold")
-        add(f"**Порог для источника:** {thr if thr else '_не указан_'}")
+        # Порог считаем ТЕМ ЖЕ правилом, что рантайм (`pipeline.format_context`): в записи его
+        # может не быть, но `thresholds.lookup_threshold` достаёт порог из примечаний раздела —
+        # и именно его видит пользователь. Читать только `min_threshold` значило спросить эксперта
+        # про пробел, которого в продукте нет: у всех 26 позиций блока XXI порог есть
+        # («не менее 300 баллов [прим. 7]»), а лист требовал разобраться с ним в первую очередь.
+        own_thr = p.get("min_threshold")
+        from_notes = None if own_thr else lookup_threshold(
+            p.get("okpd2_codes") or [], _name(p), p.get("section_roman"))
+        thr = own_thr or from_notes
+        shown = f"{thr} — из примечаний раздела; в самой позиции не указан" if from_notes else thr
+        add(f"**Порог для источника:** {shown if thr else '_не указан_'}")
         add("")
         add(f"**Что унаследовано ({len(ops)}):**")
         add("")
@@ -270,7 +286,7 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
         pts = [op.get("points") for op in ops if op.get("points")]
         if pts and not thr:
             add(f"> ⚠ **Отдельный вопрос по этому блоку.** У требований есть баллы ({', '.join(str(x) for x in pts)}),")
-            add("> но порог набора баллов в позиции-источнике отсутствует. Если порог для этой группы")
+            add("> но порога нет ни в самой позиции-источнике, ни в примечаниях раздела. Если он для этой группы")
             add("> установлен во вводной части раздела или в примечании — подскажите, где именно:")
             add("> сейчас пользователь видит баллы без минимума, который нужно набрать.")
             add("")
