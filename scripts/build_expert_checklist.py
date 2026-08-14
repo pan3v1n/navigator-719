@@ -28,6 +28,7 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import io
+import json
 import re
 import sys
 from collections import Counter
@@ -194,7 +195,7 @@ def _ops_line(op) -> str:
 
 
 def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
-    from app.rag import fragments  # noqa: F401  (гарантия, что модуль на месте)
+    from app.rag import fragments  # тот же источник R29, что читает рантайм
 
     L: list[str] = []
     add = L.append
@@ -254,8 +255,17 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
         add("")
         add(f"**Что унаследовано ({len(ops)}):**")
         add("")
+        # Вводная фраза блока (`_parent`) — ЧАСТЬ требования: без неё операции висят без условия,
+        # под которым выполняются («осуществление НА ТЕРРИТОРИИ РФ следующих операций»). Рантайм её
+        # печатает; лист сверки обязан показывать ровно то, что видит пользователь, иначе эксперт
+        # подтвердит перечень, означающий не то, что ему показали.
+        cur_intro = None
         for op in ops:
-            add(f"- {_ops_line(op)}")
+            intro = op.get("_parent")
+            if intro and intro != cur_intro:
+                add(f"- **{intro}:**")
+            cur_intro = intro
+            add(("  - " if intro else "- ") + _ops_line(op))
         add("")
         pts = [op.get("points") for op in ops if op.get("points")]
         if pts and not thr:
@@ -312,9 +322,16 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
     add("| № | Разд. | Код ОКПД2 | Наименование (как в базе) | Что уточнить |")
     add("|---:|---|---|---|---|")
     n = 0
+    def _also_in_v(rec) -> str:
+        """Одна позиция может быть и без требований, и внутри расколотой группы. Не сказать об
+        этом — значит получить два ответа под двумя разными теориями, уходящих в разные задачи."""
+        return (" ⚠ Эта же позиция — в блоке В: её группа делит расколотую ячейку."
+                if fragments.is_fragmented(rec.get("product_name")) else "")
+
     for rec, cat, _detail in manual:
         n += 1
-        add(f"| {n} | {rec.get('section_roman')} | `{_codes(rec)}` | {_name_full(rec)} | {ASK.get(cat, cat)} |")
+        add(f"| {n} | {rec.get('section_roman')} | `{_codes(rec)}` | {_name_full(rec)} | "
+            f"{ASK.get(cat, cat)}{_also_in_v(rec)} |")
     for r in refused:
         n += 1
         rec = r["rec"]
@@ -328,14 +345,30 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
     add("---")
     add("")
 
-    # ---------- В ----------
-    groups = []
-    for sec, rows in chunks.items():
-        for run in diag.find_fragmented(rows):
-            groups.append((sec, run))
-    n_pos = sum(len(r) for _s, r in groups)
+    # Позиции блока Б по коду — чтобы блок В отметил те из них, что попали в оба списка. Без
+    # перекрёстной ссылки эксперт отвечает на одну позицию дважды под двумя разными теориями
+    # («разбор не увидел требований» и «перечень раскололся»), а ответы уходят в разные задачи.
+    block_b_codes = {(rec.get("section_roman"), c)
+                     for rec, _cat, _d in manual for c in (rec.get("okpd2_codes") or [])}
+    block_b_codes |= {(r["rec"].get("section_roman"), c)
+                      for r in refused for c in (r["rec"].get("okpd2_codes") or [])}
 
-    add(f"## В. Расколотая общая ячейка — {_plural(len(groups), 'группа', 'группы', 'групп')}, "
+    # ---------- В ----------
+    # Читаем ТОТ ЖЕ артефакт, что и рантайм (`app/rag/fragments`), а не пересчитываем по чанкам:
+    # иначе документ описывал бы поведение, которого нет. Пересчёт всё равно делаем — но только
+    # чтобы РАСХОЖДЕНИЕ стало громким: артефакт мог отстать от корпуса, как отстала карта
+    # наследования в D6.
+    frag_path = ROOT / "knowledge_base/pp719/fragmented_requirements.json"
+    groups_json = json.loads(frag_path.read_text(encoding="utf-8")) if frag_path.exists() else []
+    live = {(sec, " ".join(r.name.split()))
+            for sec, rows in chunks.items() for run in diag.find_fragmented(rows) for r in run}
+    stored = {(g["section"], " ".join((p["product_name"] or "").split()))
+              for g in groups_json for p in g["positions"]}
+    frag_drift = (live - stored, stored - live)
+
+    n_pos = sum(len(g["positions"]) for g in groups_json)
+
+    add(f"## В. Расколотая общая ячейка — {_plural(len(groups_json), 'группа', 'группы', 'групп')}, "
         f"{_plural(n_pos, 'позиция', 'позиции', 'позиций')}")
     add("")
     add("**Что произошло.** У этих групп общая ячейка требований не просто потерялась, а")
@@ -343,21 +376,36 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
     add("самый опасный вид ошибки — требование взято из приложения дословно, но приписано не той")
     add("продукции. Ни автоматическая проверка, ни беглое чтение такого не ловят.")
     add("")
-    add("Поэтому сейчас система показывает эти позиции с пометкой «список операций неполный» и не")
-    add("делает вывода о наборе баллов. Восстановить точно можно только сверкой.")
+    add("Поэтому там, где обрывок перечня всё же достался позиции, система показывает его с пометкой")
+    add("«список операций неполный» и не делает вывода о наборе баллов. Позиции, которым не досталось")
+    add("ничего, отвечают «требований не найдено» — они помечены ниже и продублированы в блоке Б.")
+    add("Восстановить точно можно только сверкой.")
     add("")
     add("**Вопрос:** какие требования относятся к каждой позиции группы?")
     add("")
-    for i, (sec, run) in enumerate(sorted(groups, key=lambda g: g[0]), 1):
-        add(f"### В{i}. Раздел {sec}")
+    for i, g in enumerate(sorted(groups_json, key=lambda g: g["section"]), 1):
+        add(f"### В{i}. Раздел {g['section']}")
         add("")
         add("| Код ОКПД2 | Наименование | Что сейчас лежит в строке |")
         add("|---|---|---|")
-        for r in run:
-            code = ", ".join(r.codes) or "_(код в объединённой ячейке)_"
-            nm = " ".join(r.name.split())[:70]
-            req = " ".join(r.req.split())[:110] or "_(пусто)_"
-            add(f"| `{code}` | {nm} | {req} |")
+        for p in g["positions"]:
+            # Прочерк вместо курсива: внутри обратных кавычек markdown подчёркивания не съедает,
+            # и «_(код в объединённой ячейке)_» читался бы как испорченное значение кода.
+            code = f"`{', '.join(p['okpd2_codes'])}`" if p.get("okpd2_codes") else "— _код объединён_"
+            nm = " ".join((p.get("product_name") or "").split())[:70]
+            req = " ".join((p.get("req_preview") or "").split())[:110]
+            if not req:
+                req = "_пусто_"
+            if {(g["section"], c) for c in (p.get("okpd2_codes") or [])} & block_b_codes:
+                nm += " ⚠"
+                req += " · **см. блок Б**: своих требований у позиции нет вовсе"
+            add(f"| {code} | {nm} | {req} |")
+        add("")
+    if any(frag_drift):
+        # Молчать нельзя: документ обещает, что собран из корпуса, а часть его — из артефакта.
+        add("> ⚠ **Список групп и корпус разошлись** — `fragmented_requirements.json` отстал от")
+        add("> чанков приложения. Пересоберите его (`diag_orphan_requirements.py --fragments`) и")
+        add("> перегенерируйте этот документ: сейчас рантайм помечает не те позиции, что здесь.")
         add("")
 
     add("---")
