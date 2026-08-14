@@ -57,7 +57,41 @@ class Answer:
     rule_sources: list[dict] = field(default_factory=list)
 
 
-def _hit_operations(h: Hit) -> list[dict]:
+# Условие блока (`note`) — норма, а не комментарий, поэтому режем его щедро и только по границе
+# предложения. 600 символов покрывают 493 из 503 условий корпуса; кандидатам (не целевому хиту)
+# хватает 200 — там задача лишь показать, что условие есть.
+NOTE_CAP_TARGET = 600
+NOTE_CAP_OTHER = 200
+
+
+def _clip_note(note: str, limit: int) -> str:
+    """Обрезает условие блока по границе предложения и ГОВОРИТ об усечении.
+
+    Молча обрезанное условие опаснее показанного не полностью: «до 1 января 2024 г. - не менее 510
+    баллов, с 1 января 2024 г. - не менее 780» после тихого реза превращается в один порог, и это
+    ровно тот класс «правдоподобно, но неверно», ради которого заведена D9."""
+    note = " ".join(note.split())
+    if len(note) <= limit:
+        return note
+    cut = max(note.rfind("; ", 0, limit), note.rfind(". ", 0, limit))
+    if cut < limit // 2:  # подходящей границы нет — режем по лимиту, чем терять условие целиком
+        cut = limit
+    return (note[:cut].rstrip(" ;.")
+            + " … (условие показано не полностью — полный текст в первоисточнике)")
+
+
+def _block_intro(component: str, note: str, note_cap: int) -> str | None:
+    """Вводная строка блока: узел/вводная фраза + условие, при котором блок читается.
+
+    Условие приклеиваем к вводной, а не выводим отдельной строкой, чтобы порог узла нельзя было
+    прочитать как порог всей позиции: он стоит вплотную к названию узла, к которому относится."""
+    note = _clip_note(note, note_cap) if note else ""
+    if component and note:
+        return f"{component} — {note}"
+    return component or note or None
+
+
+def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET) -> list[dict]:
     """Плоский список требований хита в порядке первоисточника (из всех requirement_blocks).
 
     R6: блок БЕЗ `operations`, но с текстом в `component` — это ТРЕБОВАНИЕ, а не заголовок узла.
@@ -73,11 +107,24 @@ def _hit_operations(h: Hit) -> list[dict]:
     операции, ни одного короткого ярлыка), поэтому правило безусловное.
 
     Баллы им НЕ приписываем (`points=None`) — промпт выведет их в блок «Обязательные требования
-    (без балльной оценки)», как и положено требованию без балльной оценки."""
+    (без балльной оценки)», как и положено требованию без балльной оценки.
+
+    D9: поле `note` блока до 14.08.2026 не читалось ВООБЩЕ — ни здесь, ни где-либо ещё в рантайме,
+    хотя `load_kb` кладёт запись в payload целиком. А там лежит условие, при котором блок читается:
+    503 блока у 259 позиций (19 % корпуса), из них 305 — рядом с балльными операциями, где условие
+    прямо меняет прочтение баллов. Внутри: пороги отдельных узлов изделия («криогенный насос низкого
+    давления — не менее 100 баллов»), пометки «обязательное требование» (54), правила начисления
+    («при неприменении компонента баллы за него не начисляются»), периоды действия.
+
+    Хуже всего был случай «Оборудование для многостадийного ГРП»: девять узлов, у каждого свой порог
+    по годам, а `min_threshold` записи — null. Пользователь видел баллы вообще без порога. В список
+    D9 позиция не попала, потому что `verify_structured` сверяет ЗАПИСЬ, а числа в записи есть —
+    слепая зона проверки ровно там же, где слепая зона рантайма."""
     ops: list[dict] = []
     for b in h.requirement_blocks:
         block_ops = b.get("operations") or []
         comp = (b.get("component") or "").strip()
+        note = (b.get("note") or "").strip()
         if block_ops:
             # K4: вводная фраза блока — ЧАСТЬ требования, а не украшение, и до 12.08.2026 она
             # молча терялась: `ops.extend(block_ops)` брал только подпункты. А формулируется
@@ -92,12 +139,14 @@ def _hit_operations(h: Hit) -> list[dict]:
             # там она не добавляет смысла, только шум.
             dup = comp and any(
                 comp.lower() == (o.get("text") or "").strip().lower() for o in block_ops)
-            parent = comp if (comp and not dup) else None
+            parent = _block_intro(comp if not dup else "", note, note_cap)
             for o in block_ops:
                 ops.append({**o, "_parent": parent} if parent else o)
             continue
-        if comp:
-            ops.append({"text": comp, "points": None})
+        # Блок без операций: весь смысл в `component`, а условие уточняет, как его читать.
+        text = _block_intro(comp, note, note_cap)
+        if text:
+            ops.append({"text": text, "points": None})
     return ops
 
 
@@ -132,7 +181,7 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
         # (thresholds.py; напр. Чиллеры разд.XVI прим.77). Числа дословны → заземлены для гарда.
         mt = h.min_threshold or (lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
                                  if is_target else None)
-        ops = _hit_operations(h)
+        ops = _hit_operations(h, NOTE_CAP_TARGET if is_target else NOTE_CAP_OTHER)
         # R6 шаг 3: своих требований нет → показываем требования ГРУППЫ с явной атрибуцией.
         # Подмены не происходит: строка-атрибуция называет позицию-источник, а промпт обязан
         # это воспроизвести. Баллы не суммируем — это решает эксперт по первоисточнику.

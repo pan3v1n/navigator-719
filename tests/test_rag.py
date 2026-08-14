@@ -7,6 +7,7 @@ BM25 (токенизация/стемминг/векторы), сборку ко
 
 from __future__ import annotations
 
+import json
 import re
 import sys
 import unittest
@@ -905,6 +906,93 @@ class TestThresholds(unittest.TestCase):
         self.assertIn("170 баллов", thr)  # с 1 января 2023 г.
         self.assertIn("180 баллов", thr)  # с 1 января 2024 г.
         self.assertIn("прим. 9", thr)
+
+
+class TestBlockNote(unittest.TestCase):
+    """D9: условие блока (`note`) доезжает до контекста и остаётся при СВОЁМ узле.
+
+    До 14.08.2026 поле не читалось нигде в рантайме, хотя лежало в payload: 503 блока у 259 позиций,
+    из них 305 — рядом с балльными операциями. Терялись пороги отдельных узлов, пометки
+    «обязательное требование», правила начисления и периоды действия.
+    """
+
+    NODE = [
+        {"component": "криогенный насос низкого давления", "note": "не менее 100 баллов",
+         "operations": [{"text": "производство насоса", "points": 20}]},
+        {"component": "узел учета сжиженного природного газа", "note": "не менее 40 баллов",
+         "operations": [{"text": "изготовление блока управления", "points": 15}]},
+    ]
+
+    def test_note_reaches_context(self):
+        ctx = format_context([make_hit(requirement_blocks=self.NODE)])
+        self.assertIn("криогенный насос низкого давления — не менее 100 баллов", ctx)
+        self.assertIn("узел учета сжиженного природного газа — не менее 40 баллов", ctx)
+
+    def test_node_threshold_never_becomes_position_threshold(self):
+        """Порог узла в строке «Порог:» — тот самый класс «правдоподобно, но неверно»."""
+        ctx = format_context([make_hit(requirement_blocks=self.NODE)])
+        for line in ctx.splitlines():
+            if line.strip().startswith("Порог:"):
+                self.fail(f"порог узла подставился как порог позиции: {line.strip()}")
+
+    def test_position_threshold_and_node_thresholds_coexist(self):
+        ctx = format_context([make_hit(min_threshold="не менее 250 баллов",
+                                       requirement_blocks=self.NODE)])
+        self.assertIn("Порог: не менее 250 баллов", ctx)
+        self.assertIn("криогенный насос низкого давления — не менее 100 баллов", ctx)
+
+    def test_long_note_is_clipped_and_says_so(self):
+        """Молча обрезанное условие превращает несколько порогов в один — резать можно только вслух."""
+        note = "; ".join(f"с 1 января 202{i} г. - не менее {500 + i * 10} баллов" for i in range(9))
+        self.assertGreater(len(note), pipeline_mod.NOTE_CAP_OTHER)
+        self.assertLess(len(note), pipeline_mod.NOTE_CAP_TARGET)
+        blocks = [{"component": "насосные установки", "note": note,
+                   "operations": [{"text": "сборка", "points": 10}]}]
+
+        full = format_context([make_hit(okpd2_match=True, requirement_blocks=blocks)])
+        self.assertIn("не менее 500 баллов", full)
+        self.assertIn("не менее 580 баллов", full)  # у целевого хита условие идёт целиком
+        self.assertNotIn("условие показано не полностью", full)
+
+        # тот же блок у КАНДИДАТА (целевой — другой хит, по совпадению кода) режется, но вслух
+        short = format_context([make_hit(product_name="Целевая", okpd2_match=True),
+                                make_hit(product_name="Кандидат", requirement_blocks=blocks)])
+        self.assertIn("условие показано не полностью", short)
+        self.assertIn("не менее 500 баллов", short)     # начало условия остаётся
+        self.assertNotIn("не менее 580 баллов", short)  # хвост срезан
+
+    def test_clip_keeps_sentence_boundary(self):
+        clipped = pipeline_mod._clip_note("первое условие; второе условие; третье условие", 25)
+        self.assertTrue(clipped.startswith("первое условие"))
+        self.assertNotIn("третье", clipped)
+        self.assertIn("условие показано не полностью", clipped)
+
+    def test_note_shown_when_block_has_no_operations(self):
+        ctx = format_context([make_hit(requirement_blocks=[
+            {"component": "наличие прав на документацию", "note": "обязательное требование"}])])
+        self.assertIn("наличие прав на документацию — обязательное требование", ctx)
+
+    def test_inheritance_map_carries_block_intro(self):
+        """K4 применялась только к прямому пути: 327 из 331 наследника видели операции без
+        требования, частью которого они являются («…НА ТЕРРИТОРИИ РФ следующих операций»)."""
+        path = ROOT / "knowledge_base/pp719/inherited_requirements.json"
+        if not path.exists():
+            self.skipTest("карта наследования не сгенерирована")
+        parents = (json.loads(path.read_text(encoding="utf-8")).get("parents") or {})
+        if not parents:
+            self.skipTest("карта пуста")
+        with_intro = sum(1 for p in parents.values()
+                         for o in p.get("operations") or [] if o.get("_parent"))
+        total = sum(len(p.get("operations") or []) for p in parents.values())
+        self.assertGreater(with_intro, total * 0.8,
+                           "вводная фраза блока перестала попадать в карту наследования")
+
+    def test_block_without_note_renders_as_before(self):
+        ctx = format_context([make_hit(requirement_blocks=[
+            {"component": "осуществление на территории РФ следующих операций",
+             "operations": [{"text": "сварка", "points": 40}]}])])
+        self.assertIn("▸ осуществление на территории РФ следующих операций", ctx)
+        self.assertNotIn("—", ctx.split("▸")[1].split("\n")[0])  # вводная без хвоста
 
 
 class TestRulesLoader(unittest.TestCase):

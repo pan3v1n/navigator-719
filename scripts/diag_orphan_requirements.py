@@ -388,14 +388,36 @@ def find_fragmented(rows: list[Row]) -> list[list[Row]]:
 # R6 шаг 3: карта наследования требований от родителя группы
 # --------------------------------------------------------------------------- #
 def record_operations(rec: dict) -> list[dict]:
-    """Требования записи ровно по правилу рантайма (`pipeline._hit_operations`)."""
+    """Требования записи ровно по правилу рантайма (`pipeline._hit_operations`).
+
+    ⚠ Обещание «ровно по правилу рантайма» до 14.08.2026 не выполнялось: функция плющила блоки в
+    плоский список текстов, теряя вводную фразу блока (K4) и условие (`note`, D9). Наследник видел
+    операции БЕЗ требования, частью которого они являются, — то есть без «осуществление НА
+    ТЕРРИТОРИИ РОССИЙСКОЙ ФЕДЕРАЦИИ следующих технологических операций». Это ровно претензия
+    июльского теста, ради которой заведена K4, и она обошла стороной 327 из 331 наследника:
+    правка применилась к прямому пути и не применилась к унаследованному.
+
+    Поэтому вводную строку блока собираем ТОЙ ЖЕ функцией, что и рантайм, — иначе две половины
+    правила снова разойдутся молча (как разошлись половины ключа наследования в D6)."""
+    from app.rag.pipeline import NOTE_CAP_TARGET, _block_intro
+
     out: list[dict] = []
     for b in rec.get("requirement_blocks") or []:
         ops = b.get("operations") or []
+        comp = (b.get("component") or "").strip()
+        note = (b.get("note") or "").strip()
         if ops:
-            out.extend({"text": (o.get("text") or ""), "points": o.get("points")} for o in ops)
-        elif (b.get("component") or "").strip():
-            out.append({"text": b["component"].strip(), "points": None})
+            dup = comp and any(comp.lower() == (o.get("text") or "").strip().lower() for o in ops)
+            parent = _block_intro(comp if not dup else "", note, NOTE_CAP_TARGET)
+            for o in ops:
+                item = {"text": (o.get("text") or ""), "points": o.get("points")}
+                if parent:
+                    item["_parent"] = parent
+                out.append(item)
+            continue
+        text = _block_intro(comp, note, NOTE_CAP_TARGET)
+        if text:
+            out.append({"text": text, "points": None})
     return out
 
 
