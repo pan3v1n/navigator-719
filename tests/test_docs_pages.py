@@ -98,6 +98,40 @@ class TestChatDisclaimers(unittest.TestCase):
         self.assertIn(".nav-group.open .nav-menu", self.css)
 
 
+class TestSourceLinkEdition(unittest.TestCase):
+    """Ссылка на первоисточник в разметке чата = редакция корпуса.
+
+    16.08.2026 на бою источники вели на текст с пометкой «Не действует»: адрес был захардкожен
+    в chat.js, корпус за это время ушёл на две редакции вперёд. Разметку никто не проверял —
+    ни один тест страницу чата не рендерил, поэтому дефект дожил до эксперта."""
+
+    @classmethod
+    def setUpClass(cls):
+        from app.api.web import _ctx, templates
+        from app.db.models import User
+        from app.rag.edition import kontur_719_url
+
+        class _Req:  # Jinja-шаблону от запроса нужен только объект в контексте
+            scope = {"type": "http"}
+            session: dict = {}
+
+        cls.url = kontur_719_url()
+        cls.html = templates.get_template("chat.html").render(
+            **_ctx(_Req(), user=User(username="kursk.expert1", role="expert"),
+                   kontur_719_url=cls.url))
+
+    def test_page_carries_current_edition_link(self):
+        import re
+        doc_id = re.search(r"documentId=(\d+)", self.url).group(1)
+        self.assertIn(doc_id, self.html, "адрес первоисточника не доехал до разметки")
+        self.assertIn("window.KONTUR_719", self.html)
+
+    def test_js_has_no_own_copy(self):
+        js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertNotRegex(js, r"documentId=\d",
+                            "во фронте снова появился свой documentId — он разъедется с корпусом")
+
+
 class TestAnswerTools(unittest.TestCase):
     """Кнопки «копировать» и «поделиться» под ответом."""
 
