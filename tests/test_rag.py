@@ -17,7 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.prompts import build_navigator_user_prompt  # noqa: E402
+from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT, build_navigator_user_prompt  # noqa: E402
 from app.rag import sparse  # noqa: E402
 from app.rag import pipeline as pipeline_mod  # noqa: E402
 from app.rag.pipeline import (  # noqa: E402
@@ -123,6 +123,28 @@ class TestDeterministicOrder(unittest.TestCase):
         a = self._hit(None, 0.2, "Без якоря")
         b = self._hit("Раздел A, позиция 1", 0.2, "С якорем")
         self.assertEqual(len(sorted([a, b], key=_order_key)), 2)
+
+
+class TestCaseUsageIsSilent(unittest.TestCase):
+    """Кейс петли обучения используется, но НЕ называется в ответе (решение владельца 16.08.2026).
+
+    Раньше правило 1а прямо просило «упомянуть, что ответ учитывает подтверждённый экспертом
+    кейс», и это уезжало в текст («важно: ответ сделан по кейсу эксперта ТПП»). Откуда сервис
+    взял знание — его внутренняя кухня: читателю адресован ответ, а не отчёт о собственных
+    источниках. К тому же формулировка сбивает с толку — эксперт ТПП читает её как ссылку на
+    чьё-то чужое заключение, которого он не видел."""
+
+    def test_prompt_forbids_naming_the_case(self):
+        self.assertIn("НИКОГДА не упоминай в ответе сам факт использования кейса",
+                      NAVIGATOR_SYSTEM_PROMPT)
+        # приоритет кейса при этом сохранён — молчим о механике, а не игнорируем её
+        self.assertIn("опирайся в первую очередь на него", NAVIGATOR_SYSTEM_PROMPT)
+
+    def test_old_instruction_removed(self):
+        self.assertNotIn("и упомяни, что \\\n   ответ учитывает", NAVIGATOR_SYSTEM_PROMPT)
+        # именно эта формулировка попадала в ответ дословно
+        self.assertNotIn("упомяни, что ответ учитывает подтверждённый экспертом кейс",
+                         " ".join(NAVIGATOR_SYSTEM_PROMPT.split()))
 
 
 class TestPointsTable(unittest.TestCase):
