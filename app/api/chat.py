@@ -31,7 +31,12 @@ from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core import sensitive
 from app.core.prompts import EXPERT_DISCLAIMER
-from app.rag.edition import corpus_line
+from app.rag.edition import (
+    KONTUR_PRIKAZ_52_URL,
+    RULES_ANCHOR,
+    corpus_line,
+    kontur_719_url,
+)
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -117,9 +122,10 @@ def _sources_from_hits(hits) -> list[SourceItem]:
 # --- Кликабельные источники ПРОЦЕДУРНОГО ответа (пункты Правил/тела ПП №719/Приказа №52). ----------
 # Первоисточники на Контур.Норматив. Правила формирования и ведения реестра — раздел внутри документа
 # ПП №719 (якорь #h14240), поэтому та же ссылка, что и на тело, но с якорем раздела.
-_KONTUR_719 = "https://normativ.kontur.ru/document?moduleId=1&documentId=506899"
-_KONTUR_PRIKAZ_52 = "https://normativ.kontur.ru/document?moduleId=1&documentId=505398"
-_RULES_ANCHOR = "#h14240"  # раздел «Правила формирования и ведения реестра» внутри документа 719
+#
+# Адрес документа 719 берётся ПО РЕДАКЦИИ КОРПУСА (`app/rag/edition.py`), а не константой: у Контура
+# у каждой редакции свой documentId, и захардкоженный адрес молча уводил эксперта на недействующий
+# текст, пока корпус уходил вперёд.
 _DOC_NAMES = {
     "tpp_order_52": "Приказ ТПП РФ №52",
     "rules_registry": "Правила ведения реестра",
@@ -131,11 +137,11 @@ def _rule_url(doc_type: str, text: str) -> str:
     """Ссылка на первоисточник пункта + текст-фрагмент (`:~:text=`) для точной прокрутки браузером.
     Приказ №52 — отдельный документ; Правила — раздел документа 719 (якорь h14240); тело — сам 719."""
     if doc_type == "tpp_order_52":
-        base, anchor = _KONTUR_PRIKAZ_52, ""
+        base, anchor = KONTUR_PRIKAZ_52_URL, ""
     elif doc_type == "rules_registry":
-        base, anchor = _KONTUR_719, _RULES_ANCHOR
+        base, anchor = kontur_719_url(), RULES_ANCHOR
     else:  # decree_body и фолбэк
-        base, anchor = _KONTUR_719, ""
+        base, anchor = kontur_719_url(), ""
     snippet = " ".join((text or "").split()[:8]).strip()  # первые ~8 слов пункта — цель прокрутки
     if not snippet:
         return base + anchor

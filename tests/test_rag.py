@@ -752,11 +752,13 @@ class TestProceduralSources(unittest.TestCase):
         self.assertEqual(src[0].product_name, "Приказ ТПП РФ №52, п. 7")
         # Приказ №52 — отдельный документ 505398
         self.assertIn("documentId=505398", src[0].url)
-        # Правила — раздел документа 719 (якорь h14240)
-        self.assertIn("documentId=506899", src[1].url)
+        # Правила — раздел документа 719 (якорь h14240) в редакции КОРПУСА, а не в захардкоженной
+        from app.rag.edition import kontur_719_url
+        doc = kontur_719_url()
+        self.assertIn(doc, src[1].url)
         self.assertIn("h14240", src[1].url)
         # тело ПП №719 — сам 719 без якоря раздела Правил
-        self.assertIn("documentId=506899", src[2].url)
+        self.assertIn(doc, src[2].url)
         self.assertNotIn("h14240", src[2].url)
         # текст-фрагмент для точной прокрутки браузером
         self.assertIn(":~:text=", src[0].url)
@@ -792,6 +794,45 @@ class TestProceduralSources(unittest.TestCase):
             pipeline_mod.search_rules, pipeline_mod._client = orig_search, orig_client
         self.assertEqual(len(ans.rule_sources), 3)
         self.assertEqual(ans.rule_sources[0]["doc_type"], "tpp_order_52")
+
+
+class TestKonturLinks(unittest.TestCase):
+    """Ссылки на первоисточник обязаны вести в редакцию КОРПУСА.
+
+    Зачем этот тест. У Контура на каждую редакцию свой documentId, и ссылка на прошлую редакцию
+    открывается с пометкой «Не действует». Именно так и случилось: корпус ушёл с 27.06 на 22.07,
+    а захардкоженный documentId остался — эксперт третьей волны кликал источник и попадал на
+    недействующий текст. Дефект был НЕВИДИМ (все тесты зелёные, ссылка рабочая, страница
+    открывается), поэтому здесь он превращается в громкий отказ сборки."""
+
+    def test_corpus_edition_has_link(self):
+        # Актуализировали корпус, а documentId новой редакции добавить забыли → красный тест.
+        from app.rag.edition import KONTUR_719_BY_EDITION, corpus_edition
+        ed = corpus_edition()
+        self.assertIn(
+            ed, KONTUR_719_BY_EDITION,
+            f"Редакции корпуса «{ed}» нет в KONTUR_719_BY_EDITION (app/rag/edition.py): "
+            f"источники поведут на чужую редакцию. Открой текущую ссылку на Контуре, возьми "
+            f"documentId действующей версии и добавь строку в таблицу.")
+
+    def test_url_points_to_current_edition(self):
+        from app.rag.edition import KONTUR_719_BY_EDITION, corpus_edition, kontur_719_url
+        self.assertIn(f"documentId={KONTUR_719_BY_EDITION[corpus_edition()]}", kontur_719_url())
+
+    def test_no_hardcoded_doc_id_left(self):
+        """Ни в бэкенде, ни во фронте не должно остаться собственной копии documentId.
+
+        Копий было две (chat.py и chat.js), и разъехалась именно вторая — поэтому проверяем
+        обе, а не только ту, что чинили."""
+        from pathlib import Path
+        root = Path(__file__).resolve().parents[1]
+        for rel in ("app/api/chat.py", "app/web/static/chat.js"):
+            text = (root / rel).read_text(encoding="utf-8")
+            # «documentId=<цифры>» в коде — это захардкоженная редакция (комментарии их не содержат)
+            self.assertNotRegex(
+                text, r"documentId=\d",
+                f"{rel}: адрес первоисточника захардкожен. Он обязан приходить из "
+                f"app/rag/edition.kontur_719_url() — иначе разъедется с редакцией корпуса.")
 
 
 class TestThresholds(unittest.TestCase):

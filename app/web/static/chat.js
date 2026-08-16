@@ -195,14 +195,17 @@ function addPending() {
   return wrap;
 }
 
-// Официальный текст ПП №719 на Контур.Норматив (для кликабельных источников) — ДЕЙСТВУЮЩАЯ
-// редакция от 27.06.2026 (действует с 01.07.2026), совпадает с индексируемым текстом базы.
-// ⚠️ При вступлении в силу новой редакции обновить documentId (у каждой редакции Контура свой id).
-const KONTUR_719 = "https://normativ.kontur.ru/document?moduleId=1&documentId=506899";
+// Официальный текст ПП №719 на Контур.Норматив (для кликабельных источников). Адрес приходит
+// с сервера (chat.html → window.KONTUR_719), потому что у КАЖДОЙ редакции Контура свой documentId,
+// и он обязан совпадать с редакцией корпуса — её знает только сервер (app/rag/edition.py).
+// Собственной константы здесь больше НЕТ: прежняя отстала на две редакции и вела эксперта на текст
+// с пометкой «Не действует».
+const KONTUR_719 = window.KONTUR_719 || "";
 
 // Ссылка на документ 719 + текстовый фрагмент (#:~:text=…): браузер (Chrome/Edge) прокручивает
 // к позиции в таблице. Цель — код ОКПД2 (в таблице он есть дословно) либо наименование продукции.
 function konturLink(s) {
+  if (!KONTUR_719) return "";  // сервер адрес не отдал — лучше пункт без ссылки, чем битая ссылка
   const codes = s.okpd2 || [];
   const anchor = codes.length ? codes[0] : (s.product_name || "").slice(0, 40);
   return KONTUR_719 + (anchor ? "#:~:text=" + encodeURIComponent(anchor) : "");
@@ -216,14 +219,19 @@ function addSources(wrap, sources) {
   sum.textContent = "Источники (" + sources.length + ")";
   det.appendChild(sum);
   sources.forEach((s, i) => {
-    const a = document.createElement("a");
-    a.className = "src-item";
     // s.url — прямая ссылка на первоисточник (процедурные: Правила/ПП №719/Приказ №52).
     // Товарные источники приходят без url → строим ссылку по ОКПД2/наименованию в тексте 719.
-    a.href = s.url || konturLink(s);
-    a.target = "_blank";
-    a.rel = "noopener";
-    a.title = s.url ? "Открыть первоисточник (Контур.Норматив)" : "Открыть в тексте ПП №719 (Контур.Норматив)";
+    const href = s.url || konturLink(s);
+    // Без адреса рисуем ПОДПИСЬЮ, а не пустой ссылкой: <a href=""> перезагружает страницу и
+    // выглядит как рабочий клик — молчаливая поломка вместо видимой.
+    const a = document.createElement(href ? "a" : "span");
+    a.className = "src-item";
+    if (href) {
+      a.href = href;
+      a.target = "_blank";
+      a.rel = "noopener";
+      a.title = s.url ? "Открыть первоисточник (Контур.Норматив)" : "Открыть в тексте ПП №719 (Контур.Норматив)";
+    }
     const mark = s.okpd2_match ? " (совпадение по коду)" : "";
     const codes = (s.okpd2 || []).join(", ");
     let t = "[" + (i + 1) + "] " + s.product_name + (s.section ? " — " + s.section : "") + mark;

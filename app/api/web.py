@@ -31,7 +31,7 @@ from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
-from app.rag.edition import corpus_edition, corpus_line
+from app.rag.edition import corpus_edition, corpus_line, kontur_719_url
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -171,7 +171,10 @@ def chat_page(request: Request):
         return RedirectResponse("/login", status_code=302)
     if needs_profile(user):  # жёсткий гейт: роль user не в чат, пока не заполнит профиль+согласие
         return RedirectResponse("/profile", status_code=302)
-    return templates.TemplateResponse("chat.html", _ctx(request, user=user))
+    # kontur_719_url — адрес первоисточника в редакции КОРПУСА (у Контура documentId свой на каждую
+    # редакцию). Отдаём фронту отсюда, чтобы константа была одна и не разъезжалась с базой.
+    return templates.TemplateResponse(
+        "chat.html", _ctx(request, user=user, kontur_719_url=kontur_719_url()))
 
 
 @router.get("/profile", response_class=HTMLResponse)
