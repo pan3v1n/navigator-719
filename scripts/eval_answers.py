@@ -93,7 +93,10 @@ def evaluate(limit: int, cases_limit: int):
         if ans.cases:
             ctx += "\n" + format_cases(ans.cases)
 
-        hallucinated = unverified_numbers(text, ctx)  # та же логика, что в рантайм-постпроверке
+        # Та же логика, что в рантайм-постпроверке — включая ВОПРОС как законный источник чисел
+        # (16.08.2026). Забудь передать `c["query"]` — и замер начнёт считать выдумкой то, что
+        # рантайм выдумкой не считает, то есть мерить не продукт, а расхождение с самим собой.
+        hallucinated = unverified_numbers(text, ctx, c["query"])
 
         rows.append({
             "id": c["id"],

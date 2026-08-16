@@ -17,13 +17,15 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.core.prompts import build_navigator_user_prompt  # noqa: E402
+from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT, build_navigator_user_prompt  # noqa: E402
 from app.rag import sparse  # noqa: E402
 from app.rag import pipeline as pipeline_mod  # noqa: E402
 from app.rag.pipeline import (  # noqa: E402
     _anchor_code,
     _is_continuation,
+    _user_text,
     claim_numbers,
+    echoed_numbers,
     format_cases,
     format_context,
     format_rules_context,
@@ -31,7 +33,7 @@ from app.rag.pipeline import (  # noqa: E402
     unverified_deadlines,
     unverified_numbers,
 )
-from app.rag.retriever import Hit, _prefixes, _segments, okpd2_match  # noqa: E402
+from app.rag.retriever import Hit, _order_key, _prefixes, _segments, okpd2_match  # noqa: E402
 from app.rag import meta  # noqa: E402
 from app.rag import okpd2_ref  # noqa: E402
 from app.rag import procedural  # noqa: E402
@@ -83,6 +85,169 @@ class TestOkpd2Match(unittest.TestCase):
     def test_empty_inputs(self):
         self.assertFalse(okpd2_match([], "29.20"))
         self.assertFalse(okpd2_match(["29.20"], ""))
+
+
+class TestDeterministicOrder(unittest.TestCase):
+    """Ничья RRF не должна решаться случаем (диагностика 16.08.2026).
+
+    RRF выдаёт разным записям буквально одинаковый score, и на границе окна `limit` они
+    конкурируют за последнее место. Пять прогонов одного запроса давали два разных контекста:
+    «Тракторы гусеничные» (0.200000) против «Модульная криогенная АЗС» (0.200000). Эксперт
+    получал разные баллы на один вопрос, а замер «плавал» — это и есть M1, объявленный
+    неустранимым свойством слияния."""
+
+    def _hit(self, anchor, score, name="Позиция", match=False):
+        return Hit(score=score, section_roman="III", section_title="т", product_name=name,
+                   okpd2_codes=[], min_threshold=None, requirement_blocks=[],
+                   source_anchor=anchor, okpd2_match=match)
+
+    def test_tie_broken_by_anchor_not_arrival_order(self):
+        a = self._hit("Раздел III, позиция 155", 0.2, "Тракторы гусеничные")
+        b = self._hit("Раздел XXIV, позиция 6", 0.2, "Модульная криогенная АЗС")
+        # тот же набор, пришедший в РАЗНОМ порядке, обязан дать один и тот же результат
+        self.assertEqual([h.source_anchor for h in sorted([a, b], key=_order_key)],
+                         [h.source_anchor for h in sorted([b, a], key=_order_key)])
+
+    def test_score_still_dominates_tie_break(self):
+        low = self._hit("Раздел A, позиция 1", 0.2)
+        high = self._hit("Раздел Z, позиция 9", 0.9)
+        # якорь разрешает ТОЛЬКО ничьи: запись с бо́льшим score остаётся первой
+        self.assertEqual([h.score for h in sorted([low, high], key=_order_key)], [0.9, 0.2])
+
+    def test_code_match_outranks_score(self):
+        matched = self._hit("Раздел A, позиция 1", 0.1, match=True)
+        loose = self._hit("Раздел Z, позиция 9", 0.9)
+        self.assertTrue(sorted([loose, matched], key=_order_key)[0].okpd2_match)
+
+    def test_missing_anchor_does_not_crash(self):
+        a = self._hit(None, 0.2, "Без якоря")
+        b = self._hit("Раздел A, позиция 1", 0.2, "С якорем")
+        self.assertEqual(len(sorted([a, b], key=_order_key)), 2)
+
+
+class TestCaseUsageIsSilent(unittest.TestCase):
+    """Кейс петли обучения используется, но НЕ называется в ответе (решение владельца 16.08.2026).
+
+    Раньше правило 1а прямо просило «упомянуть, что ответ учитывает подтверждённый экспертом
+    кейс», и это уезжало в текст («важно: ответ сделан по кейсу эксперта ТПП»). Откуда сервис
+    взял знание — его внутренняя кухня: читателю адресован ответ, а не отчёт о собственных
+    источниках. К тому же формулировка сбивает с толку — эксперт ТПП читает её как ссылку на
+    чьё-то чужое заключение, которого он не видел."""
+
+    def test_prompt_forbids_naming_the_case(self):
+        self.assertIn("НИКОГДА не упоминай в ответе сам факт использования кейса",
+                      NAVIGATOR_SYSTEM_PROMPT)
+        # приоритет кейса при этом сохранён — молчим о механике, а не игнорируем её
+        self.assertIn("опирайся в первую очередь на него", NAVIGATOR_SYSTEM_PROMPT)
+
+    def test_old_instruction_removed(self):
+        self.assertNotIn("и упомяни, что \\\n   ответ учитывает", NAVIGATOR_SYSTEM_PROMPT)
+        # именно эта формулировка попадала в ответ дословно
+        self.assertNotIn("упомяни, что ответ учитывает подтверждённый экспертом кейс",
+                         " ".join(NAVIGATOR_SYSTEM_PROMPT.split()))
+
+
+class TestPointsTable(unittest.TestCase):
+    """Длинный перечень баллов печатает КОД, а не модель (P4).
+
+    Тай-брейк ретрива стабилизировал контекст, но детерминизм остался 8/10: из шести десятков
+    операций модель каждый раз выбирает своё подмножество. Эксперт на один и тот же вопрос
+    получает разные баллы. Код печатает их дословно и одинаково — заодно закрывая класс
+    «искажена формулировка операции», который не ловится ничем."""
+
+    def _hit(self, n_scored: int, n_plain: int = 0):
+        ops = [{"text": f"операция {i}", "points": 10 + i} for i in range(n_scored)]
+        ops += [{"text": f"условие {i}", "points": None} for i in range(n_plain)]
+        return Hit(score=0.5, section_roman="III", section_title="Спецмаш",
+                   product_name="Бульдозеры гусеничные", okpd2_codes=["28.92.21"],
+                   min_threshold="не менее 2000 баллов",
+                   requirement_blocks=[{"component": "", "operations": ops}],
+                   source_anchor="Раздел III, позиция 1")
+
+    def test_short_list_left_to_the_model(self):
+        """У коротких позиций модель справляется — таблица только высушила бы типовой ответ."""
+        self.assertEqual(pipeline_mod.points_table(self._hit(5)), "")
+
+    def test_long_list_rendered_by_code(self):
+        table = pipeline_mod.points_table(self._hit(pipeline_mod.POINTS_TABLE_MIN))
+        self.assertIn("| Операция или условие | Баллы |", table)
+        self.assertIn("| операция 0 | 10 балл. |", table)
+
+    def test_numbers_carry_unit(self):
+        """Число без «балл.» перестаёт быть проверяемым — то же правило, что у 4б промпта."""
+        for line in pipeline_mod.points_table(self._hit(14)).split("\n"):
+            if line.startswith("| операция"):
+                self.assertIn("балл.", line)
+
+    def test_rendering_is_deterministic(self):
+        h = self._hit(20)
+        self.assertEqual(pipeline_mod.points_table(h, "бульдозеры"),
+                         pipeline_mod.points_table(h, "бульдозеры"))
+
+    def test_operations_without_points_are_not_in_table(self):
+        """Обязательные требования без баллов остаются за моделью — они не про подсчёт."""
+        table = pipeline_mod.points_table(self._hit(13, n_plain=3))
+        self.assertNotIn("условие 0", table)
+
+    def test_pipe_in_text_does_not_break_markdown(self):
+        h = self._hit(12)
+        h.requirement_blocks[0]["operations"][0]["text"] = "сварка | окраска"
+        self.assertNotIn("сварка | окраска", pipeline_mod.points_table(h))
+
+    def test_no_hit_no_table(self):
+        self.assertEqual(pipeline_mod.points_table(None), "")
+
+    def test_prompt_forbids_duplicating_the_table(self):
+        p = build_navigator_user_prompt("q", "ctx", points_table_appended=True)
+        self.assertIn("БУДЕТ ДОБАВЛЕН АВТОМАТИЧЕСКИ", p)
+        self.assertIn("НЕ перечисляй операции с баллами", p)
+        # без флага инструкции быть не должно — иначе модель промолчит там, где печатать обязана
+        self.assertNotIn("БУДЕТ ДОБАВЛЕН АВТОМАТИЧЕСКИ", build_navigator_user_prompt("q", "ctx"))
+
+
+class TestScopeByClassifier(unittest.TestCase):
+    """Второй сигнал out-of-scope: класс ОКПД2 вместо близости векторов.
+
+    Косинус исчерпан — замер 16.08.2026 показал полосу перекрытия 44 тысячных вместо 14, и пять
+    негативов из 36 проходят порог. Класс ОКПД2 — сигнал другой природы: 719 покрывает 20 классов
+    обрабатывающей промышленности, и сельское хозяйство или перевозки в нём отсутствуют
+    конструктивно, а не случайно."""
+
+    def test_divisions_derived_from_corpus_not_hardcoded(self):
+        from app.rag import scope
+        d = scope.divisions_in_719()
+        self.assertGreater(len(d), 10, "классы не прочитались из корпуса")
+        for present in ("28", "29", "26", "27"):   # машиностроение, автопром, электроника
+            self.assertIn(present, d)
+        for absent in ("01", "38", "49", "43"):    # сельхоз, отходы, перевозки, стройка
+            self.assertNotIn(absent, d)
+
+    def test_flags_services_and_agriculture(self):
+        from app.rag import scope
+        for q in ("разведение крупного рогатого скота",
+                  "утилизация и переработка промышленных отходов",
+                  "услуги грузоперевозок автомобильным транспортом"):
+            self.assertTrue(scope.out_of_scope_by_classifier(q), q)
+
+    def test_does_not_flag_industrial_queries(self):
+        from app.rag import scope
+        for q in ("производим гидравлические насосы", "станки металлорежущие с ЧПУ",
+                  "светодиоды белого диапазона", "прицепы для легковых автомобилей"):
+            self.assertFalse(scope.out_of_scope_by_classifier(q), q)
+
+    def test_ambiguous_query_needs_unanimity(self):
+        """«Монтаж вентиляции» даёт и 43.22 (вне), и 28.25 (внутри) — единогласия нет, флага нет.
+
+        Требование единогласия и есть защита от промахов лексического подбора: без него
+        «декоративная косметика», цепляющаяся за керамику 23.41, дала бы ложный сигнал в обе
+        стороны в зависимости от порядка кандидатов."""
+        from app.rag import scope
+        self.assertFalse(scope.out_of_scope_by_classifier("монтаж и пусконаладка вентиляционного оборудования"))
+
+    def test_empty_and_nonsense_do_not_flag(self):
+        from app.rag import scope
+        self.assertFalse(scope.out_of_scope_by_classifier(""))
+        self.assertFalse(scope.out_of_scope_by_classifier("   "))
 
 
 class TestEnvExampleMatchesSettings(unittest.TestCase):
@@ -405,6 +570,54 @@ class TestFaithfulness(unittest.TestCase):
     def test_unverified_empty_when_grounded(self):
         ctx = "Порог: не менее 64 баллов\n  • сварка — 400 балл."
         self.assertEqual(unverified_numbers("нужно 400 баллов при пороге 64 балла", ctx), [])
+
+
+class TestNumbersFromQuestion(unittest.TestCase):
+    """Число, названное САМИМ пользователем, — не выдумка (замер 16.08.2026).
+
+    Гард сверял ответ только с контекстом, поэтому на «набрали 3200 баллов, пройдём?» ответ,
+    честно цитирующий цифру заявителя, помечался как галлюцинация. Класс вопросов «посчитайте
+    мне» — один из самых частых, то есть ложные флаги копились именно там, где приёмочная
+    метрика должна быть чистой."""
+
+    CTX = "Ключевые операции:\n  • сварка — 400 балл.\nПорог: не менее 8000 баллов"
+
+    def test_question_number_is_not_hallucination(self):
+        q = "выполняем 4 операции, набрали 3200 баллов, мы пройдём по 719?"
+        answer = "Цифра «3200 баллов» не привязана к позиции приложения."
+        self.assertEqual(unverified_numbers(answer, self.CTX, q), [])
+        self.assertEqual(echoed_numbers(answer, self.CTX, q), ["3200"])
+
+    def test_real_hallucination_still_caught(self):
+        # число, которого нет НИ в контексте, НИ в вопросе → флаг остаётся
+        q = "какие требования к прицепам"
+        self.assertEqual(unverified_numbers("начисляется 777 баллов", self.CTX, q), ["777"])
+        self.assertEqual(echoed_numbers("начисляется 777 баллов", self.CTX, q), [])
+
+    def test_context_number_is_not_echo(self):
+        # заземлённое контекстом число не попадает ни в один из списков
+        q = "у нас 3200 баллов"
+        self.assertEqual(unverified_numbers("сварка даёт 400 баллов", self.CTX, q), [])
+        self.assertEqual(echoed_numbers("сварка даёт 400 баллов", self.CTX, q), [])
+
+    def test_number_from_earlier_turn_counts(self):
+        # числа называют один раз, а спрашивают следующим ходом — история тоже источник
+        hist = [{"role": "user", "content": "у нас набрано 3200 баллов"},
+                {"role": "assistant", "content": "Уточните продукцию."}]
+        asked = _user_text("так мы пройдём?", hist)
+        self.assertEqual(unverified_numbers("речь о 3200 баллах", self.CTX, asked), [])
+
+    def test_assistant_history_is_not_a_source(self):
+        # ответ ассистента источником НЕ считается: иначе выдумка первого хода узаконит себя
+        hist = [{"role": "assistant", "content": "порог 777 баллов"}]
+        asked = _user_text("а точно?", hist)
+        self.assertEqual(unverified_numbers("да, 777 баллов", self.CTX, asked), ["777"])
+
+    def test_deadline_from_question_is_not_invented(self):
+        ctx = "Заявление рассматривается в срок, установленный Правилами."
+        q = "нам обещали 10 рабочих дней, это правда?"
+        self.assertEqual(unverified_deadlines("про 10 рабочих дней в пунктах не сказано", ctx, q), [])
+        self.assertEqual(unverified_deadlines("решение за 20 рабочих дней", ctx, q), ["20 дн."])
 
 
 class TestProceduralDeflect(unittest.TestCase):

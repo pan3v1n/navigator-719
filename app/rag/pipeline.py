@@ -13,6 +13,8 @@ import sys
 from dataclasses import dataclass, field
 from functools import lru_cache
 
+from loguru import logger
+
 from app.core.config import settings
 from app.core.prompts import (
     NAVIGATOR_SYSTEM_PROMPT,
@@ -50,6 +52,9 @@ class Answer:
     cases: list[dict] = field(default_factory=list)
     low_relevance: bool = False  # сработал ли сигнал out-of-scope guard
     unverified_numbers: list[str] = field(default_factory=list)  # числа баллов/% в ответе, не найденные в контексте
+    # Числа, которых нет в контексте, но которые назвал САМ пользователь: не выдумка, в приёмочный
+    # флаг не идут (см. `echoed_numbers`), но класс остаётся наблюдаемым — пишется в журнал.
+    echoed_numbers: list[str] = field(default_factory=list)
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
@@ -282,6 +287,73 @@ def format_context(hits: list[Hit], query: str | None = None) -> str:
     return "\n\n".join(blocks)
 
 
+# --- Детерминированная таблица баллов (P4, 16.08.2026) --------------------------------------
+# ЗАЧЕМ. Замер детерминизма даёт 8/10 при пороге гайда 0.95: на один и тот же вопрос эксперт
+# получает разные наборы баллов. Тай-брейк ретрива (`retriever._order_key`) убрал половину
+# причины — контекст стал стабильным, — но остаток лежит в ГЕНЕРАЦИИ: из шести десятков операций
+# контекста модель каждый раз выбирает своё подмножество.
+#
+# Просить её «перечислять все» бесполезно: на длинных списках модели дрейфуют, и это ровно тот
+# режим, где сорвётся и текстовая точность (искажение формулировки операции сейчас не ловится
+# НИЧЕМ — текстового faithfulness в проекте нет).
+#
+# Поэтому длинный перечень печатает КОД, дословно из того же контекста. Модель остаётся автором
+# разбора: позиция, порог, что уточнить, следующий шаг — всё это по-прежнему её работа.
+#
+# ТОЧЕЧНО, а не всегда: у коротких позиций модель справляется, а таблица вместо живого списка
+# сделала бы типовой ответ суше без всякой пользы. Порог включения — `POINTS_TABLE_MIN`.
+POINTS_TABLE_MIN = 12  # балльных операций у целевой позиции, начиная с которых печатает код
+
+_POINTS_TABLE_TITLE = "Операции и баллы — дословно из приложения"
+
+
+def _target_hit(hits: list[Hit]) -> Hit | None:
+    """Позиция, вокруг которой строится ответ: совпадение по коду, иначе top-1 (как в контексте)."""
+    if not hits:
+        return None
+    return next((h for h in hits if h.okpd2_match), hits[0])
+
+
+def points_table(hit: Hit | None, query: str | None = None) -> str:
+    """Markdown-таблица «Операция | Баллы» целевой позиции, либо пусто.
+
+    Числа и формулировки берутся из той же записи, что легла в контекст, поэтому таблица
+    заземлена по построению: faithfulness-гарду тут нечего ловить, а детерминизм абсолютный.
+    Единица «балл./%» в ячейке сохраняется намеренно — иначе число перестаёт быть проверяемым
+    (то же правило, что у 4б промпта)."""
+    if hit is None:
+        return ""
+    mt = hit.min_threshold or lookup_threshold(hit.okpd2_codes, hit.product_name, hit.section_roman)
+    ops = _hit_operations(hit, NOTE_CAP_TARGET, mt)
+    # Таблица обязана быть ПОДМНОЖЕСТВОМ контекста, а не независимой выборкой из записи. Иначе
+    # два ранжирования расходятся: в таблицу попадает операция, которой модель не видела, и
+    # faithfulness-гард честно помечает её баллы как незаземлённые — сверка идёт с КОНТЕКСТОМ.
+    # Поэтому повторяем ровно тот отбор, что делает `format_context`, и лишь потом фильтруем
+    # балльные.
+    shown_all = (_rank_operations(ops, query)[:MAX_OPS_TARGET]
+                 if len(ops) > MAX_OPS_TARGET else ops)
+    scored = [o for o in shown_all if o.get("points") is not None]
+    if len(scored) < POINTS_TABLE_MIN:
+        return ""
+    # Числа в подписи НЕ печатаем. Контекст уже несёт свою пометку «показаны N из M операций», и
+    # модель её цитирует; вторая пара чисел рядом (у нас M считалось бы по балльным — 94 против
+    # 95) читается как расхождение данных. Один факт — один источник.
+    incomplete = " (перечень неполный)" if len(ops) > len(shown_all) else ""
+    rows = ["", f"**{_POINTS_TABLE_TITLE}{incomplete}:**", "",
+            "| Операция или условие | Баллы |", "|---|---|"]
+    for o in scored:
+        text = " ".join((o.get("text") or "").split()).replace("|", "/")
+        parent = " ".join((o.get("_parent") or "").split()).replace("|", "/")
+        if parent:
+            text = f"{parent} — {text}"
+        rows.append(f"| {text} | {o['points']} балл. |")
+    if incomplete:
+        # Количество уже в подписи — здесь только напоминание, чтобы усечение было видно и тому,
+        # кто копирует одну таблицу без подписи.
+        rows.append("| _…перечень неполный, полный список — в первоисточнике ПП №719_ | |")
+    return "\n".join(rows)
+
+
 def format_cases(cases: list[dict]) -> str:
     blocks: list[str] = []
     for i, c in enumerate(cases, 1):
@@ -378,15 +450,41 @@ def number_in_context(num: str, context: str) -> bool:
     )
 
 
-def unverified_numbers(text: str, context: str) -> list[str]:
-    """Числа баллов/% из ОТВЕТА, которых НЕТ в контексте (кандидаты в галлюцинации).
+def unverified_numbers(text: str, context: str, question: str = "") -> list[str]:
+    """Числа баллов/% из ОТВЕТА, которых НЕТ ни в контексте, ни в ВОПРОСЕ (кандидаты в галлюцинации).
 
-    Консервативно: число незаземлено, только если в контексте его НЕТ вовсе (это занижает,
-    а не завышает — ложноположительных нет). Уникальные значения в порядке появления."""
+    Консервативно: число незаземлено, только если его НЕТ вовсе (это занижает, а не завышает).
+    Уникальные значения в порядке появления.
+
+    ПОЧЕМУ ВОПРОС ТОЖЕ СЧИТАЕТСЯ ИСТОЧНИКОМ (замер 16.08.2026). Гард сверял ответ ТОЛЬКО с
+    контекстом, поэтому цифра, которую назвал сам пользователь и которую ответ процитировал,
+    помечалась как выдуманная. Поймано на ловушке «выполняем 4 операции, набрали 3200 баллов,
+    мы пройдём?»: ответ честно говорит, что подходящей позиции нет («…соответствовала продукции,
+    связанной с „4 операциями“ и „3200 баллами“»), а гард ставит флаг на 3200.
+
+    Это не мелочь: «посчитайте мне, пройду ли я» — один из самых частых классов вопросов, и
+    каждый такой ответ копил ложный флаг в админке, то есть портил ровно ту метрику, ради
+    которой гард заведён. Эхо вопроса выделено в `echoed_numbers` — сигнал не теряется, а
+    отделяется от выдумки."""
     seen: set[str] = set()
     out: list[str] = []
     for n in claim_numbers(text):
-        if n not in seen and not number_in_context(n, context):
+        if n not in seen and not number_in_context(n, context) and not number_in_context(n, question):
+            seen.add(n)
+            out.append(n)
+    return out
+
+
+def echoed_numbers(text: str, context: str, question: str = "") -> list[str]:
+    """Числа баллов/% из ответа, которых нет в контексте, но которые ЕСТЬ в вопросе.
+
+    Отдельный класс, а не «всё в порядке»: модель повторяет цифру заявителя, и по самому числу
+    видно только то, что она пришла не из первоисточника. Выдумкой это не является, поэтому в
+    приёмочный флаг не идёт; но в журнал пишется, чтобы класс оставался наблюдаемым."""
+    seen: set[str] = set()
+    out: list[str] = []
+    for n in claim_numbers(text):
+        if n not in seen and not number_in_context(n, context) and number_in_context(n, question):
             seen.add(n)
             out.append(n)
     return out
@@ -399,12 +497,15 @@ def unverified_numbers(text: str, context: str) -> list[str]:
 _DEADLINE_CLAIM_RE = re.compile(rf"({_NUM})\s*(?:рабоч|календарн)\w*\s+дн", re.IGNORECASE)
 
 
-def unverified_deadlines(text: str, context: str) -> list[str]:
-    """Сроки в днях из ОТВЕТА, которых НЕТ в контексте Правил (кандидаты в выдумки процедуры)."""
+def unverified_deadlines(text: str, context: str, question: str = "") -> list[str]:
+    """Сроки в днях из ОТВЕТА, которых НЕТ в контексте Правил (кандидаты в выдумки процедуры).
+
+    Вопрос — такой же законный источник числа, как контекст (см. `unverified_numbers`):
+    «нам обещали 10 рабочих дней, правда?» не должно превращаться во флаг выдуманного срока."""
     seen: set[str] = set()
     out: list[str] = []
     for n in (v.replace(",", ".") for v in _DEADLINE_CLAIM_RE.findall(text)):
-        if n not in seen and not number_in_context(n, context):
+        if n not in seen and not number_in_context(n, context) and not number_in_context(n, question):
             seen.add(n)
             out.append(f"{n} дн.")
     return out
@@ -546,16 +647,35 @@ def _answer_procedural(query: str, search_query: str,
     usage = resp.usage
     raw = _strip_emoji(resp.choices[0].message.content or "")
     # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
-    ungrounded = unverified_numbers(raw, ctx) + unverified_deadlines(raw, ctx)
+    # Числа из вопроса источником считаются законным (см. `unverified_numbers`).
+    asked = _user_text(query, history)
+    ungrounded = unverified_numbers(raw, ctx, asked) + unverified_deadlines(raw, ctx, asked)
+    echoed = echoed_numbers(raw, ctx, asked)
+    if echoed:
+        logger.info("процедурный ответ повторяет числа из вопроса (не выдумка): {}", echoed)
     return Answer(
         text=raw,
         hits=[],
         low_relevance=False,
         unverified_numbers=ungrounded,
+        echoed_numbers=echoed,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
     )
+
+
+def _user_text(query: str, history: list[dict] | None = None) -> str:
+    """Всё, что в этом диалоге написал ПОЛЬЗОВАТЕЛЬ — источник чисел наравне с контекстом.
+
+    Берём и историю, а не только текущий вопрос: числа обычно называют один раз («у нас 3200
+    баллов»), а спрашивают следующим ходом («так мы пройдём?»). Проверяй мы только текущую
+    реплику — эхо снова считалось бы выдумкой, просто на ход позже."""
+    parts = [query or ""]
+    for m in history or []:
+        if m.get("role") == "user":
+            parts.append(m.get("content") or "")
+    return "\n".join(parts)
 
 
 @dataclass
@@ -567,6 +687,8 @@ class _Plan:
     hits: list[Hit]
     cases: list[dict]
     low_relevance: bool
+    # Готовая таблица баллов, которую печатает КОД (P4). Пусто — печатает модель, как раньше.
+    points_table: str = ""
 
 
 def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
@@ -660,11 +782,21 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # кейс и подмешивался в контекст с высшим приоритетом, и снимал флаг «похоже, вне сферы».
     # Теперь кейс проходит отсечку по dense-косинусу (`CASE_RELEVANCE_MIN`), поэтому сам факт
     # его наличия — уже сигнал уверенности, и подавление флага здесь корректно.
-    low_rel = (
-        not cases
-        and not any(h.okpd2_match for h in hits)
-        and dense_top1(search_query, qvec) < RELEVANCE_SOFT  # R16: тот же вектор, без пере-эмбеддинга
-    )
+    confident = bool(cases) or any(h.okpd2_match for h in hits)
+    low_rel = not confident and dense_top1(search_query, qvec) < RELEVANCE_SOFT  # R16: тот же вектор
+
+    # Второй сигнал (16.08.2026): косинус исчерпан — полоса перекрытия расширилась с 14 тысячных
+    # до 44, и пять негативов из 36 проходят порог. Класс ОКПД2 из классификатора — сигнал другой
+    # природы: приложение 719 покрывает 20 классов обрабатывающей промышленности, и сельское
+    # хозяйство, отходы или перевозки в нём отсутствуют конструктивно. Только ПОДНИМАЕТ флаг
+    # (никогда не снимает) и только когда пользователь НЕ назвал код — названный код авторитетнее
+    # любого подбора по наименованию.
+    if not low_rel and not confident and effective_okpd2 is None:
+        from app.rag import scope
+        if scope.out_of_scope_by_classifier(search_query):
+            logger.info("guard: класс ОКПД2 вне покрытия 719 ({}) — поднимаю флаг релевантности",
+                        scope.classifier_divisions(search_query))
+            low_rel = True
 
     # T9: поиск по наименованию без уверенного совпадения (вероятно вне приложения 719) → подсказка
     # кодов ОКПД2 по ВСЕМУ классификатору (для пути СТ-1 / уточнения), помимо позиций 719.
@@ -677,10 +809,13 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     ctx = format_context(hits, search_query)
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
+    # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
+    # обязан знать — иначе перечень задвоится: один раз от модели, второй от нас.
+    table = points_table(_target_hit(hits), search_query)
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
-        tnved=tnved, okpd2_suggestions=okpd2_suggestions,
+        tnved=tnved, okpd2_suggestions=okpd2_suggestions, points_table_appended=bool(table),
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]
@@ -688,7 +823,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         messages.extend(history)
     messages.append({"role": "user", "content": user})
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
-    return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases, low_relevance=low_rel)
+    return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases,
+                 low_relevance=low_rel, points_table=table)
 
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
@@ -711,13 +847,20 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
     # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
     raw = _strip_emoji(resp.choices[0].message.content or "")
-    ungrounded = unverified_numbers(raw, planned.grounding)
+    if planned.points_table:  # P4: длинный перечень баллов печатает код — дословно и одинаково
+        raw = raw.rstrip() + "\n" + planned.points_table
+    asked = _user_text(query, history)
+    ungrounded = unverified_numbers(raw, planned.grounding, asked)
+    echoed = echoed_numbers(raw, planned.grounding, asked)
+    if echoed:
+        logger.info("ответ повторяет числа из вопроса пользователя (не выдумка): {}", echoed)
     return Answer(
         text=raw,
         hits=planned.hits,
         cases=planned.cases,
         low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
+        echoed_numbers=echoed,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
     )
@@ -758,13 +901,24 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
             parts.append(piece)
             yield "delta", piece
     raw = "".join(parts)
-    ungrounded = unverified_numbers(raw, planned.grounding)
+    if planned.points_table:
+        # Таблицу отдаём последним куском потока: фронт дорисует её тем же рендером markdown,
+        # что и остальной ответ, а копирование/экспорт заберут её вместе с текстом.
+        tail = "\n" + planned.points_table
+        raw = raw.rstrip() + tail
+        yield "delta", tail
+    asked = _user_text(query, history)
+    ungrounded = unverified_numbers(raw, planned.grounding, asked)
+    echoed = echoed_numbers(raw, planned.grounding, asked)
+    if echoed:
+        logger.info("ответ повторяет числа из вопроса пользователя (не выдумка): {}", echoed)
     yield "done", Answer(
         text=raw,
         hits=planned.hits,
         cases=planned.cases,
         low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
+        echoed_numbers=echoed,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
     )
