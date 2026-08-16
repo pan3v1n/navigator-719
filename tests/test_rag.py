@@ -125,6 +125,64 @@ class TestDeterministicOrder(unittest.TestCase):
         self.assertEqual(len(sorted([a, b], key=_order_key)), 2)
 
 
+class TestPointsTable(unittest.TestCase):
+    """Длинный перечень баллов печатает КОД, а не модель (P4).
+
+    Тай-брейк ретрива стабилизировал контекст, но детерминизм остался 8/10: из шести десятков
+    операций модель каждый раз выбирает своё подмножество. Эксперт на один и тот же вопрос
+    получает разные баллы. Код печатает их дословно и одинаково — заодно закрывая класс
+    «искажена формулировка операции», который не ловится ничем."""
+
+    def _hit(self, n_scored: int, n_plain: int = 0):
+        ops = [{"text": f"операция {i}", "points": 10 + i} for i in range(n_scored)]
+        ops += [{"text": f"условие {i}", "points": None} for i in range(n_plain)]
+        return Hit(score=0.5, section_roman="III", section_title="Спецмаш",
+                   product_name="Бульдозеры гусеничные", okpd2_codes=["28.92.21"],
+                   min_threshold="не менее 2000 баллов",
+                   requirement_blocks=[{"component": "", "operations": ops}],
+                   source_anchor="Раздел III, позиция 1")
+
+    def test_short_list_left_to_the_model(self):
+        """У коротких позиций модель справляется — таблица только высушила бы типовой ответ."""
+        self.assertEqual(pipeline_mod.points_table(self._hit(5)), "")
+
+    def test_long_list_rendered_by_code(self):
+        table = pipeline_mod.points_table(self._hit(pipeline_mod.POINTS_TABLE_MIN))
+        self.assertIn("| Операция или условие | Баллы |", table)
+        self.assertIn("| операция 0 | 10 балл. |", table)
+
+    def test_numbers_carry_unit(self):
+        """Число без «балл.» перестаёт быть проверяемым — то же правило, что у 4б промпта."""
+        for line in pipeline_mod.points_table(self._hit(14)).split("\n"):
+            if line.startswith("| операция"):
+                self.assertIn("балл.", line)
+
+    def test_rendering_is_deterministic(self):
+        h = self._hit(20)
+        self.assertEqual(pipeline_mod.points_table(h, "бульдозеры"),
+                         pipeline_mod.points_table(h, "бульдозеры"))
+
+    def test_operations_without_points_are_not_in_table(self):
+        """Обязательные требования без баллов остаются за моделью — они не про подсчёт."""
+        table = pipeline_mod.points_table(self._hit(13, n_plain=3))
+        self.assertNotIn("условие 0", table)
+
+    def test_pipe_in_text_does_not_break_markdown(self):
+        h = self._hit(12)
+        h.requirement_blocks[0]["operations"][0]["text"] = "сварка | окраска"
+        self.assertNotIn("сварка | окраска", pipeline_mod.points_table(h))
+
+    def test_no_hit_no_table(self):
+        self.assertEqual(pipeline_mod.points_table(None), "")
+
+    def test_prompt_forbids_duplicating_the_table(self):
+        p = build_navigator_user_prompt("q", "ctx", points_table_appended=True)
+        self.assertIn("БУДЕТ ДОБАВЛЕН АВТОМАТИЧЕСКИ", p)
+        self.assertIn("НЕ перечисляй операции с баллами", p)
+        # без флага инструкции быть не должно — иначе модель промолчит там, где печатать обязана
+        self.assertNotIn("БУДЕТ ДОБАВЛЕН АВТОМАТИЧЕСКИ", build_navigator_user_prompt("q", "ctx"))
+
+
 class TestScopeByClassifier(unittest.TestCase):
     """Второй сигнал out-of-scope: класс ОКПД2 вместо близости векторов.
 
