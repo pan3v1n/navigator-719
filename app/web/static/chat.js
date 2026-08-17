@@ -9,6 +9,22 @@ const history = document.getElementById("history");
 const main = document.getElementById("main");
 let sessionId = null;
 
+// U5: подсказка в поле ввода зависит от СОСТОЯНИЯ беседы. Пустой чат — стартовая инструкция
+// («с чего начать»); начатый разговор — подсказка следующего шага от последнего ответа либо пусто.
+// Раньше плейсхолдер был статикой в шаблоне и висел одинаково и в пустом чате, и на десятой
+// реплике: он звал назвать НОВУЮ продукцию там, где человек уточняет уже найденную позицию.
+//
+// Оба текста приходят с сервера (`app/rag/followup.py`): стартовый — атрибутом при рендере
+// страницы, следующий шаг — полем `input_hint` ответа. Своей копии здесь нет намеренно: только
+// сервер знает, какой веткой отвечено и на что движок способен ответить дальше, а вторая копия
+// текста разъезжается молча (та же история, что с documentId у KONTUR_719).
+const START_HINT = input.getAttribute("placeholder") || "";
+let inputHint = "";  // «» — поле остаётся пустым: ничего не обещаем от имени системы
+
+function setPlaceholder() {
+  input.placeholder = main.classList.contains("empty") ? START_HINT : inputHint;
+}
+
 function el(cls) {
   const d = document.createElement("div");
   d.className = cls;
@@ -469,6 +485,8 @@ async function deleteConversation(sid, item) {
       messages.innerHTML = "";
       sessionId = null;
       main.classList.add("empty");
+      inputHint = "";
+      setPlaceholder();  // U5: экран снова пустой — стартовая подсказка
       updateJumpBtn(); // T16
     }
   } catch (e) { /* сеть */ }
@@ -492,6 +510,11 @@ async function openConversation(sid) {
     const data = await r.json();
     messages.innerHTML = "";
     main.classList.remove("empty");
+    // U5: подсказку последнего ответа старой беседы мы не храним (в БД её нет) — поле остаётся
+    // пустым. Показать здесь стартовую значило бы звать назвать новую продукцию посреди разбора
+    // уже найденной позиции: ровно то, из-за чего задача и заведена.
+    inputHint = "";
+    setPlaceholder();
     sessionId = sid;
     data.messages.forEach((m) => {
       if (m.role === "user") addUser(m.content);
@@ -523,6 +546,8 @@ async function handleRejected(r, text, pending) {
 
 async function ask(text) {
   main.classList.remove("empty");
+  inputHint = "";      // подсказка прошлого ответа устарела в момент нового вопроса
+  setPlaceholder();
   const isNew = !sessionId;
   if (isNew) {
     // новую беседу заводим СРАЗУ (id на клиенте) и добавляем в историю ДО ответа
@@ -598,6 +623,8 @@ async function askStream(text, pending, bubble) {
     addUnverifiedFlag(pending, done.unverified_numbers);
     addSources(pending, done.sources);
     addFeedbackBar(pending, done.message_id, sessionId);
+    inputHint = done.input_hint || "";  // U5: следующий шаг задаёт ветка, которой отвечено
+    setPlaceholder();
     return true;
   } catch (e) {
     return false;  // сеть / abort → фолбэк
@@ -636,6 +663,8 @@ async function askFallback(text, pending, bubble, isNew) {
     addUnverifiedFlag(pending, data.unverified_numbers);
     addSources(pending, data.sources);
     addFeedbackBar(pending, data.message_id, sessionId);
+    inputHint = data.input_hint || "";  // U5: фолбэк ведёт себя так же, как стриминг
+    setPlaceholder();
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
     if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
@@ -798,6 +827,8 @@ if (newChat) newChat.addEventListener("click", () => {
   messages.innerHTML = "";
   sessionId = null;
   main.classList.add("empty");
+  inputHint = "";
+  setPlaceholder();  // U5: пустой чат — снова стартовая подсказка
   setActive(null);
   updateJumpBtn(); // T16: скрыть навигатор (пустой чат)
   input.focus();

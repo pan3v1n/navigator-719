@@ -104,6 +104,10 @@ class ChatResponse(BaseModel):
     unverified_numbers: list[str]
     session_id: str
     message_id: int | None = None  # id сохранённой реплики-ответа — для привязки оценки/исправления
+    # U5: готовый текст подсказки в поле ввода после этого ответа («» — поле остаётся пустым).
+    # Считает сервер (`app/rag/followup.py`): только он знает, какой веткой отвечено и на что
+    # движок реально способен ответить следующим ходом.
+    input_hint: str = ""
 
 
 def _sources_from_hits(hits) -> list[SourceItem]:
@@ -234,6 +238,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=message_id,
+        input_hint=ans.input_hint,
     )
 
 
@@ -246,7 +251,7 @@ def _sse(event: dict) -> str:
 def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -> StreamingResponse:
     """Стриминг ответа (T18): SSE-поток `text/event-stream`. События: {"type":"delta","text":…}
     по мере генерации, затем один {"type":"done", message_id, sources, low_relevance,
-    unverified_numbers, session_id}. Лог реплики (user+assistant) и message_id — на 'done' (нужен
+    unverified_numbers, session_id, input_hint}. Лог реплики (user+assistant) и message_id — на 'done' (нужен
     полный текст). Обрыв/сбой движка → {"type":"error"} → фронт делает фолбэк на /api/chat.
 
     Эндпоинт СИНХРОННЫЙ (`def`): Starlette крутит sync-генератор в threadpool (как /api/chat),
@@ -292,6 +297,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                     "low_relevance": ans.low_relevance,
                     "unverified_numbers": ans.unverified_numbers,
                     "session_id": session_id,
+                    "input_hint": ans.input_hint,  # U5: подсказка следующего шага (см. ChatResponse)
                 })
         except Exception:  # noqa: BLE001 — движок упал (рваная сеть/DeepSeek) → сигнал фолбэка фронту
             logger.exception(f"chat_stream: движок упал на запросе от user_id={user.id}")

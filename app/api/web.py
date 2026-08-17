@@ -31,6 +31,7 @@ from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
+from app.rag import followup
 from app.rag.edition import corpus_edition, corpus_line, kontur_719_url
 from app.db import queries as q
 from app.db.engine import get_session
@@ -173,8 +174,11 @@ def chat_page(request: Request):
         return RedirectResponse("/profile", status_code=302)
     # kontur_719_url — адрес первоисточника в редакции КОРПУСА (у Контура documentId свой на каждую
     # редакцию). Отдаём фронту отсюда, чтобы константа была одна и не разъезжалась с базой.
+    # input_hint — стартовая подсказка поля ввода (U5). По той же причине отдаётся сервером:
+    # дальше её меняет ответ движка, и две копии текста разъехались бы при первой же правке.
     return templates.TemplateResponse(
-        "chat.html", _ctx(request, user=user, kontur_719_url=kontur_719_url()))
+        "chat.html", _ctx(request, user=user, kontur_719_url=kontur_719_url(),
+                          input_hint=followup.START_HINT))
 
 
 @router.get("/profile", response_class=HTMLResponse)

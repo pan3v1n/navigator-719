@@ -109,7 +109,10 @@
         {{ app_title }} — это ИИ и может ошибаться. Проверяйте важное по первоисточнику · база в {{ corpus_edition }}
       </div>
       <form id="chat-form" class="composer">
-        <textarea id="input" rows="1" placeholder="Спросите про 719 — продукцию, код ОКПД2 или ТН ВЭД…" autofocus></textarea>
+        {# U5: подсказка приходит с сервера (app/rag/followup.py) и дальше меняется по состоянию
+           беседы — в пустом чате эта, после ответа её задаёт ветка ответа. Своей копии текста
+           у фронта нет: разъехавшаяся вторая копия уже стоила ссылки на недействующую редакцию. #}
+        <textarea id="input" rows="1" placeholder="{{ input_hint }}" autofocus></textarea>
         <button class="jump-btn hidden" id="jump-btn" type="button" title="Вопросы в этом чате" aria-label="Вопросы в этом чате">
           <svg viewBox="0 0 24 24" fill="none"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1.4" fill="currentColor"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor"/><circle cx="4.5" cy="18" r="1.4" fill="currentColor"/></svg>
         </button>
