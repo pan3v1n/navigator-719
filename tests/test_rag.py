@@ -424,6 +424,63 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertFalse(fragments.is_fragmented(None))
         self.assertFalse(fragments.is_fragmented(""))
 
+    def test_group_of_links_siblings_of_one_split_cell(self):
+        from app.rag import fragments
+        # ключевое свойство: обрывок и продукт из ОДНОЙ ячейки первоисточника — в одной группе,
+        # а соседняя группа светодиодов (за исключением белого) — в другой
+        white_frag = fragments.group_of("Светодиоды (в части светодиодов белого диапазона)")
+        white = fragments.group_of("Светодиоды белого диапазона")
+        red = fragments.group_of("Светодиоды красного диапазона")
+        self.assertIsNotNone(white_frag)
+        self.assertEqual(white_frag, white)
+        self.assertNotEqual(white, red)
+        self.assertIsNone(fragments.group_of("Подшипники шариковые или роликовые"))
+        self.assertIsNone(fragments.group_of(None))
+
+    def test_target_hit_prefers_product_over_scope_qualifier(self):
+        """EV6: целевой позицией не должна становиться строка-КВАЛИФИКАТОР с обрывком требований."""
+        from app.rag.pipeline import _target_hit
+        qualifier = make_hit(
+            product_name="Светодиоды (в части светодиодов белого диапазона)",
+            score=0.9, requirement_blocks=[{"operations": [{"text": "сборочные чертежи"}]}])
+        product = make_hit(
+            product_name="Светодиоды белого диапазона", score=0.8,
+            requirement_blocks=[{"operations": [{"text": f"операция {i}"} for i in range(15)]}])
+        self.assertIs(_target_hit([qualifier, product]), product)
+        # ⚠ но подмена НЕ должна отбирать цель у названного продукта: первая версия правила брала
+        # из группы запись с наибольшим числом операций и на «светодиодах красного диапазона»
+        # уводила ответ на общую строку «за исключением белого» — чинила один запрос, ломала соседний
+        red = make_hit(product_name="Светодиоды красного диапазона", score=0.9,
+                       requirement_blocks=[{"operations": [{"text": "сварка"}]}])
+        others = make_hit(product_name="Светодиоды (за исключением светодиодов белого диапазона)",
+                          score=0.8,
+                          requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(5)]}])
+        self.assertIs(_target_hit([red, others]), red)
+        # совпадение по коду остаётся главнее любой эвристики
+        by_code = make_hit(product_name="Светодиоды белого диапазона", score=0.1, okpd2_match=True)
+        self.assertIs(_target_hit([qualifier, by_code]), by_code)
+        # позиция вне групп с расколотой ячейкой — top-1 как был
+        plain = make_hit(score=0.9)
+        self.assertIs(_target_hit([plain, product]), plain)
+        self.assertIsNone(_target_hit([]))
+
+    def test_target_hit_does_not_swap_one_fragment_for_another(self):
+        """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
+
+        На нейтральном «светодиодные модули chip-on-board» top-1 — обрывок заголовка группы
+        (3 операции), а в окне из той же группы стоял обрывок квалификатора (4). Правило меняло
+        один на другой: целевой всё равно оставалась строка, которая продукцию не называет."""
+        from app.rag.pipeline import _target_hit
+        header = make_hit(
+            product_name=("Светодиоды, включая светодиодные модули по технологии chip-on-board и иные "
+                          "модификации сборок светоизлучающих полупроводниковых кристаллов "
+                          "(в части светодиодов белого диапазона)"),
+            score=0.9, requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(3)]}])
+        qualifier = make_hit(
+            product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.8,
+            requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(4)]}])
+        self.assertIs(_target_hit([header, qualifier]), header)
+
     def test_fragmented_list_covers_known_groups(self):
         # список сгенерирован из чанков детерминированно; страхуемся от его потери/обнуления
         from app.rag import fragments
