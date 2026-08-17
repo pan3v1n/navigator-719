@@ -21,8 +21,6 @@ if str(ROOT) not in sys.path:
 
 from app.core.config import settings  # noqa: E402
 from app.rag.pipeline import (  # noqa: E402
-    Answer,
-    _plan_answer,
     _target_hit,
     answer,
     claim_numbers,
@@ -44,7 +42,7 @@ QUERIES = [
 ]
 
 
-def foreign_numbers(query: str, code: str | None, limit: int) -> set[str]:
+def foreign_numbers(query: str, hits: list) -> set[str]:
     """Числа, которые есть ТОЛЬКО у ЧУЖИХ кандидатов окна, но не у целевой позиции и её сиблингов.
 
     ⚠ ПОПЫТКА СМЯГЧИТЬ ПО ВЕТКЕ КОДА ПРОВЕРЕНА И ОТВЕРГНУТА (17.08.2026). Идея была считать
@@ -61,21 +59,23 @@ def foreign_numbers(query: str, code: str | None, limit: int) -> set[str]:
     на светодиодах — не шум метрики, а другой дефект: пустая запись-дубль обгоняет содержательную
     (заведено отдельно), и метрика правильно делает его видимым.
 
+    ⚠ ОКНО БЕРЁТСЯ ИЗ САМОГО ОТВЕТА (`ans.hits`), а не из отдельного прогона ретрива. Первая версия
+    звала `_plan_answer` заново — то есть судила ответ по окну, которого он мог не видеть, в
+    скрипте, вся суть которого — мерить нестабильность этого самого окна. Заодно уходит седьмое
+    обращение к Qdrant и лишний ПЛАТНЫЙ вызов реранкера на каждый запрос без кода.
+
     EV1: разброс набора чисел сам по себе — плохая метрика. Он растёт и когда модель просто иначе
     формулирует (упомянула «2 балла» — не упомянула), и когда она тащит в ответ ПОРОГ СОСЕДНЕЙ
     ПОЗИЦИИ. Первое — шум, второе — дефект: эксперт читает число как относящееся к своей продукции.
     Замер 17.08 показал, что это разные вещи: у «центробежных насосов» все 12 плавающих чисел были
     чужими (у целевой позиции чисел не было вовсе), а у «светодиодов» плавало число самой целевой.
     Здесь считается именно вредная половина."""
-    planned = _plan_answer(query, okpd2=code, limit=limit)
-    if isinstance(planned, Answer):        # ранний путь (meta/процедурный) — кандидатов нет
-        return set()
-    target = _target_hit(planned.hits)
-    if target is None:
+    target = _target_hit(hits)
+    if target is None:                     # ранний путь (meta/процедурный) — кандидатов нет
         return set()
     own = set(claim_numbers(format_context([target], query)))
     others: set[str] = set()
-    for h in planned.hits:
+    for h in hits:
         if h is not target:
             others |= set(claim_numbers(format_context([h], query)))
     return others - own
@@ -92,7 +92,6 @@ def evaluate(runs: int, limit: int, progress: bool):
             pass
     for q, code in it:
         num_sets, secs, flags = [], [], []
-        alien = foreign_numbers(q, code, limit)
         alien_runs, alien_seen = 0, set()
         for _ in range(runs):
             ans = answer(q, okpd2=code, limit=limit)
@@ -100,9 +99,11 @@ def evaluate(runs: int, limit: int, progress: bool):
             num_sets.append(nums)
             secs.append(ans.hits[0].section_roman if ans.hits else "—")
             flags.append(bool(ans.unverified_numbers))
-            if nums & alien:
+            # чужие числа считаем по окну ИМЕННО ЭТОГО прогона — см. докстринг foreign_numbers
+            leaked = nums & foreign_numbers(q, ans.hits)
+            if leaked:
                 alien_runs += 1
-                alien_seen |= nums & alien
+                alien_seen |= leaked
         rows.append({
             "q": q, "code": code or "",
             "num_variants": len(set(num_sets)),       # 1 = стабильный набор чисел

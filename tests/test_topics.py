@@ -75,6 +75,22 @@ class TestWiring(unittest.TestCase):
             self.assertTrue(topics.doc_types(t), f"{t}: нет предпочтения документов")
             self.assertTrue(topics.fragment(t), f"{t}: нет фрагмента промпта")
 
+    def test_four_structures_cannot_disagree(self):
+        """Тема живёт в четырёх структурах, и `classify` возвращает только то, что есть в TOPICS.
+
+        Добавь седьмое намерение в шаблоны, документы и фрагменты, но забудь про `TOPICS` — оно
+        будет совпадать, попадать в `matched` и молча отбрасываться: тема не определится, ответ
+        уйдёт с общим промптом, ошибки не будет. Это ровно «молчаливый отказ хуже громкой ошибки»,
+        поэтому расхождение структур ломает тест, а не продакшен."""
+        from app.rag import topics as m
+        names = set(m.TOPICS)
+        self.assertEqual(set(m._DOC_TYPES), names, "предпочтения документов разошлись с TOPICS")
+        self.assertEqual(set(m._FRAGMENTS), names, "фрагменты промпта разошлись с TOPICS")
+        # у `documents` шаблонов нет намеренно — она спрашивает детектор P2
+        self.assertEqual(set(m._PATTERNS) | {m.DOCUMENTS}, names,
+                         "шаблоны разошлись с TOPICS")
+        self.assertEqual(len(m.TOPICS), len(names), "в TOPICS есть дубликаты")
+
     def test_unknown_topic_is_silent(self):
         self.assertEqual(topics.doc_types(None), ())
         self.assertEqual(topics.fragment(None), "")
@@ -146,7 +162,8 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
 
         from app.rag import pipeline
         src = inspect.getsource(pipeline._plan_answer)
-        self.assertIn('topics.classify(search_query) == "documents"', src)
+        # имя темы — константой, а не строкой по месту: опечатка в литерале тихо выключила бы блок
+        self.assertIn("topics.classify(search_query) == topics.DOCUMENTS", src)
         self.assertIn("documents=docs_ctx", src)
 
     def test_documents_block_is_part_of_grounding(self):

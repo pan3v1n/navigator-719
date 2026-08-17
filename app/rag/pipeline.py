@@ -733,7 +733,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты
     ограничены MAX_OPS_OTHER и служат материалом для уточнения по коду (правило 1г)."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
-    from app.rag import followup, meta
+    from app.rag import followup, meta, topics
     if meta.is_meta(query):
         return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product())
 
@@ -832,10 +832,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # вопроса июльской волны уходили без перечня, хотя это кластер жалоб №1. Тема известна
     # детерминированно, поэтому просто доносим пункты раздела 4 Приказа №52 до контекста.
     docs_ctx = None
-    from app.rag import topics
-    if topics.classify(search_query) == "documents":
+    if topics.classify(search_query) == topics.DOCUMENTS:
         doc_points = search_rules(search_query, limit=RULES_DOC_POINTS,
-                                  primary_docs=topics.doc_types("documents"))
+                                  primary_docs=topics.doc_types(topics.DOCUMENTS))
         if doc_points:
             docs_ctx = format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом

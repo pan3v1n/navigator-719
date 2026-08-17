@@ -56,7 +56,7 @@ def _sec_rank(hits, sec: str) -> int | None:
 # --------------------------------------------------------------------------- #
 # Режим negative — out-of-scope guard
 # --------------------------------------------------------------------------- #
-def run_negative(limit: int, check_refusal: bool, progress: bool) -> list[str]:
+def run_negative(limit: int, check_refusal: bool, progress: bool) -> tuple[list[str], list[dict]]:
     from app.rag.pipeline import RELEVANCE_SOFT
 
     cases = _load(NEG)
@@ -103,13 +103,13 @@ def run_negative(limit: int, check_refusal: bool, progress: bool) -> list[str]:
         for r in fa:
             L.append(f"  dt1={r['dt1']:.3f} [{r['category']:<18}] {r['query'][:46]}")
         L.append("")
-    return L
+    return L, rows
 
 
 # --------------------------------------------------------------------------- #
 # Режим borderline — ПОГРАНИЧНЫЕ IN-SCOPE (вторая половина весов, EV2)
 # --------------------------------------------------------------------------- #
-def run_borderline(check_refusal: bool, progress: bool) -> list[str]:
+def run_borderline(check_refusal: bool, progress: bool) -> tuple[list[str], list[dict]]:
     """Ложные флаги: запросы В сфере 719, которым guard поднял «похоже, вне сферы».
 
     Зачем отдельный набор. Негативы показывают, сколько чужого guard пропускает, и по ним одним
@@ -160,21 +160,23 @@ def run_borderline(check_refusal: bool, progress: bool) -> list[str]:
             L.append(f"  dt1={r['dt1']:.3f} [{'+'.join(r['evidence']):<18}] {r['query'][:44]}"
                      + (f"  → {r['top1_hint'][:26]}" if r.get("top1_hint") else ""))
         L.append("")
-    return L
+    return L, rows
 
 
 # --------------------------------------------------------------------------- #
 # Режим threshold — кривая обмена: где вообще стоит порог
 # --------------------------------------------------------------------------- #
-def run_threshold(progress: bool) -> list[str]:
+def run_threshold(neg: list[dict], pos: list[dict]) -> list[str]:
     """Обе стороны весов на одной шкале: сколько чужого проходит и сколько своего флагуется.
 
     Порог — не «настройка строгости», а точка на кривой обмена. Пока кривая не напечатана,
     любой разговор о его сдвиге — спор о вкусах."""
     from app.rag.pipeline import RELEVANCE_SOFT
 
-    neg = [(c, dense_top1(c["query"])) for c in _load(NEG)]
-    pos = [(c, dense_top1(c["query"])) for c in _load(BORDER)]
+    # ⚠ Косинусы приходят ГОТОВЫМИ из секций выше: пересчёт тех же 56 запросов через e5 — самая
+    # медленная часть скрипта, и делать её дважды за прогон незачем.
+    neg = [(c, c["dt1"]) for c in neg]
+    pos = [(c, c["dt1"]) for c in pos]
     L = ["=" * 78,
          f"КРИВАЯ ОБМЕНА ПОРОГА (EV2) — {len(neg)} вне-719 против {len(pos)} пограничных in-scope",
          "=" * 78,
@@ -273,14 +275,21 @@ def main() -> None:
         sys.exit(f"Qdrant недоступен ({e}). Подними Docker + Qdrant (:6533).")
 
     out: list[str] = []
+    neg_rows: list[dict] = []
+    pos_rows: list[dict] = []
     # `both` = ВСЁ. Прежде он давал negative+confusable, то есть молча пропускал половину весов
     # guard'а — ту самую, без которой порог двигать нельзя.
     if args.mode in ("negative", "both", "guard"):
-        out += run_negative(args.limit, args.check_refusal, not args.no_progress)
+        text, neg_rows = run_negative(args.limit, args.check_refusal, not args.no_progress)
+        out += text
     if args.mode in ("borderline", "both", "guard"):
-        out += run_borderline(args.check_refusal, not args.no_progress)
+        text, pos_rows = run_borderline(args.check_refusal, not args.no_progress)
+        out += text
     if args.mode in ("threshold", "both", "guard"):
-        out += run_threshold(not args.no_progress)
+        if not (neg_rows and pos_rows):   # режим `threshold` в одиночку — считаем сами
+            _, neg_rows = run_negative(args.limit, False, not args.no_progress)
+            _, pos_rows = run_borderline(False, not args.no_progress)
+        out += run_threshold(neg_rows, pos_rows)
     if args.mode in ("confusable", "both"):
         out += run_confusable(args.limit, args.rerank, not args.no_progress)
 

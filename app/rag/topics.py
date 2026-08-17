@@ -32,8 +32,10 @@ import re
 
 # Порядок = приоритет при равном числе совпадений. Первым идёт самое узкое намерение: вопрос
 # «какие документы нужны для СТ-1» — про СОСТАВ документов, а не про сам путь СТ-1.
+DOCUMENTS = "documents"  # имя темы нужно и пайплайну (смешанный вопрос) — не строкой по месту
+
 TOPICS: tuple[str, ...] = (
-    "documents", "deadlines", "st1_origin", "criteria", "classification", "registry_entry",
+    DOCUMENTS, "deadlines", "st1_origin", "criteria", "classification", "registry_entry",
 )
 
 # Шаблоны намерений. `documents` намеренно пуст — см. докстринг: его правила живут в retriever.

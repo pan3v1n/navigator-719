@@ -182,7 +182,7 @@ class TestHintByAnswerBranch(unittest.TestCase):
         finally:
             pipeline_mod.search_rules = orig_search
         self.assertEqual(ans.text, procedural.DEFLECTION)
-        self.assertEqual(ans.input_hint, followup.NO_HINT)
+        self.assertEqual(ans.input_hint, "", "дефер не должен ничего обещать")
 
         orig_flag = pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES
         pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES = False
@@ -190,7 +190,7 @@ class TestHintByAnswerBranch(unittest.TestCase):
             ans = pipeline_mod._answer_procedural("порядок внесения в реестр", "порядок внесения в реестр")
         finally:
             pipeline_mod.settings.PROCEDURAL_ANSWER_FROM_RULES = orig_flag
-        self.assertEqual(ans.input_hint, followup.NO_HINT)
+        self.assertEqual(ans.input_hint, "", "дефер не должен ничего обещать")
 
 
 class TestHintReachesFront(unittest.TestCase):
@@ -264,12 +264,21 @@ class TestPlaceholderState(unittest.TestCase):
 
     def test_placeholder_follows_conversation_state(self):
         self.assertIn('main.classList.contains("empty") ? START_HINT : inputHint', self.js)
-        # Объявление + шесть точек переключения состояния: новый вопрос, готовый ответ (стриминг и
-        # фолбэк), «Новый диалог», открытие беседы, удаление текущей. Пропусти любую — подсказка
-        # отстанет от экрана, и это не будет видно ни по одной ошибке.
-        self.assertGreaterEqual(self.js.count("setPlaceholder()"), 7)
+        # Шесть точек переключения состояния: новый вопрос, готовый ответ (стриминг и фолбэк),
+        # «Новый диалог», открытие беседы, удаление текущей. Пропусти любую — подсказка отстанет
+        # от экрана, и это не будет видно ни по одной ошибке.
+        self.assertGreaterEqual(self.js.count("setHint("), 7)  # объявление + шесть вызовов
         self.assertIn("done.input_hint", self.js)   # стриминг
         self.assertIn("data.input_hint", self.js)   # фолбэк
+
+    def test_hint_cannot_be_set_without_repaint(self):
+        """Раньше это была ПАРА «присвоить + перерисовать», и половина без второй оставляла
+        подсказку прошлого ответа висеть над свежим пустым чатом — молча, без ошибки."""
+        body = self.js.split("function setHint(text) {")[1].split("}")[0]
+        self.assertIn("inputHint = text", body)
+        self.assertIn("setPlaceholder()", body)
+        # присваивать inputHint напрямую можно только в объявлении и внутри сеттера
+        self.assertEqual(self.js.count("inputHint = "), 2)
 
     def test_started_chat_does_not_reuse_start_hint(self):
         """Ради этого задача и заведена: в начатом диалоге подсказка не зовёт назвать новую продукцию.
