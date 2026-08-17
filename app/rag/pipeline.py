@@ -38,6 +38,10 @@ MAX_OPS_TARGET = 60
 MAX_OPS_OTHER = 12
 MAX_CASES = 3  # сколько подтверждённых кейсов подмешивать в контекст
 RULES_TOP_K = 6  # сколько пунктов Правил реестра тянуть для процедурного ответа (проза → синтез из нескольких)
+# K12: сколько пунктов Приказа №52 донести до ТОВАРНОГО ответа на смешанном вопросе. Три — по числу
+# частей перечня раздела 4 (заявка · приложения к заявке · документы под критерии 719); больше
+# разбавляет товарный контекст, из-за которого пользователь и пришёл.
+RULES_DOC_POINTS = 3
 # Out-of-scope guard: порог dense top-1 cosine. Ниже — подозрение, что продукция вне 719.
 # Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
 # полоса перекрытия узкая, поэтому порог НЕ режет жёстко, а лишь поднимает флаг для модели
@@ -629,18 +633,21 @@ def _answer_procedural(query: str, search_query: str,
     поможет), корпус недоступен/пуст → `DEFLECTION` (предложить повторить). Иначе генерируем
     grounded-ответ по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ
     (unverified_deadlines)."""
-    from app.rag import followup, procedural
+    from app.rag import followup, procedural, topics
 
     # Оба дефера уходят БЕЗ подсказки (`input_hint` пуст): процедурная ветка сейчас не отвечает,
     # и предлагать следующий вопрос по ней — обещать то, чего сервис в этот момент не может.
     if not settings.PROCEDURAL_ANSWER_FROM_RULES:
         return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
-    rules = search_rules(search_query, limit=RULES_TOP_K)
+    # K12: намерение вопроса задаёт и приоритет документов в окне, и оговорки промпта. Тема
+    # определяется детерминированно (регулярки), поэтому маршрутизация бесплатна и воспроизводима.
+    topic = topics.classify(search_query)
+    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
     if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
         return Answer(text=procedural.DEFLECTION, hits=[])
 
     ctx = format_rules_context(rules)
-    user = build_procedural_user_prompt(query, ctx)
+    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic))
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
         messages.extend(history)
@@ -668,9 +675,11 @@ def _answer_procedural(query: str, search_query: str,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
-        # U5: тему вопроса уже определил роутер окна (`_topic` в payload) — берём её, а не считаем
-        # заново, иначе подсказка и отбор пунктов могли бы разъехаться на одном и том же вопросе.
-        input_hint=followup.after_procedural(rules[0].get("_topic")),
+        # U5: подсказку задаёт НАМЕРЕНИЕ вопроса — то самое `topic`, по которому выбрана квота окна
+        # и фрагмент промпта. Раньше сюда шёл `rules[0]["_topic"]`, то есть лексическая догадка о
+        # ДОКУМЕНТЕ: на 12 из 20 вопросов про документы она даёт другой документ или None, и поле
+        # предлагало ровно тот вопрос, на который только что ответили.
+        input_hint=followup.after_procedural(topic),
     )
 
 
@@ -726,7 +735,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты
     ограничены MAX_OPS_OTHER и служат материалом для уточнения по коду (правило 1г)."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
-    from app.rag import followup, meta
+    from app.rag import followup, meta, topics
     if meta.is_meta(query):
         return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product())
 
@@ -820,6 +829,23 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     ctx = format_context(hits, search_query)
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
+    # K12: смешанный вопрос — про продукцию И про состав документов. Бинарный роутер считает такие
+    # товарными (719-якоря в них нет), и до сих пор ответ советовал «спросите отдельно»: 23 реальных
+    # вопроса июльской волны уходили без перечня, хотя это кластер жалоб №1. Тема известна
+    # детерминированно, поэтому просто доносим пункты раздела 4 Приказа №52 до контекста.
+    docs_ctx = None
+    if topics.classify(search_query) == topics.DOCUMENTS:
+        doc_points = search_rules(search_query, limit=RULES_DOC_POINTS, qvec=qvec,
+                                  primary_docs=topics.doc_types(topics.DOCUMENTS))
+        # ⚠ Оставляем ТОЛЬКО пункты Приказа №52: `primary_docs` — это предпочтение квоты, а не
+        # фильтр, и если добор раздела 4 не удался (он обёрнут в except и лишь логируется) или
+        # какой-то части перечня не хватило по рангу, в блок попали бы пункты про печати, ЭЦП и
+        # сроки из Правил — под шапкой, обещающей состав документов по Приказу. Промпт при этом
+        # запрещает отсылать «спросите отдельно», то есть модель синтезировала бы перечень из
+        # пунктов, где его нет. Нечего показать — блока не будет вовсе, это честнее.
+        doc_points = [p for p in doc_points if p.get("doc_type") == "tpp_order_52"]
+        if doc_points:
+            docs_ctx = format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
     # обязан знать — иначе перечень задвоится: один раз от модели, второй от нас.
     table = points_table(_target_hit(hits), search_query)
@@ -827,16 +853,33 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
         tnved=tnved, okpd2_suggestions=okpd2_suggestions, points_table_appended=bool(table),
+        documents=docs_ctx,
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user})
+    # ⚠ БЛОК ДОКУМЕНТОВ В ЗАЗЕМЛЕНИЕ НЕ ВХОДИТ — и обратное было демонстрируемым дефектом.
+    #
+    # Я добавил его сюда с обоснованием «иначе числа пунктов Приказа („не старше 30 дней“) гард
+    # объявил бы выдумкой». Обоснование ложное: `claim_numbers` берёт только числа рядом с «балл»,
+    # «процент» и «%», поэтому на тексте Приказа она возвращает ПУСТО — такие числа заявками не
+    # являются и флага получить не могли. Фактически добавление лишь расширяло стог сена для
+    # `number_in_context`, а тот сверяет цифру подстрокой, без единицы измерения.
+    #
+    # Замер: ответ «Порог — не менее 30 баллов [1], доля импорта не более 3 процентов [1]» на
+    # контексте без блока даёт `unverified_numbers = ['30', '3']`, а с блоком — ПУСТО. Две
+    # выдуманные величины отмываются в «заземлённые» через номера пунктов (4.2.1, 4.3.19), сроки в
+    # днях и годы, которых в блоке многие тысячи знаков. И это самый частый класс вопросов.
+    #
+    # Хуже всего, что регресс отчитывался бы УЛУЧШЕНИЕМ: `unverified_numbers` — тот самый сигнал, на
+    # котором стоят и скоркарта админки, и опубликованный faithfulness 1.00. Если числу из Правил
+    # когда-нибудь понадобится заземление, расширять нужно `claim_numbers` (учить единицу), а не стог.
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
-                 input_hint=followup.after_product(low_rel))
+                 input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)))
 
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,

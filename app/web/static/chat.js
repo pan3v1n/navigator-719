@@ -20,6 +20,20 @@ let sessionId = null;
 // текста разъезжается молча (та же история, что с documentId у KONTUR_719).
 const START_HINT = input.getAttribute("placeholder") || "";
 let inputHint = "";  // «» — поле остаётся пустым: ничего не обещаем от имени системы
+// Подсказка, которая была до отправки вопроса. Нужна, чтобы вернуть её на СБОЕ: 422 (в вопросе
+// ПДн), 503 движка и обрыв сети раньше оставляли поле пустым до конца сессии — ровно в тот момент,
+// когда человеку говорят «измените запрос», инструкция из поля исчезала. До U5 плейсхолдер был
+// статикой в шаблоне и переживал любой сбой.
+let hintBeforeAsk = "";
+
+// Один сеттер, а не пара «присвоить + не забыть перерисовать»: половина протокола, применённая без
+// второй, оставляет подсказку прошлого ответа висеть над свежим пустым чатом — и это НЕ ошибка,
+// а просто устаревший текст. Тот же класс, что найден в этом же файле у фолбэка (`dataset.raw`
+// не выставлялся, и ответ нельзя было скопировать) — молча и без единого исключения.
+function setHint(text) {
+  inputHint = text || "";
+  setPlaceholder();
+}
 
 function setPlaceholder() {
   input.placeholder = main.classList.contains("empty") ? START_HINT : inputHint;
@@ -201,7 +215,10 @@ const TBL_COLLAPSE_MIN = 8;   // короче — не сворачиваем: �
 // КПГ» таких порогов десять — свернув до пяти, мы бы выдали половину набора за полный, причём
 // именно в той таблице, где пропущенная строка меняет ответ. Сворачивать имеет смысл длинные
 // ПЕРЕЧНИ операций, а не пороги.
-const TBL_KEEP_WHOLE_RE = /порог/i;
+// «срок» здесь по той же причине, что «порог»: правило 4б процедурного промпта просит
+// таблицу «Этап | Срок | Ист.», и скрытая строка срока меняет вердикт так же, как
+// скрытый порог узла. Сворачиваем длинные ПЕРЕЧНИ, а не нормативные величины.
+const TBL_KEEP_WHOLE_RE = /порог|срок/i;
 
 // Строки, которые нельзя прятать НИКОГДА, даже внутри сворачиваемой таблицы: пометка об усечении
 // перечня. Код печатает её последней (`pipeline.points_table`), а таблица кодом печатается от 12
@@ -591,8 +608,7 @@ async function deleteConversation(sid, item) {
       messages.innerHTML = "";
       sessionId = null;
       main.classList.add("empty");
-      inputHint = "";
-      setPlaceholder();  // U5: экран снова пустой — стартовая подсказка
+      setHint("");  // U5: экран снова пустой — стартовая подсказка
       updateJumpBtn(); // T16
     }
   } catch (e) { /* сеть */ }
@@ -619,8 +635,7 @@ async function openConversation(sid) {
     // U5: подсказку последнего ответа старой беседы мы не храним (в БД её нет) — поле остаётся
     // пустым. Показать здесь стартовую значило бы звать назвать новую продукцию посреди разбора
     // уже найденной позиции: ровно то, из-за чего задача и заведена.
-    inputHint = "";
-    setPlaceholder();
+    setHint("");
     sessionId = sid;
     data.messages.forEach((m) => {
       if (m.role === "user") addUser(m.content);
@@ -645,6 +660,7 @@ async function handleRejected(r, text, pending) {
   let msg = "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
   try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
   if (pending) pending.remove();
+  setHint(hintBeforeAsk);   // вопрос не ушёл — подсказка снова актуальна
   input.value = text;
   input.style.height = "auto";
   showInputBlock(msg);
@@ -652,8 +668,8 @@ async function handleRejected(r, text, pending) {
 
 async function ask(text) {
   main.classList.remove("empty");
-  inputHint = "";      // подсказка прошлого ответа устарела в момент нового вопроса
-  setPlaceholder();
+  hintBeforeAsk = inputHint;
+  setHint("");         // подсказка прошлого ответа устарела в момент нового вопроса
   const isNew = !sessionId;
   if (isNew) {
     // новую беседу заводим СРАЗУ (id на клиенте) и добавляем в историю ДО ответа
@@ -729,8 +745,7 @@ async function askStream(text, pending, bubble) {
     addUnverifiedFlag(pending, done.unverified_numbers);
     addSources(pending, done.sources);
     addFeedbackBar(pending, done.message_id, sessionId);
-    inputHint = done.input_hint || "";  // U5: следующий шаг задаёт ветка, которой отвечено
-    setPlaceholder();
+    setHint(done.input_hint);  // U5: следующий шаг задаёт ветка, которой отвечено
     return true;
   } catch (e) {
     return false;  // сеть / abort → фолбэк
@@ -759,6 +774,7 @@ async function askFallback(text, pending, bubble, isNew) {
     }
     if (!r.ok) {
       bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
+      setHint(hintBeforeAsk);
       if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт
       return;
     }
@@ -775,10 +791,10 @@ async function askFallback(text, pending, bubble, isNew) {
     addUnverifiedFlag(pending, data.unverified_numbers);
     addSources(pending, data.sources);
     addFeedbackBar(pending, data.message_id, sessionId);
-    inputHint = data.input_hint || "";  // U5: фолбэк ведёт себя так же, как стриминг
-    setPlaceholder();
+    setHint(data.input_hint);  // U5: фолбэк ведёт себя так же, как стриминг
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
+    setHint(hintBeforeAsk);
     if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
   } finally {
     clearTimeout(timer);
@@ -939,8 +955,7 @@ if (newChat) newChat.addEventListener("click", () => {
   messages.innerHTML = "";
   sessionId = null;
   main.classList.add("empty");
-  inputHint = "";
-  setPlaceholder();  // U5: пустой чат — снова стартовая подсказка
+  setHint("");  // U5: пустой чат — снова стартовая подсказка
   setActive(null);
   updateJumpBtn(); // T16: скрыть навигатор (пустой чат)
   input.focus();

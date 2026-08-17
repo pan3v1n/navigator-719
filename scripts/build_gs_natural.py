@@ -46,9 +46,14 @@ if str(ROOT) not in sys.path:
 from app.core.sensitive import detect  # noqa: E402
 from app.rag import meta, procedural, translate  # noqa: E402
 
+# ⚠ `\b` в конце обязателен, и без него набор молча терял кейсы. Регулярка идёт через `.match()`,
+# то есть проверяет НАЧАЛО строки: без границы слова «да» ловило «датчики давления», «нет» —
+# «нетканые материалы», «ок» — «оконные блоки». Это оценённые на 4–5★ товарные вопросы с якорем
+# позиции, и отбрасывались они ДО счётчиков статистики — то есть потеря была невидима, а набор
+# смещался против всех наименований на да/нет/ок при цели набрать 120 кейсов из 29.
 CONTINUATION = re.compile(
     r"^\W*(да|нет|ага|ок|окей|хочу|покажи|поясни|распиши|подробнее|продолжай?|дальше|давай|"
-    r"а\s|и\s|это\s|тот\s|так\s)", re.I)
+    r"а|и|это|тот|так)\b", re.I)
 
 
 def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict]:
@@ -92,7 +97,10 @@ def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict
             sources = json.loads(m["sources_json"] or "[]")
         except Exception:  # noqa: BLE001
             sources = []
-        anchor = next((s.get("source_anchor") for s in sources if s.get("source_anchor")), None)
+        # Якорь и код берём из ОДНОГО источника: раньше anchor искался по первому с якорем, а
+        # okpd2 читался из sources[0] — две половины эталона могли описывать разные позиции.
+        src = next((s for s in sources if s.get("source_anchor")), None)
+        anchor = src.get("source_anchor") if src else None
         if not anchor:
             continue
         stats["с якорем позиции"] += 1
@@ -103,8 +111,7 @@ def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict
         cases.append({
             "id": f"nat_{len(cases) + 1:03d}",
             "query": query,
-            "expect": {"anchor": anchor,
-                       "okpd2": sources[0].get("okpd2") or []},
+            "expect": {"anchor": anchor, "okpd2": src.get("okpd2") or []},
             "source": f"волна {wave}, оценка {rated[m['id']]}★",
         })
     stats["итого кейсов"] = len(cases)

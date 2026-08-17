@@ -46,6 +46,24 @@ def _load(p: Path) -> list[dict]:
     return json.loads(p.read_text(encoding="utf-8"))["cases"]
 
 
+# ⚠ ОДНО определение отказа на обе половины весов. Первая версия считала по-разному: на негативах
+# отказом шёл сам флаг (`ans.low_relevance`) и слово «уточните», на пограничных in-scope — только
+# явный уход от ответа. Из-за этого «негативы отвергнуты 36/36» было почти тавтологией (флаг
+# перечитывался как исход), а «из 10 зафлаганных профильных отказ получил 1» мерилось строго уже —
+# и гайд сравнивал эти два числа напрямую, обосновывая ими выбор конца плато. Два разных правила
+# такое сравнение не выдерживают.
+#
+# Отказ = ЯВНЫЙ уход от ответа по смыслу. Просьба уточнить код отказом НЕ является: правило 1г её
+# предписывает, и штрафовать за неё нельзя. Флаг тоже не исход — он лишь подсказка правилу 1б.
+_REFUSAL_MARKERS = ("вне сферы", "не относится к", "не найдена", "не найден",
+                    "не подпадает", "не является промышленной")
+
+
+def _refused(text: str) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _REFUSAL_MARKERS)
+
+
 def _sec_rank(hits, sec: str) -> int | None:
     for i, h in enumerate(hits, 1):
         if h.section_roman == sec:
@@ -56,7 +74,7 @@ def _sec_rank(hits, sec: str) -> int | None:
 # --------------------------------------------------------------------------- #
 # Режим negative — out-of-scope guard
 # --------------------------------------------------------------------------- #
-def run_negative(limit: int, check_refusal: bool, progress: bool) -> list[str]:
+def run_negative(limit: int, check_refusal: bool, progress: bool) -> tuple[list[str], list[dict]]:
     from app.rag.pipeline import RELEVANCE_SOFT
 
     cases = _load(NEG)
@@ -76,9 +94,7 @@ def run_negative(limit: int, check_refusal: bool, progress: bool) -> list[str]:
             from app.rag.pipeline import answer
             ans = answer(c["query"])
             row["low_rel"] = ans.low_relevance
-            row["refused"] = ans.low_relevance or any(
-                m in ans.text.lower() for m in ("не найден", "вне сферы", "уточните", "не относится")
-            )
+            row["refused"] = _refused(ans.text)
         rows.append(row)
 
     n = len(rows)
@@ -103,13 +119,13 @@ def run_negative(limit: int, check_refusal: bool, progress: bool) -> list[str]:
         for r in fa:
             L.append(f"  dt1={r['dt1']:.3f} [{r['category']:<18}] {r['query'][:46]}")
         L.append("")
-    return L
+    return L, rows
 
 
 # --------------------------------------------------------------------------- #
 # Режим borderline — ПОГРАНИЧНЫЕ IN-SCOPE (вторая половина весов, EV2)
 # --------------------------------------------------------------------------- #
-def run_borderline(check_refusal: bool, progress: bool) -> list[str]:
+def run_borderline(check_refusal: bool, progress: bool) -> tuple[list[str], list[dict]]:
     """Ложные флаги: запросы В сфере 719, которым guard поднял «похоже, вне сферы».
 
     Зачем отдельный набор. Негативы показывают, сколько чужого guard пропускает, и по ним одним
@@ -134,10 +150,7 @@ def run_borderline(check_refusal: bool, progress: bool) -> list[str]:
             from app.rag.pipeline import answer
             ans = answer(c["query"])
             row["low_rel"] = ans.low_relevance
-            # Отказом считаем ЯВНЫЙ уход от ответа: «вне сферы»/«не найдена». Просьба уточнить код
-            # отказом НЕ является — правило 1г её предписывает, и штрафовать за неё нельзя.
-            row["refused"] = any(m in ans.text.lower() for m in
-                                 ("вне сферы", "не относится к", "не найдена", "не подпадает"))
+            row["refused"] = _refused(ans.text)
         rows.append(row)
 
     n = len(rows)
@@ -160,21 +173,23 @@ def run_borderline(check_refusal: bool, progress: bool) -> list[str]:
             L.append(f"  dt1={r['dt1']:.3f} [{'+'.join(r['evidence']):<18}] {r['query'][:44]}"
                      + (f"  → {r['top1_hint'][:26]}" if r.get("top1_hint") else ""))
         L.append("")
-    return L
+    return L, rows
 
 
 # --------------------------------------------------------------------------- #
 # Режим threshold — кривая обмена: где вообще стоит порог
 # --------------------------------------------------------------------------- #
-def run_threshold(progress: bool) -> list[str]:
+def run_threshold(neg: list[dict], pos: list[dict]) -> list[str]:
     """Обе стороны весов на одной шкале: сколько чужого проходит и сколько своего флагуется.
 
     Порог — не «настройка строгости», а точка на кривой обмена. Пока кривая не напечатана,
     любой разговор о его сдвиге — спор о вкусах."""
     from app.rag.pipeline import RELEVANCE_SOFT
 
-    neg = [(c, dense_top1(c["query"])) for c in _load(NEG)]
-    pos = [(c, dense_top1(c["query"])) for c in _load(BORDER)]
+    # ⚠ Косинусы приходят ГОТОВЫМИ из секций выше: пересчёт тех же 56 запросов через e5 — самая
+    # медленная часть скрипта, и делать её дважды за прогон незачем.
+    neg = [(c, c["dt1"]) for c in neg]
+    pos = [(c, c["dt1"]) for c in pos]
     L = ["=" * 78,
          f"КРИВАЯ ОБМЕНА ПОРОГА (EV2) — {len(neg)} вне-719 против {len(pos)} пограничных in-scope",
          "=" * 78,
@@ -201,9 +216,10 @@ def run_threshold(progress: bool) -> list[str]:
              else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f}."),
           "  ⚠ Сумма ошибок — грубая мера: false-accept и ложный флаг НЕ равноценны. Флаг только",
           "     подсказывает правилу 1б, а решение «вне сферы» принимает модель — на пограничных",
-          "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов. Поэтому плато читать",
-          "     вместе с `--check-refusal`, а из плато выбирать ВЕРХНИЙ конец: он строже к чужому",
-          "     при той же цене.",
+          "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов — то есть чужое",
+          "     отсекает не порог, а правило 1б, а ложный флаг платит профильный вопрос. Поэтому",
+          "     внутри плато выигрывает НИЖНИЙ конец, и двигать порог можно только после",
+          "     `--check-refusal` на новом значении: обмен внутри плато идёт один к одному.",
           ""]
     return L
 
@@ -273,14 +289,21 @@ def main() -> None:
         sys.exit(f"Qdrant недоступен ({e}). Подними Docker + Qdrant (:6533).")
 
     out: list[str] = []
+    neg_rows: list[dict] = []
+    pos_rows: list[dict] = []
     # `both` = ВСЁ. Прежде он давал negative+confusable, то есть молча пропускал половину весов
     # guard'а — ту самую, без которой порог двигать нельзя.
     if args.mode in ("negative", "both", "guard"):
-        out += run_negative(args.limit, args.check_refusal, not args.no_progress)
+        text, neg_rows = run_negative(args.limit, args.check_refusal, not args.no_progress)
+        out += text
     if args.mode in ("borderline", "both", "guard"):
-        out += run_borderline(args.check_refusal, not args.no_progress)
+        text, pos_rows = run_borderline(args.check_refusal, not args.no_progress)
+        out += text
     if args.mode in ("threshold", "both", "guard"):
-        out += run_threshold(not args.no_progress)
+        if not (neg_rows and pos_rows):   # режим `threshold` в одиночку — считаем сами
+            _, neg_rows = run_negative(args.limit, False, not args.no_progress)
+            _, pos_rows = run_borderline(False, not args.no_progress)
+        out += run_threshold(neg_rows, pos_rows)
     if args.mode in ("confusable", "both"):
         out += run_confusable(args.limit, args.rerank, not args.no_progress)
 
