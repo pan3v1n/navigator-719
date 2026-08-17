@@ -46,6 +46,24 @@ def _load(p: Path) -> list[dict]:
     return json.loads(p.read_text(encoding="utf-8"))["cases"]
 
 
+# ⚠ ОДНО определение отказа на обе половины весов. Первая версия считала по-разному: на негативах
+# отказом шёл сам флаг (`ans.low_relevance`) и слово «уточните», на пограничных in-scope — только
+# явный уход от ответа. Из-за этого «негативы отвергнуты 36/36» было почти тавтологией (флаг
+# перечитывался как исход), а «из 10 зафлаганных профильных отказ получил 1» мерилось строго уже —
+# и гайд сравнивал эти два числа напрямую, обосновывая ими выбор конца плато. Два разных правила
+# такое сравнение не выдерживают.
+#
+# Отказ = ЯВНЫЙ уход от ответа по смыслу. Просьба уточнить код отказом НЕ является: правило 1г её
+# предписывает, и штрафовать за неё нельзя. Флаг тоже не исход — он лишь подсказка правилу 1б.
+_REFUSAL_MARKERS = ("вне сферы", "не относится к", "не найдена", "не найден",
+                    "не подпадает", "не является промышленной")
+
+
+def _refused(text: str) -> bool:
+    t = (text or "").lower()
+    return any(m in t for m in _REFUSAL_MARKERS)
+
+
 def _sec_rank(hits, sec: str) -> int | None:
     for i, h in enumerate(hits, 1):
         if h.section_roman == sec:
@@ -76,9 +94,7 @@ def run_negative(limit: int, check_refusal: bool, progress: bool) -> tuple[list[
             from app.rag.pipeline import answer
             ans = answer(c["query"])
             row["low_rel"] = ans.low_relevance
-            row["refused"] = ans.low_relevance or any(
-                m in ans.text.lower() for m in ("не найден", "вне сферы", "уточните", "не относится")
-            )
+            row["refused"] = _refused(ans.text)
         rows.append(row)
 
     n = len(rows)
@@ -134,10 +150,7 @@ def run_borderline(check_refusal: bool, progress: bool) -> tuple[list[str], list
             from app.rag.pipeline import answer
             ans = answer(c["query"])
             row["low_rel"] = ans.low_relevance
-            # Отказом считаем ЯВНЫЙ уход от ответа: «вне сферы»/«не найдена». Просьба уточнить код
-            # отказом НЕ является — правило 1г её предписывает, и штрафовать за неё нельзя.
-            row["refused"] = any(m in ans.text.lower() for m in
-                                 ("вне сферы", "не относится к", "не найдена", "не подпадает"))
+            row["refused"] = _refused(ans.text)
         rows.append(row)
 
     n = len(rows)
@@ -203,9 +216,10 @@ def run_threshold(neg: list[dict], pos: list[dict]) -> list[str]:
              else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f}."),
           "  ⚠ Сумма ошибок — грубая мера: false-accept и ложный флаг НЕ равноценны. Флаг только",
           "     подсказывает правилу 1б, а решение «вне сферы» принимает модель — на пограничных",
-          "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов. Поэтому плато читать",
-          "     вместе с `--check-refusal`, а из плато выбирать ВЕРХНИЙ конец: он строже к чужому",
-          "     при той же цене.",
+          "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов — то есть чужое",
+          "     отсекает не порог, а правило 1б, а ложный флаг платит профильный вопрос. Поэтому",
+          "     внутри плато выигрывает НИЖНИЙ конец, и двигать порог можно только после",
+          "     `--check-refusal` на новом значении: обмен внутри плато идёт один к одному.",
           ""]
     return L
 

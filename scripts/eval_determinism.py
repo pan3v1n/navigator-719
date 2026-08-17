@@ -77,7 +77,12 @@ def foreign_numbers(query: str, hits: list) -> set[str]:
     others: set[str] = set()
     for h in hits:
         if h is not target:
-            others |= set(claim_numbers(format_context([h], query)))
+            # ⚠ Форматируем ВМЕСТЕ с целевой, а не в одиночку. `format_context` считает целевым
+            # первый хит (или совпавший по коду), поэтому одиночный кандидат получал кап целевого
+            # (60 операций вместо 12) и рантайм-добор порога из примечаний — в «чужие» попадали
+            # числа, которых в боевом промпте не было вовсе, и гейт ловил ложные утечки.
+            pair = set(claim_numbers(format_context([target, h], query)))
+            others |= pair
     return others - own
 
 

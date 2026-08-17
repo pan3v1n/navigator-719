@@ -157,6 +157,28 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
         user = build_navigator_user_prompt("требования к чиллерам", "КОНТЕКСТ")
         self.assertNotIn("ДОКУМЕНТЫ (Приказ", user)
 
+    def test_answered_documents_are_not_suggested_again(self):
+        """Товарный двойник петли: смешанный вопрос уже получил перечень — предлагать его снова
+        значит обещать то, что только что выдано. Процедурную ветку от этого починили, товарную
+        оставили — ревью нашло."""
+        from app.rag import followup
+        with_docs = followup.after_product(False, documents_answered=True)
+        self.assertIn(followup.DEADLINE_QUESTION, with_docs)
+        self.assertNotIn(followup.DOCS_QUESTION, with_docs)
+        self.assertIn(followup.DOCS_QUESTION, followup.after_product(False))
+
+    def test_block_carries_only_prikaz_52(self):
+        """Шапка блока обещает Приказ №52, значит там обязаны быть только его пункты.
+
+        `primary_docs` — предпочтение квоты, а не фильтр: если добор раздела 4 не удался (он в
+        `except` и лишь логируется), в блок попали бы пункты про печати и сроки из Правил — под
+        шапкой про состав документов, а промпт при этом запрещает отсылать «спросите отдельно»."""
+        import inspect
+
+        from app.rag import pipeline
+        src = inspect.getsource(pipeline._plan_answer)
+        self.assertIn('p.get("doc_type") == "tpp_order_52"', src)
+
     def test_pipeline_adds_the_block_by_topic(self):
         import inspect
 
@@ -166,13 +188,31 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
         self.assertIn("topics.classify(search_query) == topics.DOCUMENTS", src)
         self.assertIn("documents=docs_ctx", src)
 
-    def test_documents_block_is_part_of_grounding(self):
-        """Иначе числа пунктов Приказа («не старше 30 дней») гард объявит выдумкой."""
+    def test_documents_block_is_NOT_part_of_grounding(self):
+        """⚠ Тест перевёрнут 17.08 по итогам ревью: первая версия ЗАКРЕПЛЯЛА дефект.
+
+        Я добавлял блок документов в заземление «чтобы числа пунктов Приказа не считались
+        выдумкой». Обоснование ложное — `claim_numbers` берёт числа только рядом с «балл»/«процент»,
+        и на тексте Приказа она возвращает пусто. Фактически добавление расширяло стог сена для
+        `number_in_context` (сверка цифры подстрокой, без единицы), и выдуманные «30 баллов»
+        заземлялись о срок «30 календарных дней» из номера пункта. Замер ниже это показывает."""
+        from app.rag.pipeline import unverified_numbers
+        ctx = "Позиция: Этикетировщики. Операции: сварка станины — 6 баллов."
+        docs = ("п. 4.2.1 выписка из ЕГРЮЛ, выданная не ранее чем за 30 календарных дней; "
+                "лицензия со сроком 3 года; сведения по форме 4.3.19")
+        ans = "Порог — не менее 30 баллов [1], доля импорта не более 3 процентов [1]."
+        self.assertEqual(unverified_numbers(ans, ctx, ""), ["30", "3"],
+                         "гард обязан видеть выдуманные величины")
+        self.assertEqual(unverified_numbers(ans, ctx + "\n" + docs, ""), [],
+                         "а с блоком в заземлении он их теряет — поэтому блока там быть не должно")
+
         import inspect
 
         from app.rag import pipeline
         src = inspect.getsource(pipeline._plan_answer)
-        self.assertIn("docs_ctx if docs_ctx else", src.split("grounding =")[1][:200])
+        grounding_line = src.split("grounding =")[1][:200]
+        self.assertNotIn("docs_ctx", grounding_line,
+                         "блок документов вернулся в заземление — гард снова ослеплён")
 
 
 if __name__ == "__main__":

@@ -20,6 +20,11 @@ let sessionId = null;
 // текста разъезжается молча (та же история, что с documentId у KONTUR_719).
 const START_HINT = input.getAttribute("placeholder") || "";
 let inputHint = "";  // «» — поле остаётся пустым: ничего не обещаем от имени системы
+// Подсказка, которая была до отправки вопроса. Нужна, чтобы вернуть её на СБОЕ: 422 (в вопросе
+// ПДн), 503 движка и обрыв сети раньше оставляли поле пустым до конца сессии — ровно в тот момент,
+// когда человеку говорят «измените запрос», инструкция из поля исчезала. До U5 плейсхолдер был
+// статикой в шаблоне и переживал любой сбой.
+let hintBeforeAsk = "";
 
 // Один сеттер, а не пара «присвоить + не забыть перерисовать»: половина протокола, применённая без
 // второй, оставляет подсказку прошлого ответа висеть над свежим пустым чатом — и это НЕ ошибка,
@@ -210,7 +215,10 @@ const TBL_COLLAPSE_MIN = 8;   // короче — не сворачиваем: �
 // КПГ» таких порогов десять — свернув до пяти, мы бы выдали половину набора за полный, причём
 // именно в той таблице, где пропущенная строка меняет ответ. Сворачивать имеет смысл длинные
 // ПЕРЕЧНИ операций, а не пороги.
-const TBL_KEEP_WHOLE_RE = /порог/i;
+// «срок» здесь по той же причине, что «порог»: правило 4б процедурного промпта просит
+// таблицу «Этап | Срок | Ист.», и скрытая строка срока меняет вердикт так же, как
+// скрытый порог узла. Сворачиваем длинные ПЕРЕЧНИ, а не нормативные величины.
+const TBL_KEEP_WHOLE_RE = /порог|срок/i;
 
 // Строки, которые нельзя прятать НИКОГДА, даже внутри сворачиваемой таблицы: пометка об усечении
 // перечня. Код печатает её последней (`pipeline.points_table`), а таблица кодом печатается от 12
@@ -652,6 +660,7 @@ async function handleRejected(r, text, pending) {
   let msg = "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
   try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
   if (pending) pending.remove();
+  setHint(hintBeforeAsk);   // вопрос не ушёл — подсказка снова актуальна
   input.value = text;
   input.style.height = "auto";
   showInputBlock(msg);
@@ -659,6 +668,7 @@ async function handleRejected(r, text, pending) {
 
 async function ask(text) {
   main.classList.remove("empty");
+  hintBeforeAsk = inputHint;
   setHint("");         // подсказка прошлого ответа устарела в момент нового вопроса
   const isNew = !sessionId;
   if (isNew) {
@@ -764,6 +774,7 @@ async function askFallback(text, pending, bubble, isNew) {
     }
     if (!r.ok) {
       bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
+      setHint(hintBeforeAsk);
       if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт
       return;
     }
@@ -783,6 +794,7 @@ async function askFallback(text, pending, bubble, isNew) {
     setHint(data.input_hint);  // U5: фолбэк ведёт себя так же, как стриминг
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
+    setHint(hintBeforeAsk);
     if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
   } finally {
     clearTimeout(timer);

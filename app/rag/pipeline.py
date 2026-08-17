@@ -675,9 +675,11 @@ def _answer_procedural(query: str, search_query: str,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
-        # U5: тему вопроса уже определил роутер окна (`_topic` в payload) — берём её, а не считаем
-        # заново, иначе подсказка и отбор пунктов могли бы разъехаться на одном и том же вопросе.
-        input_hint=followup.after_procedural(rules[0].get("_topic")),
+        # U5: подсказку задаёт НАМЕРЕНИЕ вопроса — то самое `topic`, по которому выбрана квота окна
+        # и фрагмент промпта. Раньше сюда шёл `rules[0]["_topic"]`, то есть лексическая догадка о
+        # ДОКУМЕНТЕ: на 12 из 20 вопросов про документы она даёт другой документ или None, и поле
+        # предлагало ровно тот вопрос, на который только что ответили.
+        input_hint=followup.after_procedural(topic),
     )
 
 
@@ -833,8 +835,15 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # детерминированно, поэтому просто доносим пункты раздела 4 Приказа №52 до контекста.
     docs_ctx = None
     if topics.classify(search_query) == topics.DOCUMENTS:
-        doc_points = search_rules(search_query, limit=RULES_DOC_POINTS,
+        doc_points = search_rules(search_query, limit=RULES_DOC_POINTS, qvec=qvec,
                                   primary_docs=topics.doc_types(topics.DOCUMENTS))
+        # ⚠ Оставляем ТОЛЬКО пункты Приказа №52: `primary_docs` — это предпочтение квоты, а не
+        # фильтр, и если добор раздела 4 не удался (он обёрнут в except и лишь логируется) или
+        # какой-то части перечня не хватило по рангу, в блок попали бы пункты про печати, ЭЦП и
+        # сроки из Правил — под шапкой, обещающей состав документов по Приказу. Промпт при этом
+        # запрещает отсылать «спросите отдельно», то есть модель синтезировала бы перечень из
+        # пунктов, где его нет. Нечего показать — блока не будет вовсе, это честнее.
+        doc_points = [p for p in doc_points if p.get("doc_type") == "tpp_order_52"]
         if doc_points:
             docs_ctx = format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
@@ -851,12 +860,26 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if history:
         messages.extend(history)
     messages.append({"role": "user", "content": user})
-    # Блок документов — часть контекста, значит и часть заземления: иначе числа пунктов Приказа
-    # («не старше 30 дней») гард объявил бы выдумкой.
-    grounding = ctx + ("\n" + cases_ctx if cases_ctx else "") + ("\n" + docs_ctx if docs_ctx else "")
+    # ⚠ БЛОК ДОКУМЕНТОВ В ЗАЗЕМЛЕНИЕ НЕ ВХОДИТ — и обратное было демонстрируемым дефектом.
+    #
+    # Я добавил его сюда с обоснованием «иначе числа пунктов Приказа („не старше 30 дней“) гард
+    # объявил бы выдумкой». Обоснование ложное: `claim_numbers` берёт только числа рядом с «балл»,
+    # «процент» и «%», поэтому на тексте Приказа она возвращает ПУСТО — такие числа заявками не
+    # являются и флага получить не могли. Фактически добавление лишь расширяло стог сена для
+    # `number_in_context`, а тот сверяет цифру подстрокой, без единицы измерения.
+    #
+    # Замер: ответ «Порог — не менее 30 баллов [1], доля импорта не более 3 процентов [1]» на
+    # контексте без блока даёт `unverified_numbers = ['30', '3']`, а с блоком — ПУСТО. Две
+    # выдуманные величины отмываются в «заземлённые» через номера пунктов (4.2.1, 4.3.19), сроки в
+    # днях и годы, которых в блоке многие тысячи знаков. И это самый частый класс вопросов.
+    #
+    # Хуже всего, что регресс отчитывался бы УЛУЧШЕНИЕМ: `unverified_numbers` — тот самый сигнал, на
+    # котором стоят и скоркарта админки, и опубликованный faithfulness 1.00. Если числу из Правил
+    # когда-нибудь понадобится заземление, расширять нужно `claim_numbers` (учить единицу), а не стог.
+    grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
-                 input_hint=followup.after_product(low_rel))
+                 input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)))
 
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
