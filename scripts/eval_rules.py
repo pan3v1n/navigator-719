@@ -36,7 +36,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.rag import retriever  # noqa: E402
+from app.rag import retriever, topics  # noqa: E402
 
 GOLDEN = ROOT / "scripts" / "eval_golden_rules.json"
 NAMES = {"decree_body": "тело ПП №719", "rules_registry": "Правила реестра",
@@ -47,7 +47,11 @@ def evaluate(limit: int) -> list[dict]:
     data = json.loads(GOLDEN.read_text(encoding="utf-8"))
     rows = []
     for c in data["cases"]:
-        hits = retriever.search_rules(c["query"], limit=limit)
+        # K12: мерим ПРОДАКШЕН-путь. Пайплайн передаёт в окно предпочтение документов по ТЕМЕ
+        # вопроса (`topics.classify`), а не только по лексике документа (`rules_topic`) — замер без
+        # этого проверял бы уже не тот отбор, что работает в ответе.
+        hits = retriever.search_rules(c["query"], limit=limit,
+                                      primary_docs=topics.doc_types(topics.classify(c["query"])))
         docs = [h.get("doc_type") for h in hits]
         # P2: атрибуция по ДОКУМЕНТУ слепа к тому, какие пункты внутри него попали в окно.
         # На кейсе 17 она давала ✓, хотя раздела 4 (где и лежит состав документов) в окне не было
