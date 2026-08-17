@@ -901,12 +901,17 @@ class TestTableOutput(unittest.TestCase):
         self.assertIn("НЕ таблицей", rule)   # порядок действий — прозой
 
     def test_frontend_renders_tables_and_hides_partial_ones(self):
-        """Рендер таблиц и защита от «палок» во время стриминга. JS-раннера в проекте нет, поэтому
-        проверяем инварианты файла — чтобы правка не потерялась при следующей."""
+        """Рендер таблиц и защита от «палок» во время стриминга. Проверяем инварианты файла —
+        чтобы правка не потерялась при следующей. Поведение самой отрисовки (U6: сворачивание
+        длинных таблиц) исполняется на node в `tests/test_docs_pages.py`."""
         js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
         self.assertIn("tbl-wrap", js, "рендер Markdown-таблиц пропал")
         self.assertIn("function renderMarkdown(text, streaming)", js)
-        self.assertIn("renderMarkdown(acc, true)", js, "стриминг рендерит без флага — вернутся «палки»")
+        # U6 увёл отрисовку в одну точку (`renderAnswer`), но флаг стриминга обязан доезжать
+        # до `renderMarkdown` — без него вернутся «палки» недособранной таблицы.
+        self.assertIn("renderAnswer(pending, bubble, acc, true)", js,
+                      "стриминг рендерит без флага — вернутся «палки»")
+        self.assertIn("renderMarkdown(text, streaming)", js)
         css = (ROOT / "app" / "web" / "static" / "style.css").read_text(encoding="utf-8")
         self.assertIn("overflow-x: auto", css.split(".tbl-wrap")[1][:200])  # адаптив на мобильном
 
@@ -1438,7 +1443,17 @@ class TestIndexTextAsymmetry(unittest.TestCase):
         for t in (self.dense, self.sparse):
             self.assertIn("Краны грузоподъемные стрелкового типа", t)
             self.assertIn("28.22.14.125", t)
-            self.assertIn("не менее 10 баллов", t)
+
+    def test_threshold_left_the_dense_text(self):
+        """EV5 (#82): порог считался частью идентичности — и это оказалось неверно.
+
+        Формулировка порога — общий бойлерплейт сотен позиций, у 139 записей из 236 она ДЛИННЕЕ
+        наименования. Замер: запрос-пустышка «сколько баллов нужно для производства» без единого
+        товара давал «Конвейеры скребковые» с косинусом 0.858 — выше, чем целевая позиция получает
+        на своём же продукте. Для BM25 порог остаётся: там он тонет среди полного текста и штрафа
+        не создаёт."""
+        self.assertNotIn("не менее 10 баллов", self.dense)
+        self.assertIn("не менее 10 баллов", self.sparse)
 
     def test_operations_only_in_sparse_text(self):
         self.assertNotIn("сварка и покраска стрелы", self.dense)  # F1: операции топят dense

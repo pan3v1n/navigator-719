@@ -60,6 +60,10 @@ class Answer:
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
     # для кликабельных источников. Товарный путь их не заполняет (там источники строятся из hits).
     rule_sources: list[dict] = field(default_factory=list)
+    # U5: что показать подсказкой в поле ввода ПОСЛЕ этого ответа — готовый текст, «» = пусто.
+    # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
+    # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
+    input_hint: str = ""
 
 
 # Условие блока (`note`) — норма, а не комментарий, поэтому режем его щедро и только по границе
@@ -625,8 +629,10 @@ def _answer_procedural(query: str, search_query: str,
     поможет), корпус недоступен/пуст → `DEFLECTION` (предложить повторить). Иначе генерируем
     grounded-ответ по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ
     (unverified_deadlines)."""
-    from app.rag import procedural
+    from app.rag import followup, procedural
 
+    # Оба дефера уходят БЕЗ подсказки (`input_hint` пуст): процедурная ветка сейчас не отвечает,
+    # и предлагать следующий вопрос по ней — обещать то, чего сервис в этот момент не может.
     if not settings.PROCEDURAL_ANSWER_FROM_RULES:
         return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
     rules = search_rules(search_query, limit=RULES_TOP_K)
@@ -662,6 +668,9 @@ def _answer_procedural(query: str, search_query: str,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
+        # U5: тему вопроса уже определил роутер окна (`_topic` в payload) — берём её, а не считаем
+        # заново, иначе подсказка и отбор пунктов могли бы разъехаться на одном и том же вопросе.
+        input_hint=followup.after_procedural(rules[0].get("_topic")),
     )
 
 
@@ -689,6 +698,7 @@ class _Plan:
     low_relevance: bool
     # Готовая таблица баллов, которую печатает КОД (P4). Пусто — печатает модель, как раньше.
     points_table: str = ""
+    input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
 
 
 def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
@@ -716,15 +726,15 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты
     ограничены MAX_OPS_OTHER и служат материалом для уточнения по коду (правило 1г)."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
-    from app.rag import meta
+    from app.rag import followup, meta
     if meta.is_meta(query):
-        return Answer(text=meta.response(query), hits=[])
+        return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product())
 
     # T9: прямой запрос на ПЕРЕВОД кода ТН ВЭД↔ОКПД2 — отвечаем детерминированно из справочника
     # переходных ключей (без LLM: навигатор строго по 719 и на такой вопрос раньше отказывал).
     from app.rag import translate
     if translate.is_translate(query):
-        return Answer(text=translate.answer(query), hits=[])
+        return Answer(text=translate.answer(query), hits=[], input_hint=followup.ask_for_product())
 
     # Мультитёрн: уточняющий вопрос переписываем в самостоятельный — ТОЛЬКО для поиска/гейтов
     # (генерация ниже видит историю диалога через messages).
@@ -771,6 +781,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "
             "наименование продукции или укажите код ОКПД2.",
             hits=[],
+            input_hint=followup.ask_for_product(),  # ответ просит назвать продукцию — туда же ведёт подсказка
         )
 
     # Out-of-scope guard: совпадение по коду ОКПД2 или подтверждённый кейс = высокая
@@ -824,7 +835,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     messages.append({"role": "user", "content": user})
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases,
-                 low_relevance=low_rel, points_table=table)
+                 low_relevance=low_rel, points_table=table,
+                 input_hint=followup.after_product(low_rel))
 
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
@@ -863,6 +875,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         echoed_numbers=echoed,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
+        input_hint=planned.input_hint,
     )
 
 
@@ -921,6 +934,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         echoed_numbers=echoed,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        input_hint=planned.input_hint,
     )
 
 
