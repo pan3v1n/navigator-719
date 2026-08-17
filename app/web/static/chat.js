@@ -195,6 +195,20 @@ function renderMarkdown(text, streaming) {
 const TBL_VISIBLE_ROWS = 5;   // строк тела видно в свёрнутом виде
 const TBL_COLLAPSE_MIN = 8;   // короче — не сворачиваем: прятать пару строк только мешает
 
+// ⚠ ТАБЛИЦЫ, КОТОРЫЕ НЕЛЬЗЯ СВОРАЧИВАТЬ. Пороги по узлам и по годам меняют ВЕРДИКТ: правило 2б
+// промпта требует показать их таблицей и прямо сказать, что набрать нужно по КАЖДОМУ узлу, потому
+// что недобор по одному не компенсируется избытком по другому. У «Контейнерной криогенной АЗС с
+// КПГ» таких порогов десять — свернув до пяти, мы бы выдали половину набора за полный, причём
+// именно в той таблице, где пропущенная строка меняет ответ. Сворачивать имеет смысл длинные
+// ПЕРЕЧНИ операций, а не пороги.
+const TBL_KEEP_WHOLE_RE = /порог/i;
+
+// Строки, которые нельзя прятать НИКОГДА, даже внутри сворачиваемой таблицы: пометка об усечении
+// перечня. Код печатает её последней (`pipeline.points_table`), а таблица кодом печатается от 12
+// операций — то есть при слепом сворачивании пометка уходила под кнопку ВСЕГДА, ровно в тех
+// ответах, где перечень действительно неполный.
+const TBL_PINNED_ROW_RE = /перечень неполный/i;
+
 function plural(n, one, few, many) {
   const a = Math.abs(n) % 100, b = a % 10;
   if (a > 10 && a < 20) return many;
@@ -203,10 +217,13 @@ function plural(n, one, few, many) {
   return many;
 }
 
-// null — таблица короткая, кнопка не нужна. Иначе: с какой строки прятать и что писать на кнопке.
-function tblPlan(rowCount, isOpen) {
+// null — сворачивать не нужно (таблица короткая либо прятать нечего). Иначе: с какой строки
+// прятать и что писать на кнопке. `pinned` — строки, которые остаются видимыми при любом
+// состоянии, поэтому в число скрытых они не входят: подпись обязана называть реальное количество.
+function tblPlan(rowCount, isOpen, pinned) {
   if (rowCount < TBL_COLLAPSE_MIN) return null;
-  const hidden = rowCount - TBL_VISIBLE_ROWS;
+  const hidden = rowCount - TBL_VISIBLE_ROWS - (pinned || 0);
+  if (hidden < 1) return null;
   return {
     hideFrom: isOpen ? rowCount : TBL_VISIBLE_ROWS,
     label: isOpen
@@ -222,15 +239,19 @@ function tblPlan(rowCount, isOpen) {
 function collapseTables(wrap, bubble) {
   const open = wrap._tblOpen || (wrap._tblOpen = new Set());
   bubble.querySelectorAll(".tbl-wrap").forEach((box, idx) => {
+    const head = Array.from(box.querySelectorAll("thead th")).map((c) => c.textContent).join(" ");
+    if (TBL_KEEP_WHOLE_RE.test(head)) return;   // таблица порогов — показываем целиком, см. выше
     const rows = Array.from(box.querySelectorAll("tbody tr"));
-    if (!tblPlan(rows.length, false)) return;  // короткая таблица — показываем как есть
+    const pinned = rows.filter((r) => TBL_PINNED_ROW_RE.test(r.textContent || ""));
+    if (!tblPlan(rows.length, false, pinned.length)) return;  // прятать нечего
     const btn = document.createElement("button");
     btn.type = "button";
     btn.className = "tbl-more";
     const paint = () => {
       const isOpen = open.has(idx);
-      const plan = tblPlan(rows.length, isOpen);
-      rows.forEach((r, i) => r.classList.toggle("row-hidden", i >= plan.hideFrom));
+      const plan = tblPlan(rows.length, isOpen, pinned.length);
+      rows.forEach((r, i) => r.classList.toggle(
+        "row-hidden", i >= plan.hideFrom && pinned.indexOf(r) === -1));
       btn.textContent = plan.label;
       btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
     };

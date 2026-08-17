@@ -9,6 +9,11 @@
 поставил ответу 4–5★, значит позиция, на которой ответ построен, признана верной. Пара
 «вопрос + `source_anchor` этого ответа» — готовый кейс. Размечать руками 120 вопросов не нужно.
 
+⚠ У этой посылки есть ровно одно исключение, и без его отсева набор врал бы: **ответы, на которых
+поднимался флаг релевантности**. Там правило 1г запрещает называть баллы и требует список
+кандидатов, и высокая оценка означает «спасибо, что честно сказал „точного совпадения не нашёл“»,
+а не «позиция верна». Такие ответы отбрасываются по `messages.low_relevance`.
+
 ⚠ 152-ФЗ. На вход идёт боевая база с ПДн — она обязана лежать ВНЕ рабочего дерева репозитория.
 Наружу выходят только тексты вопросов, и каждый прогоняется детектором `app/core/sensitive.py`;
 при срабатывании кейс ОТБРАСЫВАЕТСЯ, а не обезличивается частично. Ни идентификаторов
@@ -49,20 +54,29 @@ CONTINUATION = re.compile(
 def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict]:
     with sqlite3.connect(db_path) as db:   # закрываем: на Windows открытый файл не даёт его убрать
         db.row_factory = sqlite3.Row
-        msgs = list(db.execute("select id, session_id, ts, role, content, sources_json "
-                               "from messages order by session_id, ts, id"))
+        msgs = list(db.execute("select id, session_id, ts, role, content, sources_json, "
+                               "low_relevance from messages order by session_id, ts, id"))
         rated = {r["message_id"]: r["rating"] for r in db.execute(
             "select message_id, rating from feedback "
             "where message_id is not null and rating is not null")}
     db.close()
 
     stats = {"оценённых ответов": 0, "есть вопрос": 0, "товарных": 0,
-             "с якорем позиции": 0, "отброшено по ПДн": 0, "итого кейсов": 0}
+             "с якорем позиции": 0, "отброшено: guard поднимал флаг": 0,
+             "отброшено по ПДн": 0, "итого кейсов": 0}
     cases, seen = [], set()
     for i, m in enumerate(msgs):
         if m["role"] != "assistant" or rated.get(m["id"], 0) < min_rating:
             continue
         stats["оценённых ответов"] += 1
+        # ⚠ Оценка ≥4★ доказывает, что ответ ПОЛЕЗЕН, а не что позиция верна. Если на этом ответе
+        # поднимался флаг релевантности, правило 1г запрещало называть баллы и требовало список
+        # кандидатов — эксперт ставит 5★ ИМЕННО за честное «точного совпадения не нашёл». Позиция
+        # там неподтверждённая, и брать её `source_anchor` эталоном значит мерить recall@1 по
+        # догадке ретрива. Тот же признак вручную отсеян в eval_golden_borderline.json.
+        if m["low_relevance"]:
+            stats["отброшено: guard поднимал флаг"] += 1
+            continue
         prev = msgs[i - 1] if i else None
         if not prev or prev["role"] != "user" or prev["session_id"] != m["session_id"]:
             continue
@@ -130,6 +144,9 @@ def main() -> None:
         "built_by": "scripts/build_gs_natural.py",
         "pii": "Тексты прогнаны детектором app/core/sensitive.py; кейсы со срабатыванием отброшены "
                "целиком. Идентификаторов пользователей, регионов и времени в наборе нет.",
+        "limits": "Отброшены ответы, на которых поднимался флаг релевантности (low_relevance): "
+                  "там правило 1г требует список кандидатов, и оценка ≥4★ означает «честно сказал, "
+                  "что точного совпадения нет», а не «позиция верна».",
         "size": len(cases), "min_rating": args.min_rating,
     }, "cases": cases}
     out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")

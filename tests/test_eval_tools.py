@@ -32,12 +32,34 @@ class TestForeignNumbersRule(unittest.TestCase):
 
     def test_rule_forbids_numbers_of_other_candidates(self):
         self.assertIn("3в.", NAVIGATOR_SYSTEM_PROMPT)
-        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:900]
+        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:1100]
         self.assertIn("БЕЗ их баллов", rule)
         # исключение обязано остаться: прямая просьба сравнить позиции — законный сценарий
         self.assertIn("СРАВНИТЬ", rule)
-        # и честный выход, когда чисел у целевой позиции нет
-        self.assertIn("не приведены", rule)
+
+    def test_rule_does_not_reinstate_the_R7_defect(self):
+        """Первая версия 3в велела на позиции без баллов писать «баллы не приведены» и просить код.
+
+        Оба указания спорили с кодом, который специально шёл другим путём: `format_context` при
+        требованиях-перечне печатает «Порог: не предусмотрен — требования заданы ПЕРЕЧНЕМ
+        обязательных операций» именно потому, что молчание заставляло модель писать «в контексте не
+        указан», а это читалось как пробел в данных и было **жалобой №1** платного теста (R7).
+        Просьба уточнить код спорила с правилом 1ж, которое её прямо запрещает при совпадении по
+        коду. Позиций без баллов в корпусе — сотни, так что цена ошибки не краевая."""
+        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:1100]
+        self.assertNotIn("попроси уточнить код", rule)
+        self.assertNotIn("баллы для этой позиции в контексте не приведены", rule)
+        # правило обязано отдавать этот случай КОНТЕКСТУ, а не решать за него
+        self.assertIn("не предусмотрен", rule)
+
+    def test_context_still_owns_the_no_points_wording(self):
+        """R7 остаётся в силе: формулировку про отсутствие порога задаёт контекст, а не промпт."""
+        import inspect
+
+        from app.rag import pipeline
+        src = inspect.getsource(pipeline.format_context)
+        self.assertIn("Порог: не предусмотрен", src)
+        self.assertIn("ПЕРЕЧНЕМ", src)
 
     def test_rule_sits_after_code_priority_rule(self):
         """3в опирается на «позицию, на которую опираешься» из правил 3 и 3а — порядок важен."""
@@ -83,6 +105,45 @@ class TestBorderlineSet(unittest.TestCase):
         self.assertTrue(eval_guard.BORDER.exists())
         self.assertTrue(hasattr(eval_guard, "run_borderline"))
         self.assertTrue(hasattr(eval_guard, "run_threshold"))
+
+    def test_default_mode_runs_both_halves_of_the_scales(self):
+        """По негативам одним порог хочется поднимать бесконечно — цена видна только вместе с
+        ложными флагами. Прежний `both` молча пропускал эту половину, а докстринг обещал «два
+        режима», когда их стало пять."""
+        import inspect
+
+        import eval_guard
+        src = inspect.getsource(eval_guard.main)
+        for mode in ("run_negative", "run_borderline", "run_threshold", "run_confusable"):
+            self.assertIn(mode, src)
+        # каждая секция должна запускаться и при `both`
+        self.assertIn('"borderline", "both", "guard"', src)
+        self.assertIn('"threshold", "both", "guard"', src)
+        self.assertIn("borderline", eval_guard.__doc__)
+        self.assertNotIn("Два режима", eval_guard.__doc__)
+
+    def test_threshold_curve_reports_plateau_not_argmin(self):
+        """Равные суммы на сетке 0.005 — норма, и «первый минимум» всегда самый permissive конец:
+        прочитав его как рекомендацию, порог понизят и добавят false-accept за нулевой выигрыш."""
+        import inspect
+
+        import eval_guard
+        src = inspect.getsource(eval_guard.run_threshold)
+        self.assertIn("plateau", src)
+        self.assertIn("ПЛАТО", src)
+        self.assertIn("НЕ равноценны", src)
+
+    def test_determinism_window_matches_production(self):
+        """Гейт «чужие числа» при окне 5 структурно не видит утечек с рангов 6–8, а прод берёт 8."""
+        import inspect
+
+        import eval_determinism
+
+        from app.rag import pipeline
+        src = inspect.getsource(eval_determinism.main)
+        self.assertIn('"--limit", type=int, default=8', src)
+        prod = inspect.signature(pipeline.answer).parameters["limit"].default
+        self.assertEqual(prod, 8, "боевое окно изменилось — гейт замера обязан идти за ним")
 
 
 class TestTextFaithfulnessCore(unittest.TestCase):
@@ -133,9 +194,9 @@ class TestGsNaturalBuilder(unittest.TestCase):
         path = Path(self.tmp) / "wave.db"
         db = sqlite3.connect(path)
         db.execute("create table messages (id integer primary key, session_id text, ts text, "
-                   "role text, content text, sources_json text)")
+                   "role text, content text, sources_json text, low_relevance integer)")
         db.execute("create table feedback (id integer primary key, message_id integer, rating integer)")
-        db.executemany("insert into messages values (?,?,?,?,?,?)", rows)
+        db.executemany("insert into messages values (?,?,?,?,?,?,?)", rows)
         db.executemany("insert into feedback (message_id, rating) values (?,?)", feedback)
         db.commit()
         db.close()
@@ -152,16 +213,16 @@ class TestGsNaturalBuilder(unittest.TestCase):
         anchor = json.dumps([{"source_anchor": "Раздел IV, поз. 12", "okpd2": ["28.13.14"]}],
                             ensure_ascii=False)
         rows = [
-            (1, "s1", "t1", "user", "делаем гидравлические насосы для нефтепереработки", None),
-            (2, "s1", "t2", "assistant", "ответ", anchor),
-            (3, "s2", "t3", "user", "да", None),                       # продолжение диалога
-            (4, "s2", "t4", "assistant", "ответ", anchor),
-            (5, "s3", "t5", "user", "какой порядок внесения в реестр", None),   # процедурный
-            (6, "s3", "t6", "assistant", "ответ", anchor),
-            (7, "s4", "t7", "user", "производим станки, СНИЛС 112-233-445 95", None),  # ПДн
-            (8, "s4", "t8", "assistant", "ответ", anchor),
-            (9, "s5", "t9", "user", "выпускаем промышленные чиллеры", None),
-            (10, "s5", "t10", "assistant", "ответ", "[]"),             # без якоря позиции
+            (1, "s1", "t1", "user", "делаем гидравлические насосы для нефтепереработки", None, 0),
+            (2, "s1", "t2", "assistant", "ответ", anchor, 0),
+            (3, "s2", "t3", "user", "да", None, 0),                       # продолжение диалога
+            (4, "s2", "t4", "assistant", "ответ", anchor, 0),
+            (5, "s3", "t5", "user", "какой порядок внесения в реестр", None, 0),   # процедурный
+            (6, "s3", "t6", "assistant", "ответ", anchor, 0),
+            (7, "s4", "t7", "user", "производим станки, СНИЛС 112-233-445 95", None, 0),  # ПДн
+            (8, "s4", "t8", "assistant", "ответ", anchor, 0),
+            (9, "s5", "t9", "user", "выпускаем промышленные чиллеры", None, 0),
+            (10, "s5", "t10", "assistant", "ответ", "[]", 0),             # без якоря позиции
         ]
         fb = [(2, 5), (4, 5), (6, 5), (8, 5), (10, 5)]
         cases, stats = self.m.collect(self._db(rows, fb), 4, "3")
@@ -172,10 +233,23 @@ class TestGsNaturalBuilder(unittest.TestCase):
 
     def test_low_rating_is_not_evidence(self):
         anchor = json.dumps([{"source_anchor": "Раздел IV, поз. 12"}], ensure_ascii=False)
-        rows = [(1, "s1", "t1", "user", "делаем гидравлические насосы", None),
-                (2, "s1", "t2", "assistant", "ответ", anchor)]
+        rows = [(1, "s1", "t1", "user", "делаем гидравлические насосы", None, 0),
+                (2, "s1", "t2", "assistant", "ответ", anchor, 0)]
         cases, _ = self.m.collect(self._db(rows, [(2, 3)]), 4, "3")
         self.assertEqual(cases, [], "оценка 3★ не подтверждает, что позиция верна")
+
+    def test_flagged_answer_is_not_a_gold_label(self):
+        """Оценка ≥4★ на ответе с поднятым флагом означает «честно сказал, что совпадения нет».
+
+        Правило 1г в этом случае ЗАПРЕЩАЕТ называть баллы и требует список кандидатов, поэтому
+        `source_anchor` там — догадка ретрива, а не подтверждённая экспертом позиция. Взяв её
+        эталоном, мы бы мерили главную цифру ретрива по собственной догадке."""
+        anchor = json.dumps([{"source_anchor": "Раздел XXII, поз. 3"}], ensure_ascii=False)
+        rows = [(1, "s1", "t1", "user", "пластичная высокотемпературная смазка", None, 0),
+                (2, "s1", "t2", "assistant", "Точного совпадения не нашёл…", anchor, 1)]
+        cases, stats = self.m.collect(self._db(rows, [(2, 5)]), 4, "3")
+        self.assertEqual(cases, [], "кейс с поднятым флагом не может быть эталоном")
+        self.assertEqual(stats["отброшено: guard поднимал флаг"], 1)
 
 
 if __name__ == "__main__":

@@ -217,6 +217,10 @@ assert.strictEqual(tblPlan(10, false).label, "Показать полность�
 assert.strictEqual(tblPlan(16, false).label, "Показать полностью (ещё 11 строк)", "11-14 — «строк»");
 assert.strictEqual(tblPlan(29, true).label, "Скрыть");
 assert.strictEqual(tblPlan(29, true).hideFrom, 29, "раскрытая таблица не прячет ни одной строки");
+// Закреплённые строки (пометка об усечении перечня) не прячутся и в число скрытых не входят —
+// иначе кнопка обещает «ещё 8», а прячет 7.
+assert.strictEqual(tblPlan(13, false, 1).label, "Показать полностью (ещё 7 строк)");
+assert.strictEqual(tblPlan(8, false, 3), null, "прятать нечего — кнопки быть не должно");
 console.log("OK");
 """
         self._run_node(self._logic() + checks)
@@ -235,10 +239,14 @@ function fakeClassList() {
   const s = new Set();
   return { toggle: (n, on) => (on ? s.add(n) : s.delete(n)), has: (n) => s.has(n) };
 }
-function fakeBox(n) {
-  const rows = Array.from({ length: n }, () => ({ classList: fakeClassList() }));
+function fakeBox(n, head, lastRowText) {
+  const rows = Array.from({ length: n }, (_v, i) => ({
+    classList: fakeClassList(),
+    textContent: (lastRowText && i === n - 1) ? lastRowText : "операция " + i,
+  }));
+  const th = (head || "Операция или условие|Баллы").split("|").map((t) => ({ textContent: t }));
   const box = { rows, btn: null, where: null };
-  box.querySelectorAll = () => rows;
+  box.querySelectorAll = (sel) => (sel.indexOf("thead") !== -1 ? th : rows);
   box.insertAdjacentElement = (where, el) => { box.where = where; box.btn = el; };
   return box;
 }
@@ -276,6 +284,62 @@ assert.strictEqual(grown.btn.textContent, "Скрыть");
 grown.btn.click();                     // свернули обратно
 assert.strictEqual(hiddenCount(grown), 26);
 assert.strictEqual(grown.btn.textContent, "Показать полностью (ещё 26 строк)");
+console.log("OK");
+"""
+        self._run_node(self._logic() + self._cut("разметка", "function collapseTables") + stub)
+
+    @unittest.skipUnless(shutil.which("node"), "node не найден — поведенческая часть пропущена")
+    def test_threshold_table_is_never_collapsed(self):
+        """Пороги по узлам меняют ВЕРДИКТ: правило 2б требует показать их все и сказать, что набрать
+        нужно по КАЖДОМУ. У «Контейнерной криогенной АЗС с КПГ» таких порогов десять — свернув до
+        пяти, мы выдали бы половину набора за полный именно там, где пропущенная строка меняет
+        ответ. Сворачиваем длинные ПЕРЕЧНИ операций, а не пороги."""
+        stub = r"""
+const assert = require("node:assert");
+function fakeClassList() {
+  const s = new Set();
+  return { toggle: (n, on) => (on ? s.add(n) : s.delete(n)), has: (n) => s.has(n) };
+}
+function fakeBox(n, head, lastRowText) {
+  const rows = Array.from({ length: n }, (_v, i) => ({
+    classList: fakeClassList(),
+    textContent: (lastRowText && i === n - 1) ? lastRowText : "строка " + i,
+  }));
+  const th = (head || "Операция или условие|Баллы").split("|").map((t) => ({ textContent: t }));
+  const box = { rows, btn: null, where: null };
+  box.querySelectorAll = (sel) => (sel.indexOf("thead") !== -1 ? th : rows);
+  box.insertAdjacentElement = (where, el) => { box.where = where; box.btn = el; };
+  return box;
+}
+const document = {
+  createElement: () => ({
+    setAttribute(k, v) { this[k] = v; },
+    addEventListener(_evt, fn) { this.click = fn; },
+  }),
+};
+const bubbleOf = (boxes) => ({ querySelectorAll: () => boxes });
+const hiddenCount = (box) => box.rows.filter((r) => r.classList.has("row-hidden")).length;
+
+// 1. Таблица порогов узлов — целиком, без кнопки
+const nodes = fakeBox(10, "Узел|Порог узла");
+collapseTables({}, bubbleOf([nodes]));
+assert.strictEqual(nodes.btn, null, "таблица порогов не должна сворачиваться");
+assert.strictEqual(hiddenCount(nodes), 0, "ни одна строка порога не может быть скрыта");
+
+// 2. Пороги по годам — тот же запрет
+const years = fakeBox(9, "Период|Порог, баллов");
+collapseTables({}, bubbleOf([years]));
+assert.strictEqual(years.btn, null);
+
+// 3. Пометка об усечении перечня остаётся видимой и не попадает в счёт скрытых
+const WARN = "…перечень неполный, полный список — в первоисточнике ПП №719";
+const ops = fakeBox(13, null, WARN);
+collapseTables({}, bubbleOf([ops]));
+assert.ok(ops.btn, "перечень операций сворачивается как раньше");
+assert.strictEqual(ops.rows[12].classList.has("row-hidden"), false,
+  "пометка об усечении спрятана — усечение стало невидимым ровно там, где оно есть");
+assert.strictEqual(hiddenCount(ops), 7, "скрыто 7: 13 строк минус 5 видимых минус закреплённая");
+assert.strictEqual(ops.btn.textContent, "Показать полностью (ещё 7 строк)");
 console.log("OK");
 """
         self._run_node(self._logic() + self._cut("разметка", "function collapseTables") + stub)

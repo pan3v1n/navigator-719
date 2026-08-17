@@ -1,15 +1,26 @@
-"""P1 #4 + #5 — out-of-scope guard и confusable-различение.
+"""P1 #4 + #5 + EV2 — out-of-scope guard, пограничные in-scope и confusable-различение.
 
-Два режима, оба читают курированные наборы:
-  • --mode negative   → scripts/eval_golden_negative.json: запросы ВНЕ 719. Мерит, ловит ли
-    guard их (dense top-1 < RELEVANCE_SOFT) и считает false-accept (вне-719 принят за in-scope).
-    Опц. --check-refusal: гоняет полный pipeline.answer и проверяет реальный ОТКАЗ (+DeepSeek).
-  • --mode confusable → scripts/eval_confusable.json: кросс-секционно-склонные запросы. Мерит
+Четыре секции, все читают курированные наборы:
+  • negative   → scripts/eval_golden_negative.json: запросы ВНЕ 719. Мерит, ловит ли guard их
+    (dense top-1 < RELEVANCE_SOFT) и считает false-accept (вне-719 принят за in-scope).
+  • borderline → scripts/eval_golden_borderline.json: запросы В сфере 719 с низким косинусом
+    (EV2). Мерит ЛОЖНЫЕ ФЛАГИ — цену ужесточения порога.
+  • threshold  → кривая обмена по обоим наборам: где вообще стоит порог.
+  • confusable → scripts/eval_confusable.json: кросс-секционно-склонные запросы. Мерит
     различение — верный раздел в top-1/top-3 и как часто соблазн-раздел перебивает верный.
 
+⚠ **Негативы в одиночку читать нельзя.** По ним одним порог хочется поднимать бесконечно: «пять
+false-accept — кандидаты на ужесточение» выглядит убедительно, пока не видно, сколько при этом
+получат ложный флаг ПРОФИЛЬНЫЕ вопросы. Поэтому `--mode both` (по умолчанию) запускает ВСЕ четыре
+секции, а не две, как в прежней версии этого докстринга.
+
+Режимы: both (всё, по умолчанию) · guard (negative + borderline + threshold) · и каждая секция
+поимённо. Опц. --check-refusal: гоняет полный pipeline.answer и проверяет РЕАЛЬНЫЙ отказ
+(+DeepSeek) — на негативах он должен быть, на пограничных in-scope его быть НЕ должно.
+
 Детерминированное ядро без DeepSeek (нужен Qdrant + e5). Прогон после F1 (контеншн по e5).
-  .venv\\Scripts\\python scripts\\eval_guard.py --mode both --rerank --report docs/eval_guard_report.md
-  .venv\\Scripts\\python scripts\\eval_guard.py --mode negative --check-refusal
+  .venv\\Scripts\\python scripts\\eval_guard.py --report docs/eval_guard_report.md
+  .venv\\Scripts\\python scripts\\eval_guard.py --mode guard --check-refusal
 """
 
 from __future__ import annotations
@@ -169,18 +180,30 @@ def run_threshold(progress: bool) -> list[str]:
          "=" * 78,
          "  порог | чужое прошло | своё зафлагано | сумма ошибок",
          "  ------|--------------|----------------|-------------"]
-    best = None
+    curve = []
     for t in [round(0.78 + i * 0.005, 3) for i in range(25)]:
         fa = sum(1 for _c, d in neg if d >= t)          # вне-719 принят за профильный
         ff = sum(1 for _c, d in pos if d < t)           # профильный зафлагован как чужой
         mark = "  ← сейчас" if abs(t - RELEVANCE_SOFT) < 1e-9 else ""
-        if best is None or fa + ff < best[1]:
-            best = (t, fa + ff)
+        curve.append((t, fa, ff))
         L.append(f"  {t:.3f} | {fa:>4}/{len(neg):<8} | {ff:>4}/{len(pos):<10} | {fa + ff:>3}{mark}")
+
+    # ⚠ Печатаем ПЛАТО, а не argmin. На сетке 0.005 с 56 кейсами равные суммы — норма, а не
+    # исключение, и «первый минимум» всегда самый ПЕРМИССИВНЫЙ конец плато: прочитав его как
+    # рекомендацию, порог понизят и добавят false-accept за несуществующий выигрыш.
+    lo = min(fa + ff for _t, fa, ff in curve)
+    plateau = [t for t, fa, ff in curve if fa + ff == lo]
+    same = "" if len(plateau) == 1 else f" — ПЛАТО из {len(plateau)}: {plateau[0]:.3f}…{plateau[-1]:.3f}"
     L += ["",
-          f"  Минимум суммарной ошибки: порог {best[0]:.3f} ({best[1]} ошибок из {len(neg) + len(pos)}).",
-          "  ⚠ Читать вместе с реальным отказом полного пайплайна: числовой порог только ПОДНИМАЕТ",
-          "     флаг для правила 1б, а решение «вне сферы» принимает модель по смыслу контекста.",
+          f"  Минимальная суммарная ошибка: {lo} из {len(neg) + len(pos)}{same}.",
+          f"  Текущий порог {RELEVANCE_SOFT}: "
+          + ("внутри минимума — двигать некуда." if RELEVANCE_SOFT in plateau
+             else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f}."),
+          "  ⚠ Сумма ошибок — грубая мера: false-accept и ложный флаг НЕ равноценны. Флаг только",
+          "     подсказывает правилу 1б, а решение «вне сферы» принимает модель — на пограничных",
+          "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов. Поэтому плато читать",
+          "     вместе с `--check-refusal`, а из плато выбирать ВЕРХНИЙ конец: он строже к чужому",
+          "     при той же цене.",
           ""]
     return L
 
@@ -250,11 +273,13 @@ def main() -> None:
         sys.exit(f"Qdrant недоступен ({e}). Подними Docker + Qdrant (:6533).")
 
     out: list[str] = []
+    # `both` = ВСЁ. Прежде он давал negative+confusable, то есть молча пропускал половину весов
+    # guard'а — ту самую, без которой порог двигать нельзя.
     if args.mode in ("negative", "both", "guard"):
         out += run_negative(args.limit, args.check_refusal, not args.no_progress)
-    if args.mode in ("borderline", "guard"):
+    if args.mode in ("borderline", "both", "guard"):
         out += run_borderline(args.check_refusal, not args.no_progress)
-    if args.mode in ("threshold", "guard"):
+    if args.mode in ("threshold", "both", "guard"):
         out += run_threshold(not args.no_progress)
     if args.mode in ("confusable", "both"):
         out += run_confusable(args.limit, args.rerank, not args.no_progress)
