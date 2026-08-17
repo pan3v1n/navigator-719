@@ -10,7 +10,10 @@
 
 from __future__ import annotations
 
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -140,9 +143,15 @@ class TestAnswerTools(unittest.TestCase):
         cls.js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
         cls.css = (WEB / "static" / "style.css").read_text(encoding="utf-8")
 
-    def test_tools_added_in_both_render_paths(self):
-        """Ответ приходит двумя путями — стримингом и одним куском; кнопки нужны в обоих."""
-        self.assertEqual(self.js.count("addAnswerTools("), 3)  # объявление + два вызова
+    def test_tools_added_in_every_render_path(self):
+        """Ответ приходит ТРЕМЯ путями — история беседы, стриминг и фолбэк; кнопки нужны везде.
+
+        ⚠ Тест раньше требовал два вызова и был зелёным, хотя фолбэк-путь (`askFallback`, обычное
+        дело на рваной сети) кнопок не добавлял и `dataset.raw` не выставлял: ответ нельзя было ни
+        скопировать, ни отправить с пометкой о происхождении. Найдено при U6."""
+        self.assertEqual(self.js.count("addAnswerTools("), 4)  # объявление + три вызова
+        # исходный markdown обязан сохраняться в каждом пути — копируем его, а не текст из DOM
+        self.assertEqual(self.js.count("dataset.raw = "), 3)
 
     def test_copied_text_carries_origin_note(self):
         """R3: ответ, покинувший сервис, несёт пометку — иначе получатель примет черновик за вердикт."""
@@ -159,6 +168,154 @@ class TestAnswerTools(unittest.TestCase):
         self.assertIn("content: attr(data-tip)", self.css)
         self.assertIn("dataset.tip", self.js)          # подпись задаётся из JS
         self.assertIn(".tool-btn:focus-visible::after", self.css)  # и доступна с клавиатуры
+
+
+class TestLongTableCollapse(unittest.TestCase):
+    """U6: длинная таблица показывает 5 строк и кнопку «Показать полностью».
+
+    Поведение проверяется НА САМОМ КОДЕ, а не пересказом ассертами по строкам файла: чистая часть
+    логики вынесена без DOM и исполняется на node — он в проекте уже есть, CI зовёт его для
+    `node --check`. Ассерты по тексту остаются там, где без DOM не обойтись (склейка с разметкой).
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
+        cls.css = (WEB / "static" / "style.css").read_text(encoding="utf-8")
+
+    def _cut(self, name: str, must_contain: str) -> str:
+        """Кусок chat.js между метками — то, что тест исполняет на node."""
+        start, end = f"// U6-{name}-начало", f"// U6-{name}-конец"
+        self.assertIn(start, self.js, f"метка {start} пропала")
+        block = self.js.split(start)[1].split(end)[0]
+        self.assertIn(must_contain, block, "метки разъехались с кодом")
+        return block
+
+    def _logic(self) -> str:
+        return self._cut("логика", "function tblPlan")
+
+    def _run_node(self, source: str):
+        with tempfile.TemporaryDirectory() as tmp:
+            script = Path(tmp) / "u6.js"
+            script.write_text(source, encoding="utf-8")
+            r = subprocess.run([shutil.which("node"), str(script)],
+                               capture_output=True, text=True, encoding="utf-8")
+        self.assertEqual(r.returncode, 0, (r.stderr or "")[-1200:])
+        self.assertIn("OK", r.stdout)
+
+    @unittest.skipUnless(shutil.which("node"), "node не найден — поведенческая часть пропущена")
+    def test_thresholds_and_labels(self):
+        checks = r"""
+const assert = require("node:assert");
+assert.strictEqual(tblPlan(3, false), null, "короткая таблица — без кнопки");
+assert.strictEqual(tblPlan(7, false), null, "семь строк ещё не сворачиваем: спрятать две — только мешать");
+assert.deepStrictEqual(tblPlan(8, false), {hideFrom: 5, label: "Показать полностью (ещё 3 строки)"});
+assert.strictEqual(tblPlan(29, false).hideFrom, 5, "видно ровно пять строк тела");
+assert.strictEqual(tblPlan(29, false).label, "Показать полностью (ещё 24 строки)");
+assert.strictEqual(tblPlan(26, false).label, "Показать полностью (ещё 21 строку)");
+assert.strictEqual(tblPlan(10, false).label, "Показать полностью (ещё 5 строк)");
+assert.strictEqual(tblPlan(16, false).label, "Показать полностью (ещё 11 строк)", "11-14 — «строк»");
+assert.strictEqual(tblPlan(29, true).label, "Скрыть");
+assert.strictEqual(tblPlan(29, true).hideFrom, 29, "раскрытая таблица не прячет ни одной строки");
+console.log("OK");
+"""
+        self._run_node(self._logic() + checks)
+
+    @unittest.skipUnless(shutil.which("node"), "node не найден — поведенческая часть пропущена")
+    def test_expand_survives_streaming_rerender(self):
+        """Сценарий приёмки целиком, на настоящем коде: свернули → раскрыли → пришёл следующий
+        фрагмент стриминга → таблица ОСТАЛАСЬ раскрытой → свернули обратно.
+
+        Именно здесь сидел риск задачи: разметка ответа пересобирается на каждом токене, и
+        состояние, хранись оно в DOM, схлопывало бы таблицу сразу после нажатия."""
+        stub = r"""
+const assert = require("node:assert");
+// Крошечная заглушка DOM: ровно те методы, которые трогает collapseTables.
+function fakeClassList() {
+  const s = new Set();
+  return { toggle: (n, on) => (on ? s.add(n) : s.delete(n)), has: (n) => s.has(n) };
+}
+function fakeBox(n) {
+  const rows = Array.from({ length: n }, () => ({ classList: fakeClassList() }));
+  const box = { rows, btn: null, where: null };
+  box.querySelectorAll = () => rows;
+  box.insertAdjacentElement = (where, el) => { box.where = where; box.btn = el; };
+  return box;
+}
+const document = {
+  createElement: () => ({
+    setAttribute(k, v) { this[k] = v; },
+    addEventListener(_evt, fn) { this.click = fn; },
+  }),
+};
+const bubbleOf = (boxes) => ({ querySelectorAll: () => boxes });
+const hiddenCount = (box) => box.rows.filter((r) => r.classList.has("row-hidden")).length;
+
+const wrap = {};                       // элемент сообщения: на нём и живёт состояние
+const long = fakeBox(29), short = fakeBox(4);
+collapseTables(wrap, bubbleOf([long, short]));
+assert.ok(long.btn, "у таблицы на 29 строк должна появиться кнопка");
+assert.strictEqual(short.btn, null, "короткая таблица кнопки не получает");
+assert.strictEqual(long.where, "afterend", "кнопка обязана стоять ВНЕ прокручиваемой обёртки");
+assert.strictEqual(hiddenCount(long), 24, "видно должно остаться пять строк");
+assert.strictEqual(long.btn.textContent, "Показать полностью (ещё 24 строки)");
+assert.strictEqual(long.btn["aria-expanded"], "false");
+
+long.btn.click();                      // раскрыли
+assert.strictEqual(hiddenCount(long), 0);
+assert.strictEqual(long.btn.textContent, "Скрыть");
+assert.strictEqual(long.btn["aria-expanded"], "true");
+
+// Следующий фрагмент стриминга: разметка пересобрана, таблица подросла на две строки.
+const grown = fakeBox(31);
+collapseTables(wrap, bubbleOf([grown, fakeBox(4)]));
+assert.strictEqual(hiddenCount(grown), 0,
+  "после пересборки таблица снова свернулась — нажатие пользователя потеряно");
+assert.strictEqual(grown.btn.textContent, "Скрыть");
+
+grown.btn.click();                     // свернули обратно
+assert.strictEqual(hiddenCount(grown), 26);
+assert.strictEqual(grown.btn.textContent, "Показать полностью (ещё 26 строк)");
+console.log("OK");
+"""
+        self._run_node(self._logic() + self._cut("разметка", "function collapseTables") + stub)
+
+    def test_state_lives_outside_markup(self):
+        """Разметка пересобирается на КАЖДОМ фрагменте стриминга: держи состояние в DOM —
+        и таблица схлопывалась бы на каждом токене, отменяя нажатие пользователя."""
+        self.assertIn("wrap._tblOpen = new Set()", self.js)
+        self.assertNotIn("classList.contains(\"tbl-open\")", self.js)  # состояния в разметке нет
+
+    def test_single_render_path(self):
+        """Одна точка отрисовки: новый путь вывода нельзя добавить, забыв про сворачивание."""
+        self.assertEqual(self.js.count("bubble.innerHTML = renderMarkdown"), 1)
+        self.assertEqual(self.js.count("renderAnswer("), 5)  # объявление + история + стрим + финал + фолбэк
+
+    def test_button_is_accessible(self):
+        self.assertIn('btn.setAttribute("aria-expanded"', self.js)
+        self.assertIn(".tbl-more:focus-visible", self.css)
+
+    def test_threshold_is_not_duplicated_in_css(self):
+        """Число видимых строк живёт только в JS: продублируй его в `nth-child` — и порог
+        разъедется со стилями при первой же правке."""
+        self.assertIn(".bubble .row-hidden { display: none; }", self.css)
+        self.assertNotIn("nth-child", self.css.split(".row-hidden")[1][:300])
+
+    def test_button_sits_outside_scrolling_wrapper(self):
+        """У `.tbl-wrap` свой горизонтальный скролл (T17) — кнопка внутри уезжала бы вбок."""
+        self.assertIn('box.insertAdjacentElement("afterend", btn)', self.js)
+
+    def test_copy_takes_full_table(self):
+        """Критерий приёмки: свёрнутая таблица уходит эксперту ЦЕЛИКОМ, а не обрезанной.
+
+        Основной путь копирует исходный markdown, запасной читает DOM — а `innerText` не видит
+        строк, скрытых через display:none. Значит запасной обязан снять сокрытие на время чтения,
+        иначе копия молча теряет хвост таблицы."""
+        tools = self.js.split("function addAnswerTools")[1][:1600]
+        self.assertIn("wrap.dataset.raw", tools)
+        self.assertIn('querySelectorAll(".row-hidden")', tools)
+        self.assertIn('classList.remove("row-hidden")', tools)
+        self.assertIn('classList.add("row-hidden")', tools)
 
 
 class TestOnboardingTour(unittest.TestCase):

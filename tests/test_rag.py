@@ -901,12 +901,17 @@ class TestTableOutput(unittest.TestCase):
         self.assertIn("НЕ таблицей", rule)   # порядок действий — прозой
 
     def test_frontend_renders_tables_and_hides_partial_ones(self):
-        """Рендер таблиц и защита от «палок» во время стриминга. JS-раннера в проекте нет, поэтому
-        проверяем инварианты файла — чтобы правка не потерялась при следующей."""
+        """Рендер таблиц и защита от «палок» во время стриминга. Проверяем инварианты файла —
+        чтобы правка не потерялась при следующей. Поведение самой отрисовки (U6: сворачивание
+        длинных таблиц) исполняется на node в `tests/test_docs_pages.py`."""
         js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
         self.assertIn("tbl-wrap", js, "рендер Markdown-таблиц пропал")
         self.assertIn("function renderMarkdown(text, streaming)", js)
-        self.assertIn("renderMarkdown(acc, true)", js, "стриминг рендерит без флага — вернутся «палки»")
+        # U6 увёл отрисовку в одну точку (`renderAnswer`), но флаг стриминга обязан доезжать
+        # до `renderMarkdown` — без него вернутся «палки» недособранной таблицы.
+        self.assertIn("renderAnswer(pending, bubble, acc, true)", js,
+                      "стриминг рендерит без флага — вернутся «палки»")
+        self.assertIn("renderMarkdown(text, streaming)", js)
         css = (ROOT / "app" / "web" / "static" / "style.css").read_text(encoding="utf-8")
         self.assertIn("overflow-x: auto", css.split(".tbl-wrap")[1][:200])  # адаптив на мобильном
 

@@ -178,6 +178,81 @@ function renderMarkdown(text, streaming) {
   return html;
 }
 
+// --- U6: длинная таблица в ответе сворачивается -------------------------------------------
+// Перечень балльных операций печатает КОД (P4), и у мега-позиций это десятки строк: у смычковых
+// инструментов одна таблица на 29 строк, у криогенной АЗС четыре таблицы узлов подряд. Ответ
+// превращается в простыню — эксперту нужно окинуть его взглядом, а он листает.
+//
+// ⚠ Состояние «раскрыто» живёт ВНЕ разметки (Set на элементе сообщения). Разметка ответа
+// пересобирается на КАЖДОМ фрагменте стриминга, и держи мы состояние в DOM — таблица
+// схлопывалась бы на каждом токене, отменяя нажатие пользователя.
+// ⚠ Копирование ответа берёт исходный markdown (`wrap.dataset.raw`), а не текст из DOM, поэтому
+// свёрнутая таблица уходит эксперту ЦЕЛИКОМ. Сломается это молча — закреплено тестом.
+
+// Чистая часть (без DOM): тест исполняет её на node КАК ЕСТЬ, вырезая между метками ниже, —
+// проверяется сам код, а не его пересказ ассертами по строкам файла.
+// U6-логика-начало
+const TBL_VISIBLE_ROWS = 5;   // строк тела видно в свёрнутом виде
+const TBL_COLLAPSE_MIN = 8;   // короче — не сворачиваем: прятать пару строк только мешает
+
+function plural(n, one, few, many) {
+  const a = Math.abs(n) % 100, b = a % 10;
+  if (a > 10 && a < 20) return many;
+  if (b === 1) return one;
+  if (b >= 2 && b <= 4) return few;
+  return many;
+}
+
+// null — таблица короткая, кнопка не нужна. Иначе: с какой строки прятать и что писать на кнопке.
+function tblPlan(rowCount, isOpen) {
+  if (rowCount < TBL_COLLAPSE_MIN) return null;
+  const hidden = rowCount - TBL_VISIBLE_ROWS;
+  return {
+    hideFrom: isOpen ? rowCount : TBL_VISIBLE_ROWS,
+    label: isOpen
+      ? "Скрыть"
+      : "Показать полностью (ещё " + hidden + " " + plural(hidden, "строку", "строки", "строк") + ")",
+  };
+}
+// U6-логика-конец
+
+// Склейка с разметкой. Тест исполняет и её — с крошечной заглушкой DOM, потому что здесь сидит
+// главный риск задачи: пересборка ответа на каждом фрагменте стриминга.
+// U6-разметка-начало
+function collapseTables(wrap, bubble) {
+  const open = wrap._tblOpen || (wrap._tblOpen = new Set());
+  bubble.querySelectorAll(".tbl-wrap").forEach((box, idx) => {
+    const rows = Array.from(box.querySelectorAll("tbody tr"));
+    if (!tblPlan(rows.length, false)) return;  // короткая таблица — показываем как есть
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "tbl-more";
+    const paint = () => {
+      const isOpen = open.has(idx);
+      const plan = tblPlan(rows.length, isOpen);
+      rows.forEach((r, i) => r.classList.toggle("row-hidden", i >= plan.hideFrom));
+      btn.textContent = plan.label;
+      btn.setAttribute("aria-expanded", isOpen ? "true" : "false");
+    };
+    btn.addEventListener("click", () => {
+      if (open.has(idx)) open.delete(idx); else open.add(idx);
+      paint();  // перерисовываем на месте: пересборка разметки создала бы вторую кнопку
+    });
+    paint();
+    // Кнопка идёт ПОСЛЕ .tbl-wrap, а не внутрь: у обёртки свой горизонтальный скролл (T17),
+    // и кнопка внутри уезжала бы вбок вместе с широкой таблицей.
+    box.insertAdjacentElement("afterend", btn);
+  });
+}
+// U6-разметка-конец
+
+// Единственная точка отрисовки ответа: и стриминг, и фолбэк, и история беседы. Отдельная функция
+// затем, чтобы новый путь вывода нельзя было добавить, забыв про сворачивание.
+function renderAnswer(wrap, bubble, text, streaming) {
+  bubble.innerHTML = renderMarkdown(text, streaming);
+  collapseTables(wrap, bubble);
+}
+
 function addUser(text) {
   const wrap = el("msg user");
   const b = el("bubble");
@@ -192,7 +267,7 @@ function addUser(text) {
 function addAssistant(text, sources) {
   const wrap = el("msg assistant");
   const b = el("bubble");
-  b.innerHTML = renderMarkdown(text);
+  renderAnswer(wrap, b, text);
   wrap.appendChild(b);
   wrap.dataset.raw = text;  // исходный markdown — его и копируем, а не текст из DOM
   messages.appendChild(wrap);
@@ -339,7 +414,17 @@ function addAnswerTools(wrap) {
     setTimeout(() => { btn.dataset.tip = prev; btn.classList.remove("ok"); }, 1600);
   };
 
-  const raw = () => (wrap.dataset.raw || wrap.querySelector(".bubble")?.innerText || "");
+  // Копируем ИСХОДНЫЙ markdown, поэтому свёрнутая таблица (U6) уходит целиком. Запасной путь
+  // читает текст из DOM — а `innerText` не видит строк, скрытых через display:none, и копия молча
+  // потеряла бы хвост таблицы. Поэтому на время чтения снимаем сокрытие и возвращаем обратно.
+  const raw = () => {
+    if (wrap.dataset.raw) return wrap.dataset.raw;
+    const hidden = Array.from(wrap.querySelectorAll(".row-hidden"));
+    hidden.forEach((r) => r.classList.remove("row-hidden"));
+    const text = wrap.querySelector(".bubble")?.innerText || "";
+    hidden.forEach((r) => r.classList.add("row-hidden"));
+    return text;
+  };
 
   const copySvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
     + '<rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>'
@@ -605,7 +690,7 @@ async function askStream(text, pending, bubble) {
         try { ev = JSON.parse(evtext); } catch (e) { continue; }
         if (ev.type === "delta") {
           acc += ev.text;
-          bubble.innerHTML = renderMarkdown(acc, true);  // инкрементальный рендер (без хвоста таблицы)
+          renderAnswer(pending, bubble, acc, true);  // инкрементальный рендер (без хвоста таблицы)
           autoScroll();  // следуем за текстом, только если пользователь не листает выше
         } else if (ev.type === "done") {
           done = ev;
@@ -617,7 +702,7 @@ async function askStream(text, pending, bubble) {
     if (!done) return false;  // поток оборвался без финала → фолбэк (лог на сервере не писался)
     sessionId = done.session_id;
     setActive(sessionId);
-    bubble.innerHTML = renderMarkdown(acc);  // финальный ре-рендер полного текста
+    renderAnswer(pending, bubble, acc);  // финальный ре-рендер полного текста
     pending.dataset.raw = acc;
     addAnswerTools(pending);
     addUnverifiedFlag(pending, done.unverified_numbers);
@@ -659,7 +744,13 @@ async function askFallback(text, pending, bubble, isNew) {
     const data = await r.json();
     sessionId = data.session_id;
     setActive(sessionId);
-    bubble.innerHTML = renderMarkdown(data.answer);
+    renderAnswer(pending, bubble, data.answer);
+    // ⚠ Найдено при U6: этот путь НЕ выставлял dataset.raw и не добавлял кнопки — ответ, пришедший
+    // фолбэком (а на рваной сети это обычное дело), нельзя было ни скопировать, ни отправить с
+    // пометкой о происхождении. Со свёрнутой таблицей цена ошибки выше: копировать нечего, а в DOM
+    // теперь видны не все строки. Порядок — как в стриминге.
+    pending.dataset.raw = data.answer;
+    addAnswerTools(pending);
     addUnverifiedFlag(pending, data.unverified_numbers);
     addSources(pending, data.sources);
     addFeedbackBar(pending, data.message_id, sessionId);
