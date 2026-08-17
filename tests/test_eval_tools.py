@@ -27,15 +27,41 @@ from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT  # noqa: E402
 from app.core.sensitive import detect  # noqa: E402
 
 
+def _rule_3v() -> str:
+    """Текст правила 3в целиком — по ГРАНИЦАМ, а не по магическим 1100 символам.
+
+    Срез по длине уже подводил: правило подросло на 200 символов (`EV7`), и утверждение про
+    «СРАВНИТЬ» уехало за окно — тест позеленел бы на выпавшем требовании."""
+    return NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1].split("4. СТИЛЬ")[0]
+
+
 class TestForeignNumbersRule(unittest.TestCase):
     """EV1: правило 3в — числа только из позиции, о которой идёт речь."""
 
     def test_rule_forbids_numbers_of_other_candidates(self):
         self.assertIn("3в.", NAVIGATOR_SYSTEM_PROMPT)
-        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:1100]
-        self.assertIn("БЕЗ их баллов", rule)
+        rule = _rule_3v()
+        self.assertIn("БЕЗ баллов", rule)
         # исключение обязано остаться: прямая просьба сравнить позиции — законный сценарий
         self.assertIn("СРАВНИТЬ", rule)
+
+    def test_rule_matches_what_context_actually_contains(self):
+        """EV7: требований кандидатов в контексте больше нет — правило обязано это ЗНАТЬ.
+
+        Иначе промпт спорит с контекстом: он разрешал бы «назвать без баллов» то, чего в контексте
+        нет вовсе, и оставлял бы открытым второй, обратный риск — заявить «требований у позиции
+        нет». Оба запрета обязаны быть в правиле дословно, потому что цена второго выше первого:
+        «требований не найдено» при живых требованиях — это дефект класса `D4`."""
+        rule = _rule_3v()
+        self.assertIn("в контекст НЕ включены", rule)      # правило ссылается на строку контекста
+        self.assertIn("НЕ утверждать, что требований у них нет", rule)
+        self.assertIn("попроси его код", rule)              # путь для разбора кандидата
+        # и та же строка обязана существовать в самом контексте — иначе ссылка правила висячая
+        import inspect
+
+        from app.rag import pipeline
+        self.assertIn("Требования этой позиции в контекст НЕ включены",
+                      inspect.getsource(pipeline.format_context))
 
     def test_rule_does_not_reinstate_the_R7_defect(self):
         """Первая версия 3в велела на позиции без баллов писать «баллы не приведены» и просить код.
@@ -46,7 +72,7 @@ class TestForeignNumbersRule(unittest.TestCase):
         указан», а это читалось как пробел в данных и было **жалобой №1** платного теста (R7).
         Просьба уточнить код спорила с правилом 1ж, которое её прямо запрещает при совпадении по
         коду. Позиций без баллов в корпусе — сотни, так что цена ошибки не краевая."""
-        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:1100]
+        rule = _rule_3v()
         self.assertNotIn("попроси уточнить код", rule)
         self.assertNotIn("баллы для этой позиции в контексте не приведены", rule)
         # правило обязано отдавать этот случай КОНТЕКСТУ, а не решать за него
@@ -64,6 +90,49 @@ class TestForeignNumbersRule(unittest.TestCase):
     def test_rule_sits_after_code_priority_rule(self):
         """3в опирается на «позицию, на которую опираешься» из правил 3 и 3а — порядок важен."""
         self.assertLess(NAVIGATOR_SYSTEM_PROMPT.index("3а."), NAVIGATOR_SYSTEM_PROMPT.index("3в."))
+
+
+class TestClarifyingClassifier(unittest.TestCase):
+    """Калибровка метрики полноты (`EV7`): что считать УТОЧНЯЮЩИМ ответом.
+
+    Классификатор решает, исключать ли кейс из полноты, — то есть напрямую двигает метрику. Первая
+    версия считала уточняющим любой ответ с фразой «укажите код», и после `EV7` (контекст сам велит
+    просить код у кандидата) из полноты уехали ответы, довёзшие ВСЕ баллы целевой позиции. Доля
+    оставалась 1.00, но проверялась уже не вся выборка, а три четверти."""
+
+    @staticmethod
+    def _hits(match: bool = False):
+        class H:
+            okpd2_match = match
+        return [H()]
+
+    def test_substantive_answer_asking_for_code_is_not_clarifying(self):
+        from eval_completeness import is_clarifying
+        text = ("**Позиция:** «Спецмашиностроение», Бульдозеры гусеничные (ОКПД2 28.92.21) [1].\n"
+                "**Требования с балльной оценкой:**\n- сварка рамы — 15 баллов [1].\n"
+                "**Что уточнить:** если продукция — одна из соседних позиций, укажите код.")
+        self.assertFalse(is_clarifying(text, self._hits()))
+
+    def test_rule_1g_shaped_answer_is_clarifying(self):
+        from eval_completeness import is_clarifying
+        text = ("Точного совпадения по «слесарный инструмент» не нашёл. Ближайшие позиции:\n"
+                "- Инструмент ручной — ОКПД2 25.73.30 [1]\n"
+                "- Инструмент слесарно-монтажный — ОКПД2 25.73.30.290 [2]\n"
+                "Если ваша продукция — одна из них, укажите код, и я приведу требования и баллы.")
+        self.assertTrue(is_clarifying(text, self._hits()))
+        self.assertNotIn("**Позиция:", text)  # форма правила 1г: опоры на позицию нет
+
+    def test_code_match_is_never_clarifying(self):
+        from eval_completeness import is_clarifying
+        text = "Точного совпадения не нашёл. Ближайшие позиции: - что-то [1]. Укажите код."
+        self.assertFalse(is_clarifying(text, self._hits(match=True)))
+
+    def test_clarify_phrase_alone_does_not_flip_a_normal_answer(self):
+        """«Уточните у заявителя…» — обычная часть разбора, а не признак неподтверждённой позиции."""
+        from eval_completeness import is_clarifying
+        text = ("**Позиция:** «Насосное оборудование», Насосы центробежные (ОКПД2 28.13.14) [1].\n"
+                "Уточните наименование сервисного центра у заявителя.")
+        self.assertFalse(is_clarifying(text, self._hits()))
 
 
 class TestBorderlineSet(unittest.TestCase):

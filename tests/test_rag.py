@@ -12,6 +12,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -463,6 +464,61 @@ class TestContextAndDisclaimer(unittest.TestCase):
         plain = make_hit(score=0.9)
         self.assertIs(_target_hit([plain, product]), plain)
         self.assertIsNone(_target_hit([]))
+
+    def test_candidate_block_carries_no_requirement_numbers(self):
+        """EV7: чужие баллы и порог не попадают в контекст вовсе — брать их будет негде."""
+        target = make_hit(product_name="Насосы центробежные подачи жидкостей прочие", score=0.9)
+        lng = make_hit(
+            product_name="Насосы центробежные технологические типов ВВ1 для производств СПГ",
+            score=0.8, min_threshold="с 1 января 2024 г. - не менее 750 баллов",
+            okpd2_codes=["28.13.14.110"], source_anchor="Раздел XXI, поз. 42",
+            requirement_blocks=[{"operations": [{"text": "сборка узлов", "points": 110},
+                                                {"text": "испытания", "points": 450}]}])
+        ctx = format_context([target, lng])
+        # позиция названа и опознаваема — она материал для уточнения по коду (правило 1г)
+        self.assertIn("Насосы центробежные технологические типов ВВ1", ctx)
+        self.assertIn("28.13.14.110", ctx)
+        self.assertIn("Раздел XXI, поз. 42", ctx)
+        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        # ни одного её ЧИСЛА-ПРЕТЕНЗИИ: ни баллов операций, ни порога.
+        # ⚠ Проверяем именно `claim_numbers` (числа рядом с «балл»/«процент»), а не присутствие
+        # токена: «110» остаётся в контексте внутри кода 28.13.14.110. Это же и слепая зона гарда —
+        # `number_in_context` сверяет цифры подстрокой, без единицы, поэтому «110 баллов» в ответе
+        # заземлится о КОД позиции. Материал для утечки убирает только отсутствие формы «N балл».
+        claims = set(claim_numbers(ctx))
+        self.assertEqual(claims & {"110", "450", "750"}, set(), f"числа кандидата в контексте: {claims}")
+        self.assertNotIn("сборка узлов", ctx)
+
+    def test_candidate_count_falls_back_to_group_requirements(self):
+        """«0 операций» читается как «требований нет» — у наследника считаем требования ГРУППЫ (R6)."""
+        from app.rag import inheritance
+        parent = {"product_name": "Группа", "operations": [{"text": f"оп {i}"} for i in range(7)]}
+        with mock.patch.object(inheritance, "lookup", return_value=parent):
+            ctx = format_context([make_hit(product_name="Целевая", score=0.9),
+                                  make_hit(product_name="Наследник", score=0.8,
+                                           requirement_blocks=[])])
+        self.assertIn("в базе 7 операц.", ctx)
+        # и обратный случай: требований нет ни своих, ни групповых — числа не выдумываем
+        with mock.patch.object(inheritance, "lookup", return_value=None):
+            bare = format_context([make_hit(product_name="Целевая", score=0.9),
+                                   make_hit(product_name="Пустая", score=0.8, requirement_blocks=[])])
+        self.assertIn("Требования этой позиции в контекст НЕ включены —", bare)
+        self.assertNotIn("в базе 0 операц.", bare)
+
+    def test_all_code_matched_positions_keep_requirements(self):
+        """Путь сравнения сохранён: назвал пользователь код — все совпавшие записи целевые.
+
+        Это не абстракция: единственная просьба сравнить позиции из 580 реальных вопросов волны
+        пришла именно с кодом («сравни требования по нашему коду и по 26.30.50»)."""
+        a = make_hit(product_name="Первая", okpd2_match=True, min_threshold="не менее 300 баллов")
+        b = make_hit(product_name="Вторая", okpd2_match=True, min_threshold="не менее 400 баллов")
+        c = make_hit(product_name="Третья", requirement_blocks=[
+            {"operations": [{"text": "литьё", "points": 55}]}])
+        ctx = format_context([a, b, c])
+        self.assertIn("не менее 300 баллов", ctx)
+        self.assertIn("не менее 400 баллов", ctx)   # вторая совпавшая — тоже целевая
+        self.assertFalse(number_in_context("55", ctx))  # а несовпавшая идёт без чисел
+        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
 
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
@@ -1260,7 +1316,6 @@ class TestBlockNote(unittest.TestCase):
     def test_long_note_is_clipped_and_says_so(self):
         """Молча обрезанное условие превращает несколько порогов в один — резать можно только вслух."""
         note = "; ".join(f"с 1 января 202{i} г. - не менее {500 + i * 10} баллов" for i in range(9))
-        self.assertGreater(len(note), pipeline_mod.NOTE_CAP_OTHER)
         self.assertLess(len(note), pipeline_mod.NOTE_CAP_TARGET)
         blocks = [{"component": "насосные установки", "note": note,
                    "operations": [{"text": "сборка", "points": 10}]}]
@@ -1270,12 +1325,16 @@ class TestBlockNote(unittest.TestCase):
         self.assertIn("не менее 580 баллов", full)  # у целевого хита условие идёт целиком
         self.assertNotIn("условие показано не полностью", full)
 
-        # тот же блок у КАНДИДАТА (целевой — другой хит, по совпадению кода) режется, но вслух
+        # ⚠ EV7: у КАНДИДАТА условие не режется, а не показывается вовсе — вместе со всеми его
+        # числами. Прежняя версия теста проверяла усечение по `NOTE_CAP_OTHER = 200`; теперь
+        # проверять надо противоположное: ни одного балла соседней позиции в контексте.
         short = format_context([make_hit(product_name="Целевая", okpd2_match=True),
                                 make_hit(product_name="Кандидат", requirement_blocks=blocks)])
-        self.assertIn("условие показано не полностью", short)
-        self.assertIn("не менее 500 баллов", short)     # начало условия остаётся
-        self.assertNotIn("не менее 580 баллов", short)  # хвост срезан
+        self.assertIn("Кандидат", short)                             # позиция названа
+        self.assertIn("Требования этой позиции в контекст НЕ включены", short)
+        self.assertNotIn("не менее 500 баллов", short)               # чисел кандидата нет
+        self.assertNotIn("не менее 580 баллов", short)
+        self.assertNotIn("условие показано не полностью", short)     # резать больше нечего
 
     def test_clip_keeps_sentence_boundary(self):
         clipped = pipeline_mod._clip_note("первое условие; второе условие; третье условие", 25)
