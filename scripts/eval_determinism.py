@@ -20,7 +20,14 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings  # noqa: E402
-from app.rag.pipeline import answer, claim_numbers  # noqa: E402
+from app.rag.pipeline import (  # noqa: E402
+    Answer,
+    _plan_answer,
+    _target_hit,
+    answer,
+    claim_numbers,
+    format_context,
+)
 
 # Представительные запросы (числоёмкие, разные разделы, с кодом и без)
 QUERIES = [
@@ -37,6 +44,28 @@ QUERIES = [
 ]
 
 
+def foreign_numbers(query: str, code: str | None, limit: int) -> set[str]:
+    """Числа, которые есть ТОЛЬКО у непрофильных кандидатов окна, но не у целевой позиции.
+
+    EV1: разброс набора чисел сам по себе — плохая метрика. Он растёт и когда модель просто иначе
+    формулирует (упомянула «2 балла» — не упомянула), и когда она тащит в ответ ПОРОГ СОСЕДНЕЙ
+    ПОЗИЦИИ. Первое — шум, второе — дефект: эксперт читает число как относящееся к своей продукции.
+    Замер 17.08 показал, что это разные вещи: у «центробежных насосов» все 12 плавающих чисел были
+    чужими (у целевой позиции чисел не было вовсе), а у «светодиодов» плавало число самой целевой.
+    Здесь считается именно вредная половина."""
+    planned = _plan_answer(query, okpd2=code, limit=limit)
+    if isinstance(planned, Answer):        # ранний путь (meta/процедурный) — кандидатов нет
+        return set()
+    target = _target_hit(planned.hits)
+    own = set(claim_numbers(format_context([target], query))) if target else set()
+    others: set[str] = set()
+    for h in planned.hits:
+        if h is target:
+            continue
+        others |= set(claim_numbers(format_context([h], query)))
+    return others - own
+
+
 def evaluate(runs: int, limit: int, progress: bool):
     rows = []
     it = QUERIES
@@ -48,16 +77,24 @@ def evaluate(runs: int, limit: int, progress: bool):
             pass
     for q, code in it:
         num_sets, secs, flags = [], [], []
+        alien = foreign_numbers(q, code, limit)
+        alien_runs, alien_seen = 0, set()
         for _ in range(runs):
             ans = answer(q, okpd2=code, limit=limit)
-            num_sets.append(frozenset(claim_numbers(ans.text)))
+            nums = frozenset(claim_numbers(ans.text))
+            num_sets.append(nums)
             secs.append(ans.hits[0].section_roman if ans.hits else "—")
             flags.append(bool(ans.unverified_numbers))
+            if nums & alien:
+                alien_runs += 1
+                alien_seen |= nums & alien
         rows.append({
             "q": q, "code": code or "",
             "num_variants": len(set(num_sets)),       # 1 = стабильный набор чисел
             "sec_variants": len(set(secs)),           # 1 = стабильная атрибуция
             "flag_variants": len(set(flags)),         # 1 = стабильный guard-флаг
+            "alien_runs": alien_runs,                 # в скольких прогонах утекли ЧУЖИЕ числа
+            "alien_seen": sorted(alien_seen),
             "example_nums": sorted(set().union(*num_sets)) if num_sets else [],
         })
     return rows
@@ -67,18 +104,33 @@ def report(rows, runs: int) -> list[str]:
     n = len(rows)
     num_stable = sum(1 for r in rows if r["num_variants"] == 1)
     sec_stable = sum(1 for r in rows if r["sec_variants"] == 1)
+    alien_total = sum(r["alien_runs"] for r in rows)
+    clean_q = sum(1 for r in rows if r["alien_runs"] == 0)
     L = ["=" * 78,
          f"P2 #8 ДЕТЕРМИНИЗМ — {n} запросов × {runs} повторов, модель={settings.DEEPSEEK_MODEL}",
          "=" * 78,
          f"  СТАБИЛЬНЫЙ набор чисел баллов/% (одинаков во всех {runs}): {num_stable}/{n} = {num_stable/n:.2f}",
          f"  СТАБИЛЬНАЯ атрибуция (раздел top-1): {sec_stable}/{n} = {sec_stable/n:.2f}",
+         f"  БЕЗ ЧУЖИХ ЧИСЕЛ (ни один прогон не привёл баллы непрофильных кандидатов):"
+         f" {clean_q}/{n} = {clean_q/n:.2f}   [утечек всего: {alien_total}/{n * runs} прогонов]",
+         "",
+         "  ⚠ Первая метрика меряет и шум формулировки, и дефект; третья — только дефект:",
+         "     число соседней позиции эксперт читает как относящееся к СВОЕЙ продукции.",
          "",
          "Детализация (вариантов из N повторов; 1 = детерминирован):",
          f"  {'числа':>6} {'раздел':>7} {'флаг':>5}  запрос"]
     for r in rows:
         mark = "" if r["num_variants"] == 1 else "  ⚠ числа плавают"
+        if r["alien_runs"]:
+            mark += f"  ⚠ ЧУЖИЕ числа в {r['alien_runs']}/{runs}"
         L.append(f"  {r['num_variants']:>6} {r['sec_variants']:>7} {r['flag_variants']:>5}  {r['q'][:40]}{mark}")
     L.append("")
+    leaks = [r for r in rows if r["alien_runs"]]
+    if leaks:
+        L.append("ЧУЖИЕ ЧИСЛА В ОТВЕТЕ (баллы/пороги непрофильных кандидатов — правило 3в промпта):")
+        for r in leaks:
+            L.append(f"  «{r['q'][:46]}»: {r['alien_runs']}/{runs} прогонов, числа: {r['alien_seen']}")
+        L.append("")
     unstable = [r for r in rows if r["num_variants"] > 1]
     if unstable:
         L.append("НЕСТАБИЛЬНЫЕ ЧИСЛА (объединение по повторам — эксперт может увидеть разное):")
