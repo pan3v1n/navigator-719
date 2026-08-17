@@ -37,6 +37,42 @@ def rec(**kw) -> dict:
     return base
 
 
+class TestDenseEmbeddingText(unittest.TestCase):
+    """EV5 (#82): порог не должен попадать в текст DENSE-вектора.
+
+    Он выглядел частью идентичности, но идентичностью не является: «до 31 декабря 2023 г. -
+    не менее 90 баллов; с 1 января 2024 г. …» — общий бойлерплейт сотен позиций, и у 139 записей
+    из 236 он ДЛИННЕЕ самого наименования. Из-за него запрос-пустышка «сколько баллов нужно для
+    производства» — без единого товара — давал «Конвейеры скребковые» с косинусом 0.858, выше,
+    чем целевая позиция получает на своём продукте. Вернуть порог в вектор — значит вернуть
+    притяжение любого вопроса про баллы к коротким записям с порогом."""
+
+    THRESHOLD = ("до 31 декабря 2023 г. - не менее 90 баллов; "
+                 "с 1 января 2024 г. - не менее 120 баллов")
+
+    def _text(self):
+        from scripts.load_kb import build_embedding_text
+        return build_embedding_text(rec(product_name="Комбайны проходческие",
+                                        min_threshold=self.THRESHOLD))
+
+    def test_threshold_is_absent(self):
+        text = self._text()
+        self.assertNotIn("баллов", text, "порог вернулся в вектор — EV5 воспроизведётся")
+        self.assertNotIn("2024", text)
+
+    def test_identity_is_intact(self):
+        """Убрали только порог: имя, раздел и коды — по-прежнему в векторе."""
+        text = self._text()
+        self.assertIn("Комбайны проходческие", text)
+        self.assertIn("IX", text)
+        self.assertIn("26.20.11.130", text)
+
+    def test_sparse_still_sees_full_record(self):
+        """Асимметрия R9 не тронута: BM25 индексирует полный текст, включая порог."""
+        from scripts.load_kb import build_text
+        self.assertIn("баллов", build_text(rec(min_threshold=self.THRESHOLD)))
+
+
 class TestExcludedStub(unittest.TestCase):
     def test_empty_name_is_stub(self):
         """Прежняя форма: у строки-кода нет ни имени, ни требований."""

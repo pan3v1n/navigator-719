@@ -1443,7 +1443,17 @@ class TestIndexTextAsymmetry(unittest.TestCase):
         for t in (self.dense, self.sparse):
             self.assertIn("Краны грузоподъемные стрелкового типа", t)
             self.assertIn("28.22.14.125", t)
-            self.assertIn("не менее 10 баллов", t)
+
+    def test_threshold_left_the_dense_text(self):
+        """EV5 (#82): порог считался частью идентичности — и это оказалось неверно.
+
+        Формулировка порога — общий бойлерплейт сотен позиций, у 139 записей из 236 она ДЛИННЕЕ
+        наименования. Замер: запрос-пустышка «сколько баллов нужно для производства» без единого
+        товара давал «Конвейеры скребковые» с косинусом 0.858 — выше, чем целевая позиция получает
+        на своём же продукте. Для BM25 порог остаётся: там он тонет среди полного текста и штрафа
+        не создаёт."""
+        self.assertNotIn("не менее 10 баллов", self.dense)
+        self.assertIn("не менее 10 баллов", self.sparse)
 
     def test_operations_only_in_sparse_text(self):
         self.assertNotIn("сварка и покраска стрелы", self.dense)  # F1: операции топят dense
