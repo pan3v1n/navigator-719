@@ -425,12 +425,6 @@ POINTS_TABLE_MIN = 12  # балльных операций у целевой п�
 _POINTS_TABLE_TITLE = "Операции и баллы — дословно из приложения"
 
 
-# Строка-КВАЛИФИКАТОР: наименование группы плюс область действия строки кода. Продуктом она не
-# является («Светодиоды (в части светодиодов белого диапазона)» — это про то, к какой части кода
-# 26.11.22.210 относится ячейка требований, а сама продукция названа отдельной строкой).
-_SCOPE_QUALIFIER_RE = re.compile(r"\((?:в\s+части|за\s+исключением)\b", re.I)
-
-
 def _n_operations(h: Hit) -> int:
     return sum(len(b.get("operations") or []) for b in (h.requirement_blocks or []))
 
@@ -489,7 +483,10 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     # «Светодиоды (за исключением светодиодов белого диапазона)» (5). То есть чинила один запрос и
     # ломала соседний. Квалификатор «(в части …)» / «(за исключением …)» — это не продукт, а
     # ОБЛАСТЬ действия строки кода, и именно такие строки держат хвост общей ячейки.
-    if not _SCOPE_QUALIFIER_RE.search(target.product_name or ""):
+    # ⚠ Роль строки читается ИЗ ДАННЫХ (`fragments.is_scope_qualifier`), а не считается регуляркой
+    # по наименованию: под прежнюю регулярку подходили 16 записей корпуса, из которых 13 — настоящая
+    # продукция, и от подмены ответа их спасало лишь отсутствие в расколотых группах (`EV9` #89).
+    if not fragments.is_scope_qualifier(target.product_name):
         return [target]
     group = fragments.group_of(target.product_name)
     if group is None:
@@ -500,7 +497,7 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     # называет. Не нашлось содержательного сиблинга в окне — оставляем top-1 как есть.
     siblings = [h for h in hits
                 if fragments.group_of(h.product_name) == group
-                and not _SCOPE_QUALIFIER_RE.search(h.product_name or "")]
+                and not fragments.is_scope_qualifier(h.product_name)]
     # ⚠ Ничья решается ИМЕНЕМ, а не порядком окна. Ничьи в данных есть: у трёх из четырёх
     # расколотых групп сиблинги имеют равное число операций (аддитивные установки 0 и 0;
     # синий/зелёный/красный диапазоны по 1). Сегодня подмена на них не срабатывает — нужен

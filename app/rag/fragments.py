@@ -126,6 +126,40 @@ def _group_index() -> dict[str, int]:
     return out
 
 
+@lru_cache(maxsize=1)
+def _role_index() -> dict[str, str]:
+    """Ключ позиции → роль строки в расколотой ячейке (`qualifier` / `product`).
+
+    ⚠ Роль — ФАКТ ДАННЫХ, проставленный при генерации списка и видимый эксперту в JSON. Рантайм её
+    только читает. Раньше `pipeline` вычислял её регуляркой по наименованию, и под ту регулярку
+    подходили 16 записей корпуса, из которых 13 — настоящая продукция; от подмены ответа их спасало
+    лишь то, что они не входят в расколотые группы (`EV9`, issue #89)."""
+    if not _PATH.exists():
+        return {}
+    try:
+        groups = json.loads(_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    out: dict[str, str] = {}
+    for g in groups:
+        for p in (g.get("positions") or []):
+            role = p.get("role")
+            if not role:
+                continue
+            for k in _keys(p.get("product_name")):
+                out.setdefault(k, role)
+    return out
+
+
+def is_scope_qualifier(product_name: str | None) -> bool:
+    """True — строка задаёт ОБЛАСТЬ действия кода и продукцию не называет (опорой быть не может).
+
+    Позиция вне списка расколотых ячеек квалификатором быть не может по построению: роли есть
+    только у перечисленных позиций."""
+    index = _role_index()
+    return any(index.get(k) == "qualifier" for k in _keys(product_name))
+
+
 def group_of(product_name: str | None) -> int | None:
     """Номер группы с расколотой ячейкой, если позиция в неё входит."""
     index = _group_index()

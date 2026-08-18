@@ -207,6 +207,27 @@ class TestFragmentedListResolvesToCorpus(unittest.TestCase):
         self.assertEqual(missing, [], f"позиции списка не найдены в корпусе: {missing}")
 
 
+class TestFragmentedListHasRoles(unittest.TestCase):
+    """У каждой позиции списка расколотых ячеек проставлена РОЛЬ — иначе рантайм ослепнет.
+
+    Роль (`qualifier` / `product`) проставляет генератор списка, эксперт видит её в JSON и правит,
+    а рантайм только читает. Без поля `role` строка-квалификатор снова стала бы опорой ответа."""
+
+    def test_every_position_has_a_role(self):
+        import json
+        path = ROOT / "knowledge_base" / "pp719" / "fragmented_requirements.json"
+        if not path.exists():
+            self.skipTest("файл списка отсутствует")
+        groups = json.loads(path.read_text(encoding="utf-8"))
+        positions = [p for g in groups for p in (g.get("positions") or [])]
+        self.assertTrue(positions, "список расколотых ячеек пуст")
+        missing = [p.get("product_name") for p in positions if p.get("role") not in ("qualifier", "product")]
+        self.assertEqual(missing, [], f"позиции без роли: {missing}")
+        # обе роли реально встречаются — иначе поле бессмысленно
+        roles = {p["role"] for p in positions}
+        self.assertEqual(roles, {"qualifier", "product"})
+
+
 class TestIncompleteThresholdNotice(unittest.TestCase):
     """D9: позиции, где в законе несколько порогов, а в записи помещался один.
 

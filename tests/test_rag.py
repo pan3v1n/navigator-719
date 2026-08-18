@@ -634,6 +634,37 @@ class TestContextAndDisclaimer(unittest.TestCase):
             {"operations": [{"text": "сборка", "points": 30}]}])
         self.assertNotIn("Балльная оценка: не предусмотрена", format_context([scored]))
 
+    def test_qualifier_role_comes_from_data_not_from_prose(self):
+        """Роль строки читается ИЗ ДАННЫХ: подменишь роль в списке — изменится и выбор опоры.
+
+        ⚠ Раньше `pipeline` решал это регуляркой по наименованию, и под неё подходили 16 записей
+        корпуса, из которых 13 — настоящая продукция («Медицинские маски (за исключением полумасок
+        FFP1…)», «Краны грузоподъемные прочие (за исключением …)», «Громкоговорители …»). От подмены
+        ответа их спасало лишь то, что они не входят в расколотые группы; после расширения состава
+        групп экспертом (`R29-4`) ответ по такой позиции уехал бы на сиблинга молча (`EV9` #89)."""
+        from app.rag import fragments
+        from app.rag.pipeline import target_hits
+        qual = make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.9,
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(4)]}])
+        real = make_hit(product_name="Светодиоды белого диапазона", score=0.8,
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(15)]}])
+        # роль «qualifier» → опорой становится содержательный сиблинг
+        self.assertEqual(target_hits([qual, real]), [real])
+        # та же проза, но в данных роль «product» → подмены НЕТ
+        with mock.patch.object(fragments, "is_scope_qualifier", return_value=False):
+            self.assertEqual(target_hits([qual, real]), [qual])
+
+    def test_position_outside_the_list_is_never_a_qualifier(self):
+        """Приёмка `EV9`: запись вне списка расколотых ячеек квалификатором быть не может.
+
+        «Медицинские маски (за исключением полумасок фильтрующих классов защиты FFP1, FFP2, FFP3)» —
+        живой приёмочный кейс `docs/test_cases.md`, и прежняя регулярка считала её «не продуктом»."""
+        from app.rag import fragments
+        for name in ("Медицинские маски (за исключением полумасок фильтрующих классов защиты FFP1)",
+                     "Краны грузоподъемные прочие (за исключением кранов на автомобильном ходу)",
+                     "Изделия из резины прочие (за исключением услуг)"):
+            self.assertFalse(fragments.is_scope_qualifier(name), name)
+
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
 
