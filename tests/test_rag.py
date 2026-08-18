@@ -12,6 +12,7 @@ import re
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -423,6 +424,200 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertTrue(fragments.is_fragmented("  хладон-218   (октафторпропан)  "))  # регистр/пробелы
         self.assertFalse(fragments.is_fragmented(None))
         self.assertFalse(fragments.is_fragmented(""))
+
+    def test_group_of_links_siblings_of_one_split_cell(self):
+        from app.rag import fragments
+        # ключевое свойство: обрывок и продукт из ОДНОЙ ячейки первоисточника — в одной группе,
+        # а соседняя группа светодиодов (за исключением белого) — в другой
+        white_frag = fragments.group_of("Светодиоды (в части светодиодов белого диапазона)")
+        white = fragments.group_of("Светодиоды белого диапазона")
+        red = fragments.group_of("Светодиоды красного диапазона")
+        self.assertIsNotNone(white_frag)
+        self.assertEqual(white_frag, white)
+        self.assertNotEqual(white, red)
+        self.assertIsNone(fragments.group_of("Подшипники шариковые или роликовые"))
+        self.assertIsNone(fragments.group_of(None))
+
+    def test_target_hit_prefers_product_over_scope_qualifier(self):
+        """EV6: целевой позицией не должна становиться строка-КВАЛИФИКАТОР с обрывком требований."""
+        from app.rag.pipeline import _target_hit
+        qualifier = make_hit(
+            product_name="Светодиоды (в части светодиодов белого диапазона)",
+            score=0.9, requirement_blocks=[{"operations": [{"text": "сборочные чертежи"}]}])
+        product = make_hit(
+            product_name="Светодиоды белого диапазона", score=0.8,
+            requirement_blocks=[{"operations": [{"text": f"операция {i}"} for i in range(15)]}])
+        self.assertIs(_target_hit([qualifier, product]), product)
+        # ⚠ но подмена НЕ должна отбирать цель у названного продукта: первая версия правила брала
+        # из группы запись с наибольшим числом операций и на «светодиодах красного диапазона»
+        # уводила ответ на общую строку «за исключением белого» — чинила один запрос, ломала соседний
+        red = make_hit(product_name="Светодиоды красного диапазона", score=0.9,
+                       requirement_blocks=[{"operations": [{"text": "сварка"}]}])
+        others = make_hit(product_name="Светодиоды (за исключением светодиодов белого диапазона)",
+                          score=0.8,
+                          requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(5)]}])
+        self.assertIs(_target_hit([red, others]), red)
+        # совпадение по коду остаётся главнее любой эвристики
+        by_code = make_hit(product_name="Светодиоды белого диапазона", score=0.1, okpd2_match=True)
+        self.assertIs(_target_hit([qualifier, by_code]), by_code)
+        # позиция вне групп с расколотой ячейкой — top-1 как был
+        plain = make_hit(score=0.9)
+        self.assertIs(_target_hit([plain, product]), plain)
+        self.assertIsNone(_target_hit([]))
+
+    def test_candidate_block_carries_no_requirement_numbers(self):
+        """EV7: чужие баллы и порог не попадают в контекст вовсе — брать их будет негде."""
+        target = make_hit(product_name="Насосы центробежные подачи жидкостей прочие", score=0.9)
+        lng = make_hit(
+            product_name="Насосы центробежные технологические типов ВВ1 для производств СПГ",
+            score=0.8, min_threshold="с 1 января 2024 г. - не менее 750 баллов",
+            okpd2_codes=["28.13.14.110"], source_anchor="Раздел XXI, поз. 42",
+            requirement_blocks=[{"operations": [{"text": "сборка узлов", "points": 110},
+                                                {"text": "испытания", "points": 450}]}])
+        ctx = format_context([target, lng])
+        # позиция названа и опознаваема — она материал для уточнения по коду (правило 1г)
+        self.assertIn("Насосы центробежные технологические типов ВВ1", ctx)
+        self.assertIn("28.13.14.110", ctx)
+        self.assertIn("Раздел XXI, поз. 42", ctx)
+        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        # ни одного её ЧИСЛА-ПРЕТЕНЗИИ: ни баллов операций, ни порога.
+        # ⚠ Проверяем именно `claim_numbers` (числа рядом с «балл»/«процент»), а не присутствие
+        # токена: «110» остаётся в контексте внутри кода 28.13.14.110. Это же и слепая зона гарда —
+        # `number_in_context` сверяет цифры подстрокой, без единицы, поэтому «110 баллов» в ответе
+        # заземлится о КОД позиции. Материал для утечки убирает только отсутствие формы «N балл».
+        claims = set(claim_numbers(ctx))
+        self.assertEqual(claims & {"110", "450", "750"}, set(), f"числа кандидата в контексте: {claims}")
+        self.assertNotIn("сборка узлов", ctx)
+
+    def test_candidate_count_falls_back_to_group_requirements(self):
+        """«Требований нет» ≠ «их не показали»: у наследника наличие считаем по требованиям ГРУППЫ.
+
+        ⚠ И БЕЗ ЦИФР. Прежняя редакция писала «(в базе 7 операц.)», и это число попадало в строку
+        заземления: `number_in_context` сверяет цифру подстрокой, без единицы, поэтому выдуманное
+        «порог — не менее 7 баллов» проходило гард как заземлённое."""
+        from app.rag import inheritance
+        parent = {"product_name": "Группа", "operations": [{"text": f"оп {i}"} for i in range(7)]}
+        with mock.patch.object(inheritance, "lookup", return_value=parent):
+            ctx = format_context([make_hit(product_name="Целевая", score=0.9),
+                                  make_hit(product_name="Наследник", score=0.8,
+                                           requirement_blocks=[])])
+        self.assertIn("есть ОБЩИЕ требования её группы", ctx)
+        self.assertFalse(number_in_context("7", ctx), "счётчик операций заземляет выдуманные числа")
+        # и обратный случай: требований нет ни своих, ни групповых — не утверждаем обратного
+        with mock.patch.object(inheritance, "lookup", return_value=None):
+            bare = format_context([make_hit(product_name="Целевая", score=0.9),
+                                   make_hit(product_name="Пустая", score=0.8, requirement_blocks=[])])
+        self.assertIn("Требования этой позиции в контекст НЕ включены —", bare)
+
+    def test_candidate_presence_uses_the_same_rule_as_rendering(self):
+        """Наличие требований у кандидата считается `_hit_operations`, а не своим счётчиком.
+
+        Блок без `operations`, но с текстом в `component` — это требование (R6/K4). Отдельный
+        счётчик по `requirement_blocks` расходился с рантаймом на 98 записях корпуса, и у девяти
+        из них позиция С требованиями описывалась как «в базе ничего нет»."""
+        component_only = make_hit(product_name="Кандидат", score=0.8, requirement_blocks=[
+            {"component": "право на конструкторскую документацию", "operations": []}])
+        ctx = format_context([make_hit(product_name="Целевая", score=0.9), component_only])
+        self.assertIn("требования у неё в базе ЕСТЬ", ctx)
+
+    def test_candidate_stub_does_not_ask_for_code_when_code_is_known(self):
+        """Правило 1ж запрещает переспрашивать код у подтверждённой позиции.
+
+        Строка-заглушка печатается для КАЖДОГО нецелевого кандидата, то есть на боевом окне 8
+        промпт получал семь требований «попроси код» против одного правила «не переспрашивай», —
+        а по уроку проекта контекст сильнее правила."""
+        matched = make_hit(product_name="Целевая", okpd2_match=True, min_threshold="не менее 300 баллов")
+        other = make_hit(product_name="Сосед", score=0.7, requirement_blocks=[
+            {"operations": [{"text": "литьё", "points": 55}]}])
+        ctx = format_context([matched, other])
+        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertNotIn("попроси её код ОКПД2", ctx)
+        # без кода — наоборот, уточнение это единственный путь дальше
+        self.assertIn("попроси её код ОКПД2",
+                      format_context([make_hit(product_name="Целевая", score=0.9), other]))
+
+    def test_exact_code_keeps_all_matched_positions_but_prefix_does_not(self):
+        """Точное совпадение кода и совпадение по ГРУППЕ — разные вопросы пользователя.
+
+        `okpd2_match` иерархический: «28.13» подходит 52 записям приложения. Пока целевыми
+        становились ВСЕ совпавшие, такой запрос обходил EV7 целиком — в контекст уезжали
+        требования восьми разных позиций (замер ревью: 18 897 символов, 19 чисел по 8 позициям)."""
+        a = make_hit(product_name="Первая", okpd2_codes=["26.11.22.210"], okpd2_match=True,
+                     min_threshold="не менее 300 баллов")
+        b = make_hit(product_name="Вторая", okpd2_codes=["26.11.22.210"], okpd2_match=True,
+                     min_threshold="не менее 400 баллов")
+        c = make_hit(product_name="Третья", requirement_blocks=[
+            {"operations": [{"text": "литьё", "points": 55}]}])
+        # назван ТОЧНЫЙ код — обе записи этого кода целевые (требования поделены между ними)
+        ctx = format_context([a, b, c], None, "26.11.22.210")
+        self.assertIn("не менее 300 баллов", ctx)
+        self.assertIn("не менее 400 баллов", ctx)
+        self.assertFalse(number_in_context("55", ctx))
+        # назван код ГРУППЫ — целевая одна, остальные идут кандидатами на уточнение
+        grp = format_context([a, b, c], None, "26.11.22")
+        self.assertIn("не менее 300 баллов", grp)
+        self.assertNotIn("не менее 400 баллов", grp)
+        self.assertIn("Требования этой позиции в контекст НЕ включены", grp)
+        # ⚠ И шапка не спорит с телом: у совпавшего по ГРУППЕ кандидата нельзя писать «наиболее
+        # вероятная позиция» рядом со строкой «она НЕ целевая» — противоречие внутри одного блока
+        # разрешала бы модель, а по уроку проекта она следует за контекстом.
+        self.assertEqual(grp.count("наиболее вероятная позиция"), 1)
+        self.assertIn("совпадение по ГРУППЕ кода ОКПД2", grp)
+
+    def test_split_cell_siblings_keep_their_requirements(self):
+        """Строки ОДНОЙ расколотой ячейки — один источник, а не чужая продукция (R29).
+
+        EV7 убирал требования всех нецелевых, включая соседние строки той же ячейки, — и ответ о
+        белых светодиодах терял 7 операций из 22, при том что его же пометка неполноты отсылает
+        «к соседним позициям той же группы»."""
+        from app.rag import fragments
+        with mock.patch.object(fragments, "group_of", side_effect=lambda n: 1 if "Светодиод" in (n or "") else None):
+            ctx = format_context([
+                make_hit(product_name="Светодиоды белого диапазона", score=0.9,
+                         requirement_blocks=[{"operations": [{"text": "сборка кристалла", "points": 30}]}]),
+                make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.8,
+                         requirement_blocks=[{"operations": [{"text": "технические условия"}]}]),
+                make_hit(product_name="Насосы", score=0.7,
+                         requirement_blocks=[{"operations": [{"text": "литьё", "points": 55}]}]),
+            ])
+        self.assertIn("технические условия", ctx)          # сиблинг той же ячейки — при требованиях
+        self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
+        self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
+
+    def test_section_methodology_record_is_never_the_target(self):
+        """Псевдозапись раздела — это ПОРОГИ раздела, а не продукция.
+
+        После EV7 её выбор целевой давал пустой ответ: своих требований у неё нет, а реальная
+        позиция того же окна обнулялась как «нецелевая». До EV7 её требования лежали вторым блоком
+        и ответ работал. По уроку EV5 такие записи (текст — про пороги) как раз выигрывают ретрив
+        на вопросах «сколько баллов», то есть там, где пустой ответ дороже всего."""
+        from app.rag.pipeline import target_hits
+        pseudo = make_hit(product_name="Методологические пороги раздела IV", score=0.95,
+                          payload={"record_type": "section_methodology"}, requirement_blocks=[])
+        real = make_hit(product_name="Светодиоды белого диапазона", score=0.80,
+                        requirement_blocks=[{"operations": [{"text": "сборка", "points": 30}]}])
+        self.assertEqual(target_hits([pseudo, real]), [real])
+        ctx = format_context([pseudo, real])
+        self.assertIn("сборка", ctx, "требования реальной позиции обнулены псевдозаписью")
+        # окно только из псевдозаписей — выбирать не из чего, поведение прежнее
+        self.assertEqual(target_hits([pseudo]), [pseudo])
+
+    def test_target_hit_does_not_swap_one_fragment_for_another(self):
+        """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
+
+        На нейтральном «светодиодные модули chip-on-board» top-1 — обрывок заголовка группы
+        (3 операции), а в окне из той же группы стоял обрывок квалификатора (4). Правило меняло
+        один на другой: целевой всё равно оставалась строка, которая продукцию не называет."""
+        from app.rag.pipeline import _target_hit
+        header = make_hit(
+            product_name=("Светодиоды, включая светодиодные модули по технологии chip-on-board и иные "
+                          "модификации сборок светоизлучающих полупроводниковых кристаллов "
+                          "(в части светодиодов белого диапазона)"),
+            score=0.9, requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(3)]}])
+        qualifier = make_hit(
+            product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.8,
+            requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(4)]}])
+        self.assertIs(_target_hit([header, qualifier]), header)
 
     def test_fragmented_list_covers_known_groups(self):
         # список сгенерирован из чанков детерминированно; страхуемся от его потери/обнуления
@@ -1014,6 +1209,51 @@ class TestProceduralSources(unittest.TestCase):
         self.assertEqual(ans.rule_sources[0]["doc_type"], "tpp_order_52")
 
 
+    def test_answer_carries_the_grounding_it_was_checked_against(self):
+        """Ответ несёт СВОЁ заземление — метрике незачем угадывать, что он видел.
+
+        ⚠ Регресс, ради которого тест написан (18.08.2026). Контекст стал зависеть от кода
+        (точное совпадение против группы), а `eval_answers` пересобирал его вызовом
+        `format_context(ans.hits, query)` БЕЗ кода. Два кейса с кодом отчитались «выдуманными
+        числами», которых рантайм честно держал в промпте: faithfulness показал 0.95 вместо 1.00,
+        то есть метрика мерила расхождение с самой собой, а не продукт. Тот же класс, что урок 33
+        («одно решение — одно место») и предупреждение в самом скрипте про забытый `question`."""
+        orig_search, orig_client = pipeline_mod.search, pipeline_mod._client
+        orig_cases, orig_embed = pipeline_mod.search_cases, pipeline_mod.embed_query
+        hit = make_hit(product_name="Целевая позиция", okpd2_codes=["28.15.10"], okpd2_match=True,
+                       min_threshold="не менее 300 баллов",
+                       requirement_blocks=[{"operations": [{"text": "сборка", "points": 30}]}])
+        pipeline_mod.search = lambda *a, **k: [hit]
+        pipeline_mod.search_cases = lambda *a, **k: []
+        pipeline_mod.embed_query = lambda *a, **k: [0.0]
+
+        class _Usage:
+            prompt_tokens = completion_tokens = 1
+
+        class _Msg:
+            content = "Порог — не менее 300 баллов [1]."
+
+        class _Resp:
+            choices = [type("C", (), {"message": _Msg()})()]
+            usage = _Usage()
+
+        class _Client:
+            chat = type("Ch", (), {"completions": type(
+                "Co", (), {"create": staticmethod(lambda *a, **k: _Resp())})()})()
+
+        pipeline_mod._client = lambda: _Client()
+        try:
+            ans = pipeline_mod.answer("подшипники", okpd2="28.15.10", limit=8)
+        finally:
+            pipeline_mod.search, pipeline_mod._client = orig_search, orig_client
+            pipeline_mod.search_cases, pipeline_mod.embed_query = orig_cases, orig_embed
+        self.assertTrue(ans.grounding, "ответ не несёт заземления")
+        self.assertIn("не менее 300 баллов", ans.grounding)
+        # и это ровно то, с чем сверялся гард: незаземлённых чисел нет
+        self.assertEqual(ans.unverified_numbers, [])
+        self.assertEqual(pipeline_mod.unverified_numbers(ans.text, ans.grounding), [])
+
+
 class TestKonturLinks(unittest.TestCase):
     """Ссылки на первоисточник обязаны вести в редакцию КОРПУСА.
 
@@ -1203,7 +1443,6 @@ class TestBlockNote(unittest.TestCase):
     def test_long_note_is_clipped_and_says_so(self):
         """Молча обрезанное условие превращает несколько порогов в один — резать можно только вслух."""
         note = "; ".join(f"с 1 января 202{i} г. - не менее {500 + i * 10} баллов" for i in range(9))
-        self.assertGreater(len(note), pipeline_mod.NOTE_CAP_OTHER)
         self.assertLess(len(note), pipeline_mod.NOTE_CAP_TARGET)
         blocks = [{"component": "насосные установки", "note": note,
                    "operations": [{"text": "сборка", "points": 10}]}]
@@ -1213,12 +1452,16 @@ class TestBlockNote(unittest.TestCase):
         self.assertIn("не менее 580 баллов", full)  # у целевого хита условие идёт целиком
         self.assertNotIn("условие показано не полностью", full)
 
-        # тот же блок у КАНДИДАТА (целевой — другой хит, по совпадению кода) режется, но вслух
+        # ⚠ EV7: у КАНДИДАТА условие не режется, а не показывается вовсе — вместе со всеми его
+        # числами. Прежняя версия теста проверяла усечение по `NOTE_CAP_OTHER = 200`; теперь
+        # проверять надо противоположное: ни одного балла соседней позиции в контексте.
         short = format_context([make_hit(product_name="Целевая", okpd2_match=True),
                                 make_hit(product_name="Кандидат", requirement_blocks=blocks)])
-        self.assertIn("условие показано не полностью", short)
-        self.assertIn("не менее 500 баллов", short)     # начало условия остаётся
-        self.assertNotIn("не менее 580 баллов", short)  # хвост срезан
+        self.assertIn("Кандидат", short)                             # позиция названа
+        self.assertIn("Требования этой позиции в контекст НЕ включены", short)
+        self.assertNotIn("не менее 500 баллов", short)               # чисел кандидата нет
+        self.assertNotIn("не менее 580 баллов", short)
+        self.assertNotIn("условие показано не полностью", short)     # резать больше нечего
 
     def test_clip_keeps_sentence_boundary(self):
         clipped = pipeline_mod._clip_note("первое условие; второе условие; третье условие", 25)

@@ -36,7 +36,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.rag import fragments, inheritance  # noqa: E402
-from app.rag.pipeline import answer, claim_numbers, format_context, number_in_context  # noqa: E402
+from app.rag.pipeline import (  # noqa: E402
+    _target_hit as target_hit,
+    answer,
+    claim_numbers,
+    number_in_context,
+)
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
@@ -70,20 +75,36 @@ CLARIFY_RE = re.compile(
     r"ближайшие позиции|укажите код|уточните\s+(наименование|код)|подтвердите\s+(код|нужную)|"
     r"точного совпадения|совпадение не уверенное|какая из них|кандидат", re.I)
 
+# ⚠ Просьба о коде — ещё НЕ уточняющий ответ (калибровка 17.08.2026, `EV7`). Правило 1г описывает
+# ФОРМУ: «Точного совпадения не нашёл. Ближайшие позиции: …» — и прямо запрещает расписывать
+# требования кандидатов. Значит уточняющий ответ НЕ опирается ни на одну позицию, то есть в нём нет
+# блока «**Позиция:**» из шаблона правила 4. Прежняя версия классификатора считала уточняющим любой
+# ответ с фразой «укажите код» — и после `EV7`, где контекст сам велит просить код у кандидата,
+# в исключённые уехали ответы, ДОВЕЗШИЕ все баллы целевой позиции: #8 бульдозеры 15 из 15,
+# #9 экскаваторы 11 из 11, #12 светодиоды 8 из 8. Доля полноты оставалась 1.00, но метрика
+# перестала мерить четверть набора (11 из 42 против 5) — то есть тихо насыщалась.
+_COMMIT_RE = re.compile(r"\*\*\s*Позиция\s*:", re.I)
+
 
 def is_clarifying(text: str, hits) -> bool:
     """Ответ-уточнение: позиция ещё не подтверждена, баллы называть нельзя (правило 1г).
 
-    Требуем ОБА признака: нет совпадения по коду И ответ просит подтвердить. Одного мало —
-    «уточните» встречается и в обычном разборе («уточните у заявителя наличие сервисного центра»)."""
-    return not any(h.okpd2_match for h in hits) and bool(CLARIFY_RE.search(text))
+    Три признака, все обязательны: нет совпадения по коду, ответ НЕ опирается на позицию (нет блока
+    «**Позиция:**») и просит подтвердить. Одной фразы мало — «уточните» встречается и в обычном
+    разборе («уточните у заявителя наличие сервисного центра», «уточните код, если продукция —
+    одна из соседних позиций»)."""
+    if any(h.okpd2_match for h in hits):
+        return False
+    if _COMMIT_RE.search(text or ""):   # ответ назвал целевую позицию → это разбор, а не уточнение
+        return False
+    return bool(CLARIFY_RE.search(text))
 
 
-def target_hit(hits):
-    """Позиция, вокруг которой строится ответ: совпадение по коду, иначе top-1 (как в format_context)."""
-    if not hits:
-        return None
-    return next((h for h in hits if h.okpd2_match), hits[0])
+# ⚠ «Кто целевой» берётся ИЗ ПАЙПЛАЙНА (`_target_hit`), своей копии здесь нет. Копия была, и с
+# `EV6` она разошлась с рантаймом: на расколотой ячейке метрика бралась за строку-квалификатор,
+# у которой после `EV7` в контексте нет ни порога, ни баллов, — кейс молча выпадал из всех
+# знаменателей, а отчёт продолжал печатать 1.00. Это тот же класс насыщения, что чинился в
+# `is_clarifying` двадцатью строками выше.
 
 
 def context_facts(hit, ctx: str) -> dict:
@@ -117,7 +138,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
     for c in cases:
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
-        ctx = format_context(ans.hits, c["query"])
+        ctx = ans.grounding  # ⚠ заземление ответа, а не пересборка (см. eval_answers)
         hit = target_hit(ans.hits)
         want = context_facts(hit, ctx)
 
@@ -139,12 +160,15 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
                      if n not in want["threshold_numbers"] and n in pts]
 
         clarifying = is_clarifying(text, ans.hits)
+        # Просьба подтвердить код при ОПОРЕ на позицию — не уточнение, а страховка (см. is_clarifying).
+        # Считаем отдельно: если однажды такие ответы начнут терять баллы целевой, это будет видно.
+        asks_code = bool(CLARIFY_RE.search(text)) and not clarifying
         if clarifying:  # полнота неприменима: позиция не подтверждена, баллы называть нельзя
             thr_expected, thr_shown, pts, pts_shown = False, None, [], 0
 
         rows.append({
             "id": c["id"], "query": c["query"], "section": c["expected_section"],
-            "clarifying": clarifying,
+            "clarifying": clarifying, "asks_code": asks_code,
             "thr_expected": thr_expected, "thr_shown": thr_shown,
             "n_points": len(pts), "points_shown": pts_shown,
             "warned": warned, "attributed": attributed,
@@ -179,6 +203,9 @@ def report(rows: list[dict]) -> list[str]:
            f"Уточняющих ответов (правило 1г, полнота неприменима): {len(clarifying)} из {n}"
            + (" — " + ", ".join(f"#{r['id']}" for r in clarifying) if clarifying else ""),
            "  Позиция не подтверждена — называть по ней баллы ЗАПРЕЩЕНО, поэтому из полноты исключены.",
+           f"  Ответов, опирающихся на позицию И просящих подтвердить код: "
+           f"{sum(1 for r in rows if r.get('asks_code'))} из {n} — это разбор, а не уточнение, "
+           f"в полноту ВКЛЮЧЕНЫ.",
            "",
            "ПОЛНОТА (пара-ограничитель к faithfulness), по подтверждённым позициям:",
            f"  Порог доехал до ответа        = {pct(thr_ok, len(thr_rows))}   (порог гайда ≥0.90)",

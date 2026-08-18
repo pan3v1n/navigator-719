@@ -44,7 +44,7 @@ import json  # noqa: E402
 
 from app.core.config import settings  # noqa: E402
 # Логику faithfulness берём ИЗ пайплайна — рантайм-постпроверка и этот замер меряют одно и то же.
-from app.rag.pipeline import answer, claim_numbers, format_cases, format_context, unverified_numbers  # noqa: E402
+from app.rag.pipeline import answer, claim_numbers, unverified_numbers  # noqa: E402
 from app.rag.retriever import _client  # noqa: E402
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
@@ -89,9 +89,11 @@ def evaluate(limit: int, cases_limit: int):
     for c in cases:
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
-        ctx = format_context(ans.hits, c["query"])
-        if ans.cases:
-            ctx += "\n" + format_cases(ans.cases)
+        # ⚠ Заземление берём У ОТВЕТА, а не пересобираем: пересборка — второе место, где
+        # решается, что ответ видел, и оно расходится молча. 18.08.2026 так и произошло: контекст
+        # стал зависеть от кода, здесь код не передавался, и два кейса с кодом отчитались
+        # «выдуманными числами», которых рантайм честно держал в промпте.
+        ctx = ans.grounding
 
         # Та же логика, что в рантайм-постпроверке — включая ВОПРОС как законный источник чисел
         # (16.08.2026). Забудь передать `c["query"]` — и замер начнёт считать выдумкой то, что

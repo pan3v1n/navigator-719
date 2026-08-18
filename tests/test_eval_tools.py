@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,15 +28,52 @@ from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT  # noqa: E402
 from app.core.sensitive import detect  # noqa: E402
 
 
+def _rule_3v() -> str:
+    """Текст правила 3в целиком — по ГРАНИЦАМ, а не по магическим 1100 символам.
+
+    Срез по длине уже подводил: правило подросло на 200 символов (`EV7`), и утверждение про
+    «СРАВНИТЬ» уехало за окно — тест позеленел бы на выпавшем требовании."""
+    return NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1].split("4. СТИЛЬ")[0]
+
+
+def _sample_context() -> str:
+    """Настоящий контекст с целевой позицией и нецелевым кандидатом — для проверок ПО РЕНДЕРУ."""
+    from app.rag.pipeline import format_context
+    from app.rag.retriever import Hit
+
+    def hit(name, ops, thr=None):
+        return Hit(score=1.0, section_roman="III", section_title="—", product_name=name,
+                   okpd2_codes=["28.15.10"], min_threshold=thr, source_anchor="Раздел III",
+                   requirement_blocks=[{"operations": ops}])
+    return format_context([hit("Целевая", [{"text": "сборка", "points": 30}], "не менее 60 баллов"),
+                           hit("Кандидат", [{"text": "литьё", "points": 55}], "не менее 90 баллов")])
+
+
 class TestForeignNumbersRule(unittest.TestCase):
     """EV1: правило 3в — числа только из позиции, о которой идёт речь."""
 
     def test_rule_forbids_numbers_of_other_candidates(self):
         self.assertIn("3в.", NAVIGATOR_SYSTEM_PROMPT)
-        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:1100]
-        self.assertIn("БЕЗ их баллов", rule)
+        rule = _rule_3v()
+        self.assertIn("БЕЗ баллов", rule)
         # исключение обязано остаться: прямая просьба сравнить позиции — законный сценарий
         self.assertIn("СРАВНИТЬ", rule)
+
+    def test_rule_matches_what_context_actually_contains(self):
+        """EV7: требований кандидатов в контексте больше нет — правило обязано это ЗНАТЬ.
+
+        Иначе промпт спорит с контекстом: он разрешал бы «назвать без баллов» то, чего в контексте
+        нет вовсе, и оставлял бы открытым второй, обратный риск — заявить «требований у позиции
+        нет». Оба запрета обязаны быть в правиле дословно, потому что цена второго выше первого:
+        «требований не найдено» при живых требованиях — это дефект класса `D4`."""
+        rule = _rule_3v()
+        self.assertIn("в контекст НЕ включены", rule)      # правило ссылается на строку контекста
+        self.assertIn("НЕ утверждать, что требований у них нет", rule)
+        self.assertIn("попроси его код", rule)              # путь для разбора кандидата
+        # ⚠ И та же строка обязана быть в РЕНДЕРЕ, а не в исходнике. Проверка через
+        # `inspect.getsource` зеленела бы на закомментированной строке — тест «правило ссылается на
+        # то, чего нет» не поймал бы ничего. Поэтому строим настоящий контекст.
+        self.assertIn("Требования этой позиции в контекст НЕ включены", _sample_context())
 
     def test_rule_does_not_reinstate_the_R7_defect(self):
         """Первая версия 3в велела на позиции без баллов писать «баллы не приведены» и просить код.
@@ -46,24 +84,153 @@ class TestForeignNumbersRule(unittest.TestCase):
         указан», а это читалось как пробел в данных и было **жалобой №1** платного теста (R7).
         Просьба уточнить код спорила с правилом 1ж, которое её прямо запрещает при совпадении по
         коду. Позиций без баллов в корпусе — сотни, так что цена ошибки не краевая."""
-        rule = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1][:1100]
+        rule = _rule_3v()
         self.assertNotIn("попроси уточнить код", rule)
         self.assertNotIn("баллы для этой позиции в контексте не приведены", rule)
         # правило обязано отдавать этот случай КОНТЕКСТУ, а не решать за него
         self.assertIn("не предусмотрен", rule)
 
     def test_context_still_owns_the_no_points_wording(self):
-        """R7 остаётся в силе: формулировку про отсутствие порога задаёт контекст, а не промпт."""
-        import inspect
+        """R7 остаётся в силе: формулировку про отсутствие порога задаёт КОНТЕКСТ, а не промпт.
 
-        from app.rag import pipeline
-        src = inspect.getsource(pipeline.format_context)
-        self.assertIn("Порог: не предусмотрен", src)
-        self.assertIn("ПЕРЕЧНЕМ", src)
+        ⚠ Проверяется рендером, а не исходником: `inspect.getsource` зеленеет и на комментарии."""
+        from app.rag.pipeline import format_context
+        from app.rag.retriever import Hit
+        listed = Hit(score=1.0, section_roman="III", section_title="—",
+                     product_name="Позиция с перечнем", okpd2_codes=["28.15.10"],
+                     min_threshold=None, source_anchor="Раздел III",
+                     requirement_blocks=[{"operations": [{"text": "сварка"}, {"text": "сборка"}]}])
+        ctx = format_context([listed])
+        self.assertIn("Порог: не предусмотрен", ctx)
+        self.assertIn("ПЕРЕЧНЕМ", ctx)
 
     def test_rule_sits_after_code_priority_rule(self):
         """3в опирается на «позицию, на которую опираешься» из правил 3 и 3а — порядок важен."""
         self.assertLess(NAVIGATOR_SYSTEM_PROMPT.index("3а."), NAVIGATOR_SYSTEM_PROMPT.index("3в."))
+
+
+class TestForeignNumbersOracle(unittest.TestCase):
+    """⚠⚠ ОРАКУЛ МЕТРИКИ НЕ ВЫВОДИТСЯ ИЗ АРТЕФАКТА, КОТОРЫЙ ОНА ПРОВЕРЯЕТ.
+
+    Прежняя версия `foreign_numbers` добывала эталон «чужих чисел» рендером
+    `format_context([target, h])` — той самой функции, из которой `EV7` требования кандидатов и
+    убрал. После правки разность стала пуста ПО ПОСТРОЕНИЮ: гейт «без чужих чисел» показывал 1.00
+    при любом поведении модели, и на этом основании было отчитано «гейт пройден впервые».
+    Тот же класс, что «эталон нельзя размечать регулярками» (`K12`): метрика проверяет себя.
+    Эти тесты краснеют, если оракул снова начнут строить из рендера."""
+
+    @staticmethod
+    def _hit(name, code, ops, thr=None, match=False):
+        from app.rag.retriever import Hit
+        return Hit(score=0.9, product_name=name, section_roman="XXIV", section_title="—",
+                   okpd2_codes=[code], min_threshold=thr, okpd2_match=match,
+                   requirement_blocks=[{"operations": ops}], source_anchor=name)
+
+    def _pair(self):
+        target = self._hit("Насосы подачи жидкостей прочие", "28.13.14.110",
+                           [{"text": "сборка", "points": 20}], thr="не менее 60 баллов")
+        cand = self._hit("Насосы технологические типов ВВ1 для крупнотоннажных производств СПГ",
+                         "28.13.14.110",
+                         [{"text": "литьё", "points": 110}, {"text": "механообработка", "points": 450}],
+                         thr="не менее 750 баллов")
+        return target, cand
+
+    def test_oracle_sees_numbers_the_context_no_longer_renders(self):
+        """Числа кандидата видны оракулу, ХОТЯ в контексте их нет — иначе метрика слепа."""
+        from app.rag.pipeline import claim_numbers, format_context
+        from eval_determinism import foreign_numbers
+        target, cand = self._pair()
+        ctx = format_context([target, cand])
+        self.assertNotIn("450", claim_numbers(ctx), "контекст всё ещё несёт числа кандидата")
+        self.assertEqual(foreign_numbers("центробежные насосы", [target, cand]),
+                         {"110", "450", "750"})
+
+    def test_oracle_counts_expert_case_numbers(self):
+        """Кейс эксперта про ЧУЖУЮ продукцию — оставшийся канал чужих чисел, и он виден.
+
+        `_plan_answer` кладёт `format_cases` и в промпт, и в строку заземления, а правило 1а даёт
+        кейсу высший приоритет. После `EV7` это единственный канал, который остался, — прежняя
+        метрика на него не смотрела вовсе."""
+        from eval_determinism import foreign_numbers
+        target, cand = self._pair()
+        case = {"product_name": "Пластикат поливинилхлоридный", "okpd2": "20.16.30.110",
+                "expert_answer": "Порог — не менее 300 баллов, доля не более 50 процентов."}
+        leaked = foreign_numbers("насосы", [target, cand], [case])
+        self.assertIn("300", leaked)
+        self.assertIn("50", leaked)
+        # кейс про ТУ ЖЕ продукцию чужим не считается
+        own_case = dict(case, okpd2="28.13.14.110",
+                        expert_answer="Порог — не менее 999 баллов.")
+        self.assertNotIn("999", foreign_numbers("насосы", [target, cand], [own_case]))
+
+    def test_oracle_does_not_flag_legitimate_sources(self):
+        """Ложные срабатывания дороже пропусков: точный код и одна расколотая ячейка — свои."""
+        from app.rag import fragments
+        from eval_determinism import foreign_numbers
+        target, cand = self._pair()
+        # назван ТОЧНЫЙ код обеих записей — они обе целевые, чужого нет
+        self.assertEqual(foreign_numbers("насосы", [target, cand], None, "28.13.14.110"), set())
+        # строки одной расколотой ячейки — один источник, а не чужая продукция
+        a = self._hit("Светодиоды белого диапазона", "26.11.22.216",
+                      [{"text": "сборка кристалла", "points": 30}])
+        b = self._hit("Светодиоды (в части светодиодов белого диапазона)", "26.11.22.210",
+                      [{"text": "технические условия", "points": 25}])
+        with unittest.mock.patch.object(fragments, "group_of", return_value=1):
+            self.assertEqual(foreign_numbers("светодиоды белого диапазона", [a, b]), set())
+
+    def test_oracle_reads_thresholds_of_nodes_and_texts(self):
+        """Числа записи живут не только в `points`: пороги узлов (D9) и величины внутри текстов."""
+        from eval_determinism import record_numbers
+        h = self._hit("Кандидат", "28.13.14.110", [], thr=None)
+        h.requirement_blocks = [{
+            "min_threshold": "не менее 100 баллов",
+            "note": "при доле импорта не более 40 процентов",
+            "operations": [{"text": "механообработка не менее 15 процентов", "points": 7}],
+        }]
+        self.assertEqual(record_numbers(h), {"100", "40", "15", "7"})
+
+
+class TestClarifyingClassifier(unittest.TestCase):
+    """Калибровка метрики полноты (`EV7`): что считать УТОЧНЯЮЩИМ ответом.
+
+    Классификатор решает, исключать ли кейс из полноты, — то есть напрямую двигает метрику. Первая
+    версия считала уточняющим любой ответ с фразой «укажите код», и после `EV7` (контекст сам велит
+    просить код у кандидата) из полноты уехали ответы, довёзшие ВСЕ баллы целевой позиции. Доля
+    оставалась 1.00, но проверялась уже не вся выборка, а три четверти."""
+
+    @staticmethod
+    def _hits(match: bool = False):
+        class H:
+            okpd2_match = match
+        return [H()]
+
+    def test_substantive_answer_asking_for_code_is_not_clarifying(self):
+        from eval_completeness import is_clarifying
+        text = ("**Позиция:** «Спецмашиностроение», Бульдозеры гусеничные (ОКПД2 28.92.21) [1].\n"
+                "**Требования с балльной оценкой:**\n- сварка рамы — 15 баллов [1].\n"
+                "**Что уточнить:** если продукция — одна из соседних позиций, укажите код.")
+        self.assertFalse(is_clarifying(text, self._hits()))
+
+    def test_rule_1g_shaped_answer_is_clarifying(self):
+        from eval_completeness import is_clarifying
+        text = ("Точного совпадения по «слесарный инструмент» не нашёл. Ближайшие позиции:\n"
+                "- Инструмент ручной — ОКПД2 25.73.30 [1]\n"
+                "- Инструмент слесарно-монтажный — ОКПД2 25.73.30.290 [2]\n"
+                "Если ваша продукция — одна из них, укажите код, и я приведу требования и баллы.")
+        self.assertTrue(is_clarifying(text, self._hits()))
+        self.assertNotIn("**Позиция:", text)  # форма правила 1г: опоры на позицию нет
+
+    def test_code_match_is_never_clarifying(self):
+        from eval_completeness import is_clarifying
+        text = "Точного совпадения не нашёл. Ближайшие позиции: - что-то [1]. Укажите код."
+        self.assertFalse(is_clarifying(text, self._hits(match=True)))
+
+    def test_clarify_phrase_alone_does_not_flip_a_normal_answer(self):
+        """«Уточните у заявителя…» — обычная часть разбора, а не признак неподтверждённой позиции."""
+        from eval_completeness import is_clarifying
+        text = ("**Позиция:** «Насосное оборудование», Насосы центробежные (ОКПД2 28.13.14) [1].\n"
+                "Уточните наименование сервисного центра у заявителя.")
+        self.assertFalse(is_clarifying(text, self._hits()))
 
 
 class TestBorderlineSet(unittest.TestCase):
