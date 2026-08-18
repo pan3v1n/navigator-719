@@ -252,11 +252,19 @@ class TestEditionWatcher(unittest.TestCase):
         self.assertEqual(res["последний в первоисточнике"], "от 22.07.2026 N 923")
 
     def test_no_false_alarm_when_corpus_is_current(self):
-        """Ноль ложных тревог важнее полноты: отчёт, который «всегда что-то нашёл», не читают."""
+        """Ноль ложных тревог важнее полноты: отчёт, который «всегда что-то нашёл», не читают.
+
+        ⚠ Первая версия сравнивала `acts(text)` с `acts(text)` — тавтология, зелёная даже при
+        `acts()`, возвращающем пустоту (ревью PR #94). Теперь корпус описан ОТДЕЛЬНОЙ строкой и
+        заведомо шире первоисточника, а непустота множеств проверяется явно."""
         w = self._watcher()
-        text = "(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923)"
-        res = w.check_source(text, w.acts(text))
+        source = "(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923)"
+        corpus = w.acts("(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923, от 05.08.2026 N 1001)")
+        self.assertEqual(len(corpus), 3, "разбор корпуса сломан — тест перестал что-либо мерить")
+        res = w.check_source(source, corpus)
+        self.assertEqual(res["актов в первоисточнике"], 2)
         self.assertEqual(res["нет в корпусе"], [])
+        self.assertEqual(res["есть только в корпусе"], ["от 05.08.2026 N 1001"])
 
     def test_parts_of_the_corpus_must_agree(self):
         """Вторая форма: одну часть корпуса актуализировали, другую забыли."""
@@ -271,6 +279,49 @@ class TestEditionWatcher(unittest.TestCase):
             with mock.patch.dict(w.PARTS, {"тело": body, "приложение": appx}, clear=True):
                 res = w.check_corpus()
         self.assertFalse(res["части согласованы"], "рассинхрон частей корпуса не замечен")
+
+    def test_sections_lagging_the_body_are_detected(self):
+        """ФОРМА ДЕФЕКТА 12.08: тело актуализировали, разделы приложения — нет.
+
+        ⚠ Первая версия сравнивала тело с полным текстом приложения, а тот открывается той же
+        шапкой со всеми актами: проверка не могла провалиться (ревью PR #94)."""
+        import tempfile
+        from pathlib import Path
+        w = self._watcher()
+        with tempfile.TemporaryDirectory() as d:
+            body = Path(d) / "01_postanovlenie.txt"
+            sec = Path(d) / "02_I_razdel.txt"
+            body.write_text("(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923)", encoding="utf-8")
+            sec.write_text("(в ред. от 27.06.2026 N 794)", encoding="utf-8")
+            with mock.patch.dict(w.PARTS, {"тело постановления": body}, clear=True), \
+                 mock.patch.object(w, "section_files", lambda: [sec]):
+                res = w.check_corpus()
+        self.assertFalse(res["части согласованы"], res["части"])
+
+    def test_unreadable_part_is_not_agreement(self):
+        """Нечитаемая часть = сравнение НЕ состоялось, а не «согласовано»."""
+        from pathlib import Path
+        w = self._watcher()
+        with mock.patch.dict(w.PARTS, {"тело": Path("D:/нет-такого-файла.txt")}, clear=True), \
+             mock.patch.object(w, "section_files", lambda: []):
+            res = w.check_corpus()
+        self.assertTrue(res["нечитаемые части"])
+        self.assertFalse(res["части согласованы"])
+
+    def test_unparsable_source_is_a_refusal_not_an_all_clear(self):
+        """Ноль разобранных актов — отказ проверки. И «№» разбирается наравне с «N».
+
+        ⚠ Экспорты правовых систем пишут «№ 923», а первая регулярка принимала только латинскую
+        «N»: источник разбирался в ноль актов, скрипт печатал «корпус не отстаёт» и выходил с
+        кодом 0 — ложное «всё чисто» на той самой проверке, ради которой существует."""
+        w = self._watcher()
+        corpus = w.acts("(в ред. от 27.06.2026 N 794)")
+        blind = w.check_source("здесь нет ни одного акта", corpus)
+        self.assertFalse(blind["разбор удался"])
+        self.assertEqual(blind["нет в корпусе"], [])   # пусто, но это НЕ значит «не отстаём»
+        cyr = w.check_source("(в ред. от 27.06.2026 № 794, от 05.08.2026 № 1001)", corpus)
+        self.assertTrue(cyr["разбор удался"])
+        self.assertEqual(cyr["нет в корпусе"], ["от 05.08.2026 N 1001"])
 
     def test_real_corpus_parts_agree_and_link_is_known(self):
         """Живая проверка состояния: части корпуса согласованы, ссылка на редакцию известна.
