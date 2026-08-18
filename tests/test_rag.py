@@ -349,7 +349,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         ctx = format_context([hit])
         self.assertIn("Подшипники шариковые или роликовые", ctx)
         self.assertIn("сварка кузова — 400 балл.", ctx)
-        self.assertIn("окраска — баллы в контексте не указаны", ctx)
+        self.assertIn("окраска — баллы не приведены", ctx)
 
     def test_format_cases(self):
         out = format_cases([{"product_name": "Прицепы", "okpd2": "29.20.23",
@@ -379,7 +379,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn(rights, ctx)                       # требование видно
         self.assertIn("сварка рамы — 9 балл.", ctx)      # обычные операции не сломаны
         # баллы требованию не приписаны → промпт выведет его как обязательное
-        self.assertIn(rights + " — баллы в контексте не указаны", ctx)
+        self.assertIn(rights + " — баллы не приведены", ctx)
         # заголовок узла у блока С операциями требованием НЕ становится
         self.assertNotIn("несущая рама — баллы", ctx)
 
@@ -696,6 +696,52 @@ class TestContextAndDisclaimer(unittest.TestCase):
                          okpd2_match=True, min_threshold=f"не менее {i}00 баллов") for i in range(1, 6)]
         self.assertEqual(len(target_hits(hits, "28.13")), 1)
         self.assertEqual(len(target_hits(hits, ["28.13"])), 1)
+
+    def test_qualifier_rule_also_applies_when_the_code_is_named(self):
+        """`EV6`/`EV9` обязаны работать и на ветке КОДА — там они нужнее всего.
+
+        ⚠ Ревью PR #94: ветка совпадения по коду возвращалась РАНЬШЕ правила, и на запросе с кодом
+        26.11.22.210 целевыми становились обе строки-квалификатора, а содержательная 26.11.22.216
+        (15 операций) в окно даже не попадала. То есть правка действовала ровно тогда, когда
+        пользователь НЕ называл код."""
+        from app.rag import fragments
+        from app.rag.pipeline import target_hits
+        qual = make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)",
+                        okpd2_codes=["26.11.22.210"], okpd2_match=True,
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(4)]}])
+        real = make_hit(product_name="Светодиоды белого диапазона", okpd2_codes=["26.11.22.216"],
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(15)]}])
+        with mock.patch.object(fragments, "is_scope_qualifier",
+                               side_effect=lambda n: "в части" in (n or "")), \
+             mock.patch.object(fragments, "group_of", return_value=1):
+            self.assertEqual(target_hits([qual, real], "26.11.22.210"), [real])
+
+    def test_points_denial_needs_the_record_that_supplied_the_operations(self):
+        """«Баллы не начисляются» нельзя утверждать по признаку ЧУЖОЙ записи.
+
+        ⚠ Ревью PR #94: при наследовании (R6) операции показываются РОДИТЕЛЬСКИЕ, а
+        `requirement_type` читался у записи-ребёнка — «два согласных признака» оказались признаками
+        разных записей, и 136 позиций утверждали, что баллы не начисляются, показывая операции
+        родителя с типом `points`/`mixed` (то есть баллы существуют и потеряны при разборе)."""
+        from app.rag import inheritance
+        parent = {"product_name": "Группа", "operations": [{"text": "сборка"}, {"text": "сварка"}]}
+        child = make_hit(product_name="Наследник", requirement_blocks=[])
+        with mock.patch.object(inheritance, "lookup", return_value=parent):
+            ctx = format_context([child])
+        self.assertNotIn("баллы за них не начисляются", ctx)
+        self.assertIn("НЕ ПРИВЕДЕНЫ", ctx)   # честная формулировка вместо утверждения
+
+    def test_points_denial_never_contradicts_a_points_threshold(self):
+        """Порог в баллах и «баллы не начисляются» в одном блоке — одно из двух заведомо неверно.
+
+        ⚠ Ревью PR #94: порог часто добирается рантаймом из примечаний, и «Суда морские
+        пассажирские» получали «Порог: не менее 3600 баллов [прим. 17]» и следом утверждение, что
+        баллы не начисляются."""
+        hit = make_hit(product_name="Суда", min_threshold="не менее 3600 баллов",
+                       requirement_blocks=[{"operations": [{"text": "сборка"}, {"text": "сварка"}]}])
+        ctx = format_context([hit])
+        self.assertIn("не менее 3600 баллов", ctx)
+        self.assertNotIn("не начисляются", ctx)
 
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.

@@ -122,6 +122,26 @@ class TestBuildChecklist(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()
 
+class TestDateIsNotACode(unittest.TestCase):
+    """Дата в вопросе не должна становиться кодом ОКПД2.
+
+    ⚠ Ревью PR #94: «заключение получали 27.12.2023» давало токен `27.12.2023`, а `okpd2_match`
+    сравнивает лишь общие сегменты — он совпадал с реальным кодом `27.12` («Реле защиты»). Пока код
+    извлекался один, дата была безобидна; с `EV8` каждый найденный код становится ЦЕЛЕВЫМ и приносит
+    полные требования своей позиции — то есть дата снова открывала утечку чужих чисел, причём
+    НЕВИДИМУЮ: числа лежат в контексте, и ни гард, ни гейт их не помечают."""
+
+    def test_dates_are_not_codes(self):
+        from app.tools.navigator import extract_okpd2, extract_okpd2_all
+        q = "наш код 27.32.13.150, заключение получали 27.12.2023"
+        self.assertEqual(extract_okpd2_all(q), ["27.32.13.150"])
+        self.assertEqual(extract_okpd2("заключение от 27.12.2023, код 27.32.13.150"), "27.32.13.150")
+        self.assertEqual(extract_okpd2_all("по состоянию на 01.07.2026"), [])
+        # настоящие коды не пострадали, включая двухсегментные
+        self.assertEqual(extract_okpd2_all("сравни 28.13.14 и 26.30.50"), ["28.13.14", "26.30.50"])
+        self.assertEqual(extract_okpd2_all("код 27.12"), ["27.12"])
+
+
 class TestExtractOkpd2All(unittest.TestCase):
     """`EV8` #88: из вопроса достаются ВСЕ коды, а не первый."""
 

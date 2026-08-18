@@ -160,6 +160,34 @@ def is_scope_qualifier(product_name: str | None) -> bool:
     return any(index.get(k) == "qualifier" for k in _keys(product_name))
 
 
+def group_codes(product_name: str | None) -> list[str]:
+    """Коды ОКПД2 ОСТАЛЬНЫХ строк той же расколотой ячейки.
+
+    ⚠ Зачем (ревью PR #94). Правило `EV6` меняет строку-квалификатор на содержательного сиблинга
+    ТОЛЬКО если тот есть в окне. Когда пользователь называет код квалификатора (26.11.22.210),
+    поиск по коду приносит записи ровно этого кода — сиблинг с требованиями (26.11.22.216) в окно
+    не попадает вовсе, и менять не на что. Эти коды и нужны, чтобы добрать его отдельным запросом."""
+    if not _PATH.exists():
+        return []
+    try:
+        groups = json.loads(_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    keys = set(_keys(product_name))
+    out: list[str] = []
+    for g in groups:
+        positions = g.get("positions") or []
+        if not any(keys & set(_keys(p.get("product_name"))) for p in positions):
+            continue
+        for p in positions:
+            if keys & set(_keys(p.get("product_name"))):
+                continue
+            for c in (p.get("okpd2_codes") or []):
+                if c not in out:
+                    out.append(c)
+    return out
+
+
 def group_of(product_name: str | None) -> int | None:
     """Номер группы с расколотой ячейкой, если позиция в неё входит."""
     index = _group_index()

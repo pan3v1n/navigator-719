@@ -334,9 +334,24 @@ def format_context(hits: list[Hit], query: str | None = None,
         # возможна потеря при разборе, и выдумывать «порога нет» нельзя.
         rtype = (h.payload or {}).get("requirement_type")
         no_points = bool(ops) and not any(o.get("points") is not None for o in ops)
+        # ⚠ ДВА УСЛОВИЯ, БЕЗ КОТОРЫХ УТВЕРЖДЕНИЕ «БАЛЛЫ НЕ НАЧИСЛЯЮТСЯ» ЛОЖНО (ревью PR #94):
+        #
+        # 1. `rtype` — свойство ЗАПИСИ-ХИТА, а операции при наследовании (R6) принадлежат РОДИТЕЛЮ.
+        #    Замер: 136 позиций печатали «баллы не начисляются», показывая при этом операции
+        #    родителя, у которого тип `points`/`mixed`, — то есть баллы существуют и потеряны при
+        #    разборе. «Два согласных признака», ради которых guard и писался, оказались признаками
+        #    РАЗНЫХ записей. Карта наследования типа не несёт, поэтому под наследованием молчим.
+        # 2. Порог может быть добран рантаймом из примечаний (`lookup_threshold`), и тогда в блоке
+        #    рядом стоит «не менее 3600 баллов [прим. 17]». Замер: «Суда морские пассажирские» и
+        #    ещё 51 запись получали порог в БАЛЛАХ и следом утверждение, что баллы не начисляются.
+        #    Одно из двух в таком блоке заведомо неверно, а по уроку проекта модель следует за
+        #    контекстом — значит противоречие разрешала бы она.
+        points_threshold = bool(mt) and "балл" in str(mt).lower()
+        own_ops = parent is None
+        can_deny_points = no_points and own_ops and not points_threshold and rtype in (None, "operations")
         if mt:
             lines.append(f"    Порог: {mt}")
-        elif no_points and rtype in (None, "operations"):
+        elif can_deny_points:
             lines.append("    Порог: не предусмотрен — требования этой позиции заданы ПЕРЕЧНЕМ "
                          "обязательных операций, баллы за них не начисляются.")
         # ⚠ ПРО БАЛЛЫ КОНТЕКСТ ГОВОРИТ САМ — иначе за него это делает модель, и делает плохо.
@@ -347,7 +362,10 @@ def format_context(hits: list[Hit], query: str | None = None,
         # Условие то же, что у R7: утверждаем только при СОГЛАСНЫХ признаках (ни у одной операции
         # нет баллов И тип требований не балльный) — при «points»/«mixed» молчим, там возможна
         # потеря при разборе, и «баллов нет» было бы выдумкой.
-        if no_points and rtype in (None, "operations"):
+        # Печатаем ТОЛЬКО когда порог показан отдельной строкой: без `mt` то же самое уже сказано
+        # строкой «Порог: не предусмотрен …», и два одинаковых утверждения подряд читаются как
+        # расхождение данных.
+        if can_deny_points and mt:
             lines.append("    Балльная оценка: не предусмотрена — требования заданы перечнем "
                          "обязательных операций, баллы за них не начисляются.")
         elif no_points:
@@ -380,7 +398,7 @@ def format_context(hits: list[Hit], query: str | None = None,
                     lines.append(f"      ▸ {op_parent}")
                 cur_parent = op_parent
                 pts = o.get("points")
-                ptxt = f" — {pts} балл." if pts is not None else " — баллы в контексте не указаны"
+                ptxt = f" — {pts} балл." if pts is not None else " — баллы не приведены"
                 indent = "        " if op_parent else "      "
                 lines.append(f"{indent}• {o.get('text', '')}{ptxt}")
             if total > cap:
@@ -482,6 +500,11 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
         hits = products
     matched = [h for h in hits if h.okpd2_match]
     if matched:
+        # ⚠ Ветка кода тоже обязана проходить правило EV6/EV9. До ревью PR #94 она возвращалась
+        # раньше него, и на запросе с кодом 26.11.22.210 целевыми становились ОБЕ строки-
+        # квалификатора («в части…» и «за исключением…»), а содержательная 26.11.22.216 с её
+        # 15 операциями в окно даже не попадала. То есть правка работала ровно тогда, когда
+        # пользователь НЕ называл код, — на самом надёжном пути её не было.
         # ПРАВИЛО: одна целевая позиция на КАЖДЫЙ названный код — плюс все записи, совпавшие с ним
         # ТОЧНО (у одного кода в приложении бывает несколько записей с поделёнными требованиями,
         # напр. 26.11.22.210). Так «сравни по 28.13.14 и по 26.30.50» даёт две опоры (`EV8`), а
@@ -490,9 +513,21 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
         for c in _codes(code):
             exact = [h for h in matched if c in (h.okpd2_codes or [])]
             chosen = exact or [h for h in matched if okpd2_match(h.okpd2_codes or [], c)][:1]
-            picked += [h for h in chosen if not any(h is p for p in picked)]
-        return picked or matched[:1]
-    target = hits[0]
+            for h in chosen:
+                h = _content_sibling(h, hits)
+                if not any(h is p for p in picked):
+                    picked.append(h)
+        if not picked:
+            picked = [_content_sibling(matched[0], hits)]
+        return picked
+    return [_content_sibling(hits[0], hits)]
+
+
+def _content_sibling(target: Hit, hits: list[Hit]) -> Hit:
+    """Строку-КВАЛИФИКАТОР расколотой ячейки меняем на содержательного сиблинга той же группы.
+
+    Общая точка для обеих веток выбора целевой (по коду и по рангу): правило `EV6`/`EV9` не должно
+    зависеть от того, назвал пользователь код или нет."""
     # ⚠ Подменяем ТОЛЬКО строку-квалификатор, а не названный продукт. Первая версия правила брала
     # из группы запись с наибольшим числом операций — и на запросе «светодиоды красного диапазона»
     # подменяла верный top-1 «Светодиоды красного диапазона» (1 операция) на общую строку
@@ -503,10 +538,10 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
     # по наименованию: под прежнюю регулярку подходили 16 записей корпуса, из которых 13 — настоящая
     # продукция, и от подмены ответа их спасало лишь отсутствие в расколотых группах (`EV9` #89).
     if not fragments.is_scope_qualifier(target.product_name):
-        return [target]
+        return target
     group = fragments.group_of(target.product_name)
     if group is None:
-        return [target]
+        return target
     # Сиблинг-замена обязан САМ быть продуктом. Без этого условия на нейтральном
     # «светодиодные модули chip-on-board» правило меняло обрывок заголовка группы (3 операции) на
     # обрывок квалификатора (4) — целевой всё равно оставалась строка, которая продукцию не
@@ -521,7 +556,7 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
     # от порядка выдачи Qdrant. Ровно этот класс уже ловили в `_order_key`: ничья RRF
     # решалась случаем и дала «неустранимый» разброс recall@1 (M1).
     best = max(siblings, key=lambda h: (_n_operations(h), h.product_name or ""), default=target)
-    return [best] if _n_operations(best) > _n_operations(target) else [target]
+    return best if _n_operations(best) > _n_operations(target) else target
 
 
 def _target_hit(hits: list[Hit], code: str | list[str] | None = None) -> Hit | None:
@@ -1034,6 +1069,14 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if extra:
         hits = _add_positions_by_code(search_query, extra, hits, qvec, limit)
     all_codes = ([effective_okpd2] if effective_okpd2 else []) + extra
+    # ⚠ Если опорой оказалась строка-КВАЛИФИКАТОР расколотой ячейки, содержательного сиблинга может
+    # не быть в окне вовсе: поиск по коду приносит записи ровно этого кода (ревью PR #94). Добираем
+    # соседей по группе их собственными кодами — иначе правило EV6 нечем исполнить.
+    qual = [t for t in target_hits(hits, all_codes) if fragments.is_scope_qualifier(t.product_name)]
+    if qual:
+        sib_codes = [c for t in qual for c in fragments.group_codes(t.product_name)]
+        if sib_codes:
+            hits = _add_positions_by_code(search_query, sib_codes, hits, qvec, limit)
     cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
