@@ -36,6 +36,19 @@ def _rule_3v() -> str:
     return NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1].split("4. СТИЛЬ")[0]
 
 
+def _sample_context() -> str:
+    """Настоящий контекст с целевой позицией и нецелевым кандидатом — для проверок ПО РЕНДЕРУ."""
+    from app.rag.pipeline import format_context
+    from app.rag.retriever import Hit
+
+    def hit(name, ops, thr=None):
+        return Hit(score=1.0, section_roman="III", section_title="—", product_name=name,
+                   okpd2_codes=["28.15.10"], min_threshold=thr, source_anchor="Раздел III",
+                   requirement_blocks=[{"operations": ops}])
+    return format_context([hit("Целевая", [{"text": "сборка", "points": 30}], "не менее 60 баллов"),
+                           hit("Кандидат", [{"text": "литьё", "points": 55}], "не менее 90 баллов")])
+
+
 class TestForeignNumbersRule(unittest.TestCase):
     """EV1: правило 3в — числа только из позиции, о которой идёт речь."""
 
@@ -57,12 +70,10 @@ class TestForeignNumbersRule(unittest.TestCase):
         self.assertIn("в контекст НЕ включены", rule)      # правило ссылается на строку контекста
         self.assertIn("НЕ утверждать, что требований у них нет", rule)
         self.assertIn("попроси его код", rule)              # путь для разбора кандидата
-        # и та же строка обязана существовать в самом контексте — иначе ссылка правила висячая
-        import inspect
-
-        from app.rag import pipeline
-        self.assertIn("Требования этой позиции в контекст НЕ включены",
-                      inspect.getsource(pipeline.format_context))
+        # ⚠ И та же строка обязана быть в РЕНДЕРЕ, а не в исходнике. Проверка через
+        # `inspect.getsource` зеленела бы на закомментированной строке — тест «правило ссылается на
+        # то, чего нет» не поймал бы ничего. Поэтому строим настоящий контекст.
+        self.assertIn("Требования этой позиции в контекст НЕ включены", _sample_context())
 
     def test_rule_does_not_reinstate_the_R7_defect(self):
         """Первая версия 3в велела на позиции без баллов писать «баллы не приведены» и просить код.
@@ -80,13 +91,18 @@ class TestForeignNumbersRule(unittest.TestCase):
         self.assertIn("не предусмотрен", rule)
 
     def test_context_still_owns_the_no_points_wording(self):
-        """R7 остаётся в силе: формулировку про отсутствие порога задаёт контекст, а не промпт."""
-        import inspect
+        """R7 остаётся в силе: формулировку про отсутствие порога задаёт КОНТЕКСТ, а не промпт.
 
-        from app.rag import pipeline
-        src = inspect.getsource(pipeline.format_context)
-        self.assertIn("Порог: не предусмотрен", src)
-        self.assertIn("ПЕРЕЧНЕМ", src)
+        ⚠ Проверяется рендером, а не исходником: `inspect.getsource` зеленеет и на комментарии."""
+        from app.rag.pipeline import format_context
+        from app.rag.retriever import Hit
+        listed = Hit(score=1.0, section_roman="III", section_title="—",
+                     product_name="Позиция с перечнем", okpd2_codes=["28.15.10"],
+                     min_threshold=None, source_anchor="Раздел III",
+                     requirement_blocks=[{"operations": [{"text": "сварка"}, {"text": "сборка"}]}])
+        ctx = format_context([listed])
+        self.assertIn("Порог: не предусмотрен", ctx)
+        self.assertIn("ПЕРЕЧНЕМ", ctx)
 
     def test_rule_sits_after_code_priority_rule(self):
         """3в опирается на «позицию, на которую опираешься» из правил 3 и 3а — порядок важен."""

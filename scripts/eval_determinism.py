@@ -203,7 +203,7 @@ def evaluate(runs: int, limit: int, progress: bool):
             pass
     for q, code in it:
         num_sets, secs, flags = [], [], []
-        alien_runs, alien_seen = 0, set()
+        alien_runs, alien_seen, alien_pool = 0, set(), set()
         for _ in range(runs):
             ans = answer(q, okpd2=code, limit=limit)
             nums = frozenset(claim_numbers(ans.text))
@@ -216,8 +216,9 @@ def evaluate(runs: int, limit: int, progress: bool):
             # Чужие числа считаем по окну ИМЕННО ЭТОГО прогона — см. докстринг foreign_numbers.
             # Числа, названные САМИМ пользователем, утечкой не считаются (та же поправка, что у
             # гарда 16.08: эхо вопроса — не выдумка и не чужое число).
-            leaked = (nums - set(ans.echoed_numbers)) & foreign_numbers(
-                q, ans.hits, ans.cases, code)
+            pool = foreign_numbers(q, ans.hits, ans.cases, code)
+            alien_pool |= pool
+            leaked = (nums - set(ans.echoed_numbers)) & pool
             if leaked:
                 alien_runs += 1
                 alien_seen |= leaked
@@ -228,6 +229,10 @@ def evaluate(runs: int, limit: int, progress: bool):
             "flag_variants": len(set(flags)),         # 1 = стабильный guard-флаг
             "alien_runs": alien_runs,                 # в скольких прогонах утекли ЧУЖИЕ числа
             "alien_seen": sorted(alien_seen),
+            # ⚠ СКОЛЬКО ЧУЖИХ ЧИСЕЛ БЫЛО ДОСТУПНО К УТЕЧКЕ. Без этой величины «1.00» не
+            # интерпретируется: пустой пул даёт единицу при любом поведении модели — ровно
+            # так прежняя версия оракула и показывала «гейт пройден» (см. foreign_numbers).
+            "alien_pool": len(alien_pool),
             "example_nums": sorted(set().union(*num_sets)) if num_sets else [],
         })
     return rows
@@ -239,6 +244,8 @@ def report(rows, runs: int) -> list[str]:
     sec_stable = sum(1 for r in rows if r["sec_variants"] == 1)
     alien_total = sum(r["alien_runs"] for r in rows)
     clean_q = sum(1 for r in rows if r["alien_runs"] == 0)
+    pool_total = sum(r.get("alien_pool", 0) for r in rows)
+    pool_q = sum(1 for r in rows if r.get("alien_pool", 0))
     L = ["=" * 78,
          f"P2 #8 ДЕТЕРМИНИЗМ — {n} запросов × {runs} повторов, модель={settings.DEEPSEEK_MODEL}",
          "=" * 78,
@@ -246,6 +253,8 @@ def report(rows, runs: int) -> list[str]:
          f"  СТАБИЛЬНАЯ атрибуция (раздел top-1): {sec_stable}/{n} = {sec_stable/n:.2f}",
          f"  БЕЗ ЧУЖИХ ЧИСЕЛ (ни один прогон не привёл баллы непрофильных кандидатов):"
          f" {clean_q}/{n} = {clean_q/n:.2f}   [утечек всего: {alien_total}/{n * runs} прогонов]",
+         f"  ⚠ было ДОСТУПНО к утечке: {pool_total} чужих чисел на {pool_q}/{n} запросах"
+         + ("  — ПУЛ ПУСТ, метрика ничего не проверяет!" if not pool_total else ""),
          "",
          "  ⚠ Первая метрика меряет и шум формулировки, и дефект; третья — только дефект:",
          "     число соседней позиции эксперт читает как относящееся к СВОЕЙ продукции.",
