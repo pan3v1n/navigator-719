@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass, field
 
 from app.core.prompts import EXPERT_DISCLAIMER
-from app.rag.pipeline import answer
+from app.rag.pipeline import _target_hit, answer
 from app.rag.retriever import Hit
 from app.tools import checklist
 
@@ -71,7 +71,11 @@ def build_checklist(hit: Hit | None) -> list[str]:
 def navigate(query: str, okpd2: str | None = None, limit: int = 5) -> Navigation:
     code = okpd2 or extract_okpd2(query)
     ans = answer(query, okpd2=code, limit=limit)
-    checklist = build_checklist(ans.hits[0]) if ans.hits else []
+    # ⚠ Чек-лист — по ЦЕЛЕВОЙ позиции, а не по `hits[0]`. До `EV6` они совпадали, и это было
+    # третьим независимым выводом «кто целевой»; с расколотой ячейкой ответ пишется про
+    # содержательного сиблинга, а перечень документов собирался бы по строке-квалификатору —
+    # без её баллов и порога, то есть без условных пунктов 4.3.x Приказа №52 (их вернула D9).
+    checklist = build_checklist(_target_hit(ans.hits, code))
     return Navigation(
         query=query,
         okpd2_used=code,

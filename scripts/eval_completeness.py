@@ -36,7 +36,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.rag import fragments, inheritance  # noqa: E402
-from app.rag.pipeline import answer, claim_numbers, format_context, number_in_context  # noqa: E402
+from app.rag.pipeline import (  # noqa: E402
+    _target_hit as target_hit,
+    answer,
+    claim_numbers,
+    format_context,
+    number_in_context,
+)
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
@@ -95,11 +101,11 @@ def is_clarifying(text: str, hits) -> bool:
     return bool(CLARIFY_RE.search(text))
 
 
-def target_hit(hits):
-    """Позиция, вокруг которой строится ответ: совпадение по коду, иначе top-1 (как в format_context)."""
-    if not hits:
-        return None
-    return next((h for h in hits if h.okpd2_match), hits[0])
+# ⚠ «Кто целевой» берётся ИЗ ПАЙПЛАЙНА (`_target_hit`), своей копии здесь нет. Копия была, и с
+# `EV6` она разошлась с рантаймом: на расколотой ячейке метрика бралась за строку-квалификатор,
+# у которой после `EV7` в контексте нет ни порога, ни баллов, — кейс молча выпадал из всех
+# знаменателей, а отчёт продолжал печатать 1.00. Это тот же класс насыщения, что чинился в
+# `is_clarifying` двадцатью строками выше.
 
 
 def context_facts(hit, ctx: str) -> dict:

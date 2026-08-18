@@ -490,35 +490,94 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertNotIn("сборка узлов", ctx)
 
     def test_candidate_count_falls_back_to_group_requirements(self):
-        """«0 операций» читается как «требований нет» — у наследника считаем требования ГРУППЫ (R6)."""
+        """«Требований нет» ≠ «их не показали»: у наследника наличие считаем по требованиям ГРУППЫ.
+
+        ⚠ И БЕЗ ЦИФР. Прежняя редакция писала «(в базе 7 операц.)», и это число попадало в строку
+        заземления: `number_in_context` сверяет цифру подстрокой, без единицы, поэтому выдуманное
+        «порог — не менее 7 баллов» проходило гард как заземлённое."""
         from app.rag import inheritance
         parent = {"product_name": "Группа", "operations": [{"text": f"оп {i}"} for i in range(7)]}
         with mock.patch.object(inheritance, "lookup", return_value=parent):
             ctx = format_context([make_hit(product_name="Целевая", score=0.9),
                                   make_hit(product_name="Наследник", score=0.8,
                                            requirement_blocks=[])])
-        self.assertIn("в базе 7 операц.", ctx)
-        # и обратный случай: требований нет ни своих, ни групповых — числа не выдумываем
+        self.assertIn("есть ОБЩИЕ требования её группы", ctx)
+        self.assertFalse(number_in_context("7", ctx), "счётчик операций заземляет выдуманные числа")
+        # и обратный случай: требований нет ни своих, ни групповых — не утверждаем обратного
         with mock.patch.object(inheritance, "lookup", return_value=None):
             bare = format_context([make_hit(product_name="Целевая", score=0.9),
                                    make_hit(product_name="Пустая", score=0.8, requirement_blocks=[])])
         self.assertIn("Требования этой позиции в контекст НЕ включены —", bare)
-        self.assertNotIn("в базе 0 операц.", bare)
 
-    def test_all_code_matched_positions_keep_requirements(self):
-        """Путь сравнения сохранён: назвал пользователь код — все совпавшие записи целевые.
+    def test_candidate_presence_uses_the_same_rule_as_rendering(self):
+        """Наличие требований у кандидата считается `_hit_operations`, а не своим счётчиком.
 
-        Это не абстракция: единственная просьба сравнить позиции из 580 реальных вопросов волны
-        пришла именно с кодом («сравни требования по нашему коду и по 26.30.50»)."""
-        a = make_hit(product_name="Первая", okpd2_match=True, min_threshold="не менее 300 баллов")
-        b = make_hit(product_name="Вторая", okpd2_match=True, min_threshold="не менее 400 баллов")
+        Блок без `operations`, но с текстом в `component` — это требование (R6/K4). Отдельный
+        счётчик по `requirement_blocks` расходился с рантаймом на 98 записях корпуса, и у девяти
+        из них позиция С требованиями описывалась как «в базе ничего нет»."""
+        component_only = make_hit(product_name="Кандидат", score=0.8, requirement_blocks=[
+            {"component": "право на конструкторскую документацию", "operations": []}])
+        ctx = format_context([make_hit(product_name="Целевая", score=0.9), component_only])
+        self.assertIn("требования у неё в базе ЕСТЬ", ctx)
+
+    def test_candidate_stub_does_not_ask_for_code_when_code_is_known(self):
+        """Правило 1ж запрещает переспрашивать код у подтверждённой позиции.
+
+        Строка-заглушка печатается для КАЖДОГО нецелевого кандидата, то есть на боевом окне 8
+        промпт получал семь требований «попроси код» против одного правила «не переспрашивай», —
+        а по уроку проекта контекст сильнее правила."""
+        matched = make_hit(product_name="Целевая", okpd2_match=True, min_threshold="не менее 300 баллов")
+        other = make_hit(product_name="Сосед", score=0.7, requirement_blocks=[
+            {"operations": [{"text": "литьё", "points": 55}]}])
+        ctx = format_context([matched, other])
+        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertNotIn("попроси её код ОКПД2", ctx)
+        # без кода — наоборот, уточнение это единственный путь дальше
+        self.assertIn("попроси её код ОКПД2",
+                      format_context([make_hit(product_name="Целевая", score=0.9), other]))
+
+    def test_exact_code_keeps_all_matched_positions_but_prefix_does_not(self):
+        """Точное совпадение кода и совпадение по ГРУППЕ — разные вопросы пользователя.
+
+        `okpd2_match` иерархический: «28.13» подходит 52 записям приложения. Пока целевыми
+        становились ВСЕ совпавшие, такой запрос обходил EV7 целиком — в контекст уезжали
+        требования восьми разных позиций (замер ревью: 18 897 символов, 19 чисел по 8 позициям)."""
+        a = make_hit(product_name="Первая", okpd2_codes=["26.11.22.210"], okpd2_match=True,
+                     min_threshold="не менее 300 баллов")
+        b = make_hit(product_name="Вторая", okpd2_codes=["26.11.22.210"], okpd2_match=True,
+                     min_threshold="не менее 400 баллов")
         c = make_hit(product_name="Третья", requirement_blocks=[
             {"operations": [{"text": "литьё", "points": 55}]}])
-        ctx = format_context([a, b, c])
+        # назван ТОЧНЫЙ код — обе записи этого кода целевые (требования поделены между ними)
+        ctx = format_context([a, b, c], None, "26.11.22.210")
         self.assertIn("не менее 300 баллов", ctx)
-        self.assertIn("не менее 400 баллов", ctx)   # вторая совпавшая — тоже целевая
-        self.assertFalse(number_in_context("55", ctx))  # а несовпавшая идёт без чисел
-        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertIn("не менее 400 баллов", ctx)
+        self.assertFalse(number_in_context("55", ctx))
+        # назван код ГРУППЫ — целевая одна, остальные идут кандидатами на уточнение
+        grp = format_context([a, b, c], None, "26.11.22")
+        self.assertIn("не менее 300 баллов", grp)
+        self.assertNotIn("не менее 400 баллов", grp)
+        self.assertIn("Требования этой позиции в контекст НЕ включены", grp)
+
+    def test_split_cell_siblings_keep_their_requirements(self):
+        """Строки ОДНОЙ расколотой ячейки — один источник, а не чужая продукция (R29).
+
+        EV7 убирал требования всех нецелевых, включая соседние строки той же ячейки, — и ответ о
+        белых светодиодах терял 7 операций из 22, при том что его же пометка неполноты отсылает
+        «к соседним позициям той же группы»."""
+        from app.rag import fragments
+        with mock.patch.object(fragments, "group_of", side_effect=lambda n: 1 if "Светодиод" in (n or "") else None):
+            ctx = format_context([
+                make_hit(product_name="Светодиоды белого диапазона", score=0.9,
+                         requirement_blocks=[{"operations": [{"text": "сборка кристалла", "points": 30}]}]),
+                make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.8,
+                         requirement_blocks=[{"operations": [{"text": "технические условия"}]}]),
+                make_hit(product_name="Насосы", score=0.7,
+                         requirement_blocks=[{"operations": [{"text": "литьё", "points": 55}]}]),
+            ])
+        self.assertIn("технические условия", ctx)          # сиблинг той же ячейки — при требованиях
+        self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
+        self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
 
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.

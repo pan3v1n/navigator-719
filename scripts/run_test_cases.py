@@ -18,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.rag.pipeline import _target_hit  # noqa: E402
 from app.tools.navigator import navigate  # noqa: E402
 
 # (описание продукции для ввода, код ОКПД2 или "" , что проверяем)
@@ -81,7 +82,9 @@ def main() -> None:
         print(f"[{i}/{len(CASES)}] {query[:50]} …", flush=True)
         try:
             nav = navigate(query, okpd2=okpd2 or None, limit=5)
-            top = nav.sources[0] if nav.sources else None
+            # Колонка «Позиция» обязана называть ту запись, ПРО КОТОРУЮ написан ответ (с EV6
+            # это не всегда `sources[0]`), иначе приёмочная таблица эксперта расходится с телом.
+            top = _target_hit(nav.sources, okpd2 or None)
             top_name = top.product_name if top else "—"
             if top is None:
                 match = "—"

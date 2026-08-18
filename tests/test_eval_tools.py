@@ -15,6 +15,7 @@ import sqlite3
 import sys
 import tempfile
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -90,6 +91,87 @@ class TestForeignNumbersRule(unittest.TestCase):
     def test_rule_sits_after_code_priority_rule(self):
         """3в опирается на «позицию, на которую опираешься» из правил 3 и 3а — порядок важен."""
         self.assertLess(NAVIGATOR_SYSTEM_PROMPT.index("3а."), NAVIGATOR_SYSTEM_PROMPT.index("3в."))
+
+
+class TestForeignNumbersOracle(unittest.TestCase):
+    """⚠⚠ ОРАКУЛ МЕТРИКИ НЕ ВЫВОДИТСЯ ИЗ АРТЕФАКТА, КОТОРЫЙ ОНА ПРОВЕРЯЕТ.
+
+    Прежняя версия `foreign_numbers` добывала эталон «чужих чисел» рендером
+    `format_context([target, h])` — той самой функции, из которой `EV7` требования кандидатов и
+    убрал. После правки разность стала пуста ПО ПОСТРОЕНИЮ: гейт «без чужих чисел» показывал 1.00
+    при любом поведении модели, и на этом основании было отчитано «гейт пройден впервые».
+    Тот же класс, что «эталон нельзя размечать регулярками» (`K12`): метрика проверяет себя.
+    Эти тесты краснеют, если оракул снова начнут строить из рендера."""
+
+    @staticmethod
+    def _hit(name, code, ops, thr=None, match=False):
+        from app.rag.retriever import Hit
+        return Hit(score=0.9, product_name=name, section_roman="XXIV", section_title="—",
+                   okpd2_codes=[code], min_threshold=thr, okpd2_match=match,
+                   requirement_blocks=[{"operations": ops}], source_anchor=name)
+
+    def _pair(self):
+        target = self._hit("Насосы подачи жидкостей прочие", "28.13.14.110",
+                           [{"text": "сборка", "points": 20}], thr="не менее 60 баллов")
+        cand = self._hit("Насосы технологические типов ВВ1 для крупнотоннажных производств СПГ",
+                         "28.13.14.110",
+                         [{"text": "литьё", "points": 110}, {"text": "механообработка", "points": 450}],
+                         thr="не менее 750 баллов")
+        return target, cand
+
+    def test_oracle_sees_numbers_the_context_no_longer_renders(self):
+        """Числа кандидата видны оракулу, ХОТЯ в контексте их нет — иначе метрика слепа."""
+        from app.rag.pipeline import claim_numbers, format_context
+        from eval_determinism import foreign_numbers
+        target, cand = self._pair()
+        ctx = format_context([target, cand])
+        self.assertNotIn("450", claim_numbers(ctx), "контекст всё ещё несёт числа кандидата")
+        self.assertEqual(foreign_numbers("центробежные насосы", [target, cand]),
+                         {"110", "450", "750"})
+
+    def test_oracle_counts_expert_case_numbers(self):
+        """Кейс эксперта про ЧУЖУЮ продукцию — оставшийся канал чужих чисел, и он виден.
+
+        `_plan_answer` кладёт `format_cases` и в промпт, и в строку заземления, а правило 1а даёт
+        кейсу высший приоритет. После `EV7` это единственный канал, который остался, — прежняя
+        метрика на него не смотрела вовсе."""
+        from eval_determinism import foreign_numbers
+        target, cand = self._pair()
+        case = {"product_name": "Пластикат поливинилхлоридный", "okpd2": "20.16.30.110",
+                "expert_answer": "Порог — не менее 300 баллов, доля не более 50 процентов."}
+        leaked = foreign_numbers("насосы", [target, cand], [case])
+        self.assertIn("300", leaked)
+        self.assertIn("50", leaked)
+        # кейс про ТУ ЖЕ продукцию чужим не считается
+        own_case = dict(case, okpd2="28.13.14.110",
+                        expert_answer="Порог — не менее 999 баллов.")
+        self.assertNotIn("999", foreign_numbers("насосы", [target, cand], [own_case]))
+
+    def test_oracle_does_not_flag_legitimate_sources(self):
+        """Ложные срабатывания дороже пропусков: точный код и одна расколотая ячейка — свои."""
+        from app.rag import fragments
+        from eval_determinism import foreign_numbers
+        target, cand = self._pair()
+        # назван ТОЧНЫЙ код обеих записей — они обе целевые, чужого нет
+        self.assertEqual(foreign_numbers("насосы", [target, cand], None, "28.13.14.110"), set())
+        # строки одной расколотой ячейки — один источник, а не чужая продукция
+        a = self._hit("Светодиоды белого диапазона", "26.11.22.216",
+                      [{"text": "сборка кристалла", "points": 30}])
+        b = self._hit("Светодиоды (в части светодиодов белого диапазона)", "26.11.22.210",
+                      [{"text": "технические условия", "points": 25}])
+        with unittest.mock.patch.object(fragments, "group_of", return_value=1):
+            self.assertEqual(foreign_numbers("светодиоды белого диапазона", [a, b]), set())
+
+    def test_oracle_reads_thresholds_of_nodes_and_texts(self):
+        """Числа записи живут не только в `points`: пороги узлов (D9) и величины внутри текстов."""
+        from eval_determinism import record_numbers
+        h = self._hit("Кандидат", "28.13.14.110", [], thr=None)
+        h.requirement_blocks = [{
+            "min_threshold": "не менее 100 баллов",
+            "note": "при доле импорта не более 40 процентов",
+            "operations": [{"text": "механообработка не менее 15 процентов", "points": 7}],
+        }]
+        self.assertEqual(record_numbers(h), {"100", "40", "15", "7"})
 
 
 class TestClarifyingClassifier(unittest.TestCase):
