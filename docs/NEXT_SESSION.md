@@ -1,6 +1,7 @@
 # План на следующую сессию — Навигатор ПП №719
 
-> Обновлён **18.08.2026**. Рабочая очередь — [BACKLOG.md](BACKLOG.md); протокол замера —
+> Обновлён **18.08.2026**. **Порядок работ — [BACKLOG.md § План заходов](BACKLOG.md), идём по нему
+> сверху вниз**; там же вся фактура по задачам. Рабочая очередь — [BACKLOG.md](BACKLOG.md); протокол замера —
 > [WAVE3_PROTOCOL.md](WAVE3_PROTOCOL.md); планы по волнам — [REVIEW_TZ.md](REVIEW_TZ.md) (R1–R30),
 > [KB_EXPANSION_TZ.md](KB_EXPANSION_TZ.md) (K1–K17), [AGENTS_PLAN.md](AGENTS_PLAN.md) (A1–A6, B1).
 
