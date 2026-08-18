@@ -628,7 +628,11 @@ class TestContextAndDisclaimer(unittest.TestCase):
         ctx = format_context([hit])
         self.assertNotIn("Балльная оценка: не предусмотрена", ctx)
         self.assertIn("баллы НЕ ПРИВЕДЕНЫ", ctx)
-        self.assertIn("не приведены, сверьте с первоисточником", ctx)
+        # ⚠ В контексте — только ФАКТ. Указание, как это сказать, живёт в правиле 2в промпта:
+        # инструкция внутри данных совпала с просадкой детерминизма 0.90 → 0.70 (ревью PR #94).
+        self.assertNotIn("Так и скажи", ctx)
+        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT
+        self.assertIn("не приведены, сверьте с первоисточником", NAVIGATOR_SYSTEM_PROMPT)
         # и там, где баллы есть, утверждения тоже нет
         scored = make_hit(product_name="Позиция", requirement_blocks=[
             {"operations": [{"text": "сборка", "points": 30}]}])

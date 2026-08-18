@@ -24,7 +24,10 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT  # noqa: E402
+from app.core.prompts import (  # noqa: E402
+    NAVIGATOR_SYSTEM_PROMPT,
+    PROCEDURAL_SYSTEM_PROMPT,
+)
 from app.core.sensitive import detect  # noqa: E402
 
 
@@ -226,6 +229,22 @@ class TestAnswerHasNoInternalVocabulary(unittest.TestCase):
         self.assertTrue(KITCHEN_RE.search("судя по промпту"))
         # ⚠ и не ловит слова из САМИХ требований приложения
         self.assertFalse(KITCHEN_RE.search("руководство по эксплуатации и инструкция по монтажу"))
+
+
+class TestPromptRuleLabels(unittest.TestCase):
+    """Метки правил промпта обязаны быть уникальны.
+
+    ⚠ Заведено после того, как я сам вставил второе правило «2а» (18.08.2026): по метке режут
+    тесты (`_rule_3v`), на метки ссылаются другие правила («см. правило 3в»), и дубль тихо ломает
+    и то и другое."""
+
+    def test_labels_are_unique(self):
+        import re
+        for name, prompt in (("навигатор", NAVIGATOR_SYSTEM_PROMPT),
+                             ("процедурный", PROCEDURAL_SYSTEM_PROMPT)):
+            labels = re.findall(r"(?m)^(\d+[а-я]?)\.\s", prompt)
+            dupes = sorted({l for l in labels if labels.count(l) > 1})
+            self.assertEqual(dupes, [], f"{name}: повторяющиеся метки {dupes}")
 
 
 class TestClarifyingClassifier(unittest.TestCase):
