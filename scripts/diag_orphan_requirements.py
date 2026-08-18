@@ -577,6 +577,29 @@ def main() -> None:
                 })
         out = Path(args.fragments)
         out.parent.mkdir(parents=True, exist_ok=True)
+        # ⚠ РОЛИ, ПОПРАВЛЕННЫЕ ЭКСПЕРТОМ, ПЕРЕЖИВАЮТ ПЕРЕГЕНЕРАЦИЮ. Смысл `EV9` в том, что роль —
+        # ДАННЫЕ, которые эксперт видит и правит (`R29-4` прямо предполагает пересмотр состава
+        # групп). Если бы генератор всякий раз переписывал файл значениями регулярки, правка
+        # молча откатывалась бы к той самой эвристике, от которой уходили, — а ПП №719 правится
+        # 6+ раз в год, то есть перегенерация запланирована, а не гипотетична (ревью PR #94).
+        prev: dict[str, str] = {}
+        if out.exists():
+            try:
+                for g in json.loads(out.read_text(encoding="utf-8")):
+                    for p_ in (g.get("positions") or []):
+                        if p_.get("role"):
+                            prev[" ".join((p_.get("product_name") or "").split()).lower()] = p_["role"]
+            except (json.JSONDecodeError, OSError):
+                prev = {}
+        kept = 0
+        for g in groups:
+            for p_ in (g.get("positions") or []):
+                key = " ".join((p_.get("product_name") or "").split()).lower()
+                if key in prev and prev[key] != p_["role"]:
+                    p_["role"] = prev[key]
+                    kept += 1
+        if kept:
+            print(f"R29: сохранено ролей, поправленных вручную: {kept}")
         out.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
         n_pos = sum(len(g["positions"]) for g in groups)
         print(f"R29: групп с расколотой ячейкой {len(groups)}, позиций в них {n_pos} → {out}")

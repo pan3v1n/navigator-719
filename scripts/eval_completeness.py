@@ -145,7 +145,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
         ctx = ans.grounding  # ⚠ заземление ответа, а не пересборка (см. eval_answers)
-        hit = target_hit(ans.hits)
+        hit = target_hit(ans.hits, ans.codes)  # ⚠ теми же кодами, что рантайм (ревью PR #94)
         want = context_facts(hit, ctx)
 
         # --- ПОЛНОТА -------------------------------------------------------------------------

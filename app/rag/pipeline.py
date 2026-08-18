@@ -73,6 +73,10 @@ class Answer:
     # держал в промпте. Тот же класс, что урок 33 («одно решение — одно место») и предупреждение в
     # самом `eval_answers` про забытый `question`.
     grounding: str = ""
+    # ⚠ Коды, по которым выбирались ЦЕЛЕВЫЕ позиции (`all_codes`). Метрики обязаны брать их отсюда:
+    # `target_hits(hits)` БЕЗ кода даёт другой ответ, чем рантайм, и метрика начинает оценивать не
+    # ту позицию, на которой построен ответ (ревью PR #94). Тот же класс, что `grounding`.
+    codes: list[str] = field(default_factory=list)
     # U5: что показать подсказкой в поле ввода ПОСЛЕ этого ответа — готовый текст, «» = пусто.
     # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
     # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
@@ -469,6 +473,15 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
     ТОЧНОЕ совпадение — другое дело: у одного кода в приложении бывает НЕСКОЛЬКО записей с
     поделёнными между ними требованиями (26.11.22.210), и назвавший этот код эксперт спрашивает про
     них обе. Такие записи остаются целевыми все.
+
+    ⚠ ОСТАТОК, ЗАМЕРЕННЫЙ И ОСТАВЛЕННЫЙ СОЗНАТЕЛЬНО (ревью PR #94). В вопросе с НЕСКОЛЬКИМИ
+    ГРУППОВЫМИ кодами выбор записи внутри группы зависит от состава окна, а тот — от того, каким
+    кодом бустился ретрив, то есть от ПОРЯДКА кодов в вопросе: «сравни по 28.13.14 и по 26.30.50»
+    и та же фраза с перестановкой дают разные пары позиций (под 28.13.14 подходят две записи с
+    одним кодом 28.13.14.110). Детерминированный тай-брейк это не лечит — различаются САМИ окна.
+    Полное решение — разрешать каждый названный код отдельным поиском и не зависеть от общего окна;
+    это переделка ретрива ради сценария, встречающегося 1 раз на 580 вопросов трафика. Пока честно
+    так: ответ называет позицию, на которую опирается, и её код (issue #88).
 
     ⚠ EV6: из СТРОК ОДНОЙ РАСКОЛОТОЙ ЯЧЕЙКИ целевой берём ту, у которой требования есть.
     В приложении одна ячейка требований бывает растянута на несколько строк кода, и парсер отдаёт
@@ -951,6 +964,7 @@ class _Plan:
     low_relevance: bool
     # Готовая таблица баллов, которую печатает КОД (P4). Пусто — печатает модель, как раньше.
     points_table: str = ""
+    codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
 
 
@@ -971,32 +985,64 @@ def _extra_codes(text: str, primary: str | None) -> list[str]:
     return [c for c in extract_okpd2_all(text) if c != (primary or "")]
 
 
+MAX_EXTRA_CODES = 3  # сколько дополнительно названных кодов разбираем в одном ответе
+
+
 def _add_positions_by_code(search_query: str, codes: list[str], hits: list[Hit],
                            qvec: list[float] | None, limit: int) -> list[Hit]:
-    """Ввести в окно позиции ДОПОЛНИТЕЛЬНО названных кодов.
+    """Ввести в окно позиции ДОПОЛНИТЕЛЬНО названных кодов и пометить их совпавшими.
 
     Ретрив бустится ОДНИМ кодом, поэтому позиция второго в окно может не попасть вовсе — а
     требования нецелевых кандидатов в контекст не идут (`EV7`), и сравнивать оказалось бы не с чем.
-    Берём по одной записи на код: вопрос «сравни A и B» просит именно позиции, а не их окрестности.
-    Дубли отсекаем по `source_anchor` — он уникален у записи (тот же ключ, что у `sync_payloads`)."""
-    seen = {h.source_anchor for h in hits if h.source_anchor}
-    added: list[Hit] = []
-    for c in codes:
-        for h in search(search_query, okpd2=c, limit=2, qvec=qvec):
-            # Иерархически, а не дословно: пользователь называет и групповые коды («26.30.50»),
-            # а в приложении у записи код полный («26.30.50.110»).
+
+    ⚠ СНАЧАЛА ПОМЕЧАЕМ ТО, ЧТО УЖЕ ЕСТЬ. Первая версия пропускала запись, уже стоящую в окне
+    (`if h.source_anchor in seen: continue`), а у неё `okpd2_match` посчитан ТОЛЬКО против
+    первого кода — то есть остаётся `False`, и целевой она стать не может. Выходило, что `EV8`
+    не работает ровно тогда, когда ретрив и так нашёл нужную позицию (ревью PR #94).
+
+    ⚠ ЗАПРОС ДЛЯ ДОБОРА — САМ КОД, а не текст вопроса о ДРУГОЙ продукции. С текстом вопроса
+    ранжирование внутри отфильтрованного набора шло по сходству с чужим товаром, и ответ зависел
+    от ПОРЯДКА, в котором пользователь назвал коды (проверено ревью: те же два кода, переставленные
+    местами, дают четыре разные позиции). Фильтр по коду делает всю работу, а нейтральный запрос
+    убирает перекос.
+
+    ⚠ ЧИСЛО КОДОВ ОГРАНИЧЕНО (`MAX_EXTRA_CODES`): вопрос принимает до 2000 символов, то есть до
+    ~200 кодов, и каждый добавленный хит — целевой с полным блоком требований, то есть отмена
+    эффекта `EV7` и лишний последовательный запрос к Qdrant на пути с p50 = 8.3 с."""
+    if not codes:
+        return hits
+    extra = codes[:MAX_EXTRA_CODES]
+    if len(codes) > len(extra):
+        logger.info("названо кодов сверх лимита ({}), разбираем первые {}", len(codes), len(extra))
+    out = list(hits)
+    seen = {h.source_anchor for h in out if h.source_anchor}
+    for c in extra:
+        # Точные совпадения, уже стоящие в окне, — целевые по построению: помечаем и не трогаем.
+        exact_here = [h for h in out if c in (h.okpd2_codes or [])]
+        for h in exact_here:
+            h.okpd2_match = True
+        if exact_here:
+            continue
+        # Иначе разрешаем код НЕЙТРАЛЬНО — запросом по самому коду, а не по тексту вопроса о другой
+        # продукции. Иначе выбор зависит от того, в каком ПОРЯДКЕ пользователь назвал коды.
+        for h in search(c, okpd2=c, limit=2, qvec=None):
             if not h.okpd2_match or not okpd2_match(h.okpd2_codes or [], c):
                 continue
-            if h.source_anchor and h.source_anchor in seen:
-                continue
-            seen.add(h.source_anchor)
-            added.append(h)
+            same = next((x for x in out if x.source_anchor and x.source_anchor == h.source_anchor), None)
+            if same is not None:
+                same.okpd2_match = True   # уже в окне — только пометить (иначе целевой не станет)
+            else:
+                seen.add(h.source_anchor)
+                out.append(h)
             break
+    added = len(out) - len(hits)
     if not added:
-        return hits
+        return out
     # Место освобождаем с ХВОСТА окна: там кандидаты, которые и так идут без требований.
-    keep = max(len(hits) - len(added), limit - len(added))
-    return hits[:keep] + added
+    # ⚠ `keep` — это ДЛИНА головы, и она не может быть отрицательной: при `added >= limit` прежняя
+    # формула давала `hits[:-N]`, то есть окно РОСЛО сверх лимита либо теряло собственную голову.
+    keep = max(0, min(len(hits), limit - added))
+    return out[:keep] + out[len(hits):]
 
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
@@ -1067,7 +1113,12 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Ретрив бустится первым из них, поэтому позицию второго добираем отдельным запросом.
     extra = _extra_codes(query, effective_okpd2) if effective_okpd2 else []
     if extra:
-        hits = _add_positions_by_code(search_query, extra, hits, qvec, limit)
+        # ⚠ Разрешаем НЕЙТРАЛЬНО ВСЕ названные коды, включая первый. Иначе правило асимметрично:
+        # первый код разрешается ранжированием по тексту вопроса, остальные — по себе, и ответ
+        # зависит от ПОРЯДКА, в котором пользователь их перечислил (ревью PR #94: те же два кода,
+        # переставленные местами, давали четыре разные позиции). В вопросе «сравни A и B» текст не
+        # описывает ни один из товаров подробнее другого, поэтому опора на код честнее.
+        hits = _add_positions_by_code(search_query, [effective_okpd2] + extra, hits, qvec, limit)
     all_codes = ([effective_okpd2] if effective_okpd2 else []) + extra
     # ⚠ Если опорой оказалась строка-КВАЛИФИКАТОР расколотой ячейки, содержательного сиблинга может
     # не быть в окне вовсе: поиск по коду приносит записи ровно этого кода (ревью PR #94). Добираем
@@ -1176,7 +1227,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # котором стоят и скоркарта админки, и опубликованный faithfulness 1.00. Если числу из Правил
     # когда-нибудь понадобится заземление, расширять нужно `claim_numbers` (учить единицу), а не стог.
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
-    return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases,
+    return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)))
 
@@ -1218,6 +1269,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
+        codes=planned.codes,
         input_hint=planned.input_hint,
     )
 
@@ -1278,6 +1330,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
+        codes=planned.codes,
         input_hint=planned.input_hint,
     )
 

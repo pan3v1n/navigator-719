@@ -172,7 +172,7 @@ def foreign_numbers(query: str, hits: list, cases: list | None = None,
     формулирует (упомянула «2 балла» — не упомянула), и когда она тащит в ответ ПОРОГ СОСЕДНЕЙ
     ПОЗИЦИИ. Первое — шум, второе — дефект: эксперт читает число как относящееся к своей продукции.
     Здесь считается именно вредная половина."""
-    target = _target_hit(hits)
+    target = _target_hit(hits, code)
     if target is None:                     # ранний путь (meta/процедурный) — кандидатов нет
         return set()
     own = _own_numbers(target, hits, code)
@@ -210,7 +210,7 @@ def evaluate(runs: int, limit: int, progress: bool):
             num_sets.append(nums)
             # Атрибуция — по ЦЕЛЕВОЙ позиции, а не по hits[0]: с EV6 это разные записи (у
             # расколотой ячейки опорой становится содержательный сиблинг, а не квалификатор).
-            tgt = _target_hit(ans.hits)
+            tgt = _target_hit(ans.hits, ans.codes)  # ⚠ теми же кодами, что рантайм
             secs.append(tgt.section_roman if tgt else "—")
             flags.append(bool(ans.unverified_numbers))
             # Чужие числа считаем по окну ИМЕННО ЭТОГО прогона — см. докстринг foreign_numbers.
