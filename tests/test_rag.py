@@ -1209,6 +1209,51 @@ class TestProceduralSources(unittest.TestCase):
         self.assertEqual(ans.rule_sources[0]["doc_type"], "tpp_order_52")
 
 
+    def test_answer_carries_the_grounding_it_was_checked_against(self):
+        """Ответ несёт СВОЁ заземление — метрике незачем угадывать, что он видел.
+
+        ⚠ Регресс, ради которого тест написан (18.08.2026). Контекст стал зависеть от кода
+        (точное совпадение против группы), а `eval_answers` пересобирал его вызовом
+        `format_context(ans.hits, query)` БЕЗ кода. Два кейса с кодом отчитались «выдуманными
+        числами», которых рантайм честно держал в промпте: faithfulness показал 0.95 вместо 1.00,
+        то есть метрика мерила расхождение с самой собой, а не продукт. Тот же класс, что урок 33
+        («одно решение — одно место») и предупреждение в самом скрипте про забытый `question`."""
+        orig_search, orig_client = pipeline_mod.search, pipeline_mod._client
+        orig_cases, orig_embed = pipeline_mod.search_cases, pipeline_mod.embed_query
+        hit = make_hit(product_name="Целевая позиция", okpd2_codes=["28.15.10"], okpd2_match=True,
+                       min_threshold="не менее 300 баллов",
+                       requirement_blocks=[{"operations": [{"text": "сборка", "points": 30}]}])
+        pipeline_mod.search = lambda *a, **k: [hit]
+        pipeline_mod.search_cases = lambda *a, **k: []
+        pipeline_mod.embed_query = lambda *a, **k: [0.0]
+
+        class _Usage:
+            prompt_tokens = completion_tokens = 1
+
+        class _Msg:
+            content = "Порог — не менее 300 баллов [1]."
+
+        class _Resp:
+            choices = [type("C", (), {"message": _Msg()})()]
+            usage = _Usage()
+
+        class _Client:
+            chat = type("Ch", (), {"completions": type(
+                "Co", (), {"create": staticmethod(lambda *a, **k: _Resp())})()})()
+
+        pipeline_mod._client = lambda: _Client()
+        try:
+            ans = pipeline_mod.answer("подшипники", okpd2="28.15.10", limit=8)
+        finally:
+            pipeline_mod.search, pipeline_mod._client = orig_search, orig_client
+            pipeline_mod.search_cases, pipeline_mod.embed_query = orig_cases, orig_embed
+        self.assertTrue(ans.grounding, "ответ не несёт заземления")
+        self.assertIn("не менее 300 баллов", ans.grounding)
+        # и это ровно то, с чем сверялся гард: незаземлённых чисел нет
+        self.assertEqual(ans.unverified_numbers, [])
+        self.assertEqual(pipeline_mod.unverified_numbers(ans.text, ans.grounding), [])
+
+
 class TestKonturLinks(unittest.TestCase):
     """Ссылки на первоисточник обязаны вести в редакцию КОРПУСА.
 

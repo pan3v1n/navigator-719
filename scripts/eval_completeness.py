@@ -40,7 +40,6 @@ from app.rag.pipeline import (  # noqa: E402
     _target_hit as target_hit,
     answer,
     claim_numbers,
-    format_context,
     number_in_context,
 )
 
@@ -139,7 +138,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
     for c in cases:
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
-        ctx = format_context(ans.hits, c["query"])
+        ctx = ans.grounding  # ⚠ заземление ответа, а не пересборка (см. eval_answers)
         hit = target_hit(ans.hits)
         want = context_facts(hit, ctx)
 

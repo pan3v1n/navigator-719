@@ -65,6 +65,14 @@ class Answer:
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
     # для кликабельных источников. Товарный путь их не заполняет (там источники строятся из hits).
     rule_sources: list[dict] = field(default_factory=list)
+    # ⚠ ЗАЗЕМЛЕНИЕ, С КОТОРЫМ СВЕРЯЛСЯ ИМЕННО ЭТОТ ОТВЕТ. Метрики обязаны брать его отсюда, а не
+    # пересобирать `format_context(ans.hits, query)` заново: пересборка — это ВТОРОЕ место, где
+    # решается, что видел ответ, и оно расходится с первым молча. Так и вышло 18.08.2026: контекст
+    # стал зависеть от кода (точное совпадение против группы), скрипт замера кода не передавал, и
+    # faithfulness показал 0.95 вместо 1.00 — два кейса «выдумали» числа, которые рантайм честно
+    # держал в промпте. Тот же класс, что урок 33 («одно решение — одно место») и предупреждение в
+    # самом `eval_answers` про забытый `question`.
+    grounding: str = ""
     # U5: что показать подсказкой в поле ввода ПОСЛЕ этого ответа — готовый текст, «» = пусто.
     # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
     # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
@@ -832,6 +840,7 @@ def _answer_procedural(query: str, search_query: str,
         echoed_numbers=echoed,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
+        grounding=ctx,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
         # U5: подсказку задаёт НАМЕРЕНИЕ вопроса — то самое `topic`, по которому выбрана квота окна
         # и фрагмент промпта. Раньше сюда шёл `rules[0]["_topic"]`, то есть лексическая догадка о
@@ -1083,6 +1092,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         echoed_numbers=echoed,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
+        grounding=planned.grounding,
         input_hint=planned.input_hint,
     )
 
@@ -1142,6 +1152,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         echoed_numbers=echoed,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        grounding=planned.grounding,
         input_hint=planned.input_hint,
     )
 

@@ -46,7 +46,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.rag.pipeline import answer, format_context  # noqa: E402
+from app.rag.pipeline import answer  # noqa: E402
 from app.rag.sparse import tokenize  # noqa: E402
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
@@ -145,7 +145,7 @@ def evaluate(limit: int, cases_limit: int, threshold: float) -> list[dict]:
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
         # Заземление — ровно то, что видела модель: контекст позиций плюс кейсы эксперта.
-        ctx = format_context(ans.hits, c["query"])
+        ctx = ans.grounding  # ⚠ заземление ответа, а не пересборка (см. eval_answers)
         ctx_grams = _ngrams(ctx) | _ngrams(c["query"])  # вопрос пользователя — тоже законный источник
         ctx_words = set(tokenize(ctx)) | set(tokenize(c["query"]))
         scored, unmarked, meta, novel = [], [], 0, []
