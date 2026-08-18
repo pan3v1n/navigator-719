@@ -190,6 +190,36 @@ class TestForeignNumbersOracle(unittest.TestCase):
         self.assertEqual(record_numbers(h), {"100", "40", "15", "7"})
 
 
+class TestAnswerHasNoInternalVocabulary(unittest.TestCase):
+    """Правило 3г: внутренней кухни («контекст», «промпт») в ответе быть не должно.
+
+    ⚠ Дефект был НЕ в модели, а в самом промпте: шаблон ответа дословно предписывал писать
+    «**Порог:** <дословно, если есть; иначе „в контексте не указан“>». То есть инструкция сама
+    выносила наружу слово, которого пользователь не знает, и ответ читался как пробел в данных —
+    класс R7, жалоба №1 платного теста. Тест закрывает шаблон, а не поведение модели."""
+
+    def test_output_template_does_not_dictate_internal_words(self):
+        lines = [l for l in NAVIGATOR_SYSTEM_PROMPT.splitlines() if "**Порог:**" in l]
+        self.assertTrue(lines, "шаблон ответа потерял строку «Порог»")
+        for l in lines:
+            self.assertNotIn("контекст", l.lower())
+        self.assertIn("не приведён", " ".join(lines))
+
+    def test_rule_forbids_internal_vocabulary(self):
+        self.assertIn("3г.", NAVIGATOR_SYSTEM_PROMPT)
+        rule = NAVIGATOR_SYSTEM_PROMPT.split("3г.")[1].split("4. СТИЛЬ")[0]
+        self.assertIn("контекст", rule)          # правило называет запрещённое слово
+        self.assertIn("не предусмотрены", rule)  # и даёт замену, а не только запрет
+
+    def test_metric_watches_the_same_words(self):
+        """Метрика полноты обязана мерить этот запрет — иначе он живёт только в промпте."""
+        from eval_completeness import KITCHEN_RE
+        self.assertTrue(KITCHEN_RE.search("в контексте баллы не указаны"))
+        self.assertTrue(KITCHEN_RE.search("судя по промпту"))
+        # ⚠ и не ловит слова из САМИХ требований приложения
+        self.assertFalse(KITCHEN_RE.search("руководство по эксплуатации и инструкция по монтажу"))
+
+
 class TestClarifyingClassifier(unittest.TestCase):
     """Калибровка метрики полноты (`EV7`): что считать УТОЧНЯЮЩИМ ответом.
 
