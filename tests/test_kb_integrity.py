@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -226,6 +227,62 @@ class TestFragmentedListHasRoles(unittest.TestCase):
         # обе роли реально встречаются — иначе поле бессмысленно
         roles = {p["role"] for p in positions}
         self.assertEqual(roles, {"qualifier", "product"})
+
+
+class TestEditionWatcher(unittest.TestCase):
+    """`A6` #60: слежение за редакциями. Проверяем на ТОМ САМОМ дефекте, ради которого заведено.
+
+    12.08.2026 корпус отстал на ДВЕ редакции (N 899 от 16.07 и N 923 от 22.07), причём тело
+    постановления оказалось СИЛЬНЕЕ приложения, и заметили это вручную при сверке с
+    КонсультантПлюс. Тест воспроизводит обе формы расхождения — отставание от первоисточника и
+    рассинхрон частей корпуса между собой."""
+
+    def _watcher(self):
+        from scripts import watch_edition
+        return watch_edition
+
+    def test_lag_behind_the_source_is_found(self):
+        """Форма дефекта 12.08: в первоисточнике есть акты, которых нет в корпусе."""
+        w = self._watcher()
+        corpus = w.acts("(в ред. Постановлений Правительства РФ от 27.06.2026 N 794)")
+        source = ("(в ред. Постановлений Правительства РФ от 27.06.2026 N 794, "
+                  "от 16.07.2026 N 899, от 22.07.2026 N 923)")
+        res = w.check_source(source, corpus)
+        self.assertEqual(res["нет в корпусе"], ["от 16.07.2026 N 899", "от 22.07.2026 N 923"])
+        self.assertEqual(res["последний в первоисточнике"], "от 22.07.2026 N 923")
+
+    def test_no_false_alarm_when_corpus_is_current(self):
+        """Ноль ложных тревог важнее полноты: отчёт, который «всегда что-то нашёл», не читают."""
+        w = self._watcher()
+        text = "(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923)"
+        res = w.check_source(text, w.acts(text))
+        self.assertEqual(res["нет в корпусе"], [])
+
+    def test_parts_of_the_corpus_must_agree(self):
+        """Вторая форма: одну часть корпуса актуализировали, другую забыли."""
+        import tempfile
+        from pathlib import Path
+        w = self._watcher()
+        with tempfile.TemporaryDirectory() as d:
+            body = Path(d) / "body.txt"
+            appx = Path(d) / "appendix.txt"
+            body.write_text("(в ред. от 22.07.2026 N 923)", encoding="utf-8")
+            appx.write_text("(в ред. от 27.06.2026 N 794)", encoding="utf-8")
+            with mock.patch.dict(w.PARTS, {"тело": body, "приложение": appx}, clear=True):
+                res = w.check_corpus()
+        self.assertFalse(res["части согласованы"], "рассинхрон частей корпуса не замечен")
+
+    def test_real_corpus_parts_agree_and_link_is_known(self):
+        """Живая проверка состояния: части корпуса согласованы, ссылка на редакцию известна.
+
+        ⚠ Тест намеренно завязан на реальные файлы: он краснеет ровно тогда, когда корпус
+        актуализировали наполовину или забыли добавить `documentId` новой редакции, — то есть
+        ведёт себя как `TestKonturLinks`, только со стороны данных."""
+        w = self._watcher()
+        res = w.check_corpus()
+        self.assertNotEqual(res["редакция корпуса"], "редакция не определена")
+        self.assertTrue(res["части согласованы"], res["части"])
+        self.assertTrue(res["ссылка на первоисточник известна"], res["редакция корпуса"])
 
 
 class TestIncompleteThresholdNotice(unittest.TestCase):
