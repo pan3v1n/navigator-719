@@ -479,7 +479,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn("Насосы центробежные технологические типов ВВ1", ctx)
         self.assertIn("28.13.14.110", ctx)
         self.assertIn("Раздел XXI, поз. 42", ctx)
-        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", ctx)
         # ни одного её ЧИСЛА-ПРЕТЕНЗИИ: ни баллов операций, ни порога.
         # ⚠ Проверяем именно `claim_numbers` (числа рядом с «балл»/«процент»), а не присутствие
         # токена: «110» остаётся в контексте внутри кода 28.13.14.110. Это же и слепая зона гарда —
@@ -507,7 +507,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         with mock.patch.object(inheritance, "lookup", return_value=None):
             bare = format_context([make_hit(product_name="Целевая", score=0.9),
                                    make_hit(product_name="Пустая", score=0.8, requirement_blocks=[])])
-        self.assertIn("Требования этой позиции в контекст НЕ включены —", bare)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ —", bare)
 
     def test_candidate_presence_uses_the_same_rule_as_rendering(self):
         """Наличие требований у кандидата считается `_hit_operations`, а не своим счётчиком.
@@ -530,7 +530,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         other = make_hit(product_name="Сосед", score=0.7, requirement_blocks=[
             {"operations": [{"text": "литьё", "points": 55}]}])
         ctx = format_context([matched, other])
-        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", ctx)
         self.assertNotIn("попроси её код ОКПД2", ctx)
         # без кода — наоборот, уточнение это единственный путь дальше
         self.assertIn("попроси её код ОКПД2",
@@ -557,7 +557,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         grp = format_context([a, b, c], None, "26.11.22")
         self.assertIn("не менее 300 баллов", grp)
         self.assertNotIn("не менее 400 баллов", grp)
-        self.assertIn("Требования этой позиции в контекст НЕ включены", grp)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", grp)
         # ⚠ И шапка не спорит с телом: у совпавшего по ГРУППЕ кандидата нельзя писать «наиболее
         # вероятная позиция» рядом со строкой «она НЕ целевая» — противоречие внутри одного блока
         # разрешала бы модель, а по уроку проекта она следует за контекстом.
@@ -1553,7 +1553,7 @@ class TestBlockNote(unittest.TestCase):
         short = format_context([make_hit(product_name="Целевая", okpd2_match=True),
                                 make_hit(product_name="Кандидат", requirement_blocks=blocks)])
         self.assertIn("Кандидат", short)                             # позиция названа
-        self.assertIn("Требования этой позиции в контекст НЕ включены", short)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", short)
         self.assertNotIn("не менее 500 баллов", short)               # чисел кандидата нет
         self.assertNotIn("не менее 580 баллов", short)
         self.assertNotIn("условие показано не полностью", short)     # резать больше нечего
