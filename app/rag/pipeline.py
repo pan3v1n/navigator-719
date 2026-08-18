@@ -478,7 +478,13 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     siblings = [h for h in hits
                 if fragments.group_of(h.product_name) == group
                 and not _SCOPE_QUALIFIER_RE.search(h.product_name or "")]
-    best = max(siblings, key=_n_operations, default=target)
+    # ⚠ Ничья решается ИМЕНЕМ, а не порядком окна. Ничьи в данных есть: у трёх из четырёх
+    # расколотых групп сиблинги имеют равное число операций (аддитивные установки 0 и 0;
+    # синий/зелёный/красный диапазоны по 1). Сегодня подмена на них не срабатывает — нужен
+    # СТРОГИЙ перевес над целевой, — но при первой же правке данных выбор стал бы зависеть
+    # от порядка выдачи Qdrant. Ровно этот класс уже ловили в `_order_key`: ничья RRF
+    # решалась случаем и дала «неустранимый» разброс recall@1 (M1).
+    best = max(siblings, key=lambda h: (_n_operations(h), h.product_name or ""), default=target)
     return [best] if _n_operations(best) > _n_operations(target) else [target]
 
 
