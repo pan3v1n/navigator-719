@@ -665,6 +665,38 @@ class TestContextAndDisclaimer(unittest.TestCase):
                      "Изделия из резины прочие (за исключением услуг)"):
             self.assertFalse(fragments.is_scope_qualifier(name), name)
 
+    def test_question_with_two_codes_keeps_both_positions_as_targets(self):
+        """`EV8`: «сравни по A и по B» — по одной опоре на КАЖДЫЙ названный код.
+
+        ⚠ Ровно этот вопрос — единственная в трафике июля просьба сравнить позиции, и на нём стояло
+        обоснование цены `EV7` («обе записи совпадают по коду, обе остаются целевыми»). Оно было
+        неверным: `extract_okpd2` — это `re.search`, второй код не извлекался вовсе, и его
+        требования уходили из контекста вместе с требованиями прочих кандидатов."""
+        from app.rag.pipeline import target_hits
+        a = make_hit(product_name="Насосы", okpd2_codes=["28.13.14.110"], okpd2_match=True,
+                     min_threshold="не менее 300 баллов")
+        b = make_hit(product_name="Оборудование для пожаротушения", okpd2_codes=["26.30.50.120"],
+                     okpd2_match=True, min_threshold="не менее 400 баллов")
+        c = make_hit(product_name="Посторонняя", okpd2_codes=["28.99.00.000"], okpd2_match=True,
+                     requirement_blocks=[{"operations": [{"text": "литьё", "points": 55}]}])
+        picked = target_hits([a, b, c], ["28.13.14", "26.30.50"])
+        self.assertEqual([h.product_name for h in picked], ["Насосы", "Оборудование для пожаротушения"])
+        ctx = format_context([a, b, c], None, ["28.13.14", "26.30.50"])
+        self.assertIn("не менее 300 баллов", ctx)
+        self.assertIn("не менее 400 баллов", ctx)
+        self.assertFalse(number_in_context("55", ctx))  # третья позиция остаётся без чисел
+
+    def test_single_group_code_still_yields_one_target(self):
+        """Контроль к `EV8`: правило «одна целевая на код» НЕ открывает дыру частичного кода.
+
+        «28.13» подходит 52 записям приложения (531 операция). Пока целевыми были все совпавшие,
+        контекст выходил 15 799 символов с числами восьми позиций — больше, чем до `EV7`."""
+        from app.rag.pipeline import target_hits
+        hits = [make_hit(product_name=f"Позиция {i}", okpd2_codes=[f"28.13.{i:02d}.110"],
+                         okpd2_match=True, min_threshold=f"не менее {i}00 баллов") for i in range(1, 6)]
+        self.assertEqual(len(target_hits(hits, "28.13")), 1)
+        self.assertEqual(len(target_hits(hits, ["28.13"])), 1)
+
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
 

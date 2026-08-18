@@ -24,7 +24,7 @@ from app.core.prompts import (
 )
 from app.rag import fragments, inheritance, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
-from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
+from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
 
 # Кап операций ЦЕЛЕВОГО хита (вариант A, 2026-07-05): 60, чтобы не резать умеренные продукты
@@ -216,7 +216,8 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     return sorted(ops, key=lambda o: -len(qtok & set(sparse.tokenize(o.get("text", "")))))
 
 
-def format_context(hits: list[Hit], query: str | None = None, code: str | None = None) -> str:
+def format_context(hits: list[Hit], query: str | None = None,
+                   code: str | list[str] | None = None) -> str:
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное
     # место, где это решается); прочие кандидаты идут строкой «наименование + код» как материал
     # для уточнения — см. EV7 ниже.
@@ -429,7 +430,14 @@ def _n_operations(h: Hit) -> int:
     return sum(len(b.get("operations") or []) for b in (h.requirement_blocks or []))
 
 
-def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
+def _codes(code: str | list[str] | None) -> list[str]:
+    """Нормализуем «код» к списку: вопрос может назвать НЕСКОЛЬКО кодов (`EV8`, issue #88)."""
+    if not code:
+        return []
+    return [c.strip() for c in ([code] if isinstance(code, str) else list(code)) if c and c.strip()]
+
+
+def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hit]:
     """Позиции, О КОТОРЫХ идёт ответ. ЕДИНСТВЕННОЕ место, где это решается.
 
     ⚠ СОВПАДЕНИЕ ПО КОДУ БЫВАЕТ ТОЧНЫМ И ПРЕФИКСНЫМ, и это разные вопросы пользователя. `okpd2_match`
@@ -474,8 +482,16 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
         hits = products
     matched = [h for h in hits if h.okpd2_match]
     if matched:
-        exact = [h for h in matched if code and code.strip() in (h.okpd2_codes or [])]
-        return exact or matched[:1]
+        # ПРАВИЛО: одна целевая позиция на КАЖДЫЙ названный код — плюс все записи, совпавшие с ним
+        # ТОЧНО (у одного кода в приложении бывает несколько записей с поделёнными требованиями,
+        # напр. 26.11.22.210). Так «сравни по 28.13.14 и по 26.30.50» даёт две опоры (`EV8`), а
+        # «требования по 28.13» — по-прежнему одну, хотя под префикс подходят 52 записи.
+        picked: list[Hit] = []
+        for c in _codes(code):
+            exact = [h for h in matched if c in (h.okpd2_codes or [])]
+            chosen = exact or [h for h in matched if okpd2_match(h.okpd2_codes or [], c)][:1]
+            picked += [h for h in chosen if not any(h is p for p in picked)]
+        return picked or matched[:1]
     target = hits[0]
     # ⚠ Подменяем ТОЛЬКО строку-квалификатор, а не названный продукт. Первая версия правила брала
     # из группы запись с наибольшим числом операций — и на запросе «светодиоды красного диапазона»
@@ -508,7 +524,7 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     return [best] if _n_operations(best) > _n_operations(target) else [target]
 
 
-def _target_hit(hits: list[Hit], code: str | None = None) -> Hit | None:
+def _target_hit(hits: list[Hit], code: str | list[str] | None = None) -> Hit | None:
     """Позиция, вокруг которой строится ответ, — первая из `target_hits`."""
     ts = target_hits(hits, code)
     return ts[0] if ts else None
@@ -914,6 +930,40 @@ def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
     return (tn, okpd2_ref.tnved_to_okpd2(tn)) if tn else None
 
 
+def _extra_codes(text: str, primary: str | None) -> list[str]:
+    """Коды ОКПД2, названные в вопросе ПОМИМО того, которым бустится ретрив (`EV8`, issue #88)."""
+    from app.tools.navigator import extract_okpd2_all
+    return [c for c in extract_okpd2_all(text) if c != (primary or "")]
+
+
+def _add_positions_by_code(search_query: str, codes: list[str], hits: list[Hit],
+                           qvec: list[float] | None, limit: int) -> list[Hit]:
+    """Ввести в окно позиции ДОПОЛНИТЕЛЬНО названных кодов.
+
+    Ретрив бустится ОДНИМ кодом, поэтому позиция второго в окно может не попасть вовсе — а
+    требования нецелевых кандидатов в контекст не идут (`EV7`), и сравнивать оказалось бы не с чем.
+    Берём по одной записи на код: вопрос «сравни A и B» просит именно позиции, а не их окрестности.
+    Дубли отсекаем по `source_anchor` — он уникален у записи (тот же ключ, что у `sync_payloads`)."""
+    seen = {h.source_anchor for h in hits if h.source_anchor}
+    added: list[Hit] = []
+    for c in codes:
+        for h in search(search_query, okpd2=c, limit=2, qvec=qvec):
+            # Иерархически, а не дословно: пользователь называет и групповые коды («26.30.50»),
+            # а в приложении у записи код полный («26.30.50.110»).
+            if not h.okpd2_match or not okpd2_match(h.okpd2_codes or [], c):
+                continue
+            if h.source_anchor and h.source_anchor in seen:
+                continue
+            seen.add(h.source_anchor)
+            added.append(h)
+            break
+    if not added:
+        return hits
+    # Место освобождаем с ХВОСТА окна: там кандидаты, которые и так идут без требований.
+    keep = max(len(hits) - len(added), limit - len(added))
+    return hits[:keep] + added
+
+
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
                  history: list[dict] | None = None) -> "Answer | _Plan":
     """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
@@ -978,6 +1028,12 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
         from app.rag.reranker import rerank
         hits = rerank(search_query, hits)
+    # EV8: вопрос может назвать НЕСКОЛЬКО кодов («сравни требования по 28.13.14 и по 26.30.50»).
+    # Ретрив бустится первым из них, поэтому позицию второго добираем отдельным запросом.
+    extra = _extra_codes(query, effective_okpd2) if effective_okpd2 else []
+    if extra:
+        hits = _add_positions_by_code(search_query, extra, hits, qvec, limit)
+    all_codes = ([effective_okpd2] if effective_okpd2 else []) + extra
     cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
@@ -1020,7 +1076,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         if sugg:
             okpd2_suggestions = [(c, n) for c, n, _s in sugg]
 
-    ctx = format_context(hits, search_query, effective_okpd2)
+    ctx = format_context(hits, search_query, all_codes)
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
     # K12: смешанный вопрос — про продукцию И про состав документов. Бинарный роутер считает такие
@@ -1047,7 +1103,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # строится по одной — и при этом промпт получает запрет перечислять операции у ВСЕХ.
     # Эксперт увидел бы «дословно из приложения» без пометки неполноты и без баллов сиблинга:
     # ровно тот класс молчаливой потери, против которого заведены R29 и D9.
-    _tgts = target_hits(hits, effective_okpd2)
+    _tgts = target_hits(hits, all_codes)
     table = points_table(_tgts[0], search_query) if len(_tgts) == 1 else ""
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,

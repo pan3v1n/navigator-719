@@ -121,3 +121,14 @@ class TestBuildChecklist(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestExtractOkpd2All(unittest.TestCase):
+    """`EV8` #88: из вопроса достаются ВСЕ коды, а не первый."""
+
+    def test_all_codes_in_order_without_duplicates(self):
+        from app.tools.navigator import extract_okpd2, extract_okpd2_all
+        q = "можешь сравнить требования по нашему коду 28.13.14 и по 26.30.50"
+        self.assertEqual(extract_okpd2(q), "28.13.14")          # ретрив бустится первым
+        self.assertEqual(extract_okpd2_all(q), ["28.13.14", "26.30.50"])
+        self.assertEqual(extract_okpd2_all("28.13 и снова 28.13"), ["28.13"])
+        self.assertEqual(extract_okpd2_all("кодов нет вовсе"), [])
