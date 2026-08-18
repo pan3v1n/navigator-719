@@ -432,6 +432,16 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     отнимала бы у ответа 7 операций из 22, замерено на белых светодиодах)."""
     if not hits:
         return []
+    # ⚠ Псевдозапись раздела (`record_type: section_methodology`, 11 штук в корпусе) — это
+    # методические ПОРОГИ раздела, а не продукция. Ни один модуль под `app/` её прежде не отличал,
+    # и после EV7 это стало видимым дефектом: став целевой, она не даёт НИ ОДНОГО требования, а
+    # реальная позиция того же окна обнуляется как «нецелевая» — ответ выходит пустым. До EV7 её
+    # требования лежали в контексте вторым блоком и ответ работал. Класс шире одной правки: по
+    # уроку EV5 записи, у которых текст — про пороги, выигрывают ретрив на вопросах «сколько
+    # баллов», то есть именно там, где пустой ответ дороже всего.
+    products = [h for h in hits if (h.payload or {}).get("record_type") != "section_methodology"]
+    if products:
+        hits = products
     matched = [h for h in hits if h.okpd2_match]
     if matched:
         exact = [h for h in matched if code and code.strip() in (h.okpd2_codes or [])]

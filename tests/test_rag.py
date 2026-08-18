@@ -579,6 +579,24 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
         self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
 
+    def test_section_methodology_record_is_never_the_target(self):
+        """Псевдозапись раздела — это ПОРОГИ раздела, а не продукция.
+
+        После EV7 её выбор целевой давал пустой ответ: своих требований у неё нет, а реальная
+        позиция того же окна обнулялась как «нецелевая». До EV7 её требования лежали вторым блоком
+        и ответ работал. По уроку EV5 такие записи (текст — про пороги) как раз выигрывают ретрив
+        на вопросах «сколько баллов», то есть там, где пустой ответ дороже всего."""
+        from app.rag.pipeline import target_hits
+        pseudo = make_hit(product_name="Методологические пороги раздела IV", score=0.95,
+                          payload={"record_type": "section_methodology"}, requirement_blocks=[])
+        real = make_hit(product_name="Светодиоды белого диапазона", score=0.80,
+                        requirement_blocks=[{"operations": [{"text": "сборка", "points": 30}]}])
+        self.assertEqual(target_hits([pseudo, real]), [real])
+        ctx = format_context([pseudo, real])
+        self.assertIn("сборка", ctx, "требования реальной позиции обнулены псевдозаписью")
+        # окно только из псевдозаписей — выбирать не из чего, поведение прежнее
+        self.assertEqual(target_hits([pseudo]), [pseudo])
+
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
 

@@ -176,6 +176,37 @@ class TestAppendixFootnotes(unittest.TestCase):
         self.assertIn("appendix_footnotes", RULES_QUOTA_ON_DEMAND)
 
 
+class TestFragmentedListResolvesToCorpus(unittest.TestCase):
+    """Каждая позиция списка расколотых ячеек обязана НАХОДИТЬСЯ в корпусе по ключу.
+
+    ⚠ Молчаливый отказ уже случался: одна из 15 позиций хранит квалификатор второй строкой
+    («Светодиоды, включая … кристаллов\n(за исключением белого диапазона)»), а в корпусе то же
+    наименование лежит одной строкой. Ключ по первой строке её не находил — позиция теряла пометку
+    неполноты `R29` (ровно то, ради чего список заведён), а `group_of` не видел её сиблингов, то
+    есть `EV6` на этой группе не работал. По списку это не видно никак: файл валиден, тесты зелены.
+    Тот же класс, что «висячая ; в ключе наследования» — 47 молчаливых отказов R6."""
+
+    def test_every_listed_position_is_found_in_corpus(self):
+        import json
+
+        from app.rag.fragments import _keys
+        path = ROOT / "knowledge_base" / "pp719" / "fragmented_requirements.json"
+        struct = ROOT / "knowledge_base" / "pp719" / "structured"
+        if not path.exists() or not struct.exists():
+            self.skipTest("файлы корпуса отсутствуют")
+        corpus = set()
+        for p in sorted(struct.glob("*.json")):
+            d = json.loads(p.read_text(encoding="utf-8"))
+            recs = d if isinstance(d, list) else (d.get("positions") or d.get("records") or [])
+            for r in recs:
+                corpus |= set(_keys(r.get("product_name")))
+        groups = json.loads(path.read_text(encoding="utf-8"))
+        listed = [p.get("product_name") for g in groups for p in (g.get("positions") or [])]
+        self.assertTrue(listed, "список расколотых ячеек пуст")
+        missing = [n for n in listed if not (set(_keys(n)) & corpus)]
+        self.assertEqual(missing, [], f"позиции списка не найдены в корпусе: {missing}")
+
+
 class TestIncompleteThresholdNotice(unittest.TestCase):
     """D9: позиции, где в законе несколько порогов, а в записи помещался один.
 

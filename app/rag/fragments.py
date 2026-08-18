@@ -68,6 +68,21 @@ def _key(name: str | None) -> str:
     return re.sub(r"\s+", " ", first).strip().lower()
 
 
+def _keys(name: str | None) -> tuple[str, ...]:
+    """ОБЕ формы ключа: по первой строке и по полному имени со схлопнутыми переносами.
+
+    ⚠ Одной первой строки не хватает, и это не гипотеза: из 15 позиций списка одна
+    («Светодиоды, включая светодиодные модули по технологии chip-on-board … \\n(за исключением
+    светодиодов белого диапазона)») хранит квалификатор ВТОРОЙ СТРОКОЙ, тогда как в корпусе то же
+    наименование лежит одной строкой. Ключи расходились молча: позиция теряла пометку неполноты
+    `R29` — ровно то, ради чего список и заведён, — а `group_of` не находил её сиблингов, то есть
+    `EV6` на этой группе не работал вовсе. Тот же класс, что «висячая ; в ключе наследования»
+    (47 молчаливых отказов R6): ключ, собранный из имени, обязан допускать обе формы записи."""
+    first = _key(name)
+    whole = re.sub(r"\s+", " ", (name or "").strip()).lower()
+    return tuple(dict.fromkeys(k for k in (first, whole) if k))
+
+
 @lru_cache(maxsize=1)
 def _fragmented() -> frozenset[str]:
     """Ключи позиций с расколотой ячейкой. Файла нет — пустое множество (пометка просто не ставится)."""
@@ -78,16 +93,16 @@ def _fragmented() -> frozenset[str]:
     except (json.JSONDecodeError, OSError):  # битый/недочитанный файл не должен ронять ответ
         return frozenset()
     return frozenset(
-        _key(p.get("product_name"))
+        k
         for g in groups for p in (g.get("positions") or [])
-        if _key(p.get("product_name"))
+        for k in _keys(p.get("product_name"))
     )
 
 
 def is_fragmented(product_name: str | None) -> bool:
     """True — требования позиции в базе заведомо неполны (обрывок общего списка группы)."""
-    k = _key(product_name)
-    return bool(k) and k in _fragmented()
+    listed = _fragmented()
+    return any(k in listed for k in _keys(product_name))
 
 
 @lru_cache(maxsize=1)
@@ -106,15 +121,18 @@ def _group_index() -> dict[str, int]:
     out: dict[str, int] = {}
     for i, g in enumerate(groups):
         for p in (g.get("positions") or []):
-            k = _key(p.get("product_name"))
-            if k:
+            for k in _keys(p.get("product_name")):
                 out.setdefault(k, i)
     return out
 
 
 def group_of(product_name: str | None) -> int | None:
     """Номер группы с расколотой ячейкой, если позиция в неё входит."""
-    return _group_index().get(_key(product_name))
+    index = _group_index()
+    for k in _keys(product_name):
+        if k in index:
+            return index[k]
+    return None
 
 
 # --- D9: у позиции несколько порогов, а в записи поместился один ---
