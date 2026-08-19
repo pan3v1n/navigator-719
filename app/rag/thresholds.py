@@ -21,8 +21,17 @@ _CHUNK = (Path(__file__).resolve().parents[2] / "knowledge_base" / "pp719" / "ch
           / "130_PRIMECHANIYA_prilozheniya.txt")
 
 # Интро примечания-таблицы: «77. Продукция … в раздел XVI настоящего приложения …»
-_INTRO_SIMPLE = re.compile(r"^\s*(\d+)\.\s+Продукция,.*?в\s+раздел\s+([IVXLC]+)\s+настоящего приложения")
+# ⚠ ВВОДНАЯ ПРИМЕЧАНИЯ-ТАБЛИЦЫ (K2, #47). Прежний шаблон требовал буквально «Продукция,» и
+# обязательно называл раздел — под него подходили 10 таблиц из 30+. Мимо проходили ходовые
+# формулировки: «Отнесение продукции радиоэлектроники …» (прим. 38), «Продукция медицинской
+# промышленности может быть отнесена …» (прим. 81, 28, 33) — а это 53 позиции одного только
+# раздела VII. Теперь вводная — это просто заголовок примечания, а РАЗДЕЛ необязателен:
+# у таких таблиц есть коды, и привязка идёт по коду (см. `_lookup`).
+_NOTE_INTRO_RE = re.compile(r"^\s*(\d+(?:\(\d+\))?)\.\s+\S")
+_INTRO_SECTION_RE = re.compile(r"в\s+раздел[еа]?\s+([IVXLC]+)\s+настоящего")
+# Заголовок таблицы: «с 1 января 2024 г.» ЛИБО «2024 год» / «2028 год и далее» / «с 2027 года».
 _YEAR_RE = re.compile(r"с 1 января (\d{4})")
+_YEAR_ANY_RE = re.compile(r"(?:с 1 января\s+|с\s+)?(\d{4})\s*(?:г\.|год)")
 _CODE_RE = re.compile(r"\d{2}\.\d{2}(?:\.\d+)*")
 
 
@@ -31,31 +40,47 @@ def _tables() -> list[dict]:
     """Парсит все таблицы-пороги из чанка примечаний. Кэш на процесс."""
     if not _CHUNK.exists():
         return []
-    lines = _CHUNK.read_text(encoding="utf-8").split("\n")
+    lines = _CHUNK.read_text(encoding="utf-8").splitlines()
     tables: list[dict] = []
     i, n = 0, len(lines)
     while i < n:
-        m = _INTRO_SIMPLE.match(lines[i])
+        m = _NOTE_INTRO_RE.match(lines[i])
         if not m:
             i += 1
             continue
-        note_no, section = m.group(1), m.group(2)
-        # найти строку-заголовок таблицы (со «с 1 января» и разделителями «|»)
-        j = i + 1
-        while j < n and "с 1 января" not in lines[j]:
-            if _INTRO_SIMPLE.match(lines[j]):
+        note_no = m.group(1)
+        # Раздел — если примечание его называет. ⚠ Часть таблиц раздела не называет вовсе
+        # (прим. 38, 81, 28, 33): у них привязка идёт по КОДУ, и это надёжнее имени.
+        sm = _INTRO_SECTION_RE.search(lines[i])
+        section = sm.group(1) if sm else None
+        # Заголовок таблицы: строка с разделителями «|» и минимум двумя годами.
+        j, header = i + 1, None
+        while j < n:
+            if _NOTE_INTRO_RE.match(lines[j]):
+                break
+            cand = lines[j]
+            # ⚠ Шапка бывает разорвана переносом («Код по ОК 034-2014» / «(КПЕС 2008)|Наименование…»,
+            # прим. 81): склеиваем с предыдущей строкой, иначе таблица не находится вовсе.
+            if "|" in cand and j > i + 1 and "|" not in lines[j - 1] and lines[j - 1].strip():
+                cand = lines[j - 1].strip() + " " + cand
+            if "|" in cand and len(_YEAR_ANY_RE.findall(cand)) >= 2:
+                header = cand
                 break
             j += 1
-        if j >= n or "с 1 января" not in lines[j]:
+        if header is None:
             i += 1
             continue
-        years = _YEAR_RE.findall(lines[j])
+        # ⚠ Подписи колонок берём ДОСЛОВНО из шапки («2028 год и далее», «с 1 января 2024 г.»):
+        # синтез «с 1 января {год}» переписывал бы первоисточник — «2028 год» и «с 1 января
+        # 2028 г.» это разные утверждения, а порог показывается эксперту как цитата.
+        hcells = [c.strip() for c in header.split('|')[2:] if c.strip()]
+        years = hcells if len(hcells) >= 2 else _YEAR_ANY_RE.findall(header)
         rows: list[dict] = []
         pending = ""  # строка-продолжение многострочной ячейки кода («из 28.25.12»)
         k = j + 1
         while k < n:
             raw = lines[k]
-            if not raw.strip() or _INTRO_SIMPLE.match(raw):
+            if not raw.strip() or _NOTE_INTRO_RE.match(raw):
                 break
             cells = raw.split("|")
             if len([c for c in cells if c.strip()]) < 3:  # ячейка кода на отдельной строке
@@ -77,13 +102,21 @@ def _tables() -> list[dict]:
     return tables
 
 
+def _strip_fn(s: str | None) -> str:
+    """Снимает хвостовой маркер сноски: «Ледоколы <9>» → «Ледоколы»."""
+    return re.sub(r"\s*<[\d.,\s]+>\s*$", "", s or "").strip()
+
+
 def _norm(s: str | None) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
-def _fmt(row: dict, note: str, section: str) -> str:
-    steps = "; ".join(f"с 1 января {yr} г. — {val}" for yr, val in row["by_year"].items())
-    return f"{steps} [прим. {note} к разд. {section}]"
+def _fmt(row: dict, note: str, section: str | None) -> str:
+    # Подпись колонки печатается как в первоисточнике; «с 1 января YYYY» уже содержит предлог,
+    # «2028 год и далее» — нет, поэтому соединяем нейтральным тире, а не дописываем «с 1 января».
+    steps = "; ".join(f"{lbl} — {val}" for lbl, val in row["by_year"].items())
+    src = f"прим. {note} к разд. {section}" if section else f"прим. {note}"
+    return f"{steps} [{src}]"
 
 
 # --- Простые пороги-списки из примечаний (прим. 7/11/31/52/53…) --------------------------
@@ -99,20 +132,82 @@ _NOTE_HDR_RE = re.compile(r"^(\d+(?:\(\d+\))?)\.\s")            # «7.», «8(1)
 #   * НЕСКОЛЬКО КОДОВ через запятую: «из 20.13.43.110, из 20.13.43.111, из 20.13.43.119 "Сода…"»
 # Прежняя регулярка требовала кавычку сразу за первым кодом и не брала ни то, ни другое.
 _CODE_TOKEN = r"(?:из\s+)?\d{2}(?:\.\d+)*(?:\s*<[^>\n]{1,16}>)?"
-_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}(?:\s*,\s*{_CODE_TOKEN})*\s*"', re.IGNORECASE)
+# ⚠ Строка-порог начинается со списка кодов, за которым идёт ЛИБО наименование в кавычках,
+# ЛИБО сразу двоеточие: «30.11.31.110, 30.11.31.111, …: до 30 июня 2023 г. не менее 2500 баллов»
+# (прим. 17). Требование кавычки теряло такие строки целиком (K2, #47).
+_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}(?:\s*,\s*{_CODE_TOKEN})*\s*[":]', re.IGNORECASE)
 _FOOTNOTE_RE = re.compile(r"<[^>\n]{1,16}>")
 _CODE_ONLY_RE = re.compile(r"\d{2}(?:\.\d+)*")
 _NAME_Q_RE = re.compile(r'"([^"]+)"')
+_QUOTED_RE = re.compile(r'"[^"]*"')
+
+
+def _name_spans(line: str) -> list[tuple[int, int]]:
+    """Границы закавыченных НАИМЕНОВАНИЙ. Общая основа для затирания кодов и для сбора имён.
+
+    ⚠ Парная регулярка `"[^"]*"` не годится: в приложении встречаются ВЛОЖЕННЫЕ кавычки —
+    «Суда наливные смешанного плавания "река - море"». Одна такая пара сбивает разбивку для всего
+    ОСТАТКА строки: в длинной строке прим. 17 из 22 кодов собиралось 6, а имена после вложенности
+    превращались в мусор («, 30.11.32.110»). Семь судов («Буровые суда», «Суда снабжения»,
+    «Суда обслуживающего флота» …) оставались без порога, хотя он написан для них тем же
+    предложением; до правки они брали порог СОСЕДНЕЙ строки — 1950 вместо 2450 (K2, #47).
+
+    Правило: имя заканчивается на кавычке, за которой идёт «,», «:», « -» или конец строки.
+    Внутренние кавычки этому не удовлетворяют и остаются частью имени."""
+    spans: list[tuple[int, int]] = []
+    i, n = 0, len(line)
+    while i < n:
+        if line[i] != '"':
+            i += 1
+            continue
+        j = i + 1
+        while j < n:
+            if line[j] == '"':
+                rest = line[j + 1:j + 3]
+                if rest[:1] in (",", ":", "") or rest.startswith(" -"):
+                    break
+            j += 1
+        spans.append((i, min(j, n - 1)))
+        i = j + 1
+    return spans
+
+
+def _blank_names(line: str) -> str:
+    """Затирает пробелами закавыченные наименования, оставляя коды и служебные символы."""
+    out = list(line)
+    for a, b in _name_spans(line):
+        for x in range(a, b + 1):
+            out[x] = " "
+    return "".join(out)
+
+
+def _quoted_names(line: str) -> list[str]:
+    """Наименования из кавычек — тем же сканером, что и затирание (иначе списки разъезжаются)."""
+    return [line[a + 1:b].strip() for a, b in _name_spans(line) if b > a + 1]
 
 
 def _codes_before_quote(line: str) -> list[str]:
-    """Все коды в левой части строки — ДО первой кавычки.
+    """ВСЕ коды строки-порога примечания.
 
-    Отсечка по кавычке обязательна: иначе в «коды» попадают числа из наименования продукции
-    («чистотой менее 95 процентов»). Сноски вырезаем до поиска, иначе «<11>» даёт «код» 11."""
-    q = line.find('"')
-    left = line[:q] if q > 0 else line
-    return _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", left))
+    ⚠ Имя обманчиво историческое: раньше брались коды строго ДО первой кавычки, чтобы в «коды» не
+    попали числа из наименования («чистотой менее 95 процентов»). Но строки примечаний часто несут
+    НЕСКОЛЬКО пар «код + имя» подряд:
+
+        30.11.22.110 "Суда наливные морские", 30.11.22.112 "Суда морские для перевозки химических
+        продуктов", 30.11.22.119 "…": до 30 июня 2023 г. - не менее 1750 баллов, …
+
+    и до 19.08.2026 привязывался только ПЕРВЫЙ код — остальные позиции оставались без порога,
+    хотя он написан для них тем же предложением (K2, #47; в прим. 17 так устроена половина строк).
+
+    Опасность чисел из наименования снимается иначе и надёжнее: вырезаем ВСЕ закавыченные куски
+    целиком, а из остатка берём коды. Хвост с самим порогом отсекаем по первому «:» или «не менее» —
+    там даты («до 30 июня 2023 г.»), и хотя точек в них нет, отсечка дешевле рассуждения."""
+    body = _blank_names(line)
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = body.find(cut)
+        if pos > 0:
+            body = body[:pos]
+    return [c for c in _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", body)) if "." in c]
 _AMEND_STRIP_RE = re.compile(r"\s*\(в ред\.(?:[^()]|\([^()]*\))*\)")
 
 
@@ -135,16 +230,29 @@ def _flat_thresholds() -> list[dict]:
             note = h.group(1)
         if _FLAT_ROW_RE.match(ln):
             if "не менее" in ln:  # инлайн: код и порог на одной строке
-                j = ln.find("не менее")
-                left = ln[:j]
-                thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip().rstrip(";. ").strip()
+                # ⚠ Порог начинается ПОСЛЕ имени/кодов, а не со слова «не менее». Отсечка по
+                # «не менее» срезала первую ступень вместе с её датой: «до 30 июня 2023 г. -
+                # не менее 250 баллов, с 1 июля 2023 г. - …» превращалось в «не менее 250
+                # баллов, …», то есть ПРОШЛЫЙ порог читался как действующий (K2, #47). Режем по
+                # границе «конец последнего имени / список кодов», а её даёт двоеточие или тире.
+                head = _blank_names(ln)
+                nm = head.find("не менее")
+                # Двоеточие — граница «коды/имена | порог», и оно приоритетнее тире: тире стоит
+                # ещё и ВНУТРИ порога, между датой и числом («до 30 июня 2023 г. - не менее 250»).
+                sep = head.rfind(":", 0, nm)
+                if sep < 0:
+                    sep = head.rfind(" - ", 0, nm)
+                j = sep + 1 if sep > 0 else ln.find("не менее")
+                left = ln[:ln.find("не менее")]
+                thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip(" -—").rstrip(";. ").strip()
+                codes = _codes_before_quote(ln)
                 codes = _codes_before_quote(ln)
                 if codes and thr:
-                    rows.append({"codes": codes, "names": _NAME_Q_RE.findall(left),
+                    rows.append({"codes": codes, "names": _quoted_names(left),
                                  "threshold": thr, "note": note})
             elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
                 codes = _codes_before_quote(ln)
-                names = _NAME_Q_RE.findall(ln)
+                names = _quoted_names(ln)
                 steps: list[str] = []
                 k = i + 1
                 while (k < n and lines[k].strip()
@@ -271,6 +379,35 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                 for r in t["rows"]:
                     if _norm(r["name"]) == name:
                         return _fmt(r, t["note"], t["section"])
+    # 1б) ТАБЛИЦЫ, ПРИВЯЗАННЫЕ ПО КОДУ (K2, #47). Часть примечаний-таблиц раздела не называет
+    #     (прим. 38 радиоэлектроника, 81/28/33 медизделия), поэтому матч по имени в рамках раздела
+    #     до них не доходил, а сами таблицы прежде даже не разбирались. У них есть КОДЫ — привязка
+    #     по коду надёжнее имени: наименование в примечании и в приложении расходится формулировкой.
+    #     ⚠ Направление то же, что в `_code_applies`: код примечания — предок ИЛИ равен коду позиции.
+    #     Порог не «утекает» вверх по иерархии; при неоднозначности разрешаем по наименованию и,
+    #     если оно не различает, НЕ ГАДАЕМ — лучше не показать, чем показать чужой порог.
+    if codes:
+        tcands: list[tuple[dict, dict, bool]] = []   # (таблица, строка, точное ли совпадение кода)
+        for t in _tables():
+            if note_scope(t["note"]) != scope:
+                continue
+            for r in t["rows"]:
+                exact = None
+                for c in codes:
+                    for rc in r["codes"]:
+                        if _code_applies(rc, c):
+                            exact = bool(exact) or (_segs(rc) == _segs(c))
+                if exact is not None:
+                    tcands.append((t, r, exact))
+        if len(tcands) == 1:
+            t, r, _ = tcands[0]
+            return _fmt(r, t["note"], t["section"])
+        if len(tcands) > 1:
+            best = max(tcands, key=lambda x: (_name_overlap(product_name, [x[1]["name"]]), x[2]))
+            if _name_overlap(product_name, [best[1]["name"]]) >= 2:
+                t, r, _ = best
+                return _fmt(r, t["note"], t["section"])
+
     # 2) простые пороги-списки (прим. 7/11/31/52/53…) — матч по КОДУ; при неоднозначности (у кода
     #    несколько строк с разными порогами) разрешаем по наименованию, иначе НЕ гадаем.
     if codes:
@@ -289,6 +426,17 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             row, is_exact = cands[0]
             return _fmt_flat(row, group=not is_exact)
         if len(cands) > 1:
+            # ⚠ ТОЧНОЕ СОВПАДЕНИЕ ИМЕНИ РЕШАЕТ СРАЗУ. Правило «пересечение ≥2 слов» слепо к
+            # ОДНОСЛОВНЫМ наименованиям: «Ледоколы», «Буровые суда», «Суда снабжения» названы в
+            # прим. 17 поимённо, но давали пересечение 1 и отбрасывались — а код 30.11.33.190
+            # делят несколько строк примечания, и позиция оставалась без порога при том, что он
+            # написан прямо для неё. Сноски у имени («Ледоколы <9>») снимаем перед сравнением.
+            exact_name = [rc for rc in cands
+                          if any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
+                                 for nm in rc[0]["names"])]
+            if len(exact_name) == 1:
+                row, is_exact = exact_name[0]
+                return _fmt_flat(row, group=not is_exact)
             # При равном пересечении имён точное совпадение кода приоритетнее группового.
             row, is_exact = max(cands, key=lambda rc: (_name_overlap(product_name, rc[0]["names"]), rc[1]))
             if _name_overlap(product_name, row["names"]) >= 2:
