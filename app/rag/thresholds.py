@@ -161,6 +161,42 @@ def _flat_thresholds() -> list[dict]:
     return rows
 
 
+# --- ⚠ ОБЛАСТЬ ДЕЙСТВИЯ ПРИМЕЧАНИЯ (K2, #47) -------------------------------------------
+# Часть примечаний задаёт порог НЕ для подтверждения российского происхождения, а «для целей
+# осуществления закупок … для обеспечения государственных и муниципальных нужд». Это ДРУГОЙ вопрос
+# и другой порог: у одной позиции они могут различаться, а «Порог:» в ответе означает первое.
+#
+# ⚠ ЗАМЕР 19.08.2026: 57 позиций корпуса получали закупочный порог как СВОЙ ОБЩИЙ — с настоящей
+# ссылкой на первоисточник («не менее 75 баллов [прим. 53]»). Неверный порог с подлинной ссылкой
+# опаснее отсутствующего: faithfulness-гард молчит (число дословно), а эксперт видит подтверждение.
+# Тот же класс, что утечка порога вверх по иерархии в `_code_applies`: гард проверяет
+# заземлённость, а не правильность привязки.
+#
+# Признак берётся из ТЕКСТА примечания, а не из списка номеров: список устареет на следующей
+# редакции, а формулировка живёт в первоисточнике.
+_PROCUREMENT_RE = re.compile(r"[Дд]ля целей осуществления закупок")
+
+
+@lru_cache(maxsize=1)
+def _note_scopes() -> dict[str, str]:
+    """Номер примечания → 'procurement' | 'general' (по его вводной фразе)."""
+    if not _CHUNK.exists():
+        return {}
+    lines = _CHUNK.read_text(encoding="utf-8").splitlines()
+    out: dict[str, str] = {}
+    bounds = [(m.group(1), i) for i, ln in enumerate(lines) if (m := _NOTE_HDR_RE.match(ln))]
+    for k, (num, i) in enumerate(bounds):
+        j = bounds[k + 1][1] if k + 1 < len(bounds) else len(lines)
+        head = " ".join(lines[i:j])[:900]
+        out.setdefault(num, "procurement" if _PROCUREMENT_RE.search(head) else "general")
+    return out
+
+
+def note_scope(note: str | None) -> str:
+    """Область действия примечания. Неизвестное примечание считаем общим — это прежнее поведение."""
+    return _note_scopes().get(str(note or ""), "general")
+
+
 def _segs(code: str) -> list[str]:
     return [s for s in str(code).strip().split(".") if s]
 
@@ -197,6 +233,20 @@ def _fmt_flat(r: dict, group: bool = False) -> str:
 
 
 def lookup_threshold(codes: list[str], product_name: str, section: str | None = None) -> str | None:
+    """ОБЩИЙ порог позиции из примечаний (для подтверждения российского происхождения), либо None.
+
+    ⚠ Закупочные примечания сюда НЕ входят — см. `_note_scopes`. Их порог отдаёт
+    `lookup_procurement_threshold`, и показывать его надо ВМЕСТЕ с условием, при котором он читается."""
+    return _lookup(codes, product_name, section, "general")
+
+
+def lookup_procurement_threshold(codes: list[str], product_name: str,
+                                 section: str | None = None) -> str | None:
+    """Порог «для целей осуществления закупок» — ДРУГОЙ вопрос и другой ответ, чем `lookup_threshold`."""
+    return _lookup(codes, product_name, section, "procurement")
+
+
+def _lookup(codes: list[str], product_name: str, section: str | None, scope: str) -> str | None:
     """Порог по годам для позиции (из примечаний), либо None. Матч по НАИМЕНОВАНИЮ в рамках раздела
     (у одного кода бывают строки «общая категория» и «конкретный продукт» — имя различает)."""
     name = _norm(product_name)
@@ -206,6 +256,8 @@ def lookup_threshold(codes: list[str], product_name: str, section: str | None = 
         for t in tables:  # точный матч имени в нужном разделе
             if section and t["section"] != section:
                 continue
+            if note_scope(t["note"]) != scope:
+                continue
             for r in t["rows"]:
                 if _norm(r["name"]) == name:
                     return _fmt(r, t["note"], t["section"])
@@ -214,6 +266,8 @@ def lookup_threshold(codes: list[str], product_name: str, section: str | None = 
             # проход выполнялся всегда, и одноимённая позиция из ДРУГОГО раздела могла отдать свой
             # порог. Сейчас на корпусе это не срабатывает, но защита нужна: данные меняются.
             for t in tables:
+                if note_scope(t["note"]) != scope:
+                    continue
                 for r in t["rows"]:
                     if _norm(r["name"]) == name:
                         return _fmt(r, t["note"], t["section"])
@@ -222,6 +276,8 @@ def lookup_threshold(codes: list[str], product_name: str, section: str | None = 
     if codes:
         cands: list[tuple[dict, bool]] = []  # (строка примечания, точное ли совпадение кода)
         for r in _flat_thresholds():
+            if note_scope(r.get("note")) != scope:
+                continue
             exact = None
             for c in codes:
                 for rc in r["codes"]:

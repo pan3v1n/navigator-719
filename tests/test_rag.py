@@ -39,7 +39,11 @@ from app.rag import meta  # noqa: E402
 from app.rag import okpd2_ref  # noqa: E402
 from app.rag import procedural  # noqa: E402
 from app.rag import translate  # noqa: E402
-from app.rag.thresholds import _tables, lookup_threshold  # noqa: E402
+from app.rag.thresholds import (  # noqa: E402
+    _tables,
+    lookup_procurement_threshold,
+    lookup_threshold,
+)
 
 # Загрузчик Правил лежит в scripts/ (не пакет) — добавляем в путь для теста парсера.
 if str(ROOT / "scripts") not in sys.path:
@@ -1470,9 +1474,20 @@ class TestThresholds(unittest.TestCase):
         self.assertIn("прим. 7", thr)
 
     def test_flat_threshold_name_disambiguation(self):
-        # у кода 32.99.53.130 несколько строк с разными порогами → выбор по наименованию (прим. 31)
-        self.assertIn("10 баллов", lookup_threshold(["32.99.53.130"], "Оборудование для практикума"))
-        self.assertIn("15 баллов", lookup_threshold(["32.99.53.130"], "Конструктор робототехнический"))
+        """У кода 32.99.53.130 несколько строк с разными порогами → выбор по НАИМЕНОВАНИЮ.
+
+        ⚠ Тест перенацелен 19.08.2026 (`K2` #47): механика дизамбигуации осталась та же, но
+        прим. 31 — ЗАКУПОЧНОЕ («Для целей осуществления закупок продукции индустрии учебного
+        оборудования … для обеспечения государственных и муниципальных нужд»). Прежняя редакция
+        требовала, чтобы его порог возвращался как ОБЩИЙ, то есть закрепляла дефект: заявитель,
+        спрашивающий про подтверждение российского происхождения, получал порог программы
+        госзакупок со ссылкой на настоящее примечание."""
+        practicum = lookup_procurement_threshold(["32.99.53.130"], "Оборудование для практикума")
+        robotics = lookup_procurement_threshold(["32.99.53.130"], "Конструктор робототехнический")
+        self.assertIn("10 баллов", practicum)
+        self.assertIn("15 баллов", robotics)
+        # и ни при каких условиях — как общий порог позиции
+        self.assertIsNone(lookup_threshold(["32.99.53.130"], "Оборудование для практикума"))
 
     def test_threshold_does_not_leak_up_the_hierarchy(self):
         """R8: порог из примечания для УЗКОГО кода не применяется к более широкой позиции.
@@ -1498,11 +1513,15 @@ class TestThresholds(unittest.TestCase):
         self.assertIn("порог задан для группы кодов", child)     # унаследован от 22.22
 
     def test_exact_note_wins_over_narrower_siblings(self):
-        # у 15.20.14 есть и точная строка примечания, и узкие («Обувь валяная» 15.20.14.130):
-        # после фикса узкие отброшены и остаётся верная
-        thr = lookup_threshold(["15.20.14"], "Обувь с верхом из текстильных материалов", "XVII")
+        """У 15.20.14 есть и точная строка примечания, и узкие («Обувь валяная» 15.20.14.130):
+        узкие отброшены, остаётся верная. ⚠ Прим. 53 закупочное — проверяем на своём канале
+        (`K2` #47), общий порог у этой позиции отсутствует, и это правильный ответ."""
+        thr = lookup_procurement_threshold(["15.20.14"],
+                                           "Обувь с верхом из текстильных материалов", "XVII")
         self.assertIsNotNone(thr)
         self.assertNotIn("порог задан для группы", thr)  # это её собственный порог
+        self.assertIsNone(lookup_threshold(["15.20.14"],
+                                           "Обувь с верхом из текстильных материалов", "XVII"))
 
     def test_operations_model_says_threshold_not_applicable(self):
         """R7: «порога нет в 719» и «порог не нашли» — разные вещи, и путать их нельзя.
@@ -1542,9 +1561,12 @@ class TestThresholds(unittest.TestCase):
         self.assertIsNone(lookup_threshold(["28.41.1"], "Станки лазерные"))
 
     def test_flat_threshold_multiline_note9(self):
-        # прим.9: пороги нефтегаз-компрессоров идут ОТДЕЛЬНЫМИ строками-ступенями под «код "имя":»
-        # (многострочный формат) — раньше терялись, теперь собираются в один порог.
-        thr = lookup_threshold(
+        """Прим. 9: пороги нефтегаз-компрессоров идут ОТДЕЛЬНЫМИ строками-ступенями под «код \"имя\":»
+        (многострочный формат) — раньше терялись, теперь собираются в один порог.
+
+        ⚠ Прим. 9 закупочное, поэтому проверяем на своём канале (`K2` #47). Разбор формата — то,
+        ради чего тест писался, — не изменился."""
+        thr = lookup_procurement_threshold(
             ["28.13.24"], "Компрессорные станции на колесных шасси на базе поршневых объемных компрессоров")
         self.assertIsNotNone(thr)
         self.assertIn("170 баллов", thr)  # с 1 января 2023 г.

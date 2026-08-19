@@ -272,3 +272,48 @@ class TestExtraCodesLimit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProcurementThresholdIsNotTheGeneralOne(unittest.TestCase):
+    """`K2` #47: примечания «для целей осуществления закупок» задают ДРУГОЙ порог.
+
+    ⚠ Замер 19.08.2026: 57 позиций корпуса получали закупочный порог как СВОЙ ОБЩИЙ — со ссылкой
+    на настоящее примечание («не менее 75 баллов [прим. 53]»). Заявитель, спрашивающий про
+    подтверждение российского происхождения, получал порог программы госзакупок. Неверный порог с
+    подлинной ссылкой опаснее отсутствующего: число дословно, поэтому faithfulness-гард молчит, —
+    тот же класс, что утечка порога вверх по иерархии в `_code_applies`."""
+
+    def test_scope_is_read_from_the_note_text(self):
+        from app.rag.thresholds import note_scope
+        for n in ["29", "31", "52", "53", "8", "9"]:
+            with self.subTest(note=n):
+                self.assertEqual(note_scope(n), "procurement")
+        for n in ["7", "11", "17", "26", "61", "77"]:
+            with self.subTest(note=n):
+                self.assertEqual(note_scope(n), "general")
+
+    def test_unknown_note_defaults_to_general(self):
+        """Неизвестное примечание — прежнее поведение, а не молчаливое исчезновение порога."""
+        from app.rag.thresholds import note_scope
+        self.assertEqual(note_scope("999"), "general")
+        self.assertEqual(note_scope(None), "general")
+
+    def test_procurement_threshold_never_answers_as_the_general_one(self):
+        from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
+        cases = [(["13.20.13"], "Ткани льняные", "XVII"), (["13.10.50"], "Пряжа шерстяная", "XVII")]
+        for codes, name, sec in cases:
+            with self.subTest(name=name):
+                self.assertIsNone(lookup_threshold(codes, name, sec),
+                                  "закупочный порог всё ещё выдаётся как общий")
+                self.assertIsNotNone(lookup_procurement_threshold(codes, name, sec),
+                                     "закупочный порог потерян вовсе — это тоже не годится")
+
+    def test_context_prints_the_condition_with_the_number(self):
+        """Число без условия и есть неверный ответ — условие обязано ехать вместе с порогом."""
+        hit = Hit(0.9, "XVII", "Лёгкая промышленность", "Ткани льняные", ["13.20.13"], None,
+                  [{"operations": [{"text": "ткачество", "points": 30}]}], "Разд. XVII, поз. 5",
+                  True, {})
+        ctx = P.format_context([hit], "ткани льняные", "13.20.13")
+        self.assertIn("ДЛЯ ЦЕЛЕЙ ЗАКУПОК", ctx)
+        self.assertIn("не для подтверждения происхождения", ctx)
+        self.assertNotIn("\n    Порог: не менее 50", ctx, "закупочное число стоит в строке «Порог»")
