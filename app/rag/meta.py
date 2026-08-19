@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import re
 
-_CODE_RE = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
+from app.rag.okpd2_ref import has_okpd2_code  # разбор кода — одно место (ревью PR #94)
 
 _GREETING = re.compile(
     r"^(привет\w*|здравствуй\w*|добр(ый|ое) (день|вечер|утро)|хай|hello|hi|доброе утро)\b", re.I
@@ -59,7 +59,7 @@ THANKS = "Пожалуйста. Если нужно — спрашивайте �
 def is_meta(query: str) -> bool:
     """True — это приветствие/вопрос о возможностях/как работать/благодарность (не про продукцию)."""
     q = (query or "").strip()
-    if _CODE_RE.search(q):  # есть код ОКПД2 → товарный вопрос
+    if has_okpd2_code(q):  # есть код ОКПД2 → товарный вопрос
         return False
     return bool(
         _CAPABILITIES.search(q) or _HOWTO.search(q) or _GREETING.search(q) or _THANKS.search(q)

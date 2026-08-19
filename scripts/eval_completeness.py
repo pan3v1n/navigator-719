@@ -53,6 +53,12 @@ VERDICT_RE = re.compile(
 # Номера правил инструкции («[2б]», «правило 4») эксперт прочитает как ссылку на источник.
 RULE_REF_RE = re.compile(r"\[\s*\d+\s*[а-яё]\s*\]|правил[оа]\s+\d+[а-яё]?\b", re.I)
 ZAKL_RE = re.compile(r"заключени\w*\s+ТПП", re.I)
+# Внутренняя кухня в ответе (правило 3г). Пользователь не видит ни контекста, ни промпта, и
+# «в контексте не указано» читает как «в системе чего-то не хватает» — класс R7, жалоба №1
+# платного теста. ⚠ Ловим только «контекст» и «промпт»: слова «инструкция», «база»,
+# «руководство» встречаются в САМИХ требованиях приложения (руководство по эксплуатации,
+# инструкция по монтажу), и запрет на них дал бы ложные срабатывания на верных ответах.
+KITCHEN_RE = re.compile(r"контекст\w*|промпт\w*", re.I)
 EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️]")
 CITE_RE = re.compile(r"\[(\d+)\]")
 # Строка «Порог:» в ответе — в неё нельзя подставлять порог отдельного УЗЛА (правило 2б).
@@ -139,7 +145,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
         ctx = ans.grounding  # ⚠ заземление ответа, а не пересборка (см. eval_answers)
-        hit = target_hit(ans.hits)
+        hit = target_hit(ans.hits, ans.codes)  # ⚠ теми же кодами, что рантайм (ревью PR #94)
         want = context_facts(hit, ctx)
 
         # --- ПОЛНОТА -------------------------------------------------------------------------
@@ -175,6 +181,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
             "verdict": bool(VERDICT_RE.search(text)),
             "rule_ref": bool(RULE_REF_RE.search(text)),
             "zakl": bool(ZAKL_RE.search(text)),
+            "kitchen": bool(KITCHEN_RE.search(text)),
             "emoji": bool(EMOJI_RE.search(text)),
             "cites_ok": (not cites) or max(cites) <= max(len(ans.hits), 1),
             "node_leak": node_leak,
@@ -219,12 +226,14 @@ def report(rows: list[dict]) -> list[str]:
            f"  Нет номеров правил промпта          = {pct(n - sum(r['rule_ref'] for r in rows), n)}",
            f"  Нет термина «заключение ТПП»        = {pct(n - sum(r['zakl'] for r in rows), n)}",
            f"  Нет эмодзи                          = {pct(n - sum(r['emoji'] for r in rows), n)}",
+           f"  Нет внутренней лексики («контекст») = {pct(n - sum(r['kitchen'] for r in rows), n)}",
            f"  Все [N] существуют                  = {pct(sum(r['cites_ok'] for r in rows), n)}",
            f"  Порог узла не подставлен в «Порог»  = {pct(n - sum(1 for r in rows if r['node_leak']), n)}",
            ""]
 
     bad = [r for r in rows if (r["thr_expected"] and not r["thr_shown"]) or r["verdict"]
-           or r["rule_ref"] or r["zakl"] or r["emoji"] or r["node_leak"] or not r["cites_ok"]]
+           or r["rule_ref"] or r["zakl"] or r["emoji"] or r["kitchen"] or r["node_leak"]
+           or not r["cites_ok"]]
     if bad:
         out.append("ПРОБЛЕМНЫЕ КЕЙСЫ:")
         for r in bad:
@@ -239,6 +248,8 @@ def report(rows: list[dict]) -> list[str]:
                 why.append("«заключение ТПП»")
             if r["emoji"]:
                 why.append("эмодзи")
+            if r["kitchen"]:
+                why.append("внутренняя лексика («контекст»/«промпт»)")
             if r["node_leak"]:
                 why.append(f"порог узла в строке «Порог»: {r['node_leak']}")
             if not r["cites_ok"]:

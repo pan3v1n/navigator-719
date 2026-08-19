@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import re
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
 
@@ -24,7 +25,7 @@ from app.core.prompts import (
 )
 from app.rag import fragments, inheritance, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
-from app.rag.retriever import Hit, dense_top1, search, search_cases, search_rules
+from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
 from app.rag.thresholds import lookup_threshold
 
 # Кап операций ЦЕЛЕВОГО хита (вариант A, 2026-07-05): 60, чтобы не резать умеренные продукты
@@ -73,6 +74,10 @@ class Answer:
     # держал в промпте. Тот же класс, что урок 33 («одно решение — одно место») и предупреждение в
     # самом `eval_answers` про забытый `question`.
     grounding: str = ""
+    # ⚠ Коды, по которым выбирались ЦЕЛЕВЫЕ позиции (`all_codes`). Метрики обязаны брать их отсюда:
+    # `target_hits(hits)` БЕЗ кода даёт другой ответ, чем рантайм, и метрика начинает оценивать не
+    # ту позицию, на которой построен ответ (ревью PR #94). Тот же класс, что `grounding`.
+    codes: list[str] = field(default_factory=list)
     # U5: что показать подсказкой в поле ввода ПОСЛЕ этого ответа — готовый текст, «» = пусто.
     # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
     # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
@@ -216,7 +221,8 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     return sorted(ops, key=lambda o: -len(qtok & set(sparse.tokenize(o.get("text", "")))))
 
 
-def format_context(hits: list[Hit], query: str | None = None, code: str | None = None) -> str:
+def format_context(hits: list[Hit], query: str | None = None,
+                   code: str | list[str] | None = None) -> str:
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное
     # место, где это решается); прочие кандидаты идут строкой «наименование + код» как материал
     # для уточнения — см. EV7 ниже.
@@ -297,11 +303,16 @@ def format_context(hits: list[Hit], query: str | None = None, code: str | None =
             # печатается для КАЖДОГО нецелевого кандидата — на окне 8 промпт получал бы семь
             # требований «попроси код» против одного правила «не переспрашивай». По уроку проекта
             # («правило промпта слабее устройства контекста») выиграл бы контекст.
-            ask = ("" if targets and any(t.okpd2_match for t in targets) else
+            # ⚠ Спрашивать надо про ВСЁ ОКНО, а не про целевые. С переносом `_content_sibling`
+            # на ветку кода (ревью PR #94) целевой становится содержательный сиблинг, а он
+            # пришёл обычным ретривом и `okpd2_match` у него False — при том что код пользователя
+            # совпал со строкой-квалификатором, которая осталась в окне. По прежнему условию
+            # эксперта, назвавшего код, просили назвать его снова — та самая рекурсия правила 1ж.
+            ask = ("" if any(x.okpd2_match for x in hits) else
                    " Это кандидат для УТОЧНЕНИЯ: если продукция заявителя — эта позиция, попроси её "
                    "код ОКПД2 и разбери отдельным ответом.")
             lines.append(
-                f"    Требования этой позиции в контекст НЕ включены{have} — она НЕ целевая.{ask} "
+                f"    Требования этой позиции НЕ ПОКАЗАНЫ{have} — она НЕ целевая.{ask} "
                 "НЕ утверждай, что требований у неё нет, и НЕ приводи по ней баллов, порогов и "
                 "процентов — их здесь нет и брать их негде."
             )
@@ -332,11 +343,62 @@ def format_context(hits: list[Hit], query: str | None = None, code: str | None =
         # нет баллов И тип требований не балльный. При «points»/«mixed» без баллов молчим — там
         # возможна потеря при разборе, и выдумывать «порога нет» нельзя.
         rtype = (h.payload or {}).get("requirement_type")
+        no_points = bool(ops) and not any(o.get("points") is not None for o in ops)
+        # ⚠ ДВА УСЛОВИЯ, БЕЗ КОТОРЫХ УТВЕРЖДЕНИЕ «БАЛЛЫ НЕ НАЧИСЛЯЮТСЯ» ЛОЖНО (ревью PR #94):
+        #
+        # 1. `rtype` — свойство ЗАПИСИ-ХИТА, а операции при наследовании (R6) принадлежат РОДИТЕЛЮ.
+        #    Замер: 136 позиций печатали «баллы не начисляются», показывая при этом операции
+        #    родителя, у которого тип `points`/`mixed`, — то есть баллы существуют и потеряны при
+        #    разборе. «Два согласных признака», ради которых guard и писался, оказались признаками
+        #    РАЗНЫХ записей. Карта наследования типа не несёт, поэтому под наследованием молчим.
+        # 2. Порог может быть добран рантаймом из примечаний (`lookup_threshold`), и тогда в блоке
+        #    рядом стоит «не менее 3600 баллов [прим. 17]». Замер: «Суда морские пассажирские» и
+        #    ещё 51 запись получали порог в БАЛЛАХ и следом утверждение, что баллы не начисляются.
+        #    Одно из двух в таком блоке заведомо неверно, а по уроку проекта модель следует за
+        #    контекстом — значит противоречие разрешала бы она.
+        points_threshold = bool(mt) and "балл" in str(mt).lower()
+        own_ops = parent is None
+        can_deny_points = no_points and own_ops and not points_threshold and rtype in (None, "operations")
         if mt:
             lines.append(f"    Порог: {mt}")
-        elif ops and not any(o.get("points") is not None for o in ops) and rtype in (None, "operations"):
+        elif can_deny_points:
             lines.append("    Порог: не предусмотрен — требования этой позиции заданы ПЕРЕЧНЕМ "
                          "обязательных операций, баллы за них не начисляются.")
+        # ⚠ ПРО БАЛЛЫ КОНТЕКСТ ГОВОРИТ САМ — иначе за него это делает модель, и делает плохо.
+        # 18.08.2026 на живом ответе (насосы по ГОСТ 32601-2013): порог у позиции ТЕКСТОВЫЙ
+        # («не менее 5 из следующих технологических операций»), поэтому строка выше не печаталась,
+        # а баллов у операций нет — и модель написала «в контексте баллы по операциям не указаны».
+        # Это класс R7, жалоба №1 платного теста: молчание контекста читается как пробел в данных.
+        # Условие то же, что у R7: утверждаем только при СОГЛАСНЫХ признаках (ни у одной операции
+        # нет баллов И тип требований не балльный) — при «points»/«mixed» молчим, там возможна
+        # потеря при разборе, и «баллов нет» было бы выдумкой.
+        # Печатаем ТОЛЬКО когда порог показан отдельной строкой: без `mt` то же самое уже сказано
+        # строкой «Порог: не предусмотрен …», и два одинаковых утверждения подряд читаются как
+        # расхождение данных.
+        # ⚠ РЕВЬЮ PR #94: у этой развилки `elif` ловил ровно тот случай, ради которого стоит `and mt`.
+        # При `can_deny_points and not mt` первая ветка ложна, а `can_deny_points` ВЛЕЧЁТ `no_points`
+        # — и блок печатал подряд «баллы за них не начисляются» и «баллы НЕ ПРИВЕДЕНЫ (это не значит,
+        # что их нет в приложении)». Не дубль, а два ВЗАИМОИСКЛЮЧАЮЩИХ утверждения об одной позиции
+        # (8–11 % корпуса), которые модель разрешала сама — от прогона к прогону по-разному. Поэтому
+        # `not can_deny_points` в `elif`: без порога об отсутствии баллов уже сказала строка «Порог».
+        if can_deny_points and mt:
+            lines.append("    Балльная оценка: не предусмотрена — требования заданы перечнем "
+                         "обязательных операций, баллы за них не начисляются.")
+        elif no_points and not can_deny_points:
+            # ⚠ Тип требований говорит «баллы должны быть», а их нет ни у одной операции: у 229
+            # записей корпуса (17 %) это так. Утверждать «баллов не предусмотрено» здесь НЕЛЬЗЯ —
+            # возможна потеря при разборе (класс `K2`/`D9`, порог и баллы живут в примечании).
+            # Но и молчать нельзя: 18.08.2026 на живом ответе модель заполнила молчание сама и
+            # написала «баллы по операциям В КОНТЕКСТЕ не указаны» — внутренняя лексика наружу и
+            # чтение «в системе чего-то нет» (класс R7). Поэтому контекст говорит РОВНО то, что
+            # знает, и подсказывает формулировку: «не приведены» ≠ «не предусмотрены» (правило 3в).
+            # ⚠ ТОЛЬКО ФАКТ, без указаний. Первая редакция несла внутри контекста императив
+            # («Так и скажи — …; не утверждай …»), то есть правило жило в ДАННЫХ. Замер показал
+            # просадку детерминизма набора чисел 0.90 → 0.70 при неизменном ретриве (контекст
+            # совпадал в 9 запросах из 10), а инструкция в данных — самый вероятный источник
+            # разброса формулировок. Указание переехало в правило 2в промпта, где ему и место.
+            lines.append("    Балльная оценка: у показанных требований баллы НЕ ПРИВЕДЕНЫ "
+                         "(это не значит, что их нет в приложении).")
         if attribution_line:
             lines.append(attribution_line)
         total = len(ops)
@@ -356,7 +418,7 @@ def format_context(hits: list[Hit], query: str | None = None, code: str | None =
                     lines.append(f"      ▸ {op_parent}")
                 cur_parent = op_parent
                 pts = o.get("points")
-                ptxt = f" — {pts} балл." if pts is not None else " — баллы в контексте не указаны"
+                ptxt = f" — {pts} балл." if pts is not None else " — баллы не приведены"
                 indent = "        " if op_parent else "      "
                 lines.append(f"{indent}• {o.get('text', '')}{ptxt}")
             if total > cap:
@@ -402,17 +464,26 @@ POINTS_TABLE_MIN = 12  # балльных операций у целевой п�
 _POINTS_TABLE_TITLE = "Операции и баллы — дословно из приложения"
 
 
-# Строка-КВАЛИФИКАТОР: наименование группы плюс область действия строки кода. Продуктом она не
-# является («Светодиоды (в части светодиодов белого диапазона)» — это про то, к какой части кода
-# 26.11.22.210 относится ячейка требований, а сама продукция названа отдельной строкой).
-_SCOPE_QUALIFIER_RE = re.compile(r"\((?:в\s+части|за\s+исключением)\b", re.I)
-
-
 def _n_operations(h: Hit) -> int:
-    return sum(len(b.get("operations") or []) for b in (h.requirement_blocks or []))
+    """Сколько требований у позиции — ТЕМ ЖЕ счётчиком, которым их показывает контекст.
+
+    ⚠ Ревью PR #94: здесь считались только `requirement_blocks[].operations`, а контекст выводит
+    требования через `_hit_operations`, который добавляет блоки без операций, но с текстом в
+    `component` (R6). Счётчики расходятся на 98 записях корпуса, причём 9 из них считались НУЛЁМ,
+    показывая при этом требования, — и одна такая запись лежит внутри расколотой группы, где по
+    этому числу выбирается опора ответа. Ровно то расхождение счётчиков, которое `EV7` уже
+    исправляла для кандидатов."""
+    return len(_hit_operations(h))
 
 
-def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
+def _codes(code: str | list[str] | None) -> list[str]:
+    """Нормализуем «код» к списку: вопрос может назвать НЕСКОЛЬКО кодов (`EV8`, issue #88)."""
+    if not code:
+        return []
+    return [c.strip() for c in ([code] if isinstance(code, str) else list(code)) if c and c.strip()]
+
+
+def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hit]:
     """Позиции, О КОТОРЫХ идёт ответ. ЕДИНСТВЕННОЕ место, где это решается.
 
     ⚠ СОВПАДЕНИЕ ПО КОДУ БЫВАЕТ ТОЧНЫМ И ПРЕФИКСНЫМ, и это разные вопросы пользователя. `okpd2_match`
@@ -426,6 +497,15 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     ТОЧНОЕ совпадение — другое дело: у одного кода в приложении бывает НЕСКОЛЬКО записей с
     поделёнными между ними требованиями (26.11.22.210), и назвавший этот код эксперт спрашивает про
     них обе. Такие записи остаются целевыми все.
+
+    ⚠ ОСТАТОК, ЗАМЕРЕННЫЙ И ОСТАВЛЕННЫЙ СОЗНАТЕЛЬНО (ревью PR #94). В вопросе с НЕСКОЛЬКИМИ
+    ГРУППОВЫМИ кодами выбор записи внутри группы зависит от состава окна, а тот — от того, каким
+    кодом бустился ретрив, то есть от ПОРЯДКА кодов в вопросе: «сравни по 28.13.14 и по 26.30.50»
+    и та же фраза с перестановкой дают разные пары позиций (под 28.13.14 подходят две записи с
+    одним кодом 28.13.14.110). Детерминированный тай-брейк это не лечит — различаются САМИ окна.
+    Полное решение — разрешать каждый названный код отдельным поиском и не зависеть от общего окна;
+    это переделка ретрива ради сценария, встречающегося 1 раз на 580 вопросов трафика. Пока честно
+    так: ответ называет позицию, на которую опирается, и её код (issue #88).
 
     ⚠ EV6: из СТРОК ОДНОЙ РАСКОЛОТОЙ ЯЧЕЙКИ целевой берём ту, у которой требования есть.
     В приложении одна ячейка требований бывает растянута на несколько строк кода, и парсер отдаёт
@@ -457,27 +537,55 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
         hits = products
     matched = [h for h in hits if h.okpd2_match]
     if matched:
-        exact = [h for h in matched if code and code.strip() in (h.okpd2_codes or [])]
-        return exact or matched[:1]
-    target = hits[0]
+        # ⚠ Ветка кода тоже обязана проходить правило EV6/EV9. До ревью PR #94 она возвращалась
+        # раньше него, и на запросе с кодом 26.11.22.210 целевыми становились ОБЕ строки-
+        # квалификатора («в части…» и «за исключением…»), а содержательная 26.11.22.216 с её
+        # 15 операциями в окно даже не попадала. То есть правка работала ровно тогда, когда
+        # пользователь НЕ называл код, — на самом надёжном пути её не было.
+        # ПРАВИЛО: одна целевая позиция на КАЖДЫЙ названный код — плюс все записи, совпавшие с ним
+        # ТОЧНО (у одного кода в приложении бывает несколько записей с поделёнными требованиями,
+        # напр. 26.11.22.210). Так «сравни по 28.13.14 и по 26.30.50» даёт две опоры (`EV8`), а
+        # «требования по 28.13» — по-прежнему одну, хотя под префикс подходят 52 записи.
+        picked: list[Hit] = []
+        for c in _codes(code):
+            exact = [h for h in matched if c in (h.okpd2_codes or [])]
+            chosen = exact or [h for h in matched if okpd2_match(h.okpd2_codes or [], c)][:1]
+            for h in chosen:
+                h = _content_sibling(h, hits)
+                if not any(h is p for p in picked):
+                    picked.append(h)
+        if not picked:
+            picked = [_content_sibling(matched[0], hits)]
+        return picked
+    return [_content_sibling(hits[0], hits)]
+
+
+def _content_sibling(target: Hit, hits: list[Hit]) -> Hit:
+    """Строку-КВАЛИФИКАТОР расколотой ячейки меняем на содержательного сиблинга той же группы.
+
+    Общая точка для обеих веток выбора целевой (по коду и по рангу): правило `EV6`/`EV9` не должно
+    зависеть от того, назвал пользователь код или нет."""
     # ⚠ Подменяем ТОЛЬКО строку-квалификатор, а не названный продукт. Первая версия правила брала
     # из группы запись с наибольшим числом операций — и на запросе «светодиоды красного диапазона»
     # подменяла верный top-1 «Светодиоды красного диапазона» (1 операция) на общую строку
     # «Светодиоды (за исключением светодиодов белого диапазона)» (5). То есть чинила один запрос и
     # ломала соседний. Квалификатор «(в части …)» / «(за исключением …)» — это не продукт, а
     # ОБЛАСТЬ действия строки кода, и именно такие строки держат хвост общей ячейки.
-    if not _SCOPE_QUALIFIER_RE.search(target.product_name or ""):
-        return [target]
+    # ⚠ Роль строки читается ИЗ ДАННЫХ (`fragments.is_scope_qualifier`), а не считается регуляркой
+    # по наименованию: под прежнюю регулярку подходили 16 записей корпуса, из которых 13 — настоящая
+    # продукция, и от подмены ответа их спасало лишь отсутствие в расколотых группах (`EV9` #89).
+    if not fragments.is_scope_qualifier(target.product_name):
+        return target
     group = fragments.group_of(target.product_name)
     if group is None:
-        return [target]
+        return target
     # Сиблинг-замена обязан САМ быть продуктом. Без этого условия на нейтральном
     # «светодиодные модули chip-on-board» правило меняло обрывок заголовка группы (3 операции) на
     # обрывок квалификатора (4) — целевой всё равно оставалась строка, которая продукцию не
     # называет. Не нашлось содержательного сиблинга в окне — оставляем top-1 как есть.
     siblings = [h for h in hits
                 if fragments.group_of(h.product_name) == group
-                and not _SCOPE_QUALIFIER_RE.search(h.product_name or "")]
+                and not fragments.is_scope_qualifier(h.product_name)]
     # ⚠ Ничья решается ИМЕНЕМ, а не порядком окна. Ничьи в данных есть: у трёх из четырёх
     # расколотых групп сиблинги имеют равное число операций (аддитивные установки 0 и 0;
     # синий/зелёный/красный диапазоны по 1). Сегодня подмена на них не срабатывает — нужен
@@ -485,10 +593,10 @@ def target_hits(hits: list[Hit], code: str | None = None) -> list[Hit]:
     # от порядка выдачи Qdrant. Ровно этот класс уже ловили в `_order_key`: ничья RRF
     # решалась случаем и дала «неустранимый» разброс recall@1 (M1).
     best = max(siblings, key=lambda h: (_n_operations(h), h.product_name or ""), default=target)
-    return [best] if _n_operations(best) > _n_operations(target) else [target]
+    return best if _n_operations(best) > _n_operations(target) else target
 
 
-def _target_hit(hits: list[Hit], code: str | None = None) -> Hit | None:
+def _target_hit(hits: list[Hit], code: str | list[str] | None = None) -> Hit | None:
     """Позиция, вокруг которой строится ответ, — первая из `target_hits`."""
     ts = target_hits(hits, code)
     return ts[0] if ts else None
@@ -574,9 +682,14 @@ def format_rules_context(rules: list[dict]) -> str:
         # Вводная фраза родительского пункта (P2): без неё «4.2.1. Правоустанавливающие и
         # регистрационные документы заявителя…» — список неизвестно к чему. То же правило, что
         # K4 применила к требованиям приложения.
+        # ⚠ Формулировка — не косметика (ревью PR #94). Прежняя врезка звучала «(в контексте пункта: …)»,
+        # то есть внутренняя лексика ехала в промпт на ПРОЦЕДУРНОЙ ветке, где запрета на слово нет вовсе
+        # (в PROCEDURAL_SYSTEM_PROMPT его ноль раз), а метрика полноты гоняет только товарные кейсы
+        # и увидеть этого не могла. Механизм уже измерен: запрет слова не держится, пока слово
+        # живёт в самом промпте (0.83 против 0.98) — поэтому слово убрано, а не запрещено.
         intro = (r.get("parent_intro") or "").strip()
         if intro and intro not in text:
-            text = f"(в контексте пункта: {intro})\n{text}"
+            text = f"(пункт читается вместе с вводной фразой: {intro})\n{text}"
         blocks.append(head + "\n" + text)
     return "\n\n".join(blocks)
 
@@ -713,13 +826,12 @@ _REWRITE_SYSTEM = (
     "микропроцессорного?»), подставь продукт/тему из диалога и верни ПОЛНЫЙ запрос. Если вопрос "
     "уже самодостаточен — верни его без изменений. Ответь ТОЛЬКО текстом запроса, без пояснений."
 )
-_HAS_CODE_RE = re.compile(r"\d{2}\.\d{2}")
 
 
 def _needs_context(query: str) -> bool:
     """Дёшево отсеиваем заведомо самодостаточные запросы (свой код ОКПД2 или длинный текст),
     чтобы не звать LLM-переписыватель на каждый ход зря."""
-    return not _HAS_CODE_RE.search(query) and len(query) <= 80
+    return not okpd2_ref.has_okpd2_code(query) and len(query) <= 80
 
 
 def _contextualize(query: str, history: list[dict]) -> str:
@@ -750,7 +862,6 @@ def _contextualize(query: str, history: list[dict]) -> str:
 # Если код уже подтверждён в диалоге, а текущий ход — продолжение (ссылается на установленную
 # позицию, а не вводит новый продукт), переносим последний код пользователя из истории в поиск.
 # Иначе ретрив «уходит» в другие коды — частая жалоба экспертов («код определили, а ИИ ищет другие»).
-_USER_CODE_RE = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
 # Сильная обратная ссылка на установленную позицию (требования/порог/баллы/операции/документы/это…).
 _STRONG_BACKREF_RE = re.compile(
     r"поро[гв]|балл|требовани|операци|неполн|перечень|целиком|состав|дальше|"
@@ -774,7 +885,7 @@ _NEW_SUBJECT_RE = re.compile(
 def _is_continuation(query: str) -> bool:
     """Ход продолжает установленную позицию (переносить код-якорь), а не вводит новый продукт."""
     q = (query or "").strip()
-    if not q or _HAS_CODE_RE.search(q):
+    if not q or okpd2_ref.has_okpd2_code(q):
         return False
     if _NEW_SUBJECT_RE.search(q):  # «к насосам»/«для станков» → новый продукт, код не якорим
         return False
@@ -784,13 +895,18 @@ def _is_continuation(query: str) -> bool:
 
 
 def _anchor_code(history: list[dict] | None) -> str | None:
-    """Последний код ОКПД2, НАЗВАННЫЙ ПОЛЬЗОВАТЕЛЕМ в истории (якорь темы диалога)."""
+    """Последний код ОКПД2, НАЗВАННЫЙ ПОЛЬЗОВАТЕЛЕМ в истории (якорь темы диалога).
+
+    ⚠ Ревью PR #94: здесь стояла СВОЯ регулярка без фильтра дат, и `codes[-1]` брал последний
+    токен — «Наш код 28.15.10, заключение получали 27.12.2023» якорило диалог на `27.12.2023`.
+    Дальше префиксная ветка помечала `okpd2_match` всей ветке 27.12 («Реле защиты»), а с `EV8`
+    каждая помеченная запись становилась ЦЕЛЕВОЙ и приносила полные требования в контекст."""
     if not history:
         return None
     for m in reversed(history):
         if m.get("role") != "user":
             continue
-        codes = _USER_CODE_RE.findall(m.get("content") or "")
+        codes = okpd2_ref.extract_codes(m.get("content"))
         if codes:
             return codes[-1]
     return None
@@ -880,6 +996,7 @@ class _Plan:
     low_relevance: bool
     # Готовая таблица баллов, которую печатает КОД (P4). Пусто — печатает модель, как раньше.
     points_table: str = ""
+    codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
 
 
@@ -892,6 +1009,100 @@ def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
     говорит честно, товарный молчал."""
     tn = okpd2_ref.extract_tnved(query)
     return (tn, okpd2_ref.tnved_to_okpd2(tn)) if tn else None
+
+
+def _extra_codes(text: str, primary: str | None) -> list[str]:
+    """Коды ОКПД2, названные в вопросе ПОМИМО того, которым бустится ретрив (`EV8`, issue #88)."""
+    from app.tools.navigator import extract_okpd2_all
+    return [c for c in extract_okpd2_all(text) if c != (primary or "")]
+
+
+MAX_EXTRA_CODES = 3  # сколько дополнительно названных ПОЛЬЗОВАТЕЛЕМ кодов разбираем в ответе
+# Свой бюджет у машинного добора сиблингов: он не конкурирует с кодами пользователя и
+# покрывает самую большую расколотую группу целиком (4 содержательных строки).
+MAX_SIBLING_CODES = 4
+
+
+def _add_positions_by_code(codes: list[str], hits: list[Hit], limit: int, *,
+                           mark: bool = True,
+                           accept: Callable[[Hit], bool] | None = None) -> list[Hit]:
+    """Ввести в окно позиции ДОПОЛНИТЕЛЬНО названных кодов и пометить их совпавшими.
+
+    Ретрив бустится ОДНИМ кодом, поэтому позиция второго в окно может не попасть вовсе — а
+    требования нецелевых кандидатов в контекст не идут (`EV7`), и сравнивать оказалось бы не с чем.
+
+    ⚠ СНАЧАЛА ПОМЕЧАЕМ ТО, ЧТО УЖЕ ЕСТЬ. Первая версия пропускала запись, уже стоящую в окне
+    (`if h.source_anchor in seen: continue`), а у неё `okpd2_match` посчитан ТОЛЬКО против
+    первого кода — то есть остаётся `False`, и целевой она стать не может. Выходило, что `EV8`
+    не работает ровно тогда, когда ретрив и так нашёл нужную позицию (ревью PR #94).
+
+    ⚠ ЗАПРОС ДЛЯ ДОБОРА — САМ КОД, а не текст вопроса о ДРУГОЙ продукции. С текстом вопроса
+    ранжирование внутри отфильтрованного набора шло по сходству с чужим товаром, и ответ зависел
+    от ПОРЯДКА, в котором пользователь назвал коды (проверено ревью: те же два кода, переставленные
+    местами, дают четыре разные позиции). Фильтр по коду делает всю работу, а нейтральный запрос
+    убирает перекос.
+
+    ⚠ `search_query`/`qvec`/`seen` отсюда убраны (ревью PR #94): первые два не использовались в теле
+    вовсе — запрос идёт по САМОМУ коду, — а `seen` только пополнялся и ни разу не читался (дедуп
+    делает поиск по `out`). Мёртвый параметр `qvec` при этом создавал впечатление, будто вектор
+    переиспользуется по R16; на деле каждый код — свой прогон e5-large, и это осознанная цена
+    нейтрального добора, а не упущенная оптимизация. Ограничена она числом кодов, см. ниже.
+
+    ⚠ ЧИСЛО КОДОВ ОГРАНИЧЕНО (`MAX_EXTRA_CODES`): вопрос принимает до 2000 символов, то есть до
+    ~200 кодов, и каждый добавленный хит — целевой с полным блоком требований, то есть отмена
+    эффекта `EV7` и лишний последовательный запрос к Qdrant на пути с p50 = 8.3 с."""
+    if not codes:
+        return hits
+    extra = codes[:MAX_EXTRA_CODES]
+    if len(codes) > len(extra):
+        logger.info("названо кодов сверх лимита ({}), разбираем первые {}", len(codes), len(extra))
+    out = list(hits)
+    for c in extra:
+        # Точные совпадения, уже стоящие в окне, — целевые по построению: помечаем и не трогаем.
+        exact_here = [h for h in out if c in (h.okpd2_codes or [])]
+        if exact_here:
+            if mark:
+                for h in exact_here:
+                    h.okpd2_match = True
+            continue
+        # Иначе разрешаем код НЕЙТРАЛЬНО — запросом по самому коду, а не по тексту вопроса о другой
+        # продукции. Иначе выбор зависит от того, в каком ПОРЯДКЕ пользователь назвал коды.
+        for h in search(c, okpd2=c, limit=2, qvec=None):
+            if not h.okpd2_match or not okpd2_match(h.okpd2_codes or [], c):
+                continue
+            if accept is not None and not accept(h):
+                continue
+            same = next((x for x in out if x.source_anchor and x.source_anchor == h.source_anchor), None)
+            if same is not None:
+                if mark:
+                    same.okpd2_match = True   # уже в окне — только пометить (иначе целевой не станет)
+            else:
+                # ⚠ `search(okpd2=c)` ставит `okpd2_match` как ФИЛЬТР выборки. Когда код пришёл не
+                # от пользователя, а из файла групп, эту пометку надо снять: иначе рантайм утверждает
+                # «совпадение по коду ОКПД2», которого не было (ревью PR #94).
+                if not mark:
+                    h.okpd2_match = False
+                out.append(h)
+            break
+    appended = out[len(hits):]
+    if not appended:
+        return out
+    # Место освобождаем с ХВОСТА окна: там кандидаты, которые и так идут без требований.
+    # ⚠⚠ ВЫТЕСНЯТЬ МОЖНО ТОЛЬКО НЕПОМЕЧЕННЫХ. Прежняя формула резала голову ПО ИНДЕКСУ
+    # (`out[:keep]`), не глядя на пометки, которые эта же функция только что расставила: запись,
+    # помеченная для первого кода, выбрасывалась при доборе второго. На «сравни A и B» это давало
+    # ОДНУ опору вместо двух — то есть `EV8` отказывала ровно на том вопросе, ради которого
+    # писалась, — а `Answer.codes` продолжал сообщать метрикам оба кода (ревью PR #94).
+    head = out[:len(hits)]
+    drop = max(0, len(head) + len(appended) - limit)
+    kept: list[Hit] = []
+    for h in reversed(head):
+        if drop and not h.okpd2_match:
+            drop -= 1
+            continue
+        kept.append(h)
+    kept.reverse()
+    return kept + appended
 
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
@@ -958,6 +1169,48 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if settings.RERANK_ENABLED and hits and not any(h.okpd2_match for h in hits):
         from app.rag.reranker import rerank
         hits = rerank(search_query, hits)
+    # EV8: вопрос может назвать НЕСКОЛЬКО кодов («сравни требования по 28.13.14 и по 26.30.50»).
+    # Ретрив бустится первым из них, поэтому позицию второго добираем отдельным запросом.
+    # ⚠ ЛИМИТ ПРИМЕНЯЕТСЯ ЗДЕСЬ, А НЕ ВНУТРИ ДОБОРА. Прежде `_add_positions_by_code` резал список
+    # сам, а `all_codes` строился из ПОЛНОГО: `target_hits`/`format_context` объявляли целевыми
+    # коды, позиции которых в окно никто не заводил, и число опор с полным блоком требований
+    # ограничивалось только размером окна — тот самый объём контекста, ради которого делалась
+    # `EV7` (ревью PR #94). Заодно лимит перестал включать в себя первый код: константа названа
+    # «сколько ДОПОЛНИТЕЛЬНО названных кодов разбираем», а разбиралось на один меньше.
+    extra = _extra_codes(query, effective_okpd2) if effective_okpd2 else []
+    if len(extra) > MAX_EXTRA_CODES:
+        logger.info("названо кодов сверх лимита ({}), разбираем первые {}",
+                    len(extra) + 1, MAX_EXTRA_CODES + 1)
+        extra = extra[:MAX_EXTRA_CODES]
+    if extra:
+        # ⚠ Разрешаем НЕЙТРАЛЬНО ВСЕ названные коды, включая первый. Иначе правило асимметрично:
+        # первый код разрешается ранжированием по тексту вопроса, остальные — по себе, и ответ
+        # зависит от ПОРЯДКА, в котором пользователь их перечислил (ревью PR #94: те же два кода,
+        # переставленные местами, давали четыре разные позиции). В вопросе «сравни A и B» текст не
+        # описывает ни один из товаров подробнее другого, поэтому опора на код честнее.
+        hits = _add_positions_by_code([effective_okpd2] + extra, hits, limit)
+    all_codes = ([effective_okpd2] if effective_okpd2 else []) + extra
+    # ⚠ Если опорой оказалась строка-КВАЛИФИКАТОР расколотой ячейки, содержательного сиблинга может
+    # не быть в окне вовсе: поиск по коду приносит записи ровно этого кода (ревью PR #94). Добираем
+    # соседей по группе их собственными кодами — иначе правило EV6 нечем исполнить.
+    qual = [t for t in target_hits(hits, all_codes) if fragments.is_scope_qualifier(t.product_name)]
+    for t in qual:
+        sib_codes = list(fragments.group_codes(t.product_name))
+        if not sib_codes:
+            continue
+        group = fragments.group_of(t.product_name)
+        # ⚠ ДОБОР СИБЛИНГА НЕ ЕСТЬ «СОВПАДЕНИЕ ПО КОДУ»: код взят из файла групп, а не назван
+        # пользователем. С прежней пометкой добор поднимал `confident`, а тот коротким замыканием
+        # снимал расчёт релевантности, второй сигнал out-of-scope и подсказки по коду, ставил в
+        # контекст шапку «СОВПАДЕНИЕ ПО КОДУ ОКПД2» и показывал «(совпадение по коду)» в интерфейсе
+        # — на вопросе, где пользователь кода вообще не называл (ревью PR #94).
+        # ⚠ ГРУППЫ ПЕРЕСЕКАЮТСЯ ПО КОДАМ: `26.11.22.200` и `26.11.22.210` входят в две разные
+        # группы под разными наименованиями, поэтому принадлежность проверяется У НАЙДЕННОЙ записи,
+        # а не подразумевается по коду запроса.
+        hits = _add_positions_by_code(
+            sib_codes[:MAX_SIBLING_CODES], hits, limit,
+            mark=False,
+            accept=lambda h, g=group: fragments.group_of(h.product_name) == g)
     cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec)  # подтверждённые экспертом — высший приоритет
     if not hits and not cases:
         return Answer(
@@ -1000,7 +1253,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         if sugg:
             okpd2_suggestions = [(c, n) for c, n, _s in sugg]
 
-    ctx = format_context(hits, search_query, effective_okpd2)
+    ctx = format_context(hits, search_query, all_codes)
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
     # K12: смешанный вопрос — про продукцию И про состав документов. Бинарный роутер считает такие
@@ -1027,7 +1280,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # строится по одной — и при этом промпт получает запрет перечислять операции у ВСЕХ.
     # Эксперт увидел бы «дословно из приложения» без пометки неполноты и без баллов сиблинга:
     # ровно тот класс молчаливой потери, против которого заведены R29 и D9.
-    _tgts = target_hits(hits, effective_okpd2)
+    _tgts = target_hits(hits, all_codes)
     table = points_table(_tgts[0], search_query) if len(_tgts) == 1 else ""
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
@@ -1057,7 +1310,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # котором стоят и скоркарта админки, и опубликованный faithfulness 1.00. Если числу из Правил
     # когда-нибудь понадобится заземление, расширять нужно `claim_numbers` (учить единицу), а не стог.
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
-    return _Plan(messages=messages, grounding=grounding, hits=hits, cases=cases,
+    return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)))
 
@@ -1099,6 +1352,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
+        codes=planned.codes,
         input_hint=planned.input_hint,
     )
 
@@ -1159,6 +1413,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
+        codes=planned.codes,
         input_hint=planned.input_hint,
     )
 

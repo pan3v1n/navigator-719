@@ -17,6 +17,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.rag.embeddings import embed_query
+from app.rag import okpd2_ref
 from app.rag.sparse import query_vector
 
 DENSE = "dense"
@@ -240,9 +241,9 @@ def dense_top1(query: str, qvec: list[float] | None = None) -> float:
     return float(res.points[0].score) if res.points else 0.0
 
 
-# Код ОКПД2 в тексте запроса. Дубль регулярки из app/tools/navigator, чтобы retriever
-# (нижний слой) не тянул зависимость от tools (верхний) — иначе импорт закольцуется.
-_CODE_IN_TEXT = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
+# Код ОКПД2 в тексте запроса разбирает `okpd2_ref` (тот же слой, цикла нет). Своей копии
+# регулярки здесь больше нет: их было семь, фильтр дат стоял в одной — и дата в вопросе
+# приносила чужую позицию целевой (ревью PR #94).
 
 
 def _case_code_hit(query: str, payload: dict) -> bool:
@@ -257,7 +258,7 @@ def _case_code_hit(query: str, payload: dict) -> bool:
     if not code:
         return False
     return any(okpd2_match([str(code)], m) or okpd2_match([m], str(code))
-               for m in _CODE_IN_TEXT.findall(query or ""))
+               for m in okpd2_ref.extract_codes(query))
 
 
 def _case_dense_scores(qvec: list[float], probe: int) -> dict:

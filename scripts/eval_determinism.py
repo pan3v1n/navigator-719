@@ -80,7 +80,7 @@ def record_numbers(h) -> set[str]:
     return _numbers_of(h.min_threshold, h.requirement_blocks)
 
 
-def _own_numbers(target, hits: list, code: str | None) -> set[str]:
+def _own_numbers(target, hits: list, code: "str | list[str] | None") -> set[str]:
     """Числа, которые ответ вправе назвать: они принадлежат позиции, О КОТОРОЙ идёт речь.
 
     Сюда входят четыре законных источника, и каждый — факт ДАННЫХ, а не свойство рендера:
@@ -115,9 +115,19 @@ def _own_numbers(target, hits: list, code: str | None) -> set[str]:
     return own
 
 
-def _exact_code(h, code: str | None) -> bool:
+def _codes_of(code: "str | list[str] | None") -> list[str]:
+    """Коды к списку. ⚠ Ревью PR #94: сюда стал приходить `ans.codes` (СПИСОК) — прежняя сигнатура
+    `str | None` звала `code.strip()` и падала AttributeError, то есть половинчатая миграция была
+    ещё и ловушкой для очевидной следующей правки."""
+    if not code:
+        return []
+    return [c.strip() for c in ([code] if isinstance(code, str) else list(code)) if c and c.strip()]
+
+
+def _exact_code(h, code: "str | list[str] | None") -> bool:
     """Названный пользователем код совпал с кодом записи ТОЧНО (не по префиксу)."""
-    return bool(code) and code.strip() in (h.okpd2_codes or [])
+    codes = set(h.okpd2_codes or [])
+    return any(c in codes for c in _codes_of(code))
 
 
 def _case_about_target(case: dict, target) -> bool:
@@ -127,7 +137,7 @@ def _case_about_target(case: dict, target) -> bool:
 
 
 def foreign_numbers(query: str, hits: list, cases: list | None = None,
-                    code: str | None = None) -> set[str]:
+                    code: "str | list[str] | None" = None) -> set[str]:
     """Числа, принадлежащие ЧУЖИМ позициям окна, но не целевой и не её законным источникам.
 
     ⚠⚠ ПРЕЖНЯЯ ВЕРСИЯ ЭТОЙ ФУНКЦИИ БЫЛА ТАВТОЛОГИЕЙ, и на ней построен отчёт `EV7` от 17.08.2026
@@ -172,7 +182,7 @@ def foreign_numbers(query: str, hits: list, cases: list | None = None,
     формулирует (упомянула «2 балла» — не упомянула), и когда она тащит в ответ ПОРОГ СОСЕДНЕЙ
     ПОЗИЦИИ. Первое — шум, второе — дефект: эксперт читает число как относящееся к своей продукции.
     Здесь считается именно вредная половина."""
-    target = _target_hit(hits)
+    target = _target_hit(hits, code)
     if target is None:                     # ранний путь (meta/процедурный) — кандидатов нет
         return set()
     own = _own_numbers(target, hits, code)
@@ -210,13 +220,17 @@ def evaluate(runs: int, limit: int, progress: bool):
             num_sets.append(nums)
             # Атрибуция — по ЦЕЛЕВОЙ позиции, а не по hits[0]: с EV6 это разные записи (у
             # расколотой ячейки опорой становится содержательный сиблинг, а не квалификатор).
-            tgt = _target_hit(ans.hits)
+            tgt = _target_hit(ans.hits, ans.codes)  # ⚠ теми же кодами, что рантайм
             secs.append(tgt.section_roman if tgt else "—")
             flags.append(bool(ans.unverified_numbers))
             # Чужие числа считаем по окну ИМЕННО ЭТОГО прогона — см. докстринг foreign_numbers.
             # Числа, названные САМИМ пользователем, утечкой не считаются (та же поправка, что у
             # гарда 16.08: эхо вопроса — не выдумка и не чужое число).
-            pool = foreign_numbers(q, ans.hits, ans.cases, code)
+            # ⚠ ТЕМИ ЖЕ КОДАМИ, ЧТО РАНТАЙМ (ревью PR #94): строкой выше атрибуция уже считается
+            # по `ans.codes`, а оракул утечки продолжал брать одиночный `code` фикстуры и выводить
+            # СВОЮ целевую из него. На вопросе с двумя кодами рантайм держит две опоры, оракул —
+            # одну, и числа законной второй опоры считались утечкой.
+            pool = foreign_numbers(q, ans.hits, ans.cases, ans.codes)
             alien_pool |= pool
             leaked = (nums - set(ans.echoed_numbers)) & pool
             if leaked:

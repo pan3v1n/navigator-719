@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import sys
 import unittest
+from unittest import mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -205,6 +206,134 @@ class TestFragmentedListResolvesToCorpus(unittest.TestCase):
         self.assertTrue(listed, "список расколотых ячеек пуст")
         missing = [n for n in listed if not (set(_keys(n)) & corpus)]
         self.assertEqual(missing, [], f"позиции списка не найдены в корпусе: {missing}")
+
+
+class TestFragmentedListHasRoles(unittest.TestCase):
+    """У каждой позиции списка расколотых ячеек проставлена РОЛЬ — иначе рантайм ослепнет.
+
+    Роль (`qualifier` / `product`) проставляет генератор списка, эксперт видит её в JSON и правит,
+    а рантайм только читает. Без поля `role` строка-квалификатор снова стала бы опорой ответа."""
+
+    def test_every_position_has_a_role(self):
+        import json
+        path = ROOT / "knowledge_base" / "pp719" / "fragmented_requirements.json"
+        if not path.exists():
+            self.skipTest("файл списка отсутствует")
+        groups = json.loads(path.read_text(encoding="utf-8"))
+        positions = [p for g in groups for p in (g.get("positions") or [])]
+        self.assertTrue(positions, "список расколотых ячеек пуст")
+        missing = [p.get("product_name") for p in positions if p.get("role") not in ("qualifier", "product")]
+        self.assertEqual(missing, [], f"позиции без роли: {missing}")
+        # обе роли реально встречаются — иначе поле бессмысленно
+        roles = {p["role"] for p in positions}
+        self.assertEqual(roles, {"qualifier", "product"})
+
+
+class TestEditionWatcher(unittest.TestCase):
+    """`A6` #60: слежение за редакциями. Проверяем на ТОМ САМОМ дефекте, ради которого заведено.
+
+    12.08.2026 корпус отстал на ДВЕ редакции (N 899 от 16.07 и N 923 от 22.07), причём тело
+    постановления оказалось СИЛЬНЕЕ приложения, и заметили это вручную при сверке с
+    КонсультантПлюс. Тест воспроизводит обе формы расхождения — отставание от первоисточника и
+    рассинхрон частей корпуса между собой."""
+
+    def _watcher(self):
+        from scripts import watch_edition
+        return watch_edition
+
+    def test_lag_behind_the_source_is_found(self):
+        """Форма дефекта 12.08: в первоисточнике есть акты, которых нет в корпусе."""
+        w = self._watcher()
+        corpus = w.acts("(в ред. Постановлений Правительства РФ от 27.06.2026 N 794)")
+        source = ("(в ред. Постановлений Правительства РФ от 27.06.2026 N 794, "
+                  "от 16.07.2026 N 899, от 22.07.2026 N 923)")
+        res = w.check_source(source, corpus)
+        self.assertEqual(res["нет в корпусе"], ["от 16.07.2026 N 899", "от 22.07.2026 N 923"])
+        self.assertEqual(res["последний в первоисточнике"], "от 22.07.2026 N 923")
+
+    def test_no_false_alarm_when_corpus_is_current(self):
+        """Ноль ложных тревог важнее полноты: отчёт, который «всегда что-то нашёл», не читают.
+
+        ⚠ Первая версия сравнивала `acts(text)` с `acts(text)` — тавтология, зелёная даже при
+        `acts()`, возвращающем пустоту (ревью PR #94). Теперь корпус описан ОТДЕЛЬНОЙ строкой и
+        заведомо шире первоисточника, а непустота множеств проверяется явно."""
+        w = self._watcher()
+        source = "(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923)"
+        corpus = w.acts("(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923, от 05.08.2026 N 1001)")
+        self.assertEqual(len(corpus), 3, "разбор корпуса сломан — тест перестал что-либо мерить")
+        res = w.check_source(source, corpus)
+        self.assertEqual(res["актов в первоисточнике"], 2)
+        self.assertEqual(res["нет в корпусе"], [])
+        self.assertEqual(res["есть только в корпусе"], ["от 05.08.2026 N 1001"])
+
+    def test_parts_of_the_corpus_must_agree(self):
+        """Вторая форма: одну часть корпуса актуализировали, другую забыли."""
+        import tempfile
+        from pathlib import Path
+        w = self._watcher()
+        with tempfile.TemporaryDirectory() as d:
+            body = Path(d) / "body.txt"
+            appx = Path(d) / "appendix.txt"
+            body.write_text("(в ред. от 22.07.2026 N 923)", encoding="utf-8")
+            appx.write_text("(в ред. от 27.06.2026 N 794)", encoding="utf-8")
+            with mock.patch.dict(w.PARTS, {"тело": body, "приложение": appx}, clear=True):
+                res = w.check_corpus()
+        self.assertFalse(res["части согласованы"], "рассинхрон частей корпуса не замечен")
+
+    def test_sections_lagging_the_body_are_detected(self):
+        """ФОРМА ДЕФЕКТА 12.08: тело актуализировали, разделы приложения — нет.
+
+        ⚠ Первая версия сравнивала тело с полным текстом приложения, а тот открывается той же
+        шапкой со всеми актами: проверка не могла провалиться (ревью PR #94)."""
+        import tempfile
+        from pathlib import Path
+        w = self._watcher()
+        with tempfile.TemporaryDirectory() as d:
+            body = Path(d) / "01_postanovlenie.txt"
+            sec = Path(d) / "02_I_razdel.txt"
+            body.write_text("(в ред. от 27.06.2026 N 794, от 22.07.2026 N 923)", encoding="utf-8")
+            sec.write_text("(в ред. от 27.06.2026 N 794)", encoding="utf-8")
+            with mock.patch.dict(w.PARTS, {"тело постановления": body}, clear=True), \
+                 mock.patch.object(w, "section_files", lambda: [sec]):
+                res = w.check_corpus()
+        self.assertFalse(res["части согласованы"], res["части"])
+
+    def test_unreadable_part_is_not_agreement(self):
+        """Нечитаемая часть = сравнение НЕ состоялось, а не «согласовано»."""
+        from pathlib import Path
+        w = self._watcher()
+        with mock.patch.dict(w.PARTS, {"тело": Path("D:/нет-такого-файла.txt")}, clear=True), \
+             mock.patch.object(w, "section_files", lambda: []):
+            res = w.check_corpus()
+        self.assertTrue(res["нечитаемые части"])
+        self.assertFalse(res["части согласованы"])
+
+    def test_unparsable_source_is_a_refusal_not_an_all_clear(self):
+        """Ноль разобранных актов — отказ проверки. И «№» разбирается наравне с «N».
+
+        ⚠ Экспорты правовых систем пишут «№ 923», а первая регулярка принимала только латинскую
+        «N»: источник разбирался в ноль актов, скрипт печатал «корпус не отстаёт» и выходил с
+        кодом 0 — ложное «всё чисто» на той самой проверке, ради которой существует."""
+        w = self._watcher()
+        corpus = w.acts("(в ред. от 27.06.2026 N 794)")
+        blind = w.check_source("здесь нет ни одного акта", corpus)
+        self.assertFalse(blind["разбор удался"])
+        self.assertEqual(blind["нет в корпусе"], [])   # пусто, но это НЕ значит «не отстаём»
+        cyr = w.check_source("(в ред. от 27.06.2026 № 794, от 05.08.2026 № 1001)", corpus)
+        self.assertTrue(cyr["разбор удался"])
+        self.assertEqual(cyr["нет в корпусе"], ["от 05.08.2026 N 1001"])
+
+    def test_real_corpus_parts_agree_and_link_is_known(self):
+        """Живая проверка состояния: части корпуса согласованы, ссылка на редакцию известна.
+
+        ⚠ Тест намеренно завязан на реальные файлы: он краснеет ровно тогда, когда корпус
+        актуализировали наполовину или забыли добавить `documentId` новой редакции, — то есть
+        ведёт себя как `TestKonturLinks`, только со стороны данных."""
+        w = self._watcher()
+        res = w.check_corpus()
+        self.assertNotEqual(res["редакция корпуса"], "редакция не определена")
+        self.assertTrue(res["части согласованы"], res["части"])
+        self.assertTrue(res["ссылка на первоисточник известна"], res["редакция корпуса"])
 
 
 class TestIncompleteThresholdNotice(unittest.TestCase):

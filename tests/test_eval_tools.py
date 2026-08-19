@@ -24,7 +24,10 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT  # noqa: E402
+from app.core.prompts import (  # noqa: E402
+    NAVIGATOR_SYSTEM_PROMPT,
+    PROCEDURAL_SYSTEM_PROMPT,
+)
 from app.core.sensitive import detect  # noqa: E402
 
 
@@ -32,8 +35,16 @@ def _rule_3v() -> str:
     """Текст правила 3в целиком — по ГРАНИЦАМ, а не по магическим 1100 символам.
 
     Срез по длине уже подводил: правило подросло на 200 символов (`EV7`), и утверждение про
-    «СРАВНИТЬ» уехало за окно — тест позеленел бы на выпавшем требовании."""
-    return NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1].split("4. СТИЛЬ")[0]
+    «СРАВНИТЬ» уехало за окно — тест позеленел бы на выпавшем требовании.
+
+    ⚠ И по БЛИЖАЙШЕЙ границе: правило 3г, добавленное 18.08, попало внутрь среза до «4. СТИЛЬ», и
+    утверждение «правило 3в отдаёт формулировку контексту» стало выполняться текстом СОСЕДНЕГО
+    правила — тест зеленел бы и после удаления самой проверяемой фразы (ревью PR #94)."""
+    tail = NAVIGATOR_SYSTEM_PROMPT.split("3в.")[1]
+    for boundary in ("\n3г.", "\n4. СТИЛЬ"):
+        if boundary in tail:
+            return tail.split(boundary)[0]
+    return tail
 
 
 def _sample_context() -> str:
@@ -67,13 +78,13 @@ class TestForeignNumbersRule(unittest.TestCase):
         нет». Оба запрета обязаны быть в правиле дословно, потому что цена второго выше первого:
         «требований не найдено» при живых требованиях — это дефект класса `D4`."""
         rule = _rule_3v()
-        self.assertIn("в контекст НЕ включены", rule)      # правило ссылается на строку контекста
+        self.assertIn("НЕ ПОКАЗАНЫ", rule)      # правило ссылается на строку найденных данных
         self.assertIn("НЕ утверждать, что требований у них нет", rule)
         self.assertIn("попроси его код", rule)              # путь для разбора кандидата
         # ⚠ И та же строка обязана быть в РЕНДЕРЕ, а не в исходнике. Проверка через
         # `inspect.getsource` зеленела бы на закомментированной строке — тест «правило ссылается на
         # то, чего нет» не поймал бы ничего. Поэтому строим настоящий контекст.
-        self.assertIn("Требования этой позиции в контекст НЕ включены", _sample_context())
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", _sample_context())
 
     def test_rule_does_not_reinstate_the_R7_defect(self):
         """Первая версия 3в велела на позиции без баллов писать «баллы не приведены» и просить код.
@@ -188,6 +199,52 @@ class TestForeignNumbersOracle(unittest.TestCase):
             "operations": [{"text": "механообработка не менее 15 процентов", "points": 7}],
         }]
         self.assertEqual(record_numbers(h), {"100", "40", "15", "7"})
+
+
+class TestAnswerHasNoInternalVocabulary(unittest.TestCase):
+    """Правило 3г: внутренней кухни («контекст», «промпт») в ответе быть не должно.
+
+    ⚠ Дефект был НЕ в модели, а в самом промпте: шаблон ответа дословно предписывал писать
+    «**Порог:** <дословно, если есть; иначе „в контексте не указан“>». То есть инструкция сама
+    выносила наружу слово, которого пользователь не знает, и ответ читался как пробел в данных —
+    класс R7, жалоба №1 платного теста. Тест закрывает шаблон, а не поведение модели."""
+
+    def test_output_template_does_not_dictate_internal_words(self):
+        lines = [l for l in NAVIGATOR_SYSTEM_PROMPT.splitlines() if "**Порог:**" in l]
+        self.assertTrue(lines, "шаблон ответа потерял строку «Порог»")
+        for l in lines:
+            self.assertNotIn("контекст", l.lower())
+        self.assertIn("не приведён", " ".join(lines))
+
+    def test_rule_forbids_internal_vocabulary(self):
+        self.assertIn("3г.", NAVIGATOR_SYSTEM_PROMPT)
+        rule = NAVIGATOR_SYSTEM_PROMPT.split("3г.")[1].split("4. СТИЛЬ")[0]
+        self.assertIn("контекст", rule)          # правило называет запрещённое слово
+        self.assertIn("не предусмотрены", rule)  # и даёт замену, а не только запрет
+
+    def test_metric_watches_the_same_words(self):
+        """Метрика полноты обязана мерить этот запрет — иначе он живёт только в промпте."""
+        from eval_completeness import KITCHEN_RE
+        self.assertTrue(KITCHEN_RE.search("в контексте баллы не указаны"))
+        self.assertTrue(KITCHEN_RE.search("судя по промпту"))
+        # ⚠ и не ловит слова из САМИХ требований приложения
+        self.assertFalse(KITCHEN_RE.search("руководство по эксплуатации и инструкция по монтажу"))
+
+
+class TestPromptRuleLabels(unittest.TestCase):
+    """Метки правил промпта обязаны быть уникальны.
+
+    ⚠ Заведено после того, как я сам вставил второе правило «2а» (18.08.2026): по метке режут
+    тесты (`_rule_3v`), на метки ссылаются другие правила («см. правило 3в»), и дубль тихо ломает
+    и то и другое."""
+
+    def test_labels_are_unique(self):
+        import re
+        for name, prompt in (("навигатор", NAVIGATOR_SYSTEM_PROMPT),
+                             ("процедурный", PROCEDURAL_SYSTEM_PROMPT)):
+            labels = re.findall(r"(?m)^(\d+[а-я]?)\.\s", prompt)
+            dupes = sorted({l for l in labels if labels.count(l) > 1})
+            self.assertEqual(dupes, [], f"{name}: повторяющиеся метки {dupes}")
 
 
 class TestClarifyingClassifier(unittest.TestCase):

@@ -349,7 +349,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         ctx = format_context([hit])
         self.assertIn("Подшипники шариковые или роликовые", ctx)
         self.assertIn("сварка кузова — 400 балл.", ctx)
-        self.assertIn("окраска — баллы в контексте не указаны", ctx)
+        self.assertIn("окраска — баллы не приведены", ctx)
 
     def test_format_cases(self):
         out = format_cases([{"product_name": "Прицепы", "okpd2": "29.20.23",
@@ -379,7 +379,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn(rights, ctx)                       # требование видно
         self.assertIn("сварка рамы — 9 балл.", ctx)      # обычные операции не сломаны
         # баллы требованию не приписаны → промпт выведет его как обязательное
-        self.assertIn(rights + " — баллы в контексте не указаны", ctx)
+        self.assertIn(rights + " — баллы не приведены", ctx)
         # заголовок узла у блока С операциями требованием НЕ становится
         self.assertNotIn("несущая рама — баллы", ctx)
 
@@ -479,7 +479,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn("Насосы центробежные технологические типов ВВ1", ctx)
         self.assertIn("28.13.14.110", ctx)
         self.assertIn("Раздел XXI, поз. 42", ctx)
-        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", ctx)
         # ни одного её ЧИСЛА-ПРЕТЕНЗИИ: ни баллов операций, ни порога.
         # ⚠ Проверяем именно `claim_numbers` (числа рядом с «балл»/«процент»), а не присутствие
         # токена: «110» остаётся в контексте внутри кода 28.13.14.110. Это же и слепая зона гарда —
@@ -507,7 +507,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         with mock.patch.object(inheritance, "lookup", return_value=None):
             bare = format_context([make_hit(product_name="Целевая", score=0.9),
                                    make_hit(product_name="Пустая", score=0.8, requirement_blocks=[])])
-        self.assertIn("Требования этой позиции в контекст НЕ включены —", bare)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ —", bare)
 
     def test_candidate_presence_uses_the_same_rule_as_rendering(self):
         """Наличие требований у кандидата считается `_hit_operations`, а не своим счётчиком.
@@ -530,7 +530,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         other = make_hit(product_name="Сосед", score=0.7, requirement_blocks=[
             {"operations": [{"text": "литьё", "points": 55}]}])
         ctx = format_context([matched, other])
-        self.assertIn("Требования этой позиции в контекст НЕ включены", ctx)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", ctx)
         self.assertNotIn("попроси её код ОКПД2", ctx)
         # без кода — наоборот, уточнение это единственный путь дальше
         self.assertIn("попроси её код ОКПД2",
@@ -557,7 +557,7 @@ class TestContextAndDisclaimer(unittest.TestCase):
         grp = format_context([a, b, c], None, "26.11.22")
         self.assertIn("не менее 300 баллов", grp)
         self.assertNotIn("не менее 400 баллов", grp)
-        self.assertIn("Требования этой позиции в контекст НЕ включены", grp)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", grp)
         # ⚠ И шапка не спорит с телом: у совпавшего по ГРУППЕ кандидата нельзя писать «наиболее
         # вероятная позиция» рядом со строкой «она НЕ целевая» — противоречие внутри одного блока
         # разрешала бы модель, а по уроку проекта она следует за контекстом.
@@ -601,6 +601,151 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIn("сборка", ctx, "требования реальной позиции обнулены псевдозаписью")
         # окно только из псевдозаписей — выбирать не из чего, поведение прежнее
         self.assertEqual(target_hits([pseudo]), [pseudo])
+
+    def test_context_says_itself_that_points_are_not_provided(self):
+        """Про отсутствие БАЛЛОВ говорит контекст, а не модель (класс R7).
+
+        18.08.2026 на живом ответе: у позиции текстовый порог («не менее 5 из следующих
+        технологических операций»), поэтому строка «Порог: не предусмотрен» не печаталась, а баллов
+        у операций нет — и модель написала «в контексте баллы по операциям не указаны». Молчание
+        контекста читается как пробел в данных; это была жалоба №1 платного теста."""
+        hit = make_hit(product_name="Насосы по ГОСТ", min_threshold="не менее 5 операций",
+                       requirement_blocks=[{"operations": [{"text": "сборка"}, {"text": "сварка"}]}])
+        ctx = format_context([hit])
+        self.assertIn("Балльная оценка: не предусмотрена", ctx)
+        self.assertIn("не менее 5 операций", ctx)   # текстовый порог остаётся дословным
+
+    def test_no_points_claim_when_parser_may_have_lost_them(self):
+        """При типе «points»/«mixed» контекст НЕ утверждает «баллов нет», но и не молчит.
+
+        Утверждать «не предусмотрено» нельзя — возможна потеря при разборе (у 229 записей корпуса,
+        17 %, тип говорит «баллы должны быть», а их нет ни у одной операции). Но молчание модель
+        заполняет сама: на живом ответе 18.08 она написала «баллы по операциям В КОНТЕКСТЕ не
+        указаны» — внутренняя лексика наружу и чтение «в системе чего-то нет» (класс R7). Поэтому
+        контекст даёт формулировку «не приведены», отличную от «не предусмотрены» (правило 3в)."""
+        hit = make_hit(product_name="Позиция с баллами", requirement_blocks=[
+            {"operations": [{"text": "сборка"}]}], payload={"requirement_type": "points"})
+        ctx = format_context([hit])
+        self.assertNotIn("Балльная оценка: не предусмотрена", ctx)
+        self.assertIn("баллы НЕ ПРИВЕДЕНЫ", ctx)
+        # ⚠ В контексте — только ФАКТ. Указание, как это сказать, живёт в правиле 2в промпта:
+        # инструкция внутри данных совпала с просадкой детерминизма 0.90 → 0.70 (ревью PR #94).
+        self.assertNotIn("Так и скажи", ctx)
+        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT
+        self.assertIn("не приведены, сверьте с первоисточником", NAVIGATOR_SYSTEM_PROMPT)
+        # и там, где баллы есть, утверждения тоже нет
+        scored = make_hit(product_name="Позиция", requirement_blocks=[
+            {"operations": [{"text": "сборка", "points": 30}]}])
+        self.assertNotIn("Балльная оценка: не предусмотрена", format_context([scored]))
+
+    def test_qualifier_role_comes_from_data_not_from_prose(self):
+        """Роль строки читается ИЗ ДАННЫХ: подменишь роль в списке — изменится и выбор опоры.
+
+        ⚠ Раньше `pipeline` решал это регуляркой по наименованию, и под неё подходили 16 записей
+        корпуса, из которых 13 — настоящая продукция («Медицинские маски (за исключением полумасок
+        FFP1…)», «Краны грузоподъемные прочие (за исключением …)», «Громкоговорители …»). От подмены
+        ответа их спасало лишь то, что они не входят в расколотые группы; после расширения состава
+        групп экспертом (`R29-4`) ответ по такой позиции уехал бы на сиблинга молча (`EV9` #89)."""
+        from app.rag import fragments
+        from app.rag.pipeline import target_hits
+        qual = make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.9,
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(4)]}])
+        real = make_hit(product_name="Светодиоды белого диапазона", score=0.8,
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(15)]}])
+        # роль «qualifier» → опорой становится содержательный сиблинг
+        self.assertEqual(target_hits([qual, real]), [real])
+        # та же проза, но в данных роль «product» → подмены НЕТ
+        with mock.patch.object(fragments, "is_scope_qualifier", return_value=False):
+            self.assertEqual(target_hits([qual, real]), [qual])
+
+    def test_position_outside_the_list_is_never_a_qualifier(self):
+        """Приёмка `EV9`: запись вне списка расколотых ячеек квалификатором быть не может.
+
+        «Медицинские маски (за исключением полумасок фильтрующих классов защиты FFP1, FFP2, FFP3)» —
+        живой приёмочный кейс `docs/test_cases.md`, и прежняя регулярка считала её «не продуктом»."""
+        from app.rag import fragments
+        for name in ("Медицинские маски (за исключением полумасок фильтрующих классов защиты FFP1)",
+                     "Краны грузоподъемные прочие (за исключением кранов на автомобильном ходу)",
+                     "Изделия из резины прочие (за исключением услуг)"):
+            self.assertFalse(fragments.is_scope_qualifier(name), name)
+
+    def test_question_with_two_codes_keeps_both_positions_as_targets(self):
+        """`EV8`: «сравни по A и по B» — по одной опоре на КАЖДЫЙ названный код.
+
+        ⚠ Ровно этот вопрос — единственная в трафике июля просьба сравнить позиции, и на нём стояло
+        обоснование цены `EV7` («обе записи совпадают по коду, обе остаются целевыми»). Оно было
+        неверным: `extract_okpd2` — это `re.search`, второй код не извлекался вовсе, и его
+        требования уходили из контекста вместе с требованиями прочих кандидатов."""
+        from app.rag.pipeline import target_hits
+        a = make_hit(product_name="Насосы", okpd2_codes=["28.13.14.110"], okpd2_match=True,
+                     min_threshold="не менее 300 баллов")
+        b = make_hit(product_name="Оборудование для пожаротушения", okpd2_codes=["26.30.50.120"],
+                     okpd2_match=True, min_threshold="не менее 400 баллов")
+        c = make_hit(product_name="Посторонняя", okpd2_codes=["28.99.00.000"], okpd2_match=True,
+                     requirement_blocks=[{"operations": [{"text": "литьё", "points": 55}]}])
+        picked = target_hits([a, b, c], ["28.13.14", "26.30.50"])
+        self.assertEqual([h.product_name for h in picked], ["Насосы", "Оборудование для пожаротушения"])
+        ctx = format_context([a, b, c], None, ["28.13.14", "26.30.50"])
+        self.assertIn("не менее 300 баллов", ctx)
+        self.assertIn("не менее 400 баллов", ctx)
+        self.assertFalse(number_in_context("55", ctx))  # третья позиция остаётся без чисел
+
+    def test_single_group_code_still_yields_one_target(self):
+        """Контроль к `EV8`: правило «одна целевая на код» НЕ открывает дыру частичного кода.
+
+        «28.13» подходит 52 записям приложения (531 операция). Пока целевыми были все совпавшие,
+        контекст выходил 15 799 символов с числами восьми позиций — больше, чем до `EV7`."""
+        from app.rag.pipeline import target_hits
+        hits = [make_hit(product_name=f"Позиция {i}", okpd2_codes=[f"28.13.{i:02d}.110"],
+                         okpd2_match=True, min_threshold=f"не менее {i}00 баллов") for i in range(1, 6)]
+        self.assertEqual(len(target_hits(hits, "28.13")), 1)
+        self.assertEqual(len(target_hits(hits, ["28.13"])), 1)
+
+    def test_qualifier_rule_also_applies_when_the_code_is_named(self):
+        """`EV6`/`EV9` обязаны работать и на ветке КОДА — там они нужнее всего.
+
+        ⚠ Ревью PR #94: ветка совпадения по коду возвращалась РАНЬШЕ правила, и на запросе с кодом
+        26.11.22.210 целевыми становились обе строки-квалификатора, а содержательная 26.11.22.216
+        (15 операций) в окно даже не попадала. То есть правка действовала ровно тогда, когда
+        пользователь НЕ называл код."""
+        from app.rag import fragments
+        from app.rag.pipeline import target_hits
+        qual = make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)",
+                        okpd2_codes=["26.11.22.210"], okpd2_match=True,
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(4)]}])
+        real = make_hit(product_name="Светодиоды белого диапазона", okpd2_codes=["26.11.22.216"],
+                        requirement_blocks=[{"operations": [{"text": f"оп {i}"} for i in range(15)]}])
+        with mock.patch.object(fragments, "is_scope_qualifier",
+                               side_effect=lambda n: "в части" in (n or "")), \
+             mock.patch.object(fragments, "group_of", return_value=1):
+            self.assertEqual(target_hits([qual, real], "26.11.22.210"), [real])
+
+    def test_points_denial_needs_the_record_that_supplied_the_operations(self):
+        """«Баллы не начисляются» нельзя утверждать по признаку ЧУЖОЙ записи.
+
+        ⚠ Ревью PR #94: при наследовании (R6) операции показываются РОДИТЕЛЬСКИЕ, а
+        `requirement_type` читался у записи-ребёнка — «два согласных признака» оказались признаками
+        разных записей, и 136 позиций утверждали, что баллы не начисляются, показывая операции
+        родителя с типом `points`/`mixed` (то есть баллы существуют и потеряны при разборе)."""
+        from app.rag import inheritance
+        parent = {"product_name": "Группа", "operations": [{"text": "сборка"}, {"text": "сварка"}]}
+        child = make_hit(product_name="Наследник", requirement_blocks=[])
+        with mock.patch.object(inheritance, "lookup", return_value=parent):
+            ctx = format_context([child])
+        self.assertNotIn("баллы за них не начисляются", ctx)
+        self.assertIn("НЕ ПРИВЕДЕНЫ", ctx)   # честная формулировка вместо утверждения
+
+    def test_points_denial_never_contradicts_a_points_threshold(self):
+        """Порог в баллах и «баллы не начисляются» в одном блоке — одно из двух заведомо неверно.
+
+        ⚠ Ревью PR #94: порог часто добирается рантаймом из примечаний, и «Суда морские
+        пассажирские» получали «Порог: не менее 3600 баллов [прим. 17]» и следом утверждение, что
+        баллы не начисляются."""
+        hit = make_hit(product_name="Суда", min_threshold="не менее 3600 баллов",
+                       requirement_blocks=[{"operations": [{"text": "сборка"}, {"text": "сварка"}]}])
+        ctx = format_context([hit])
+        self.assertIn("не менее 3600 баллов", ctx)
+        self.assertNotIn("не начисляются", ctx)
 
     def test_target_hit_does_not_swap_one_fragment_for_another(self):
         """Замена обязана САМА называть продукцию, иначе подмена бессмысленна.
@@ -1458,7 +1603,7 @@ class TestBlockNote(unittest.TestCase):
         short = format_context([make_hit(product_name="Целевая", okpd2_match=True),
                                 make_hit(product_name="Кандидат", requirement_blocks=blocks)])
         self.assertIn("Кандидат", short)                             # позиция названа
-        self.assertIn("Требования этой позиции в контекст НЕ включены", short)
+        self.assertIn("Требования этой позиции НЕ ПОКАЗАНЫ", short)
         self.assertNotIn("не менее 500 баллов", short)               # чисел кандидата нет
         self.assertNotIn("не менее 580 баллов", short)
         self.assertNotIn("условие показано не полностью", short)     # резать больше нечего
