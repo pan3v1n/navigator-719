@@ -11,31 +11,19 @@ import re
 from dataclasses import dataclass, field
 
 from app.core.prompts import EXPERT_DISCLAIMER
+from app.rag import okpd2_ref
 from app.rag.pipeline import _target_hit, answer
 from app.rag.retriever import Hit
 from app.tools import checklist
 
-# Код ОКПД2 в свободном тексте: 29.20.23, 28.41, 21.20.21.110 …
-OKPD2_IN_TEXT = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
+# Код ОКПД2 в свободном тексте разбирает `okpd2_ref` — ЕДИНСТВЕННОЕ место на весь проект.
+# ⚠ Ревью PR #94: фильтр дат стоял ЗДЕСЬ, в одной копии регулярки из семи, а `_anchor_code`,
+# `_HAS_CODE_RE`, `retriever._CODE_IN_TEXT`, `meta`, `procedural`, `translate` разбирали текст
+# сами и дату от кода не отличали. И сам фильтр был слабее, чем выглядел: `27.12.2023г` давал
+# реальный код `27.12` (кириллическая «г» не граница слова, регулярка откатывалась на префикс),
+# `01.07.26` и `09.00` проходили целиком, а `_DATE_LIKE` не отсекал НИЧЕГО сверх проверки длины
+# сегмента — то есть комментарий приписывал ему работу, которой тот не делал.
 
-# ⚠ ДАТА ВЫГЛЯДИT КАК КОД, и это не теория. «заключение получали 27.12.2023» даёт токен
-# `27.12.2023`, а `okpd2_match` сравнивает лишь общие сегменты — значит он совпадает с реальным
-# кодом `27.12` («Реле защиты», «Зажимы наборные»). Пока код извлекался ОДИН (`re.search`), дата
-# в конце фразы была безобидна: первым шёл настоящий код. С `EV8` каждый найденный код становится
-# ЦЕЛЕВЫМ и приносит в контекст полные требования своей позиции — то есть дата в вопросе снова
-# открывала утечку чужих чисел, которую закрывала `EV7`, и утечку НЕВИДИМУЮ: числа лежат в
-# контексте, поэтому ни `unverified_numbers`, ни гейт «без чужих чисел» их не помечают.
-#
-# Отсекаем по форме: у ОКПД2 сегменты — 2, 2, 2 и до 3 цифр (максимум XX.XX.XX.XXX), четырёхзначного
-# сегмента в нём не бывает, а у даты последний сегмент — год. Это признак ДАННЫХ, а не догадка по
-# смыслу фразы: «27.12.2023» отбрасывается, «27.12», «27.32.13.150» остаются.
-_DATE_LIKE = re.compile(r"^\d{2}\.\d{2}\.\d{4}$")
-
-
-def _is_okpd2(token: str) -> bool:
-    """Токен вида ЧЧ.ЧЧ[.…] — код ОКПД2, а не дата и не номер пункта."""
-    return bool(token) and not _DATE_LIKE.match(token) and all(
-        len(seg) <= 3 for seg in token.split(".")[2:])
 
 # Перечень документов больше НЕ зашит в код (R25): он строится из раздела 4 Приказа ТПП РФ №52
 # со ссылками на номера пунктов — см. app/tools/checklist.py. Прежний хардкод из шести пунктов
@@ -47,6 +35,9 @@ class Navigation:
     query: str
     okpd2_used: str | None
     answer: str
+    # Коды, по которым рантайм строил ответ (`Answer.codes`): их может быть больше одного (`EV8`),
+    # и «кто целевой» обязано решаться по ним — одно решение, одно место.
+    codes: list[str] = field(default_factory=list)
     sources: list[Hit] = field(default_factory=list)
     checklist: list[str] = field(default_factory=list)
     disclaimer: str = EXPERT_DISCLAIMER
@@ -68,12 +59,7 @@ def extract_okpd2_all(text: str) -> list[str]:
     тем, что на обратном утверждении («просьба сравнить пришла с кодом, значит обе записи остаются
     целевыми») стояло обоснование ЦЕНЫ самой `EV7` — то есть правка ломала ровно тот вопрос,
     безопасность которого доказывала."""
-    seen: list[str] = []
-    for m in OKPD2_IN_TEXT.finditer(text or ""):
-        tok = m.group(0)
-        if _is_okpd2(tok) and tok not in seen:
-            seen.append(tok)
-    return seen
+    return okpd2_ref.extract_codes(text)
 
 
 def build_checklist(hit: Hit | None) -> list[str]:
@@ -113,11 +99,17 @@ def navigate(query: str, okpd2: str | None = None, limit: int = 5) -> Navigation
     # третьим независимым выводом «кто целевой»; с расколотой ячейкой ответ пишется про
     # содержательного сиблинга, а перечень документов собирался бы по строке-квалификатору —
     # без её баллов и порога, то есть без условных пунктов 4.3.x Приказа №52 (их вернула D9).
-    checklist = build_checklist(_target_hit(ans.hits, code))
+    # ⚠ Коды берём ИЗ ОТВЕТА, а не свой `code` (ревью PR #94). `code` — один, а рантайм строил
+    # ответ по `[effective_okpd2] + extra`, где `effective_okpd2` может прийти из перевода ТН ВЭД
+    # или из якоря диалога: на `POST /navigate` без явного `okpd2` здесь было None, `_target_hit`
+    # уходил в ветку `matched[0]` и мог назвать ДРУГУЮ запись, чем тело ответа. `Answer.codes`
+    # ради того и заведён, чтобы «кто целевой» решалось в одном месте.
+    checklist = build_checklist(_target_hit(ans.hits, ans.codes))
     return Navigation(
         query=query,
         okpd2_used=code,
         answer=ans.text,
+        codes=list(ans.codes or []),
         sources=ans.hits,
         checklist=checklist,
     )

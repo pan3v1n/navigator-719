@@ -160,32 +160,48 @@ def is_scope_qualifier(product_name: str | None) -> bool:
     return any(index.get(k) == "qualifier" for k in _keys(product_name))
 
 
-def group_codes(product_name: str | None) -> list[str]:
-    """Коды ОКПД2 ОСТАЛЬНЫХ строк той же расколотой ячейки.
+@lru_cache(maxsize=256)
+def group_codes(product_name: str | None) -> tuple[str, ...]:
+    """Коды ОКПД2 СОДЕРЖАТЕЛЬНЫХ строк той же расколотой ячейки (без квалификаторов).
 
     ⚠ Зачем (ревью PR #94). Правило `EV6` меняет строку-квалификатор на содержательного сиблинга
     ТОЛЬКО если тот есть в окне. Когда пользователь называет код квалификатора (26.11.22.210),
     поиск по коду приносит записи ровно этого кода — сиблинг с требованиями (26.11.22.216) в окно
-    не попадает вовсе, и менять не на что. Эти коды и нужны, чтобы добрать его отдельным запросом."""
+    не попадает вовсе, и менять не на что. Эти коды и нужны, чтобы добрать его отдельным запросом.
+
+    ⚠ ТРИ ПРАВКИ ПОСЛЕ ПОВТОРНОГО РЕВЬЮ:
+    1. Строки с ролью `qualifier` отсюда исключены. Прежде порядок был файловый, и на группе 2
+       («светодиоды») первым шёл код `26.11.22.200` — САМ квалификатор, которого `_content_sibling`
+       отвергает по построению. Бюджет добора уходил на него, зелёный и красный диапазоны не
+       добирались вовсе, и правило не срабатывало на группе, ради которой писалось.
+    2. Группа берётся ОДНА — своя (`_group_index`, первая по вхождению). Прежде объединялись коды
+       ВСЕХ групп, где встретилось имя, а `26.11.22.200` и `26.11.22.210` входят в ДВЕ разные
+       группы под разными наименованиями: добор мог принести строку чужой группы, и целевой
+       становилась запись, прямо ИСКЛЮЧАЮЩАЯ спрошенную продукцию.
+    3. `@lru_cache`, как у соседей модуля: это был единственный читатель файла без кэша — файл
+       перечитывался и разбирался на КАЖДЫЙ запрос."""
+    group = group_of(product_name)
+    if group is None:
+        return ()
     if not _PATH.exists():
-        return []
+        return ()
     try:
         groups = json.loads(_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
-        return []
+        return ()
+    if group >= len(groups):
+        return ()
     keys = set(_keys(product_name))
     out: list[str] = []
-    for g in groups:
-        positions = g.get("positions") or []
-        if not any(keys & set(_keys(p.get("product_name"))) for p in positions):
+    for p in (groups[group].get("positions") or []):
+        if keys & set(_keys(p.get("product_name"))):
             continue
-        for p in positions:
-            if keys & set(_keys(p.get("product_name"))):
-                continue
-            for c in (p.get("okpd2_codes") or []):
-                if c not in out:
-                    out.append(c)
-    return out
+        if p.get("role") == "qualifier":
+            continue
+        for c in (p.get("okpd2_codes") or []):
+            if c not in out:
+                out.append(c)
+    return tuple(out)
 
 
 def group_of(product_name: str | None) -> int | None:

@@ -18,7 +18,7 @@ import re
 from app.rag import okpd2_ref
 
 # Код ОКПД2 в тексте (та же форма, что в meta): «28.13» / «28.13.14.190».
-_OKPD2_CODE = re.compile(r"\b\d{2}\.\d{2}(?:\.\d+)*\b")
+# Код ОКПД2 разбирает `okpd2_ref` — одно место на весь проект (ревью PR #94).
 
 _TNVED_MENTION = re.compile(r"тн\s*вэд|тнвэд", re.I)
 _OKPD_MENTION = re.compile(r"окпд", re.I)
@@ -39,7 +39,7 @@ def is_translate(query: str) -> bool:
     один код в другой, это обрабатывает навигатор."""
     q = query or ""
     tnved_code = okpd2_ref.extract_tnved(q) is not None
-    okpd_code = _OKPD2_CODE.search(q) is not None
+    okpd_code = okpd2_ref.has_okpd2_code(q)
     tn = bool(_TNVED_MENTION.search(q))
     ok = bool(_OKPD_MENTION.search(q))
     verb = bool(_VERB.search(q))
@@ -114,8 +114,8 @@ def answer(query: str) -> str:
     """Готовый текст ответа на запрос перевода. Вызывать только если `is_translate(query)`."""
     q = query or ""
     tnved = okpd2_ref.extract_tnved(q)
-    m = _OKPD2_CODE.search(q)
-    okpd = m.group(0) if m else None
+    _codes = okpd2_ref.extract_codes(q)
+    okpd = _codes[0] if _codes else None
 
     # Явно просят ТН ВЭД по коду ОКПД2 → обратное направление.
     if okpd and (_TO_TNVED.search(q) or (not tnved and _TNVED_MENTION.search(q))):

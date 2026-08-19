@@ -582,12 +582,22 @@ def main() -> None:
         # групп). Если бы генератор всякий раз переписывал файл значениями регулярки, правка
         # молча откатывалась бы к той самой эвристике, от которой уходили, — а ПП №719 правится
         # 6+ раз в год, то есть перегенерация запланирована, а не гипотетична (ревью PR #94).
+        # ⚠⚠ ПЕРЕЖИВАТЬ ПЕРЕГЕНЕРАЦИЮ ДОЛЖНА ПРАВКА ЭКСПЕРТА, А НЕ ВЫВОД ГЕНЕРАТОРА (ревью PR #94).
+        # Первая версия сохраняла ЛЮБУЮ прежнюю роль без признака происхождения — то есть намертво
+        # замораживала результат ПЕРВОГО прогона регулярки. Последствие обратное задуманному:
+        # никакая будущая правка `_SCOPE_QUALIFIER_RE` уже не могла бы доехать до данных, а
+        # регулярка по прозе — ровно то, от чего уходила `EV9` (под неё подходили 16 записей
+        # корпуса, из них 13 — настоящая продукция).
+        # Поэтому у роли есть происхождение: `role_source: "expert"` ставит ЧЕЛОВЕК, правя файл, и
+        # только такие роли переносятся. Всё, что сгенерировано, помечается `"generator"` и
+        # свободно пересчитывается. Сегодня в файле экспертных правок нет — `R29-4` открыта и
+        # состав групп эксперт ещё не подтверждал.
         prev: dict[str, str] = {}
         if out.exists():
             try:
                 for g in json.loads(out.read_text(encoding="utf-8")):
                     for p_ in (g.get("positions") or []):
-                        if p_.get("role"):
+                        if p_.get("role") and p_.get("role_source") == "expert":
                             prev[" ".join((p_.get("product_name") or "").split()).lower()] = p_["role"]
             except (json.JSONDecodeError, OSError):
                 prev = {}
@@ -595,11 +605,15 @@ def main() -> None:
         for g in groups:
             for p_ in (g.get("positions") or []):
                 key = " ".join((p_.get("product_name") or "").split()).lower()
-                if key in prev and prev[key] != p_["role"]:
+                if key in prev:
+                    if prev[key] != p_["role"]:
+                        kept += 1
                     p_["role"] = prev[key]
-                    kept += 1
-        if kept:
-            print(f"R29: сохранено ролей, поправленных вручную: {kept}")
+                    p_["role_source"] = "expert"
+                else:
+                    p_["role_source"] = "generator"
+        print(f"R29: ролей от эксперта сохранено {len(prev)} (из них переопределили генератор: {kept}); "
+              "остальные пересчитаны. Чтобы правка пережила перегенерацию — role_source: \"expert\".")
         out.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
         n_pos = sum(len(g["positions"]) for g in groups)
         print(f"R29: групп с расколотой ячейкой {len(groups)}, позиций в них {n_pos} → {out}")

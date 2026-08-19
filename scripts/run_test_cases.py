@@ -84,7 +84,7 @@ def main() -> None:
             nav = navigate(query, okpd2=okpd2 or None, limit=5)
             # Колонка «Позиция» обязана называть ту запись, ПРО КОТОРУЮ написан ответ (с EV6
             # это не всегда `sources[0]`), иначе приёмочная таблица эксперта расходится с телом.
-            top = _target_hit(nav.sources, okpd2 or None)
+            top = _target_hit(nav.sources, nav.codes)  # теми же кодами, что рантайм (ревью PR #94)
             top_name = top.product_name if top else "—"
             if top is None:
                 match = "—"
