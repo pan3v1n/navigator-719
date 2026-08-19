@@ -620,3 +620,75 @@ class TestEmbeddingCacheFilename(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExcludedPositionsAreNotInTheCorpus(unittest.TestCase):
+    """`D12` #90: исключённые позиции приложения не должны жить в корпусе.
+
+    ⚠ Диагноз в постановке задачи был ИНОЙ («парсер отдал требованию статус позиции») и не
+    выдержал сверки с первоисточником. Строка читается так:
+
+        14.12.11, … 14.12.30.160 - Позиции исключены.|до 1 января 2019 г.: наличие …
+
+    маркер стоит в ячейке КОДА, поэтому наименованием стал текст ячейки ТРЕБОВАНИЙ. Это класс `D4`,
+    а не «обрывок»: позиции нет в приложении вовсе. Рантайм по коду 14.12.30.131 делал такую
+    заглушку целевой, и ответ выходил БЕЗ требований, хотя настоящая «Спецодежда» (14.12) лежит
+    в разделе XVII и покрывает код по иерархии."""
+
+    @staticmethod
+    def _records():
+        out = []
+        for f in sorted((ROOT / "knowledge_base" / "pp719" / "structured").glob("*.json")):
+            for r in json.loads(f.read_text(encoding="utf-8")):
+                out.append((f.name, r))
+        return out
+
+    def test_no_record_is_named_by_a_requirement_formula(self):
+        """Признак берём из ПЕРВОИСТОЧНИКА, не регуляркой по прозе (урок `EV9`)."""
+        from scripts.drop_excluded_positions import (
+            excluded_codes, is_requirement_text_stub, is_section_title_stub, excluded_rows,
+        )
+        rows = excluded_rows()
+        self.assertTrue(rows, "маркеры исключения не разобраны — тест перестал что-либо мерить")
+        codes_x = excluded_codes(rows)
+        bad = [(f, r.get("product_name")) for f, r in self._records()
+               if is_requirement_text_stub(r, rows) or is_section_title_stub(r, codes_x)]
+        self.assertEqual(bad, [], f"в корпусе живут исключённые позиции: {bad}")
+
+    def test_the_five_marker_spellings_are_all_recognised(self):
+        """Написаний маркера в первоисточнике ПЯТЬ; ловить надо все, иначе класс вернётся."""
+        import sys as _sys
+        _sys.path.insert(0, str(ROOT / "scripts"))
+        from structure_kb import classify, split_fields
+        excluded_rows_src = [
+            "14.12.30.160 - Позиции исключены.|до 1 января 2019 г.: …|",
+            "из 20.59.52.120 - Позиция исключена.|до 1 января 2019 г.: …|",
+            "из 32.50.13.110 Позиция исключена.||",          # без дефиса
+            "из 26.60.11.130. - Код исключен.|",             # «Код исключен»
+            "22.19.1 Позиция исключена.|",                   # без «из» и без дефиса
+        ]
+        for row in excluded_rows_src:
+            with self.subTest(row=row[:44]):
+                kind, _ = classify(split_fields(row))
+                self.assertEqual(kind, "empty", "исключённая строка разобрана как продукт")
+
+    def test_a_real_product_row_is_still_a_product(self):
+        """Радиус: правка не должна съедать настоящие позиции."""
+        import sys as _sys
+        _sys.path.insert(0, str(ROOT / "scripts"))
+        from structure_kb import classify, split_fields
+        kind, payload = classify(split_fields("28.15.10|Подшипники шариковые или роликовые|треб.|"))
+        self.assertEqual(kind, "product")
+        self.assertEqual(payload["name"], "Подшипники шариковые или роликовые")
+
+    def test_live_positions_sharing_an_excluded_code_survive(self):
+        """⚠ Коды исключённых строк ПЕРЕИСПОЛЬЗУЮТСЯ живой продукцией.
+
+        Правило «пустая запись + код помечен исключённым» задевало 20 записей, из них 17 —
+        настоящая продукция, получающая требования по НАСЛЕДОВАНИЮ (27.12 «Реле защиты»,
+        28.99.39.190 судовые системы, 20.30.2 лакокрасочные). Поэтому признак — совпадение с
+        текстом требований исключённой строки, а не сам код."""
+        names = {r.get("product_name") for _, r in self._records()}
+        self.assertIn("Реле защиты", names, "живая позиция с исключённым кодом 27.12 удалена")
+        self.assertTrue(any((n or "").startswith("Воск зуботехнический") for n in names),
+                        "живая позиция, делящая код 20.59.52.120 с заглушкой, удалена")

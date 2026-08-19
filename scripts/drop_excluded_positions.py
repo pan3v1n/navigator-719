@@ -56,15 +56,123 @@ def is_excluded_stub(rec: dict) -> bool:
     return _strip_footnotes(name) == _strip_footnotes(rec.get("section_title") or "") != ""
 
 
+# --- Третья форма (D12, #90): наименованием стала ЯЧЕЙКА ТРЕБОВАНИЙ исключённой строки ---
+#
+# В первоисточнике строка читается так:
+#     14.12.11,
+#     14.12.21
+#     14.12.30.131
+#     14.12.30.132
+#     14.12.30.160 - Позиции исключены.|до 1 января 2019 г.: наличие у юридического лица …
+# Маркер стоит в ячейке КОДА, поэтому наименованием строки парсер взял текст ячейки ТРЕБОВАНИЙ.
+# В корпус попали три записи раздела VII с именем-формулой требования и ЖИВЫМИ кодами спецодежды:
+# по коду 14.12.30.131 рантайм делал целевой такой обрывок, и ответ выходил БЕЗ требований вовсе,
+# хотя настоящая «Спецодежда» (код 14.12) лежит в разделе XVII и покрывает запрошенный код по
+# иерархии. Код 20.59.52.120 такая заглушка делит с живым «Воском зуботехническим» (5 блоков) —
+# точь-в-точь дефект D4 с кодом 26.51.20.121.
+#
+# ⚠ ПРИЗНАК БЕРЁТСЯ ИЗ ПЕРВОИСТОЧНИКА, А НЕ ИЗ ФОРМЫ ИМЕНИ. Регулярка по прозе здесь запрещена
+# уроком EV9 (#89): под похожую регулярку подходили 16 записей корпуса, из них 13 — настоящая
+# продукция. Здесь совпадение ТОЧНОЕ: имя записи обязано быть началом текста требований той самой
+# строки, которую первоисточник помечает исключённой, а коды записи — подмножеством её кодов.
+#
+# ⚠ РАДИУС ИЗМЕРЕН. Две более слабые редакции правила проверены и ОТВЕРГНУТЫ:
+#   * «пустая запись + код помечен исключённым» задевала 20 записей: коды исключённых строк
+#     переиспользуются живыми позициями (27.12 «Реле защиты», 28.99.39.190 судовые системы,
+#     20.30.2 лакокрасочные) — 17 из них настоящая продукция, получающая требования по НАСЛЕДОВАНИЮ;
+#   * то же правило с проверкой наследования давало верные 3, но зависело от `inherited_requirements.json`
+#     — генерируемого файла. Устарей он (а он уже отставал 13.08), и правило снесло бы 17 живых
+#     позиций молча. Признак из первоисточника от состояния генерируемых файлов не зависит.
+_MARK_RE = re.compile(r"(?:[Пп]озици[яи]|[Кк]од[ыа]?)\s+исключен[аыо]?\.?")
+_CODE_RE = re.compile(r"(?:из\s+)?(\d{2}(?:\.\d+)*)")
+_FULL_TXT = ROOT / "knowledge_base" / "pp719" / "pp719_full.txt"
+
+
+def _norm(s: str | None) -> str:
+    return " ".join((s or "").split()).lower()
+
+
+def excluded_rows() -> list[tuple[set[str], str]]:
+    """(коды строки, нормализованный текст её ячейки требований) для строк с маркером исключения."""
+    if not _FULL_TXT.exists():
+        return []
+    text = _FULL_TXT.read_text(encoding="utf-8", errors="ignore")
+    out: list[tuple[set[str], str]] = []
+    for m in _MARK_RE.finditer(text):
+        cell = text[max(0, m.start() - 300):m.start()].rsplit("|", 1)[-1]
+        codes = {c.rstrip(".") for c in _CODE_RE.findall(cell) if "." in c.rstrip(".")}
+        tail = text[m.end():m.end() + 1200].lstrip()
+        if not codes or not tail.startswith("|"):
+            continue
+        req = _norm(tail[1:].split("|", 1)[0])
+        if req:
+            out.append((codes, req))
+    return out
+
+
+def excluded_codes(rows: list[tuple[set[str], str]]) -> set[str]:
+    """Плоское множество кодов, помеченных первоисточником как исключённые."""
+    out: set[str] = set()
+    for codes, _ in rows:
+        out |= codes
+    return out
+
+
+def is_section_title_stub(rec: dict, codes_excluded: set[str]) -> bool:
+    """Исключённая позиция, которой LLM дала имя ЗАГОЛОВКА РАЗДЕЛА и ЧУЖИЕ требования.
+
+    ⚠ Отличается от второй формы выше тем, что запись НЕ пуста: у `из 32.50.23.000 - Позиция
+    исключена.` наименования нет, LLM подставила «Медицинские изделия» (заголовок раздела) и
+    прицепила требования из следующей ячейки — получилась позиция-фантом с двумя блоками, которая
+    отвечает требованиями по ИСКЛЮЧЁННОМУ коду. Прежний фильтр до имени не доходил: он выходил
+    раньше по `if rec.get("requirement_blocks")`.
+
+    Дефект всплыл ровно тогда, когда парсер научился отбрасывать такие строки: `reconcile` сел
+    29/29 → 28/29 («в JSON но не в чанке: 32.50.23.000»), то есть расхождение сторон и показало
+    запись, которую обе стороны прежде держали молча.
+
+    ⚠ Радиус измерен по всему корпусу: таких записей РОВНО ОДНА. Условие «код подтверждён
+    исключённым В ПЕРВОИСТОЧНИКЕ» здесь несущее — без него правило било бы по любой позиции,
+    которую LLM назвала заголовком раздела."""
+    codes = {c.strip() for c in (rec.get("okpd2_codes") or []) if c and c.strip()}
+    if not codes or not codes <= codes_excluded:
+        return False
+    name = _strip_footnotes(rec.get("product_name") or "")
+    return bool(name) and name == _strip_footnotes(rec.get("section_title") or "")
+
+
+def is_requirement_text_stub(rec: dict, rows: list[tuple[set[str], str]]) -> bool:
+    """True — наименование записи есть текст требований строки, ИСКЛЮЧЁННОЙ первоисточником."""
+    if rec.get("record_type") or rec.get("requirement_blocks") or rec.get("min_threshold"):
+        return False
+    name = _norm(rec.get("product_name"))
+    codes = {c.strip() for c in (rec.get("okpd2_codes") or []) if c and c.strip()}
+    if not name or not codes:
+        return False
+    probe = name[:80]
+    return any(codes <= row_codes and req.startswith(probe) for row_codes, req in rows)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="Удаление пустых записей исключённых позиций из structured/*.json")
     ap.add_argument("--dry-run", action="store_true", help="не записывать, только показать что удалится")
     args = ap.parse_args()
 
+    rows = excluded_rows()
+    if not rows:
+        print("⚠ первоисточник не прочитан или маркеров исключения в нём нет — третья форма "
+              "(D12) НЕ проверяется. Это отказ проверки, а не «чисто».")
+    else:
+        print(f"  строк с маркером исключения в первоисточнике: {len(rows)}")
+    codes_excluded = excluded_codes(rows)
+
     grand_total = 0
     for jf in sorted(STRUCT.glob("*.json")):
         data = json.loads(jf.read_text(encoding="utf-8"))
-        kept = [r for r in data if not is_excluded_stub(r)]
+        kept = [r for r in data
+                if not is_excluded_stub(r)
+                and not is_requirement_text_stub(r, rows)
+                and not is_section_title_stub(r, codes_excluded)]
         removed = len(data) - len(kept)
         if removed:
             grand_total += removed
