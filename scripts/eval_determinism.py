@@ -83,28 +83,36 @@ def record_numbers(h) -> set[str]:
     return _numbers_of(h.min_threshold, h.requirement_blocks)
 
 
-def _runtime_threshold_numbers(codes, name, section) -> set[str]:
-    """Числа порогов, которые рантайм ДОБИРАЕТ к записи из примечаний, — общего и закупочного.
+def _runtime_threshold_numbers(own_threshold, codes, name, section) -> set[str]:
+    """Числа порогов, которые рантайм ДОБИРАЕТ записи из примечаний, — общего и закупочного.
 
-    ⚠ В данных записи их нет (`record_numbers` читает только `min_threshold` и блоки), а
-    `format_context` печатает обе строки. Пока это учитывалось лишь для целевой записи, любой
-    СИБЛИНГ — строка той же расколотой ячейки или запись с точным совпадением кода — приносил в
-    контекст числа, которых оракул не знал за «свои». Замер 20.08.2026: таких сиблингов 2 и 264
-    соответственно, а числа там мелкие (27, 29, 100) и легко совпадают с числами постороннего
-    кандидата — тогда гейт флагает ВЕРНЫЙ ответ, как уже случилось с 40/50 на масках.
+    ⚠ ЗЕРКАЛИТ `format_context`, а не «всё, что найдётся» (ревью 20.08.2026). Рантайм строит
+    общий порог как `h.min_threshold or lookup_threshold(...)` (`pipeline.py:326`): у записи со
+    СВОИМ порогом примечание не читается вовсе. Первая редакция звала `lookup_threshold`
+    безусловно и вносила в «свои» числа, которых контекст не печатает НИКОГДА, — замер: 56
+    записей имеют и свой порог, и совпадение по примечанию, у 54 из них в `own` попадали лишние
+    числа. А `foreign_numbers` возвращает `others - own`, то есть настоящая утечка чужого числа
+    вычиталась бы и гейт продолжал показывать 1.00. Метрика, расширенная сверх проверяемого
+    артефакта, перестаёт его проверять — тот же класс, что тавтология оракула 17.08.
+
+    Закупочный порог, наоборот, печатается ВСЕГДА при наличии (`pipeline.py:409`), независимо
+    от собственного порога записи, — поэтому он в «свои» входит безусловно.
     """
     out: set[str] = set()
-    for fn in (lookup_threshold, lookup_procurement_threshold):
-        val = fn(codes, name, section)
-        if val:
-            out |= set(claim_numbers(str(val)))
+    if not (own_threshold or "").strip():
+        general = lookup_threshold(codes, name, section)
+        if general:
+            out |= set(claim_numbers(str(general)))
+    proc = lookup_procurement_threshold(codes, name, section)
+    if proc:
+        out |= set(claim_numbers(str(proc)))
     return out
 
 
 def _hit_numbers_with_thresholds(h) -> set[str]:
     """Числа записи ВМЕСТЕ с порогами, которые рантайм добирает ей из примечаний."""
     return record_numbers(h) | _runtime_threshold_numbers(
-        h.okpd2_codes, h.product_name, h.section_roman)
+        h.min_threshold, h.okpd2_codes, h.product_name, h.section_roman)
 
 
 def _own_numbers(target, hits: list, code: "str | list[str] | None") -> set[str]:
@@ -139,7 +147,7 @@ def _own_numbers(target, hits: list, code: "str | list[str] | None") -> set[str]
     # коммитах и разошлись. Метрика, штрафующая за ВЕРНОЕ поведение, дороже отсутствующей —
     # она заставляет усомниться в правке (урок про предохранитель, бьющий по верному коду).
     own |= _runtime_threshold_numbers(
-        target.okpd2_codes, target.product_name, target.section_roman)
+        target.min_threshold, target.okpd2_codes, target.product_name, target.section_roman)
     parent = inheritance.lookup(target.section_roman, target.product_name)
     if parent:
         own |= _numbers_of(parent.get("min_threshold"),

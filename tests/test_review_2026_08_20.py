@@ -24,6 +24,7 @@ if str(ROOT) not in sys.path:
 from app.rag.thresholds import (  # noqa: E402
     _split_exception,
     _tables,
+    lookup_procurement_threshold,
     lookup_threshold,
 )
 
@@ -82,24 +83,33 @@ class TestTwoSchedulesInOneLine(unittest.TestCase):
         self.assertIn("квот", exception, "условие оговорки не поехало вместе с её числами")
 
     def test_no_position_shows_one_date_with_two_thresholds(self):
-        """Радиус по ВСЕМУ корпусу: ни у одной позиции общий график не содержит одну и ту же
-        дату с разными порогами. Правило меряется на всех, а не на целевом случае."""
+        """Радиус по ВСЕМУ корпусу: ни у одной позиции ни одна строка порога не содержит одну и
+        ту же дату с разными значениями.
+
+        ⚠ Первая редакция проверяла только `lookup_threshold` и объявляла класс закрытым, пока
+        та же патология жила в строке «Порог ДЛЯ ЦЕЛЕЙ ЗАКУПОК» — а `format_context` печатает её
+        строкой ниже, в том же блоке (ревью 20.08.2026). Радиус меряется по ВСЕМУ, что уезжает
+        в контекст, а не по той функции, которую чинили.
+        """
         offenders: list[str] = []
         for rec in _records():
-            if (rec.get("min_threshold") or "").strip():
-                continue
-            thr = lookup_threshold(rec.get("okpd2_codes") or [],
-                                   rec.get("product_name") or "", rec.get("section_roman"))
-            if not thr:
-                continue
-            general = thr.split(_MARKER, 1)[0]
-            seen: dict[str, set[str]] = {}
-            for date, value in _STEP_RE.findall(general):
-                seen.setdefault(date, set()).add(value)
-            if any(len(v) > 1 for v in seen.values()):
-                offenders.append(f"{rec.get('product_name', '')[:40]}: "
-                                 f"{ {d: sorted(v) for d, v in seen.items() if len(v) > 1} }")
-        self.assertEqual(offenders, [], "одна дата с разными порогами в общем графике")
+            codes = rec.get("okpd2_codes") or []
+            name = rec.get("product_name") or ""
+            section = rec.get("section_roman")
+            variants = [("общий", None if (rec.get("min_threshold") or "").strip()
+                         else lookup_threshold(codes, name, section)),
+                        ("закупочный", lookup_procurement_threshold(codes, name, section))]
+            for label, thr in variants:
+                if not thr:
+                    continue
+                general = thr.split(_MARKER, 1)[0]
+                seen: dict[str, set[str]] = {}
+                for date, value in _STEP_RE.findall(general):
+                    seen.setdefault(date, set()).add(value)
+                dup = {d: sorted(v) for d, v in seen.items() if len(v) > 1}
+                if dup:
+                    offenders.append(f"[{label}] {name[:38]}: {dup}")
+        self.assertEqual(offenders, [], "одна дата с разными значениями в строке порога")
 
 
 class TestExceptionSplitIsNarrow(unittest.TestCase):
@@ -115,6 +125,29 @@ class TestExceptionSplitIsNarrow(unittest.TestCase):
                 "флота, с 1 июля 2025 г. не менее 300 баллов")
         self.assertEqual(_split_exception(text), (text, None),
                          "хвост ОБЩЕГО графика уехал в оговорку")
+
+    def test_evaluation_verb_after_the_schedule_does_not_authorise_a_split(self):
+        """Ревью 20.08: признак искался по ВСЕМУ хвосту, и глагол, стоящий ПОСЛЕ графика, резал
+        строку. У настоящей оговорки прим. 17 порядок обратный: «…которые оцениваются <график>»."""
+        text = ("до 30 июня 2023 г. не менее 250 баллов, за исключением судов рыбопромыслового "
+                "флота, с 1 июля 2025 г. не менее 300 баллов, которые оцениваются по акту "
+                "экспертизы")
+        self.assertEqual(_split_exception(text), (text, None),
+                         "глагол после графика не должен разрешать разделение")
+
+    def test_negated_verb_does_not_authorise_a_split(self):
+        """«не оцениваются» — отрицание, а не ввод собственного графика: этой фразой в прим. 17
+        открывается абзац о том, что операции до 2022 г. не оцениваются вовсе."""
+        text = ("не менее 250 баллов, за исключением судов, которые не оцениваются, "
+                "с 1 июля 2025 г. не менее 300 баллов")
+        self.assertEqual(_split_exception(text), (text, None))
+
+    def test_step_detection_is_case_insensitive_and_needs_a_unit(self):
+        """Проверка ступени была регистрозависимой, тогда как обе соседние регулярки —
+        IGNORECASE; и «не менее 5 лет» (срок хранения документации) ступенью не является."""
+        from app.rag.thresholds import _STEP_RE
+        self.assertTrue(_STEP_RE.search("НЕ МЕНЕЕ 300 БАЛЛОВ"))
+        self.assertIsNone(_STEP_RE.search("не менее 5 лет"))
 
     def test_exception_with_its_own_evaluation_clause_is_split(self):
         general, exc = _split_exception(
@@ -171,37 +204,69 @@ class TestColumnLabelsStayVerbatim(unittest.TestCase):
                     f"прим. {table['note']}: подпись {label!r} — голый год, то есть синтез")
 
 
-class TestCoefficientTableIsRejectedByMechanism(unittest.TestCase):
-    """Прим. 80 — «Коэффициент | Срок действия коэффициента», а не пороги.
+class TestCoefficientNoteIsRejectedByItsIntro(unittest.TestCase):
+    """Прим. 79 и 80 задают КОЭФФИЦИЕНТ и срок его действия, а не порог баллов.
 
-    Прежний тест утверждал это через `assertIsNone` на одной позиции и проходил бы при любом
-    сломе разбора. Теперь проверяется САМ признак: ни одна разобранная таблица не объявляет
-    колонку коэффициента.
+    ⚠ Первый страж стоял на ШАПКЕ таблицы и не исполнялся ни разу: до шапки дело не доходит,
+    прим. 80 отсеивается раньше — в его шапке нет двух дат. Оба написанных к нему теста
+    проходили и при удалении стража, то есть проверяли не механизм, а совпадение. Хуже: страж
+    промахивался мимо будущего, которое сам предсказывал, — перепиши редакция шапку в ходовую
+    форму, слово «Коэффициент» ушло бы ИЗ ШАПКИ и страж молчал бы именно тогда, когда нужен.
+    Признак перенесён во ВВОДНУЮ примечания, которая переживает переписывание колонок.
     """
 
-    def test_no_parsed_table_declares_a_coefficient_column(self):
-        for table in _tables():
-            for label in table["years"]:
-                self.assertNotIn("коэффициент", label.lower(),
-                                 f"прим. {table['note']}: коэффициент разобран как порог")
+    def test_predicate_reads_the_intro_not_the_header(self):
+        from app.rag.thresholds import _is_coefficient_note
+        self.assertTrue(_is_coefficient_note(
+            "80. Продукция … применяется с учетом следующих коэффициентов:"))
+        self.assertFalse(_is_coefficient_note(
+            "77. Продукция, включенная в раздел XVI настоящего приложения"))
 
-    def test_note_80_is_not_among_parsed_tables(self):
-        self.assertNotIn("80", [t["note"] for t in _tables()])
+    def test_the_source_still_has_such_notes(self):
+        """Признак обязан соответствовать первоисточнику, иначе он украшение."""
+        from app.rag import thresholds as T
+        intros = [ln for ln in T._CHUNK.read_text(encoding="utf-8").splitlines()
+                  if T._NOTE_INTRO_RE.match(ln) and T._is_coefficient_note(ln)]
+        self.assertTrue(intros, "в чанке нет ни одного примечания-коэффициента — "
+                                "признак разошёлся с первоисточником")
 
+    def test_guard_excludes_a_coefficient_note_that_would_otherwise_parse(self):
+        """РАЗЛИЧАЮЩИЙ тест: чанк, где таблица коэффициентов имеет ходовую шапку с двумя датами.
 
-class TestPromptKnowsAboutTheSecondThresholdLine(unittest.TestCase):
-    """Шаблон ответа держит РОВНО ОДИН слот «**Порог:**», а контекст теперь приносит до трёх строк
-    порога разной природы: общий, «⚠ ИНОЙ порог — за исключением …» и «Порог ДЛЯ ЦЕЛЕЙ ЗАКУПОК».
+        Без стража она разбирается и коэффициент 0,5 уезжает в строку порога. Проверять это на
+        реальном прим. 80 бесполезно — оно отсеивается раньше по другой причине, и тест прошёл бы
+        при удалённом страже (ровно за это ревью и забраковало первую редакцию)."""
+        import tempfile
+        from pathlib import Path as _P
+        from app.rag import thresholds as T
 
-    Без правила модель сама решает, какая из них займёт единственный слот, — и оба числа
-    дословны, поэтому faithfulness-гард молчит. Правило промпта слабее устройства контекста,
-    но его отсутствие — это отсутствие даже слабой защиты.
-    """
+        chunk = "\n".join([
+            "80. Продукция … применяется с учетом следующих коэффициентов:",
+            "Код по ОК 034-2014|Наименование|с 1 января 2026 г.|с 1 января 2028 г.|",
+            "28.15.24.110|Редуктор ветроэнергетической установки|0,5|0,7|",
+            "",
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            path = _P(d) / "chunk.txt"
+            path.write_text(chunk, encoding="utf-8")
+            orig = T._CHUNK
+            try:
+                T._CHUNK = path
+                T._tables.cache_clear()
+                with_guard = T._tables()
+                self.assertEqual(with_guard, [],
+                                 "таблица коэффициентов разобрана как таблица порогов")
 
-    def test_rule_names_both_conditional_threshold_lines(self):
-        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT as P
-        self.assertIn("ИНОЙ порог", P, "в промпте нет правила про график-оговорку")
-        self.assertIn("ДЛЯ ЦЕЛЕЙ ЗАКУПОК", P, "в промпте нет правила про закупочный порог")
+                # Тот же чанк без вводной-признака ОБЯЗАН разобраться — иначе тест доказывал бы
+                # лишь то, что разбор вообще не работает.
+                path.write_text(chunk.replace(
+                    "применяется с учетом следующих коэффициентов:", "пороги:"), encoding="utf-8")
+                T._tables.cache_clear()
+                self.assertTrue(T._tables(),
+                                "контроль не сработал: чанк не разбирается и без стража")
+            finally:
+                T._CHUNK = orig
+                T._tables.cache_clear()
 
 
 class TestExcludedCodesGateSeesEveryMarkerRow(unittest.TestCase):
