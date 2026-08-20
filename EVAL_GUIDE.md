@@ -130,7 +130,7 @@
 python -m unittest discover -s tests
 python scripts/verify_structured.py --records
 python scripts/reconcile_kb.py
-python scripts/eval_threshold_coverage.py --max-share 22   # покрытие порогом (K2 #47)
+python scripts/eval_threshold_coverage.py                   # покрытие порогом (K2 #47)
 ```
 
 > ⚠ **`scripts/check_editions.py` как ФАЙЛА нет** — команда осталась от плана. Сама проверка
@@ -142,6 +142,12 @@ python scripts/eval_threshold_coverage.py --max-share 22   # покрытие п
 > позиций без общего порога служила критерием приёмки `K2`, но считать её было НЕЧЕМ — число
 > жило только в сообщении коммита. Скрипт повторяет порядок разрешения порога из рантайма и
 > печатает оба среза (весь корпус и `points`+`mixed`). Гонять при КАЖДОЙ правке корпуса.
+>
+> ⚠⚠ **Здесь он зовётся БЕЗ `--max-share`, и это осознанно.** Порог ≤22 % отменён владельцем
+> 20.08.2026 как недостижимый и неопределимый; новый назначается после `A1` #56, когда
+> классификация «дефект / порога нет в первоисточнике» станет однозначной. Пока порога нет,
+> `--max-share` на уровне 0 возвращал бы 1 на ВЕРНОМ коде и по правилу гайда останавливал бы
+> всю цепочку замеров. Метрика печатается как наблюдение, а не как ворота.
 
 | Метрика | Порог | Комментарий |
 |---|---|---|
@@ -275,9 +281,9 @@ python scripts/eval_guard.py --mode borderline --check-refusal   # цена фл
 **Когда:** релизный тег, три повтора. **Длительность:** десятки минут. **Платно.**
 
 ```bash
-python scripts/eval_answers.py --set gs_answers --runs 3
-python scripts/eval_answers.py --set gs_boundary --runs 3
-python scripts/eval_answers.py --set gs_traps --runs 3
+python scripts/eval_answers.py --report docs/eval_runs/<дата>_answers1.md
+python scripts/eval_completeness.py --report docs/eval_runs/<дата>_compl1.md
+# повторить ТРИЖДЫ, меняя имя отчёта: флага --runs у этих скриптов нет
 ```
 
 ### 2.1. Пары метрик — иначе система оптимизируется в молчание
@@ -386,10 +392,20 @@ python scripts/eval_answers.py --set gs_traps --runs 3
 
 ```bash
 python scripts/eval_determinism.py --runs 5
-python scripts/eval_paraphrase.py --set gs_natural
+python scripts/eval_paraphrase.py --per-section 3 --paraphrases 3
 python scripts/eval_perturbation.py
-python scripts/eval_multiturn.py
 ```
+
+> ⚠ **`scripts/eval_multiturn.py` в репозитории НЕТ** (проверено 20.08.2026) — команда стояла
+> здесь от плана. Мультитёрн сейчас закрыт юнит-тестами (`tests/test_followup.py`,
+> `test_chat_logging.py`, `test_review_pr94.py`: якорь-код диалога, окно истории, дата в вопросе
+> не гасит мультитёрн), то есть уровнем 0, а не уровнем 3. Отдельного замера устойчивости
+> диалога нет — это пробел, а не забытая команда.
+>
+> ⚠ **Команды этого гайда сверены со скриптами 20.08.2026** после того, как выяснилось, что
+> четыре вызова из пяти были невыполнимы (`--set` у `eval_coverage`, `eval_answers`,
+> `eval_paraphrase`; `--runs` у `eval_answers`). Гайд — приёмочный протокол: команда, которую
+> нельзя запустить дословно, обесценивает весь уровень.
 
 | Замер | Метрика | Порог |
 |---|---|---|

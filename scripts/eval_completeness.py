@@ -113,6 +113,16 @@ def is_clarifying(text: str, hits) -> bool:
 # `is_clarifying` двадцатью строками выше.
 
 
+_DATE_STEP_RE = re.compile(
+    r"((?:с|до)\s+\d{1,2}\s+\w+\s+\d{4}\s*г\.|\d{4}\s*год[а-я]*)\s*[-—:]?\s*"
+    r"(?:не менее\s+)?(\d+(?:[.,]\d+)?)")
+
+
+def _steps(text: str) -> dict:
+    """Привязка ДАТА → ЗНАЧЕНИЕ. Именно она отличает общий график от оговорки."""
+    return {d.strip(): v for d, v in _DATE_STEP_RE.findall(text or "")}
+
+
 def context_facts(hit, ctx: str) -> dict:
     """Что контекст ОБЯЗЫВАЕТ показать в ответе (эталон полноты, машинный)."""
     block = ctx.split("\n\n")[0] if ctx else ""
@@ -122,10 +132,21 @@ def context_facts(hit, ctx: str) -> dict:
             break
     m = re.search(r"^\s*Порог:\s*(.+)$", block, re.M)
     threshold = (m.group(1).strip() if m else "")
+    # ⚠ У ПОРОГА БЫВАЕТ ВТОРАЯ СТРОКА, И ОРАКУЛ ЕЁ НЕ ВИДЕЛ (ревью 20.08.2026).
+    # `(.+)$` останавливается на переводе строки, а с 20.08 контекст печатает под «Порог:»
+    # строку «⚠ ИНОЙ порог — за исключением судов…» со СВОИМ графиком. Хуже: у обоих графиков
+    # прим. 17 ОДИНАКОВЫЙ набор чисел {2300, 2900, 3400, 3500} и различаются они только
+    # привязкой к датам — значит ни одна метрика, считающая ЧИСЛА, поймать подмену не может
+    # в принципе. Правило 2г оставалось без единого гейта, способного упасть.
+    exc_m = re.search(r"^\s*⚠ ИНОЙ порог\s*—\s*(.+)$", block, re.M)
+    exception = (exc_m.group(1).strip() if exc_m else "")
     # Баллы операций именно ЦЕЛЕВОГО блока: числа перед «балл.»
     points = [n for n in re.findall(r"—\s*(\d+(?:[.,]\d+)?)\s*балл", block)]
     return {
         "threshold": threshold,
+        "exception": exception,
+        "general_steps": _steps(threshold),
+        "exception_steps": _steps(exception),
         "threshold_numbers": claim_numbers(threshold),
         "points": sorted(set(points), key=lambda x: -float(x.replace(",", "."))),
         "has_incomplete_marker": ("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ" in block
@@ -164,6 +185,15 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
         # Порог УЗЛА в строке «Порог» — числа, которых нет в пороге позиции, но есть в баллах узлов.
         node_leak = [n for n in claim_numbers(thr_line)
                      if n not in want["threshold_numbers"] and n in pts]
+        # ⚠ ПОДМЕНА ГРАФИКА: у позиции с оговоркой (прим. 17) обе строки несут ОДНИ И ТЕ ЖЕ
+        # числа при разной привязке к датам. Сверяем ПРИВЯЗКУ в строке «Порог» ответа с общим
+        # графиком контекста: значение оговорки, выданное за общий порог, — это и есть дефект,
+        # против которого написано правило 2г, и единственный способ его увидеть.
+        said = _steps(thr_line)
+        schedule_mix = [f"{d}: {v} (в контексте {want['general_steps'][d]})"
+                        for d, v in said.items()
+                        if d in want["general_steps"] and v != want["general_steps"][d]
+                        and v == want["exception_steps"].get(d)]
 
         clarifying = is_clarifying(text, ans.hits)
         # Просьба подтвердить код при ОПОРЕ на позицию — не уточнение, а страховка (см. is_clarifying).
@@ -171,6 +201,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
         asks_code = bool(CLARIFY_RE.search(text)) and not clarifying
         if clarifying:  # полнота неприменима: позиция не подтверждена, баллы называть нельзя
             thr_expected, thr_shown, pts, pts_shown = False, None, [], 0
+            schedule_mix = []
 
         rows.append({
             "id": c["id"], "query": c["query"], "section": c["expected_section"],
@@ -185,6 +216,7 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
             "emoji": bool(EMOJI_RE.search(text)),
             "cites_ok": (not cites) or max(cites) <= max(len(ans.hits), 1),
             "node_leak": node_leak,
+            "schedule_mix": schedule_mix,
             "unverified": ans.unverified_numbers,
         })
     return rows
@@ -229,10 +261,13 @@ def report(rows: list[dict]) -> list[str]:
            f"  Нет внутренней лексики («контекст») = {pct(n - sum(r['kitchen'] for r in rows), n)}",
            f"  Все [N] существуют                  = {pct(sum(r['cites_ok'] for r in rows), n)}",
            f"  Порог узла не подставлен в «Порог»  = {pct(n - sum(1 for r in rows if r['node_leak']), n)}",
+           f"  График оговорки не выдан за общий   = "
+           f"{pct(n - sum(1 for r in rows if r.get('schedule_mix')), n)}",
            ""]
 
     bad = [r for r in rows if (r["thr_expected"] and not r["thr_shown"]) or r["verdict"]
            or r["rule_ref"] or r["zakl"] or r["emoji"] or r["kitchen"] or r["node_leak"]
+           or r.get("schedule_mix")
            or not r["cites_ok"]]
     if bad:
         out.append("ПРОБЛЕМНЫЕ КЕЙСЫ:")
@@ -252,6 +287,8 @@ def report(rows: list[dict]) -> list[str]:
                 why.append("внутренняя лексика («контекст»/«промпт»)")
             if r["node_leak"]:
                 why.append(f"порог узла в строке «Порог»: {r['node_leak']}")
+            if r.get("schedule_mix"):
+                why.append(f"график оговорки выдан за общий: {r['schedule_mix']}")
             if not r["cites_ok"]:
                 why.append("ссылка [N] на несуществующую позицию")
             out.append(f"  #{r['id']:>3} [{r['section']:>5}] {r['query'][:52]:52} — {', '.join(why)}")
