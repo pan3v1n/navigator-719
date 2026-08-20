@@ -102,6 +102,53 @@ class TestTwoSchedulesInOneLine(unittest.TestCase):
         self.assertEqual(offenders, [], "одна дата с разными порогами в общем графике")
 
 
+class TestExceptionSplitIsNarrow(unittest.TestCase):
+    """Второй круг ревью: признак разделения был СЛИШКОМ ШИРОК и давал зеркало исходного дефекта.
+
+    «После „за исключением“ где-то есть „не менее“» ловит и обычное сужение охвата, за которым
+    ПРОДОЛЖАЕТСЯ общий график. Тогда действующая ступень уезжает в строку «ИНОЙ порог», а в
+    «Порог» остаётся просроченная — та же ошибка, только в другую сторону.
+    """
+
+    def test_scope_narrowing_followed_by_general_schedule_is_not_split(self):
+        text = ("до 30 июня 2023 г. не менее 250 баллов, за исключением судов рыбопромыслового "
+                "флота, с 1 июля 2025 г. не менее 300 баллов")
+        self.assertEqual(_split_exception(text), (text, None),
+                         "хвост ОБЩЕГО графика уехал в оговорку")
+
+    def test_exception_with_its_own_evaluation_clause_is_split(self):
+        general, exc = _split_exception(
+            "до 30 июня 2023 г. не менее 2300 баллов, за исключением судов, "
+            "которые оцениваются с 1 июля 2025 г. не менее 2900 баллов")
+        self.assertEqual(general, "до 30 июня 2023 г. не менее 2300 баллов")
+        self.assertIn("2900", exc)
+
+    def test_exception_swallowing_the_whole_value_is_refused(self):
+        """Оговорка в начале строки оставила бы «Порог:» пустым при подлинной ссылке на
+        примечание — величины нет, а цитата выглядит настоящей. Молчим, а не печатаем пусто."""
+        text = "за исключением судов, которые оцениваются с 1 июля 2025 г. не менее 300 баллов"
+        self.assertEqual(_split_exception(text), (text, None))
+
+
+class TestGroupDisclaimerStaysOnTheGeneralLine(unittest.TestCase):
+    """Приписка «порог задан для группы кодов» обязана стоять при ОБЩЕМ графике.
+
+    Она добавлялась в самый конец, то есть ПОСЛЕ перевода строки, — и описывала оговорку,
+    а строка «Порог:» оставалась без предупреждения о применимости вовсе.
+    """
+
+    def test_disclaimer_precedes_the_exception_line(self):
+        from app.rag.thresholds import _fmt_flat
+        out = _fmt_flat({"threshold": "не менее 100 баллов", "exception": "за исключением X",
+                         "note": "17", "codes": ["30.11.31.110", "30.11.31.120"]}, group=True)
+        head, _, tail = out.partition("\n")
+        self.assertIn("порог задан для группы кодов", head,
+                      "предупреждение о группе не попало в строку «Порог»")
+        self.assertNotIn("порог задан для группы кодов", tail,
+                         "предупреждение о группе уехало к оговорке")
+        self.assertIn("за исключением X", tail)
+
+
 class TestColumnLabelsStayVerbatim(unittest.TestCase):
     """Подписи колонок — цитата первоисточнику, а не синтез.
 
@@ -140,6 +187,21 @@ class TestCoefficientTableIsRejectedByMechanism(unittest.TestCase):
 
     def test_note_80_is_not_among_parsed_tables(self):
         self.assertNotIn("80", [t["note"] for t in _tables()])
+
+
+class TestPromptKnowsAboutTheSecondThresholdLine(unittest.TestCase):
+    """Шаблон ответа держит РОВНО ОДИН слот «**Порог:**», а контекст теперь приносит до трёх строк
+    порога разной природы: общий, «⚠ ИНОЙ порог — за исключением …» и «Порог ДЛЯ ЦЕЛЕЙ ЗАКУПОК».
+
+    Без правила модель сама решает, какая из них займёт единственный слот, — и оба числа
+    дословны, поэтому faithfulness-гард молчит. Правило промпта слабее устройства контекста,
+    но его отсутствие — это отсутствие даже слабой защиты.
+    """
+
+    def test_rule_names_both_conditional_threshold_lines(self):
+        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT as P
+        self.assertIn("ИНОЙ порог", P, "в промпте нет правила про график-оговорку")
+        self.assertIn("ДЛЯ ЦЕЛЕЙ ЗАКУПОК", P, "в промпте нет правила про закупочный порог")
 
 
 class TestExcludedCodesGateSeesEveryMarkerRow(unittest.TestCase):

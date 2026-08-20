@@ -130,8 +130,18 @@
 python -m unittest discover -s tests
 python scripts/verify_structured.py --records
 python scripts/reconcile_kb.py
-python scripts/check_editions.py        # см. ниже — новый
+python scripts/eval_threshold_coverage.py --max-share 22   # покрытие порогом (K2 #47)
 ```
+
+> ⚠ **`scripts/check_editions.py` как ФАЙЛА нет** — команда осталась от плана. Сама проверка
+> редакций написана и живёт ТЕСТОМ (см. §«Статус» ниже, п. 1), то есть уже входит в строку
+> `unittest discover`; отдельно её звать не нужно. Слежением за выходом новых редакций занимается
+> `A6` (`scripts/watch_edition.py`).
+>
+> ⚠ **`eval_threshold_coverage.py` добавлен 20.08.2026** и закрывает конкретный провал: доля
+> позиций без общего порога служила критерием приёмки `K2`, но считать её было НЕЧЕМ — число
+> жило только в сообщении коммита. Скрипт повторяет порядок разрешения порога из рантайма и
+> печатает оба среза (весь корпус и `points`+`mixed`). Гонять при КАЖДОЙ правке корпуса.
 
 | Метрика | Порог | Комментарий |
 |---|---|---|
@@ -158,10 +168,14 @@ python scripts/check_editions.py        # см. ниже — новый
 **Когда:** каждый PR. **Длительность:** минуты. **LLM:** только реранкер (отключается флагом).
 
 ```bash
-EXACT_SEARCH=1 python scripts/eval_coverage.py --set gs_canonical
-EXACT_SEARCH=1 python scripts/eval_coverage.py --set gs_natural
+EXACT_SEARCH=1 python scripts/eval_coverage.py --sweep both
 EXACT_SEARCH=1 python scripts/eval_rules.py
 ```
+
+> ⚠ **Флага `--set` у `eval_coverage.py` нет** (исправлено 20.08.2026 — гайд предписывал
+> `--set gs_canonical` / `--set gs_natural`, и команда падала). Скрипт принимает
+> `--sweep {name,code,both}`: NAME sweep гоняет запрос = наименование позиции по всему корпусу,
+> CODE sweep — запрос = код ОКПД2. Повторов по умолчанию три (`--repeat`).
 
 | Метрика | Набор | Порог | Тип |
 |---|---|---|---|

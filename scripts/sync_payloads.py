@@ -121,41 +121,42 @@ def main() -> None:
         print(f"  · {str(name)[:52]!r} → {diff}")
     if orphans:
         print(f"⚠ точек, которым нет записи в корпусе: {len(orphans)} {orphans[:3]}")
-        # ⚠ НАЙДЕНО РЕВЬЮ 20.08.2026. Раньше при пустом `changed` последней строкой печаталось
-        # «расхождений нет — коллекция уже соответствует корпусу», и скрипт выходил нулём — даже
-        # когда выше стояло предупреждение о точках-сиротах. А удаление записей (D12: −4 из
-        # `VII_medizdeliya.json`) даёт ровно такую форму: полей никто не менял, `changed` пуст.
-        # Оператор дешёвого пути выкатки (код + `sync_payloads --write` вместо часовой
-        # переиндексации) читал ПОСЛЕДНЮЮ строку, считал шаг закрытым — и четыре исключённые
-        # позиции оставались живыми в индексе, то есть правка до ответа не доезжала, а инструмент
-        # рапортовал «чисто». Предохранитель, успокаивающий на реальной проблеме, хуже
-        # отсутствующего: он закрывает шаг, который не выполнен.
-        print(f"\n❌ {len(orphans)} точек не имеют записи в корпусе — payload их не чинит. "
-              f"Нужна ПЕРЕИНДЕКСАЦИЯ (`load_kb.py`) или снапшот: удаление записей "
-              f"`sync_payloads` не выполняет.")
-        raise SystemExit(3)
 
+    # ⚠ СНАЧАЛА ДЕЛАЕМ РАБОТУ, КОТОРУЮ МОЖЕМ, ПОТОМ ПАДАЕМ (ревью 20.08.2026, вторая редакция).
+    # Первая правка ставила отказ по сиротам ДО записи — и меняла молчаливый успех на отказ от
+    # работы: правка, которая и удаляет записи, и меняет поля у сотен других (форма `D12`+`K2`),
+    # оставляла бы ВЕСЬ payload устаревшим. Предохранитель обязан сообщать о невыполненном шаге,
+    # а не отменять выполнимый.
     if not changed:
-        print("расхождений нет — коллекция уже соответствует корпусу")
-        return
-    if not write:
+        print("payload существующих точек соответствует корпусу")
+    elif not write:
         print("\nПРОБНЫЙ ПРОГОН — ничего не записано (нужен --write)")
-        return
+    else:
+        for pid, _name, _diff, rec in changed:
+            payload = dict(rec)
+            payload["text"] = build_embedding_text(rec)
+            client.set_payload(collection_name=collection, payload=payload, points=[pid])
+        print(f"payload обновлён: {len(changed)} точек")
 
-    for pid, _name, _diff, rec in changed:
-        payload = dict(rec)
-        payload["text"] = build_embedding_text(rec)
-        client.set_payload(collection_name=collection, payload=payload, points=[pid])
-    print(f"payload обновлён: {len(changed)} точек")
+        if revec:
+            from app.rag.embeddings import embed_passages
+            vectors = {pid: embed_passages([build_embedding_text(rec)])[0]
+                       for pid, _n, _d, rec in revec}
+            client.update_vectors(collection_name=collection, points=[
+                models.PointVectors(id=pid, vector={"dense": vec}) for pid, vec in vectors.items()])
+            print(f"вектор пересчитан: {len(vectors)} точек")
+        print("готово")
 
-    if revec:
-        from app.rag.embeddings import embed_passages
-        vectors = {pid: embed_passages([build_embedding_text(rec)])[0]
-                   for pid, _n, _d, rec in revec}
-        client.update_vectors(collection_name=collection, points=[
-            models.PointVectors(id=pid, vector={"dense": vec}) for pid, vec in vectors.items()])
-        print(f"вектор пересчитан: {len(vectors)} точек")
-    print("готово")
+    if orphans:
+        # ⚠ Раньше последней строкой при пустом `changed` печаталось «расхождений нет — коллекция
+        # уже соответствует корпусу» и скрипт выходил нулём, хотя выше стояло предупреждение о
+        # сиротах. Удаление записей (`D12`: −4) даёт ровно такую форму: полей никто не менял.
+        # Оператор дешёвого пути выкатки читал ПОСЛЕДНЮЮ строку и считал шаг закрытым — а четыре
+        # исключённые позиции оставались в индексе, то есть правка до ответа не доезжала.
+        print(f"\n❌ {len(orphans)} точек не имеют записи в корпусе — payload их не чинит: "
+              f"удаление точек `sync_payloads` НЕ ВЫПОЛНЯЕТ. Нужна переиндексация "
+              f"(`load_kb.py`) или восстановление коллекции из снапшота.")
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":

@@ -266,8 +266,17 @@ def render(recs, chunks, fresh, refused, n_new, n_old) -> str:
         from_notes = None if own_thr else lookup_threshold(
             p.get("okpd2_codes") or [], _name(p), p.get("section_roman"))
         thr = own_thr or from_notes
-        shown = f"{thr} — из примечаний раздела; в самой позиции не указан" if from_notes else thr
+        # ⚠ Порог бывает ДВУСТРОЧНЫМ: с 20.08.2026 `lookup_threshold` выносит оговорку прим. 17
+        # («⚠ ИНОЙ порог — за исключением судов…») отдельной строкой. Приписка про источник
+        # обязана остаться при ОБЩЕМ графике, а не уехать к оговорке, и markdown-строка «**Порог
+        # для источника:**» не должна разорваться посреди значения — иначе документ для эксперта
+        # начнёт считать величину иначе, чем рантайм.
+        head, sep, tail = (thr or "").partition("\n")
+        shown = f"{head} — из примечаний раздела; в самой позиции не указан" if from_notes else head
         add(f"**Порог для источника:** {shown if thr else '_не указан_'}")
+        for extra in (tail.splitlines() if sep else []):
+            if extra.strip():
+                add(f"    {extra.strip()}")
         add("")
         add(f"**Что унаследовано ({len(ops)}):**")
         add("")
