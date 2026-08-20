@@ -26,7 +26,7 @@ from app.core.prompts import (
 from app.rag import fragments, inheritance, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
-from app.rag.thresholds import lookup_threshold
+from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
 
 # Кап операций ЦЕЛЕВОГО хита (вариант A, 2026-07-05): 60, чтобы не резать умеренные продукты
 # (напр. чиллеры XVI, 38 операций). «СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ» помечается только там, где список
@@ -399,6 +399,17 @@ def format_context(hits: list[Hit], query: str | None = None,
             # разброса формулировок. Указание переехало в правило 2в промпта, где ему и место.
             lines.append("    Балльная оценка: у показанных требований баллы НЕ ПРИВЕДЕНЫ "
                          "(это не значит, что их нет в приложении).")
+        # ⚠ ЗАКУПОЧНЫЙ ПОРОГ — ДРУГОЙ ВОПРОС (K2, #47). Часть примечаний задаёт порог «для целей
+        # осуществления закупок … для обеспечения государственных и муниципальных нужд», и до
+        # 19.08.2026 он подставлялся в строку «Порог» как общий: 57 позиций корпуса отвечали
+        # закупочным порогом на вопрос о подтверждении российского происхождения — с настоящей
+        # ссылкой на первоисточник, поэтому ни гард, ни эксперт подмены не видели. Теперь он
+        # печатается ОТДЕЛЬНОЙ строкой и ВСЕГДА со своим условием: число без условия и есть
+        # неверный ответ.
+        proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)
+        if proc:
+            lines.append(f"    Порог ДЛЯ ЦЕЛЕЙ ЗАКУПОК (не для подтверждения происхождения): {proc}")
+
         if attribution_line:
             lines.append(attribution_line)
         total = len(ops)

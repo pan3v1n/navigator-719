@@ -27,7 +27,10 @@ from app.rag.pipeline import (  # noqa: E402
     claim_numbers,
 )
 from app.rag.retriever import okpd2_match  # noqa: E402
-from app.rag.thresholds import lookup_threshold  # noqa: E402
+from app.rag.thresholds import (  # noqa: E402
+    lookup_procurement_threshold,
+    lookup_threshold,
+)
 
 # Представительные запросы (числоёмкие, разные разделы, с кодом и без)
 QUERIES = [
@@ -80,16 +83,42 @@ def record_numbers(h) -> set[str]:
     return _numbers_of(h.min_threshold, h.requirement_blocks)
 
 
+def _runtime_threshold_numbers(codes, name, section) -> set[str]:
+    """Числа порогов, которые рантайм ДОБИРАЕТ к записи из примечаний, — общего и закупочного.
+
+    ⚠ В данных записи их нет (`record_numbers` читает только `min_threshold` и блоки), а
+    `format_context` печатает обе строки. Пока это учитывалось лишь для целевой записи, любой
+    СИБЛИНГ — строка той же расколотой ячейки или запись с точным совпадением кода — приносил в
+    контекст числа, которых оракул не знал за «свои». Замер 20.08.2026: таких сиблингов 2 и 264
+    соответственно, а числа там мелкие (27, 29, 100) и легко совпадают с числами постороннего
+    кандидата — тогда гейт флагает ВЕРНЫЙ ответ, как уже случилось с 40/50 на масках.
+    """
+    out: set[str] = set()
+    for fn in (lookup_threshold, lookup_procurement_threshold):
+        val = fn(codes, name, section)
+        if val:
+            out |= set(claim_numbers(str(val)))
+    return out
+
+
+def _hit_numbers_with_thresholds(h) -> set[str]:
+    """Числа записи ВМЕСТЕ с порогами, которые рантайм добирает ей из примечаний."""
+    return record_numbers(h) | _runtime_threshold_numbers(
+        h.okpd2_codes, h.product_name, h.section_roman)
+
+
 def _own_numbers(target, hits: list, code: "str | list[str] | None") -> set[str]:
     """Числа, которые ответ вправе назвать: они принадлежат позиции, О КОТОРОЙ идёт речь.
 
-    Сюда входят четыре законных источника, и каждый — факт ДАННЫХ, а не свойство рендера:
+    Сюда входят пять законных источников, и каждый — факт ДАННЫХ, а не свойство рендера:
       * сама целевая запись;
       * порог, добираемый рантаймом из примечаний-таблиц (`thresholds.lookup_threshold`) — у части
         позиций порог живёт в примечании раздела и попадает в контекст законно;
       * требования ГРУППЫ (`R6`), когда своих у позиции нет: они показываются с атрибуцией;
       * строки ОДНОЙ расколотой ячейки (`R29`/`EV6`) — это не чужая продукция, а один источник,
-        разъехавшийся по нескольким строкам кода при конвертации.
+        разъехавшийся по нескольким строкам кода при конвертации;
+      * ЗАКУПОЧНЫЙ порог самой позиции (`lookup_procurement_threshold`, `K2`) — он печатается
+        отдельной строкой со своим условием и принадлежит цели, а не соседу.
 
     ⚠ ЧЕГО СЮДА СОЗНАТЕЛЬНО НЕ ВХОДИТ: записи, попавшие в окно по ПРЕФИКСУ кода. Пользователь,
     назвавший «28.13», получает окно, где рантайм помечает целевыми ВСЕ 52 подходящие записи
@@ -98,10 +127,19 @@ def _own_numbers(target, hits: list, code: "str | list[str] | None") -> set[str]
     приложении бывает несколько записей с поделёнными между ними требованиями (26.11.22.210),
     и назвавший этот код эксперт спрашивает про них обе."""
     own = record_numbers(target)
-    mt = target.min_threshold or lookup_threshold(
+    # ⚠ ПЯТЫЙ ЗАКОННЫЙ ИСТОЧНИК, найденный замером 20.08.2026. `K2` (#47) стала печатать
+    # ЗАКУПОЧНЫЙ порог отдельной строкой — всегда со своим условием («не для подтверждения
+    # происхождения»). Это числа ЦЕЛЕВОЙ позиции, но оракул о них не знал, и гейт «без чужих
+    # чисел» сел 1.00 → 0.90: «одноразовые медицинские маски» флагались в 5 прогонах из 5
+    # числами 40 и 50 из строки прим. 53 своей же позиции. Ответ при этом ВЕРЕН — порог
+    # происхождения назван отдельно («не менее 25 баллов»), а 40/50 стоят только внутри
+    # обусловленной фразы про закупки.
+    #
+    # Тот же класс, что уже дважды ловили: оракул и код, который он судит, менялись в разных
+    # коммитах и разошлись. Метрика, штрафующая за ВЕРНОЕ поведение, дороже отсутствующей —
+    # она заставляет усомниться в правке (урок про предохранитель, бьющий по верному коду).
+    own |= _runtime_threshold_numbers(
         target.okpd2_codes, target.product_name, target.section_roman)
-    if mt:
-        own |= set(claim_numbers(str(mt)))
     parent = inheritance.lookup(target.section_roman, target.product_name)
     if parent:
         own |= _numbers_of(parent.get("min_threshold"),
@@ -111,7 +149,9 @@ def _own_numbers(target, hits: list, code: "str | list[str] | None") -> set[str]
         if h is target:
             continue
         if (group is not None and fragments.group_of(h.product_name) == group) or _exact_code(h, code):
-            own |= record_numbers(h)
+            # ⚠ Не `record_numbers`: сиблингу рантайм тоже ДОБИРАЕТ порог из примечаний, и
+            # `format_context` его печатает (ревью 20.08.2026 — та же неполнота, что была у цели).
+            own |= _hit_numbers_with_thresholds(h)
     return own
 
 

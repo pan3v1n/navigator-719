@@ -10,7 +10,7 @@
 пересобрать payload на месте: сеть нужна только под сам архив.
 
 КАК СОПОСТАВЛЯЮТСЯ ТОЧКИ. По `source_anchor` («Приложение к ПП №719, Раздел XXIV, позиция 6») —
-он есть у всех 1381 записи и уникален. Привычный ключ (раздел + имя) здесь НЕ годится: в корпусе
+он есть у каждой записи корпуса и уникален. Привычный ключ (раздел + имя) здесь НЕ годится: в корпусе
 7 пар записей делят название внутри раздела («Шасси с установленными двигателями…», «Устройства
 наведения промышленные», «Стерилизаторы хирургические или лабораторные» и др.), и по такому ключу
 14 точек получили бы payload ЧУЖОЙ записи — то есть скрипт, задуманный чинить данные, тихо портил
@@ -120,30 +120,43 @@ def main() -> None:
     for _, name, diff, _rec in changed[:20]:
         print(f"  · {str(name)[:52]!r} → {diff}")
     if orphans:
-        print(f"⚠ точек, которым нет записи в корпусе: {len(orphans)} {orphans[:3]} "
-              f"(их payload не трогаем — это работа load_kb)")
+        print(f"⚠ точек, которым нет записи в корпусе: {len(orphans)} {orphans[:3]}")
 
+    # ⚠ СНАЧАЛА ДЕЛАЕМ РАБОТУ, КОТОРУЮ МОЖЕМ, ПОТОМ ПАДАЕМ (ревью 20.08.2026, вторая редакция).
+    # Первая правка ставила отказ по сиротам ДО записи — и меняла молчаливый успех на отказ от
+    # работы: правка, которая и удаляет записи, и меняет поля у сотен других (форма `D12`+`K2`),
+    # оставляла бы ВЕСЬ payload устаревшим. Предохранитель обязан сообщать о невыполненном шаге,
+    # а не отменять выполнимый.
     if not changed:
-        print("расхождений нет — коллекция уже соответствует корпусу")
-        return
-    if not write:
+        print("payload существующих точек соответствует корпусу")
+    elif not write:
         print("\nПРОБНЫЙ ПРОГОН — ничего не записано (нужен --write)")
-        return
+    else:
+        for pid, _name, _diff, rec in changed:
+            payload = dict(rec)
+            payload["text"] = build_embedding_text(rec)
+            client.set_payload(collection_name=collection, payload=payload, points=[pid])
+        print(f"payload обновлён: {len(changed)} точек")
 
-    for pid, _name, _diff, rec in changed:
-        payload = dict(rec)
-        payload["text"] = build_embedding_text(rec)
-        client.set_payload(collection_name=collection, payload=payload, points=[pid])
-    print(f"payload обновлён: {len(changed)} точек")
+        if revec:
+            from app.rag.embeddings import embed_passages
+            vectors = {pid: embed_passages([build_embedding_text(rec)])[0]
+                       for pid, _n, _d, rec in revec}
+            client.update_vectors(collection_name=collection, points=[
+                models.PointVectors(id=pid, vector={"dense": vec}) for pid, vec in vectors.items()])
+            print(f"вектор пересчитан: {len(vectors)} точек")
+        print("готово")
 
-    if revec:
-        from app.rag.embeddings import embed_passages
-        vectors = {pid: embed_passages([build_embedding_text(rec)])[0]
-                   for pid, _n, _d, rec in revec}
-        client.update_vectors(collection_name=collection, points=[
-            models.PointVectors(id=pid, vector={"dense": vec}) for pid, vec in vectors.items()])
-        print(f"вектор пересчитан: {len(vectors)} точек")
-    print("готово")
+    if orphans:
+        # ⚠ Раньше последней строкой при пустом `changed` печаталось «расхождений нет — коллекция
+        # уже соответствует корпусу» и скрипт выходил нулём, хотя выше стояло предупреждение о
+        # сиротах. Удаление записей (`D12`: −4) даёт ровно такую форму: полей никто не менял.
+        # Оператор дешёвого пути выкатки читал ПОСЛЕДНЮЮ строку и считал шаг закрытым — а четыре
+        # исключённые позиции оставались в индексе, то есть правка до ответа не доезжала.
+        print(f"\n❌ {len(orphans)} точек не имеют записи в корпусе — payload их не чинит: "
+              f"удаление точек `sync_payloads` НЕ ВЫПОЛНЯЕТ. Нужна переиндексация "
+              f"(`load_kb.py`) или восстановление коллекции из снапшота.")
+        raise SystemExit(3)
 
 
 if __name__ == "__main__":

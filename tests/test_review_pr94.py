@@ -272,3 +272,129 @@ class TestExtraCodesLimit(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestProcurementThresholdIsNotTheGeneralOne(unittest.TestCase):
+    """`K2` #47: примечания «для целей осуществления закупок» задают ДРУГОЙ порог.
+
+    ⚠ Замер 19.08.2026: 57 позиций корпуса получали закупочный порог как СВОЙ ОБЩИЙ — со ссылкой
+    на настоящее примечание («не менее 75 баллов [прим. 53]»). Заявитель, спрашивающий про
+    подтверждение российского происхождения, получал порог программы госзакупок. Неверный порог с
+    подлинной ссылкой опаснее отсутствующего: число дословно, поэтому faithfulness-гард молчит, —
+    тот же класс, что утечка порога вверх по иерархии в `_code_applies`."""
+
+    def test_scope_is_read_from_the_note_text(self):
+        from app.rag.thresholds import note_scope
+        for n in ["29", "31", "52", "53", "8", "9"]:
+            with self.subTest(note=n):
+                self.assertEqual(note_scope(n), "procurement")
+        for n in ["7", "11", "17", "26", "61", "77"]:
+            with self.subTest(note=n):
+                self.assertEqual(note_scope(n), "general")
+
+    def test_unknown_note_defaults_to_general(self):
+        """Неизвестное примечание — прежнее поведение, а не молчаливое исчезновение порога."""
+        from app.rag.thresholds import note_scope
+        self.assertEqual(note_scope("999"), "general")
+        self.assertEqual(note_scope(None), "general")
+
+    def test_procurement_threshold_never_answers_as_the_general_one(self):
+        from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
+        cases = [(["13.20.13"], "Ткани льняные", "XVII"), (["13.10.50"], "Пряжа шерстяная", "XVII")]
+        for codes, name, sec in cases:
+            with self.subTest(name=name):
+                self.assertIsNone(lookup_threshold(codes, name, sec),
+                                  "закупочный порог всё ещё выдаётся как общий")
+                self.assertIsNotNone(lookup_procurement_threshold(codes, name, sec),
+                                     "закупочный порог потерян вовсе — это тоже не годится")
+
+    def test_context_prints_the_condition_with_the_number(self):
+        """Число без условия и есть неверный ответ — условие обязано ехать вместе с порогом."""
+        hit = Hit(0.9, "XVII", "Лёгкая промышленность", "Ткани льняные", ["13.20.13"], None,
+                  [{"operations": [{"text": "ткачество", "points": 30}]}], "Разд. XVII, поз. 5",
+                  True, {})
+        ctx = P.format_context([hit], "ткани льняные", "13.20.13")
+        self.assertIn("ДЛЯ ЦЕЛЕЙ ЗАКУПОК", ctx)
+        self.assertIn("не для подтверждения происхождения", ctx)
+        self.assertNotIn("\n    Порог: не менее 50", ctx, "закупочное число стоит в строке «Порог»")
+
+
+class TestNoteThresholdParsing(unittest.TestCase):
+    """`K2` #47: разбор примечаний-порогов. Каждый случай — дефект, найденный сверкой с источником.
+
+    ⚠ Все они одного класса: рантайм показывал ЧИСЛО ИЗ ПЕРВОИСТОЧНИКА, но не то. Гард молчит —
+    он проверяет заземлённость, а не правильность привязки. Порог — самый дорогой факт продукта."""
+
+    def _thr(self, codes, name, sec=None):
+        from app.rag.thresholds import lookup_threshold
+        return lookup_threshold(codes, name, sec)
+
+    def test_column_labels_are_verbatim_and_aligned(self):
+        """Колонки «до 31 декабря 2024 г.» / «с 15 марта 2025 г.» прежде не опознавались, и
+        значения съезжали на колонку: у БАС 800 баллов подписывались 2025 годом вместо 2024."""
+        thr = self._thr(["30.30.31.130"],
+                        "БАС в составе с беспилотным воздушным судном вертолетного типа", "XXVIII")
+        self.assertIsNotNone(thr)
+        self.assertIn("до 31 декабря 2024 г. — не менее 800 баллов", thr)
+        self.assertIn("с 1 января 2025 г. — не менее 900 баллов", thr)
+        self.assertIn("с 1 января 2026 г. — не менее 1800 баллов", thr)
+
+    def test_tables_without_a_named_section_bind_by_code(self):
+        """Прим. 38/81/28/33 раздела не называют — привязка по КОДУ, иначе таблицы мертвы."""
+        thr = self._thr(["21.20.23.199"], "Гель-лубрикант", "VII")
+        self.assertIsNotNone(thr, "таблица без названного раздела не привязалась")
+        self.assertIn("2023 год — не менее 60 баллов", thr)
+        self.assertIn("прим. 28", thr)
+        self.assertNotIn("разд. None", thr, "в ссылке печатается несуществующий раздел")
+
+    def test_first_step_keeps_its_date(self):
+        """Отсечка по «не менее» срезала первую ступень вместе с датой, и ПРОШЛЫЙ порог читался
+        как действующий: «до 30 июня 2023 г. - не менее 250 баллов» → «не менее 250 баллов»."""
+        thr = self._thr(["28.11"], "Главная энергетическая установка", "XVIII")
+        self.assertIsNotNone(thr)
+        self.assertTrue(thr.startswith("до 30 июня 2023 г."), thr[:60])
+        self.assertIn("с 1 июля 2025 г.", thr)
+
+    def test_every_code_of_a_multi_entry_line_is_bound(self):
+        """Строка «код "A", код "B", код "C": порог» привязывала только ПЕРВЫЙ код."""
+        for name in ["Суда морские для перевозки химических продуктов",
+                     "Суда морские для перевозки прочих жидких грузов"]:
+            with self.subTest(name=name):
+                self.assertIsNotNone(self._thr(["30.11.22.112"], name, "XVIII"))
+
+    def test_nested_quotes_do_not_break_the_rest_of_the_line(self):
+        """⚠ «Суда наливные смешанного плавания "река - море"» — вложенные кавычки. Парная
+        регулярка сбивалась на весь остаток строки: из 22 кодов собиралось 6, имена превращались
+        в «, 30.11.32.110». Семь судов оставались без порога, а до того брали порог СОСЕДНЕЙ
+        строки — 1950 вместо 2450."""
+        for name in ["Буровые суда <9>", "Суда снабжения <9>", "Суда обслуживающего флота",
+                     "Суда научно-исследовательские", "Суда прочие <9>"]:
+            with self.subTest(name=name):
+                thr = self._thr(["30.11.33.190"], name, "XVIII")
+                self.assertIsNotNone(thr, "порог потерян")
+                self.assertIn("2450 баллов", thr, "взят порог соседней строки примечания")
+        # у «Ледоколов» СВОЯ строка примечания с другим числом — подмены быть не должно
+        self.assertIn("2500 баллов", self._thr(["30.11.33.190"], "Ледоколы <9>", "XVIII"))
+
+    def test_exact_name_beats_word_overlap(self):
+        """Однословные и близкие наименования: правило «пересечение ≥2 слов» выбирало соседа.
+
+        «Перфторуглеродная смазка УПИ» названа в строке с 200 баллами, а получала 100 из строки
+        про ФУП-НК/ФУП-С; «Сополимеры стирола … прочие» названы точно в строке с 300, а получали
+        30 от более узкого варианта «(в части сополимер-акриловых дисперсий)»."""
+        self.assertIn("200 баллов", self._thr(["20.14.19.140"], "Перфторуглеродная смазка УПИ", "XXI"))
+        self.assertIn("300 баллов", self._thr(["20.16.20.129"],
+                                              "Сополимеры стирола в первичных формах прочие", "XXI"))
+
+    def test_coefficient_table_is_not_a_threshold(self):
+        """Прим. 80 — таблица «Коэффициент | Срок действия», а не порог. Раньше выдавалось
+        «с 1 января 2026 г. — 0,5» в строке «Порог»: коэффициент СЭЗ подавался как порог баллов."""
+        thr = self._thr(["28.15.24.110"], "Редуктор (мультипликатор) ветроэнергетической установки", "V")
+        self.assertIsNone(thr)
+
+    def test_names_with_inner_numbers_do_not_become_codes(self):
+        """Радиус: числа внутри наименования не должны попадать в коды примечания."""
+        from app.rag.thresholds import _codes_before_quote
+        line = ('из 20.13.43.110, из 20.13.43.111 "Сода кальцинированная чистотой менее 95 '
+                'процентов" - не менее 90 баллов')
+        self.assertEqual(_codes_before_quote(line), ["20.13.43.110", "20.13.43.111"])
