@@ -83,6 +83,49 @@ def record_numbers(h) -> set[str]:
     return _numbers_of(h.min_threshold, h.requirement_blocks)
 
 
+def decisive_numbers(target, inherited_parent=None) -> set[str]:
+    """`EV10` (#91): РЕШАЮЩИЕ числа позиции — порог и баллы операций.
+
+    ЗАЧЕМ ОТДЕЛЬНАЯ ВЕЛИЧИНА. Метрика «стабильный набор чисел» считает ЛЮБОЕ число ответа, а
+    значит меряет не воспроизводимость решения, а полноту упоминаний. Разбор нестабильных
+    запросов это и показал: у бульдозеров между прогонами расходятся `0.1` и `0.3` — проценты
+    затрат на НИОКР, названные в ПРОЗЕ операции, а порог и баллы совпадают во всех прогонах.
+    Эксперт по таким числам решения не принимает; он смотрит на порог и на баллы операций.
+
+    Поэтому решающие числа берутся из СТРУКТУРНЫХ полей — `min_threshold` позиции, пороги,
+    добираемые рантаймом из примечаний, и `points` операций, — и НЕ включают величины, вкраплённые
+    в текст операций. Это ровно те числа, которые печатает код (`pipeline.points_table`), а не
+    выбирает модель.
+
+    ⚠ Наследование (`R6`): если своих операций у позиции нет, решающими становятся баллы ГРУППЫ —
+    их же показывает контекст с атрибуцией.
+    """
+    if target is None:
+        return set()
+    # ⚠ ЗАКУПОЧНЫЙ ПОРОГ В РЕШАЮЩИЕ НЕ ВХОДИТ, и это замер, а не вкусовщина. Он отвечает на
+    # ДРУГОЙ вопрос («для целей осуществления закупок»), печатается отдельной строкой со своим
+    # условием, и назвать его или нет — выбор полноты, а не воспроизводимости. Разбор показал:
+    # у «одноразовых медицинских масок» между прогонами плавали ровно 80 / 100 / 40 / 50 / 60 —
+    # весь закупочный график прим. 53, — тогда как ОБЩИЙ порог «не менее 25 баллов» назывался
+    # во всех прогонах без исключения. Включая закупочный, метрика штрафовала ответ за то, что
+    # он не пересказал ответ на вопрос, которого не задавали. Различение то же, что ввела `K2`.
+    out: set[str] = set(claim_numbers(str(target.min_threshold or "")))
+    if not (target.min_threshold or "").strip():
+        general = lookup_threshold(target.okpd2_codes, target.product_name, target.section_roman)
+        if general:
+            out |= set(claim_numbers(str(general)))
+    blocks = list(target.requirement_blocks or [])
+    if not any(b.get("operations") for b in blocks) and inherited_parent:
+        out |= set(claim_numbers(str(inherited_parent.get("min_threshold") or "")))
+        blocks = [{"operations": inherited_parent.get("operations") or []}]
+    for b in blocks:
+        for op in (b.get("operations") or []):
+            n = _norm_num(op.get("points"))
+            if n:
+                out.add(n)
+    return out
+
+
 def _runtime_threshold_numbers(own_threshold, codes, name, section) -> set[str]:
     """Числа порогов, которые рантайм ДОБИРАЕТ записи из примечаний, — общего и закупочного.
 
@@ -260,7 +303,7 @@ def evaluate(runs: int, limit: int, progress: bool):
         except ImportError:
             pass
     for q, code in it:
-        num_sets, secs, flags = [], [], []
+        num_sets, dec_sets, secs, flags = [], [], [], []
         alien_runs, alien_seen, alien_pool = 0, set(), set()
         for _ in range(runs):
             ans = answer(q, okpd2=code, limit=limit)
@@ -270,6 +313,9 @@ def evaluate(runs: int, limit: int, progress: bool):
             # расколотой ячейки опорой становится содержательный сиблинг, а не квалификатор).
             tgt = _target_hit(ans.hits, ans.codes)  # ⚠ теми же кодами, что рантайм
             secs.append(tgt.section_roman if tgt else "—")
+            # EV10: из чисел ответа оставляем только РЕШАЮЩИЕ — порог и баллы операций.
+            parent = (inheritance.lookup(tgt.section_roman, tgt.product_name) if tgt else None)
+            dec_sets.append(frozenset(nums & decisive_numbers(tgt, parent)))
             flags.append(bool(ans.unverified_numbers))
             # Чужие числа считаем по окну ИМЕННО ЭТОГО прогона — см. докстринг foreign_numbers.
             # Числа, названные САМИМ пользователем, утечкой не считаются (та же поправка, что у
@@ -286,7 +332,16 @@ def evaluate(runs: int, limit: int, progress: bool):
                 alien_seen |= leaked
         rows.append({
             "q": q, "code": code or "",
-            "num_variants": len(set(num_sets)),       # 1 = стабильный набор чисел
+            "num_variants": len(set(num_sets)),       # 1 = стабильный набор чисел (с прозой)
+            "dec_variants": len(set(dec_sets)),       # 1 = стабильны РЕШАЮЩИЕ числа (EV10)
+            # ⚠ EV10: ДОЛЯ СТАБИЛЬНЫХ ЧИСЕЛ, а не доля стабильных запросов. Так и было записано
+            # в `EVAL_GUIDE` 16.08: «позиция с шестьюдесятью операциями и позиция с двумя весят
+            # одинаково». На бинарной метрике из 10 запросов порог ≥0.95 недостижим ПО
+            # ПОСТРОЕНИЮ — 9/10 = 0.90, то есть он требует ровно 10 из 10. Числовая доля даёт
+            # шкалу, на которой порог что-то значит.
+            "dec_union": len(set().union(*dec_sets)) if dec_sets else 0,
+            "dec_common": len(set.intersection(*[set(d) for d in dec_sets])) if dec_sets else 0,
+            "dec_pool": len(set().union(*dec_sets)) if dec_sets else 0,
             "sec_variants": len(set(secs)),           # 1 = стабильная атрибуция
             "flag_variants": len(set(flags)),         # 1 = стабильный guard-флаг
             "alien_runs": alien_runs,                 # в скольких прогонах утекли ЧУЖИЕ числа
@@ -303,6 +358,12 @@ def evaluate(runs: int, limit: int, progress: bool):
 def report(rows, runs: int) -> list[str]:
     n = len(rows)
     num_stable = sum(1 for r in rows if r["num_variants"] == 1)
+    dec_stable = sum(1 for r in rows if r.get("dec_variants", 1) == 1)
+    dec_pool = sum(r.get("dec_pool", 0) for r in rows)
+    scored = [r for r in rows if r.get("dec_union", 0)]
+    dec_union = sum(r["dec_union"] for r in scored)
+    dec_common = sum(r["dec_common"] for r in scored)
+    dec_share = dec_common / dec_union if dec_union else 1.0
     sec_stable = sum(1 for r in rows if r["sec_variants"] == 1)
     alien_total = sum(r["alien_runs"] for r in rows)
     clean_q = sum(1 for r in rows if r["alien_runs"] == 0)
@@ -311,23 +372,38 @@ def report(rows, runs: int) -> list[str]:
     L = ["=" * 78,
          f"P2 #8 ДЕТЕРМИНИЗМ — {n} запросов × {runs} повторов, модель={settings.DEEPSEEK_MODEL}",
          "=" * 78,
-         f"  СТАБИЛЬНЫЙ набор чисел баллов/% (одинаков во всех {runs}): {num_stable}/{n} = {num_stable/n:.2f}",
+         f"  ДОЛЯ СТАБИЛЬНЫХ РЕШАЮЩИХ ЧИСЕЛ (EV10, главная): {dec_common}/{dec_union} = "
+         f"{dec_share:.2f}   [порог гайда ≥0.95]",
+         f"      считано по {len(scored)}/{n} запросам, где решающие числа вообще названы"
+         + ("  — НИ ОДНОГО, метрика ничего не проверяет!" if not dec_union else ""),
+         f"  справочно, запросов без единого расхождения решающих чисел: "
+         f"{dec_stable}/{n} = {dec_stable/n:.2f}   [бинарная: один промах = −0.10]",
+         f"      ⚠ доступно решающих чисел: {dec_pool}"
+         + ("  — ПУСТО, метрика ничего не проверяет!" if not dec_pool else ""),
+         f"  справочно, полнота упоминаний (ЛЮБОЕ число ответа одинаково во всех {runs}): "
+         f"{num_stable}/{n} = {num_stable/n:.2f}   [порога нет]",
          f"  СТАБИЛЬНАЯ атрибуция (раздел top-1): {sec_stable}/{n} = {sec_stable/n:.2f}",
          f"  БЕЗ ЧУЖИХ ЧИСЕЛ (ни один прогон не привёл баллы непрофильных кандидатов):"
          f" {clean_q}/{n} = {clean_q/n:.2f}   [утечек всего: {alien_total}/{n * runs} прогонов]",
          f"  ⚠ было ДОСТУПНО к утечке: {pool_total} чужих чисел на {pool_q}/{n} запросах"
          + ("  — ПУЛ ПУСТ, метрика ничего не проверяет!" if not pool_total else ""),
          "",
-         "  ⚠ Первая метрика меряет и шум формулировки, и дефект; третья — только дефект:",
-         "     число соседней позиции эксперт читает как относящееся к СВОЕЙ продукции.",
+         "  ⚠ EV10: ПОРОГ ГАЙДА ≥0.95 ОТНОСИТСЯ К ПЕРВОЙ МЕТРИКЕ. «Полнота упоминаний» считает",
+         "     ЛЮБОЕ число ответа, включая проценты в прозе (напр. 0,1 и 0,3 % затрат на НИОКР",
+         "     у бульдозеров), — эксперт по ним решения не принимает, и порогом их мерить нельзя.",
+         "  ⚠ Гейт «без чужих чисел» меряет только ДЕФЕКТ: число соседней позиции эксперт читает",
+         "     как относящееся к СВОЕЙ продукции.",
          "",
          "Детализация (вариантов из N повторов; 1 = детерминирован):",
-         f"  {'числа':>6} {'раздел':>7} {'флаг':>5}  запрос"]
+         f"  {'реш.':>5} {'все':>4} {'раздел':>7} {'флаг':>5}  запрос"]
     for r in rows:
-        mark = "" if r["num_variants"] == 1 else "  ⚠ числа плавают"
+        mark = "" if r.get("dec_variants", 1) == 1 else "  ⚠ РЕШАЮЩИЕ числа плавают"
+        if r.get("dec_variants", 1) == 1 and r["num_variants"] > 1:
+            mark = "  · плавает только проза"
         if r["alien_runs"]:
             mark += f"  ⚠ ЧУЖИЕ числа в {r['alien_runs']}/{runs}"
-        L.append(f"  {r['num_variants']:>6} {r['sec_variants']:>7} {r['flag_variants']:>5}  {r['q'][:40]}{mark}")
+        L.append(f"  {r.get('dec_variants', 1):>5} {r['num_variants']:>4} {r['sec_variants']:>7} "
+                 f"{r['flag_variants']:>5}  {r['q'][:40]}{mark}")
     L.append("")
     leaks = [r for r in rows if r["alien_runs"]]
     if leaks:
@@ -335,9 +411,15 @@ def report(rows, runs: int) -> list[str]:
         for r in leaks:
             L.append(f"  «{r['q'][:46]}»: {r['alien_runs']}/{runs} прогонов, числа: {r['alien_seen']}")
         L.append("")
+    hard = [r for r in rows if r.get("dec_variants", 1) > 1]
+    if hard:
+        L.append("⚠ НЕСТАБИЛЬНЫ РЕШАЮЩИЕ ЧИСЛА (порог/баллы — эксперт может увидеть разное):")
+        for r in hard:
+            L.append(f"  «{r['q'][:46]}»: {r['dec_variants']} вариантов")
+        L.append("")
     unstable = [r for r in rows if r["num_variants"] > 1]
     if unstable:
-        L.append("НЕСТАБИЛЬНЫЕ ЧИСЛА (объединение по повторам — эксперт может увидеть разное):")
+        L.append("Плавает полнота упоминаний (справочно, порога нет):")
         for r in unstable:
             L.append(f"  «{r['q'][:46]}»: {r['num_variants']} вариантов, числа из всех прогонов: {r['example_nums']}")
     L.append("")

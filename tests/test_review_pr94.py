@@ -212,14 +212,14 @@ class TestAskForCodeGuard(unittest.TestCase):
         self.assertEqual([t.product_name for t in P.target_hits(hits, "26.11.22.210")],
                          ["Светодиоды белого диапазона"])
         ctx = P.format_context(hits, "светодиоды белого диапазона", "26.11.22.210")
-        self.assertNotIn("попроси её", ctx, "у эксперта просят код, который он уже назвал")
+        self.assertNotIn("попроси его код", ctx, "у эксперта просят код, который он уже назвал")
 
     def test_request_stays_when_no_code_was_given(self):
         hits = [H(name="Кандидат A", codes=["26.30.50.110"], anchor="a1",
                   blocks=[{"operations": [{"text": "сборка"}]}]),
                 H(name="Кандидат B", codes=["99.99"], anchor="b1")]
         ctx = P.format_context(hits, "какая-то продукция", None)
-        self.assertIn("попроси её", ctx, "подсказка уточнить по коду пропала вовсе")
+        self.assertIn("попроси его код", ctx, "подсказка уточнить по коду пропала вовсе")
 
 
 class TestProceduralContextHasNoInternalVocabulary(unittest.TestCase):
