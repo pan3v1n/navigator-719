@@ -360,7 +360,10 @@ def _codes_before_quote(line: str) -> list[str]:
     Опасность чисел из наименования снимается иначе и надёжнее: вырезаем ВСЕ закавыченные куски
     целиком, а из остатка берём коды. Хвост с самим порогом отсекаем по первому «:» или «не менее» —
     там даты («до 30 июня 2023 г.»), и хотя точек в них нет, отсечка дешевле рассуждения."""
-    body = _blank_names(line)
+    # ⚠ «(в ред. … от 29.12.2022 N 2519)» ЗАТИРАЕМ: дата с точками проходит фильтр «есть точка»
+    # и становилась кодом. У строк прим. 27 порог написан без «не менее», поэтому отсечка ниже
+    # до амендмента не доходила, и в коды попадали `29.12.2022`, `17.05.2024` (замер 21.08.2026).
+    body = _blank_names(_blank_amend(line))
     for cut in (":", "не менее", "не оцениваются"):
         pos = body.find(cut)
         if pos > 0:
@@ -516,7 +519,10 @@ def _flat_thresholds() -> list[dict]:
                     while (k < n and lines[k].strip()
                            and not _FLAT_ROW_RE.match(lines[k])
                            and not _NOTE_START_RE.match(lines[k])):
-                        if _STEP_RE.search(lines[k]):
+                        # ⚠ Ступень бывает и БЕЗ «не менее»: «до 1 января 2022 г. - 70 баллов»
+                        # (прим. 10, редкоземельные магниты). Без второго признака примечание не
+                        # давало ни одной строки, и позиция оставалась без порога.
+                        if _STEP_RE.search(lines[k]) or _P27_VALUE_RE.search(lines[k]):
                             steps.append(_clean_step(lines[k]))
                         k += 1
                     thr, exc = _split_exception("; ".join(steps)) if steps else ("", None)
@@ -586,6 +592,174 @@ def _flat_thresholds() -> list[dict]:
     for r in rows:
         if r.get("intro") and r["names"]:
             r["codes"] = []
+    rows.extend(_qualified_list_rows(lines))
+    rows.extend(_named_block_rows(lines))
+    return rows
+
+
+# --- ⚠ ПЯТАЯ ФОРМА: «классифицируемой кодом … из CODE "ИМЯ" - N баллов» (прим. 27) ------------
+#
+# Строка НЕ начинается с кода — она начинается со слова «классифицируемой», поэтому `_FLAT_ROW_RE`
+# её не видел, и прим. 27 (энергомаш, электротехника, кабельная промышленность) не разбиралось
+# вовсе. Вторая особенность: величина написана БЕЗ «не менее» — «- 60 баллов», «с 2024 года -
+# 73 балла», — то есть общий признак ступени здесь не работает.
+#
+# ⚠ ПОЧЕМУ ПРИЗНАК ЛОКАЛЬНЫЙ, А НЕ ОБЩИЙ. Расширить `_STEP_RE` до «любое число + баллы» нельзя:
+# тогда ступенью станут баллы ОТДЕЛЬНЫХ ОПЕРАЦИЙ («литье, ковка, штамповка (3 балла)»), которых
+# в корпусе сотни, и «Порог» наполнится значениями операций. Признак работает только внутри этой
+# формы, где величина стоит после тире и относится ко всей позиции.
+_P27_ROW_RE = re.compile(r"^\s*классифицируем\w+\s+код", re.IGNORECASE)
+# ⚠ ДАТА ОБЯЗАНА ЕХАТЬ ВМЕСТЕ СО СВОИМ ЧИСЛОМ. Первая редакция шаблона отделяла дату классом
+# `[^;.]`, а в «с 1 сентября 2026 г. - 92 балла» точка стоит внутри «г.» — префикс обрывался, и
+# порог печатался как «82 балла; 92 балла», без единой даты. Это ровно тот дефект, который
+# `EV13` вычищала у прим. 17: число без своего условия.
+_P27_VALUE_RE = re.compile(
+    r"(?:(?:до|с|начиная\s+с)\s+(?:\d{1,2}\s+[а-яё]+\s+)?\d{4}\s*(?:г\.|года|год)?\s*,?\s*)?"
+    r"[-—]\s*(?:не менее\s+)?\d[\d\s]*\s*балл\w*",
+    re.IGNORECASE)
+_P27_QUALIFIER_RE = re.compile(r"^\s*для\s+.+:\s*$")
+
+
+def _blank_amend(line: str) -> str:
+    """Затирает «(в ред. …)» пробелами, СОХРАНЯЯ длину строки.
+
+    ⚠ Именно затирает, а не вырезает: позиции закавыченных имён (`_name_spans`) считаются по
+    исходной строке, и вырезание сдвинуло бы их — имена начали бы разъезжаться с величинами.
+    """
+    out = list(line)
+    for m in _AMEND_STRIP_RE.finditer(line):
+        for x in range(m.start(), m.end()):
+            out[x] = " "
+    return "".join(out)
+
+
+def _qualified_list_rows(lines: list[str]) -> list[dict]:
+    """Строки-пороги формы прим. 27, включая подблоки «для …: <график>»."""
+    rows: list[dict] = []
+    note = None
+    n = len(lines)
+    for i, ln in enumerate(lines):
+        h = _NOTE_START_RE.match(ln)
+        if h:
+            note = h.group(1)
+        if not _P27_ROW_RE.match(ln):
+            continue
+        masked = _blank_names(_blank_amend(ln))
+        codes = _codes_before_quote(ln)
+        if not codes:
+            continue
+        vals = [m for m in _P27_VALUE_RE.finditer(masked)]
+        # Наименования берём только ДО первой величины: дальше в строке идёт проза, где тоже
+        # встречаются кавычки («с примечанием "при наличии"»), и она не наименование продукции.
+        cut = vals[0].start() if vals else len(ln)
+        names = [ln[a + 1:b].strip() for a, b in _name_spans(ln) if b < cut and b > a + 1]
+        if vals:
+            thr = "; ".join(ln[m.start():m.end()].strip(" ,;-—") for m in vals)
+            rows.append({"codes": codes, "names": names, "threshold": thr,
+                         "exception": None, "note": note, "strict_name": True})
+            continue
+        if not masked.rstrip().endswith(":"):
+            continue
+        # Подблоки «для <условие>:» со своими графиками. Условие едет ВМЕСТЕ с числами —
+        # график без своего условия и есть неверный ответ (тот же принцип, что у прим. 17).
+        blocks: list[tuple[str, list[str]]] = []
+        k = i + 1
+        while k < n and not _P27_ROW_RE.match(lines[k]) and not _NOTE_START_RE.match(lines[k]):
+            cand = _blank_amend(lines[k]).rstrip()
+            vals_here = list(_P27_VALUE_RE.finditer(cand))
+            if _P27_QUALIFIER_RE.match(cand):
+                blocks.append((cand.strip().rstrip(":"), []))
+            elif cand.strip().lower().startswith("для") and vals_here:
+                # ⚠ Оговорка и её величины на ОДНОЙ строке: «для вакуумных контакторов
+                # низковольтных переменного тока - 41 балл, с 1 сентября 2025 г. - 51 балл;»
+                # (прим. 27, контакторы). Без этой ветки строка не давала блока вовсе, и порог
+                # терялся целиком.
+                blocks.append((cand[:vals_here[0].start()].strip(" ,;-—:"),
+                               [cand[m.start():m.end()].strip(" ,;-—") for m in vals_here]))
+            elif blocks:
+                for m in vals_here:
+                    blocks[-1][1].append(cand[m.start():m.end()].strip(" ,;-—"))
+            k += 1
+        blocks = [(q, v) for q, v in blocks if v]
+        if not blocks:
+            continue
+        fmt = lambda q, v: f"{q}: " + "; ".join(v)  # noqa: E731
+        rows.append({"codes": codes, "names": names,
+                     "threshold": fmt(*blocks[0]),
+                     "exception": " · ".join(fmt(q, v) for q, v in blocks[1:]) or None,
+                     "note": note, "strict_name": True})
+    return rows
+
+
+# --- ⚠ ШЕСТАЯ ФОРМА: подзаголовок «из CODE "ИМЯ":» + таблица по УЗЛАМ (прим. 74) -------------
+#
+# Таблица есть, но её первая колонка — не код, а УЗЕЛ изделия («Компрессор», «Компрессорная
+# установка»), поэтому `_tables` её не берёт: он ищет строки, начинающиеся с кода. Продукт
+# называет подзаголовок над таблицей.
+#
+# ⚠ БЕРЁМ ТОЛЬКО СТРОКУ САМОГО ИЗДЕЛИЯ, А НЕ ЕГО УЗЛА. У «Компрессорной установки смешанного
+# хладагента» в таблице две строки: «Компрессор» (170/230) и «Компрессорная установка»
+# (160/210). Первая — порог УЗЛА, и его место не в строке «Порог» (это правило `D9`). Признак
+# изделия: все слова строки входят в наименование подзаголовка — «компрессорная установка» ⊂
+# «компрессорная установка смешанного хладагента», а «компрессор» отдельным словом туда не входит.
+_NAMED_BLOCK_RE = re.compile(rf'^\s*{_CODE_TOKEN}\s*"')
+
+
+def _named_block_rows(lines: list[str]) -> list[dict]:
+    """Строки-пороги формы прим. 74: подзаголовок с наименованием + таблица по узлам."""
+    rows: list[dict] = []
+    note = None
+    n = len(lines)
+    for i, ln in enumerate(lines):
+        h = _NOTE_START_RE.match(ln)
+        if h:
+            note = h.group(1)
+        if not _NAMED_BLOCK_RE.match(ln) or not _blank_amend(ln).rstrip().endswith(":"):
+            continue
+        names = _quoted_names(ln)
+        if not names:
+            continue
+        # Ищем шапку таблицы, пропуская пустые строки и строки-ссылки на редакцию.
+        k, header = i + 1, None
+        while k < n and k <= i + 6:
+            cand = _blank_amend(lines[k]).strip()
+            if cand and "|" in cand and len(_YEAR_ANY_RE.findall(cand)) >= 2:
+                header = cand
+                break
+            if cand and "|" not in cand:
+                break            # начался обычный текст — таблицы здесь нет
+            k += 1
+        if header is None:
+            continue
+        years = [c.strip() for c in header.split("|") if c.strip()]
+        want = set(_norm(names[0]).split())
+        # ⚠ БЕРЁМ ВСЕ СТРОКИ, ЧЕЙ ПРЕДМЕТ НАЗВАН В ПОДЗАГОЛОВКЕ, И КАЖДУЮ СО СВОЕЙ ПОДПИСЬЮ.
+        # Прим. 37: подзаголовок — «Насосы центробежные … И АГРЕГАТЫ НА ИХ ОСНОВЕ», а в таблице
+        # две строки с РАЗНЫМИ порогами: «Насосы» 750/850 и «Насосные агрегаты» 1300/1800.
+        # Показать одну значило бы выдать заявителю с агрегатом порог насоса — вдвое меньший.
+        # Прим. 74: подзаголовок «Компрессорная установка смешанного хладагента», строки
+        # «Компрессор» (170/230) и «Компрессорная установка» (160/210). Слова «компрессор»
+        # в подзаголовке НЕТ (там «компрессорная»), поэтому строка узла отсекается — порог узла
+        # не место в строке «Порог» (правило `D9`).
+        picked: list[tuple[str, str]] = []
+        k += 1
+        while k < n and "|" in lines[k]:
+            cells = [c.strip() for c in lines[k].split("|") if c.strip()]
+            if len(cells) >= 2 and any(len(w) >= 5 and w in want
+                                       for w in _norm(cells[0]).split()):
+                vals = "; ".join(f"{y} — {v.rstrip(';')}"
+                                 for y, v in zip(years, cells[1:]) if v)
+                if vals:
+                    picked.append((cells[0], vals))
+            k += 1
+        if not picked:
+            continue
+        # Одна строка — порог как есть; несколько — каждая со своей подписью, чтобы величина
+        # не отрывалась от того, к чему она относится.
+        thr = picked[0][1] if len(picked) == 1 else f"{picked[0][0]}: {picked[0][1]}"
+        exc = " · ".join(f"{nm}: {v}" for nm, v in picked[1:]) or None
+        rows.append({"codes": [], "names": [names[0]], "threshold": thr,
+                     "exception": exc, "note": note})
     return rows
 
 
@@ -769,8 +943,25 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                 for rc in r["codes"]:
                     if _code_applies(rc, c):
                         exact = bool(exact) or (_segs(rc) == _segs(c))
-            if exact is not None:
-                cands.append((r, exact))
+            if exact is None:
+                continue
+            # ⚠ «ИЗ 27.12 "Выключатель автоматический…"» ЧИТАЕТСЯ КАК «ЧАСТЬ КОДА, А ИМЕННО ЭТО
+            # ИЗДЕЛИЕ». Без проверки имени график выключателей уходил ОДИННАДЦАТИ чужим позициям
+            # группы 27.12 — «Реле управления», «Зажимы и блоки зажимов наборные»,
+            # «Предохранители плавкие», «Главные распределительные щиты судовые» (замер 21.08.2026).
+            # Правило локальное: только для строк формы прим. 27, где наименование и есть ключ.
+            # Обычные групповые строки (прим. 7, 37) работают как прежде — там имя строки законно
+            # называет представителя группы, и требование совпадения снесло бы 18 верных порогов.
+            # ⚠ ПРОВЕРКА ИМЕНИ ЗДЕСЬ БЕЗУСЛОВНА, а не «только при групповом коде». У позиции
+            # «Реле управления» СОБСТВЕННЫЙ код — ровно `27.12`, то есть совпадение формально
+            # точное, и условие «not exact» фильтр отключало: график выключателей уходил ей,
+            # «Зажимам и блокам зажимов наборным», «Предохранителям плавким» и судовым щитам.
+            if r.get("strict_name"):
+                if not (_name_overlap(product_name, r["names"]) >= 2
+                        or any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
+                               for nm in r["names"])):
+                    continue
+            cands.append((r, exact))
         if len(cands) == 1:
             row, is_exact = cands[0]
             return _fmt_flat(row, group=not is_exact)
