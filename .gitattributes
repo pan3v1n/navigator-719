@@ -1,0 +1,5 @@
+# Скрипты и профили выкатки едут на Linux-VM: CRLF ломает shebang («bad interpreter: bash^M»)
+# и подставляет \r в значения, прочитанные `source` — например в TAG, из которого строится
+# имя архива. Нормализация принудительная, а не «как получится на машине разработчика».
+*.sh text eol=lf
+scripts/deploy/releases/*.env text eol=lf
