@@ -1248,7 +1248,14 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
             sib_codes[:MAX_SIBLING_CODES], hits, limit,
             mark=False,
             accept=lambda h, g=group: fragments.group_of(h.product_name) == g)
-    cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec)  # подтверждённые экспертом — высший приоритет
+    # ⚠ EV16 (#102): кейсу передаём ОКНО — разделы и коды найденной продукции. Позиционный кейс
+    # о чужой продукции иначе проходит по одной семантической близости: «станки с ЧПУ» тянули
+    # кейс про вычислительные машины (26.20.13, раздел IX) с косинусом 0.851 — выше, чем 0.843 у
+    # безусловно уместного. Порогом это не лечится, нужен второй сигнал другой природы.
+    case_sections = {h.section_roman for h in hits if h.section_roman}
+    case_codes = list(all_codes) + [c for h in hits for c in (h.okpd2_codes or [])]
+    cases = search_cases(search_query, limit=MAX_CASES, qvec=qvec,  # эксперт — высший приоритет
+                         sections=case_sections, codes=case_codes)
     if not hits and not cases:
         return Answer(
             text="Подходящая позиция в приложении к ПП №719 не найдена. Уточните "

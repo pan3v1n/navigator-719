@@ -74,9 +74,23 @@ def sets() -> dict[str, list[str]]:
     }
 
 
-def probe(query: str) -> list[dict]:
-    """Тот же вызов, что в `pipeline.answer`."""
-    return search_cases(query, limit=MAX_CASES, qvec=embed_query(query))
+def probe(query: str, scoped: bool = False) -> list[dict]:
+    """Тот же вызов, что в `pipeline.answer`.
+
+    `scoped=True` — с ОКНОМ (разделы и коды найденной продукции), как зовёт рантайм после `EV16`
+    (#102). Без окна — прежнее поведение; разница между двумя режимами и есть эффект `EV16`.
+    """
+    qvec = embed_query(query)
+    if not scoped:
+        return search_cases(query, limit=MAX_CASES, qvec=qvec)
+    from app.rag.retriever import search
+    from app.tools.navigator import extract_okpd2
+
+    code = extract_okpd2(query)
+    hits = search(query, okpd2=code, limit=8, qvec=qvec)
+    sections = {h.section_roman for h in hits if h.section_roman}
+    codes = ([code] if code else []) + [c for h in hits for c in (h.okpd2_codes or [])]
+    return search_cases(query, limit=MAX_CASES, qvec=qvec, sections=sections, codes=codes)
 
 
 def _label(case: dict) -> str:
@@ -127,17 +141,22 @@ def main() -> None:
         sys.exit(2)
 
     print("=" * 78)
-    total_q = total_fired = 0
+    total_q = total_fired = total_scoped = 0
     for name, queries in sets().items():
         fired = []
+        scoped_fired = 0
         for q in queries:
             got = probe(q)
             if got:
                 fired.append((q, got))
+            if probe(q, scoped=True):
+                scoped_fired += 1
+        total_scoped += scoped_fired
         total_q += len(queries)
         total_fired += len(fired)
         share = len(fired) / len(queries) if queries else 0.0
-        print(f"{name}: сработало {len(fired)} из {len(queries)} = {share:.1%}")
+        print(f"{name}: сработало {len(fired)} из {len(queries)} = {share:.1%}"
+              f"   ·  с окном (рантайм, EV16): {scoped_fired}")
         for q, got in fired:
             print(f"   ⚠ «{q[:60]}»")
             for g in got:
@@ -147,7 +166,8 @@ def main() -> None:
 
     print("=" * 78)
     share = total_fired / total_q if total_q else 0.0
-    print(f"ИТОГО: {total_fired} срабатываний на {total_q} вопросах = {share:.1%}")
+    print(f"ИТОГО: {total_fired} срабатываний на {total_q} вопросах = {share:.1%}"
+          f"   ·  с окном (рантайм, EV16): {total_scoped}")
     if total_fired == 0:
         print("→ Выключение `verified_cases` НЕ МЕНЯЕТ контекст ни на одном вопросе наборов:\n"
               "  предусловие гайда исполняется бесплатно, перезамер базы не нужен.")
