@@ -17,9 +17,11 @@ r"""Эталонный скрипт выкатки: предохранители
 from __future__ import annotations
 
 import ast
+import os
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -199,14 +201,74 @@ class TestReleaseProfiles(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which("bash"), "bash недоступен")
     def test_dry_run_passes_for_every_profile(self):
-        """Сухой прогон — единственное место, где профиль проверяется целиком и до боя."""
+        """Сухой прогон — единственное место, где профиль проверяется целиком и до боя.
+
+        ⚠ `SKIP_CI_GATE=1` здесь ОБЯЗАТЕЛЕН, и это не ослабление проверки. Тест отвечает на
+        вопрос «профиль читается, файлы на месте», а гейт CI — на другой: «батарея на этом
+        коммите зелёная». Без отключения получается петля: батарея красная → сухой прогон
+        падает → падает этот тест → батарея красная. Предохранитель, замкнутый сам на себя,
+        чинить нечем. Поведение самого гейта проверяет `TestCiGate` — на подставном `gh`.
+        """
+        env = {**os.environ, "SKIP_CI_GATE": "1"}
         for p in self._profiles():
             with self.subTest(profile=p.name):
                 r = subprocess.run(
                     [shutil.which("bash"), str(DEPLOY_SH), "--release", str(p), "--dry-run"],
-                    capture_output=True, text=True, cwd=str(ROOT))
+                    capture_output=True, text=True, cwd=str(ROOT), env=env)
                 self.assertEqual(r.returncode, 0,
                                  f"сухой прогон {p.name} упал:\n{r.stdout}\n{r.stderr}")
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
+class TestCiGate(unittest.TestCase):
+    r"""Гейт CI: красная батарея обязана ОСТАНАВЛИВАТЬ выкатку — инцидент 21.08.2026.
+
+    ЧТО СЛУЧИЛОСЬ. Тест `EV16`, перестав быть офлайновым, уронил батарею — и она простояла
+    красной ШЕСТЬ прогонов подряд, пока PR #103 уезжал в `main`, а `v0.5.0-test13` — на бой.
+    CI отработал безупречно: он ловит ровно это и предупреждает об этом прямо в `tests.yml`.
+    Не сработал ЧЕЛОВЕЧЕСКИЙ шаг — прочитать сигнал. Поэтому проверка переезжает туда, где её
+    нельзя не заметить: в обязательный сухой прогон перед выкаткой.
+
+    ⚠ ПОДСТАВНОЙ `gh`, А НЕ ЖИВОЙ GITHUB. Тест о ПОВЕДЕНИИ гейта, а не о цвете репозитория:
+    зависеть от реального состояния CI значило бы завести тест, меняющий вердикт сам по себе, —
+    то есть повторить ошибку `EV16` в новом месте. Батарея офлайновая, и здесь тоже.
+    """
+
+    def _run_with_fake_gh(self, gh_stdout: str):
+        """Сухой прогон с подставным `gh` первым в PATH; `gh_stdout` — что он печатает."""
+        with tempfile.TemporaryDirectory() as td:
+            fake = Path(td) / "gh"
+            fake.write_text("#!/bin/sh\necho '" + gh_stdout + "'\n", encoding="utf-8",
+                            newline="\n")
+            fake.chmod(0o755)
+            env = {**os.environ, "PATH": td + os.pathsep + os.environ.get("PATH", "")}
+            env.pop("SKIP_CI_GATE", None)
+            profile = sorted(RELEASES.glob("*.env"))[0]
+            return subprocess.run(
+                [shutil.which("bash"), str(DEPLOY_SH), "--release", str(profile), "--dry-run"],
+                capture_output=True, text=True, cwd=str(ROOT), env=env)
+
+    def test_red_ci_stops_the_dry_run(self):
+        """Главное. Отчитаться о провале и продолжить — то же самое, что не проверять вовсе."""
+        r = self._run_with_fake_gh("success failure")
+        self.assertNotEqual(r.returncode, 0, f"красный CI не остановил прогон:\n{r.stdout}")
+        self.assertIn("КРАСНЫЙ", r.stdout)
+
+    def test_green_ci_passes(self):
+        r = self._run_with_fake_gh("success")
+        self.assertEqual(r.returncode, 0, f"зелёный CI остановил прогон:\n{r.stdout}{r.stderr}")
+
+    def test_no_runs_found_is_a_warning_not_a_failure(self):
+        """⚠ «Проверить не смог» ≠ «красный»: нет сети — это не дефект выкатываемого кода."""
+        r = self._run_with_fake_gh("")
+        self.assertEqual(r.returncode, 0, f"отсутствие прогона принято за провал:\n{r.stdout}")
+        self.assertIn("НЕ ПРОВЕРЕН", r.stdout)
+
+    def test_gate_is_wired_into_dry_run(self):
+        """Функция может существовать и не вызываться — проверяем именно ВЫЗОВ."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn("ci_gate()", code, "функция гейта исчезла из скрипта")
+        self.assertIn('ci_gate "$SRC"', code, "гейт не вызывается в сухом прогоне")
 
 
 if __name__ == "__main__":
