@@ -510,7 +510,25 @@ def recreate_collection(client) -> None:
     client.create_payload_index(name, "status", models.PayloadSchemaType.KEYWORD)
 
 
-def index_all(client, recs: list[dict], batch: int = 64) -> None:
+def corpus_avgdl(recs: list[dict]) -> float:
+    """Средняя длина документа ПО ВСЕМУ КОРПУСУ — в токенах sparse-канала.
+
+    ⚠⚠ ВЫНЕСЕНО ОТДЕЛЬНО РАДИ `K11`. `document_vector` ЗАПЕКАЕТ `avgdl` в значения sparse-вектора
+    (нормировка BM25 по длине). Если переиндексировать один документ, посчитав среднюю длину
+    только по нему, его вектора окажутся в ДРУГОМ масштабе, чем у соседей по коллекции: у Приказа
+    №52 пункты длинные, у сносок — короткие, средние отличаются кратно. Ранжирование поедет у
+    ВСЕХ, и ни один тест выдачи этого не покажет — числа останутся правдоподобными.
+
+    Поэтому инкрементальная переиндексация всё равно РАЗБИРАЕТ весь корпус (это дёшево, без
+    модели) и считает `avgdl` по нему, а эмбеддит и грузит только целевой документ. Экономится
+    ровно то, что дорого, — прогон e5."""
+    from app.rag.sparse import doc_length
+
+    lengths = [doc_length(r.get("index_text") or r["text"]) for r in recs]
+    return (sum(lengths) / len(lengths)) if lengths else 1.0
+
+
+def index_all(client, recs: list[dict], batch: int = 64, avgdl: float | None = None) -> None:
     from qdrant_client import models
 
     from app.rag.embeddings import embed_passages
@@ -526,7 +544,10 @@ def index_all(client, recs: list[dict], batch: int = 64) -> None:
     # раздела и вводная фраза родителя, для остальных — просто текст.
     texts = [r.get("index_text") or r["text"] for r in recs]
     lengths = [doc_length(t) for t in texts]
-    avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
+    # `avgdl` передаётся снаружи при частичной загрузке (`K11`): он обязан быть корпусным, иначе
+    # вектора документа окажутся в другом масштабе, чем у соседей. См. `corpus_avgdl`.
+    if avgdl is None:
+        avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
     print(f"Пунктов Правил: {len(recs)} | avgdl (токенов): {avgdl:.1f} | макс={max(lengths)} мин={min(lengths)}")
 
     bar = tqdm(total=len(recs), unit="пункт", desc="Эмбеддинг+апсерт") if tqdm else None
@@ -551,6 +572,47 @@ def index_all(client, recs: list[dict], batch: int = 64) -> None:
             bar.update(len(points))
     if bar:
         bar.close()
+
+
+def reindex_document(client, doc_type: str, recs_all: list[dict], batch: int = 64) -> int:
+    """`K11` (#41): переиндексировать ОДИН документ, не трогая точки остальных.
+
+    ЗАЧЕМ. `recreate_collection` сносит коллекцию целиком: добавление одного приказа
+    переиндексирует все 311 пунктов, то есть прогоняет e5 по всему корпусу. Дальше в очереди
+    четыре задачи, которые ДОБАВЛЯЮТ документы (`K15`, `K14`, `K16`, `K17`) — без этого каждая
+    платит полной переиндексацией.
+
+    ⚠⚠ `avgdl` СЧИТАЕТСЯ ПО ВСЕМУ КОРПУСУ (`recs_all`), а не по целевому документу. Причина — в
+    `corpus_avgdl`: иначе вектора документа окажутся в другом масштабе BM25, чем у соседей.
+    Поэтому весь корпус здесь разбирается (дёшево), а эмбеддится только целевой документ.
+
+    ⚠ СНАЧАЛА UPSERT, ПОТОМ УБОРКА. Обратный порядок («удалить документ, затем загрузить») даёт
+    окно, в котором пункты этого документа отсутствуют, — а сервис в это время отвечает. Уборка
+    точечная: точки ЭТОГО документа, которых нет в новой выдаче (пункт исчез из редакции).
+
+    Возвращает число загруженных пунктов."""
+    from qdrant_client import models
+
+    name = settings.QDRANT_RULES_COLLECTION
+    if not client.collection_exists(name):
+        sys.exit(f"коллекции {name} нет — сначала полная загрузка (без --doc)")
+
+    target = [r for r in recs_all if r.get("doc_type") == doc_type]
+    if not target:
+        sys.exit(f"в корпусе нет пунктов документа {doc_type!r} — проверьте манифест")
+
+    index_all(client, target, batch=batch, avgdl=corpus_avgdl(recs_all))
+
+    fresh_ids = [point_id(r) for r in target]
+    client.delete(
+        collection_name=name,
+        points_selector=models.FilterSelector(filter=models.Filter(
+            must=[models.FieldCondition(key="doc_type", match=models.MatchValue(value=doc_type))],
+            must_not=[models.HasIdCondition(has_id=fresh_ids)],
+        )),
+    )
+    print(f"{doc_type}: загружено {len(target)} пунктов, устаревшие точки этого документа убраны")
+    return len(target)
 
 
 def hybrid_search(client, query: str, limit: int = 5):
@@ -591,12 +653,30 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Загрузка корпуса Правил ведения реестра в Qdrant")
     ap.add_argument("--smoke", action="store_true", help="после загрузки прогнать смоук-запросы")
     ap.add_argument("--smoke-only", action="store_true", help="только смоук (без перезагрузки)")
+    ap.add_argument("--doc", metavar="DOC_TYPE",
+                    help="K11: переиндексировать ОДИН документ, не трогая остальные "
+                         "(коллекция не пересоздаётся)")
+    ap.add_argument("--list-docs", action="store_true", help="показать документы корпуса и выйти")
     ap.add_argument("--batch", type=int, default=64)
     args = ap.parse_args()
 
+    if args.list_docs:
+        for doc in kb_manifest.documents(COLLECTION):
+            mark = " " if doc.get("status") == kb_manifest.ACTIVE else "×"
+            print(f" {mark} {doc['doc_type']:32} {doc.get('short') or doc.get('title')}")
+        return
+
     client = make_client()
 
-    if not args.smoke_only:
+    if args.doc:
+        # ⚠ Разбираем ВЕСЬ корпус, грузим ОДИН документ: `avgdl` обязан быть корпусным
+        # (см. `corpus_avgdl`), а дорог здесь только прогон e5 — он и экономится.
+        recs, _ = load_records()
+        print(f"Коллекция: {settings.QDRANT_RULES_COLLECTION} (частичная переиндексация)")
+        reindex_document(client, args.doc, recs, batch=args.batch)
+        info = client.get_collection(settings.QDRANT_RULES_COLLECTION)
+        print(f"\n✅ Коллекция '{settings.QDRANT_RULES_COLLECTION}': точек = {info.points_count}")
+    elif not args.smoke_only:
         recs, edition = load_records()
         print(f"Редакция индексируемого текста Правил: {edition}")
         print(f"Коллекция: {settings.QDRANT_RULES_COLLECTION}")
