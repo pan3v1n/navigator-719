@@ -300,6 +300,23 @@ class TestCiGate(unittest.TestCase):
         self.assertRegex(code, r'if sha=\$\(cd "\$src" && git rev-parse --verify --quiet',
                          "форма `cmd && from=…` оставляет `from` неприсвоенной под set -u")
 
+    def test_reindex_step_lives_in_the_script_not_in_someones_memory(self):
+        """⚠ Правка, меняющая payload, доезжает до ответа только через переиндексацию. Пока это
+        был «шаг оператора», релиз состоял из скрипта и человеческой памяти — ровно так уехала
+        `D12`: код новый, данные прежние, снаружи неотличимо от успешной выкатки."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn("REINDEX_DOCS", code, "шаг переиндексации исчез из скрипта")
+        self.assertIn("--doc", code, "переиндексация идёт не по документам (K11)")
+        self.assertRegex(code, r"переиндексация \$doc НЕ УДАЛАСЬ[^|]*exit 1|exit 1",
+                         "провал переиндексации не останавливает выкатку")
+
+    def test_reindex_is_per_document_never_full_recreate(self):
+        """Полная переиндексация сносит коллекцию: всё время прогона e5 сервис отвечал бы на
+        процедурные вопросы пустотой. K11 существует ровно чтобы этого не было."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertNotIn("load_rules_kb.py 2>", code, "в скрипте полная переиндексация")
+        self.assertNotIn("recreate_collection", code)
+
     def test_network_failure_is_distinguished_from_no_runs(self):
         """«gh не ответил» и «прогонов нет» — разные вещи. На живом прогоне 24.08 запрос отвалился
         по таймауту, и гейт сказал «прогона не нашлось» про коммит, у которого их два и оба
