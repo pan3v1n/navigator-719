@@ -276,6 +276,40 @@ class TestCiGate(unittest.TestCase):
         self.assertIn("ci_gate()", code, "функция гейта исчезла из скрипта")
         self.assertIn('ci_gate "$SRC"', code, "гейт не вызывается в сухом прогоне")
 
+    def test_gate_runs_on_a_real_deploy_too(self):
+        """⚠ Первая редакция звала гейт ТОЛЬКО в `--dry-run`, а ничто не требует, чтобы сухой
+        прогон вообще состоялся: самая очевидная форма запуска (первая строка usage) обходила
+        предохранитель целиком. Найдено ревью 24.08.2026."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        after_dry_run = code.split('if [ "$DRY_RUN" = "1" ]', 1)[-1].split("exit 0", 1)[-1]
+        self.assertIn("ci_gate", after_dry_run, "на реальной выкатке гейт не зовётся")
+
+    def test_tag_lookup_cannot_return_garbage(self):
+        r"""⚠⚠ ДЕФЕКТ, ВНЕСЁННЫЙ ПРАВКОЙ ПО РЕВЬЮ И ПОЙМАННЫЙ CI. Голый
+        `git rev-parse "$TAG^{commit}"` при отсутствующем теге печатает в stdout САМУ СТРОКУ
+        («v0.5.0-test12^{commit}») и выходит с кодом 128 — переменная получает мусор вместо SHA,
+        и гейт ищет прогоны по несуществующему коммиту, всегда находя «ничего». В чекауте GitHub
+        Actions тегов нет, поэтому туда попадала именно эта ветка.
+
+        Второй слой: форма `sha=$(...) && from=...` при неудаче оставляла `from` неприсвоенной, и
+        под `set -u` функция падала на печати. Поэтому проверяем и `--verify --quiet`, и `if`.
+        """
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn('rev-parse --verify --quiet "$TAG^{commit}"', code,
+                      "без --verify --quiet отсутствующий тег даёт мусор вместо SHA")
+        self.assertRegex(code, r'if sha=\$\(cd "\$src" && git rev-parse --verify --quiet',
+                         "форма `cmd && from=…` оставляет `from` неприсвоенной под set -u")
+
+    def test_network_failure_is_distinguished_from_no_runs(self):
+        """«gh не ответил» и «прогонов нет» — разные вещи. На живом прогоне 24.08 запрос отвалился
+        по таймауту, и гейт сказал «прогона не нашлось» про коммит, у которого их два и оба
+        красные. Деградация безопасная, но оператор читает СТРОКУ."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn("if ! concl=$(", code, "код возврата gh не отличается от пустой выдачи")
+        text = DEPLOY_SH.read_text(encoding="utf-8")
+        self.assertIn("gh НЕ ОТВЕТИЛ", text)
+        self.assertIn("прогонов на $sha нет", text)
+
 
 if __name__ == "__main__":
     unittest.main()
