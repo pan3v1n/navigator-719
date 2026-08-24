@@ -64,14 +64,26 @@ class TestManifestItself(unittest.TestCase):
                         self.assertIn(doc[field], allowed)
 
     def test_sources_exist_on_disk(self):
+        """⚠ Источник может быть ШАБЛОНОМ (`pp719/structured/*.json`), поэтому проверяем через
+        `resolve_sources`, а не `is_file()`: он же и падает, если шаблон не нашёл ни одного файла —
+        то есть «корпус исчез» не проходит молча."""
+        from app.core import manifest as kb
+
         for doc in self.man["documents"]:
-            for src in doc.get("sources") or []:
-                with self.subTest(src=src):
-                    self.assertTrue((ROOT / "knowledge_base" / src).is_file())
+            with self.subTest(doc=doc["doc_type"]):
+                files = kb.resolve_sources(doc)
+                self.assertTrue(all(f.is_file() for f in files))
+                if doc.get("sources"):
+                    self.assertTrue(files, "источники заданы, а файлов не нашлось")
 
     def test_every_indexed_document_has_a_parser(self):
-        """Документ в манифесте без парсера — молчаливая потеря целого документа корпуса."""
+        """Документ в манифесте без парсера — молчаливая потеря целого документа корпуса.
+
+        ⚠ Только СВОЯ коллекция: у товарного корпуса и кейсов другие загрузчики и свой формат,
+        `PARSERS` про них ничего не знает и знать не должен."""
         for doc in self.man["documents"]:
+            if doc.get("collection") != loader.COLLECTION:
+                continue
             if doc.get("status") == "действует" and doc.get("sources"):
                 with self.subTest(doc=doc["doc_type"]):
                     self.assertIn(doc["doc_type"], loader.PARSERS)
@@ -152,6 +164,80 @@ class TestManifestAgreesWithTheInterface(unittest.TestCase):
 
         by_doc = {d["doc_type"]: d for d in loader.load_manifest()["documents"]}
         self.assertEqual(by_doc["decree_body"]["edition_expected"], edition.corpus_edition())
+
+
+class TestAllThreeCollectionsDescribed(unittest.TestCase):
+    """`#106`: манифест описывает ВСЕ корпуса сервиса, а не только процедурный.
+
+    Пока в нём был один `pp719_rules`, «единственный источник правды о составе» звучал шире, чем
+    исполнялся: товарный корпус собирался `STRUCT_DIR.glob`, кейсы — `CASES_DIR.glob` с условием
+    `startswith("_")` внутри цикла. Ни редакции, ни юридической силы у них не было — то есть
+    `A6` нечем было сравнивать по товарному корпусу, а `K13` нечем строить иерархию.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from app.core import manifest as kb
+        cls.kb = kb
+        cls.man = kb.load_manifest()
+
+    def test_scope_and_documents_agree(self):
+        declared = set(self.man["scope"])
+        actual = {d["collection"] for d in self.man["documents"]}
+        self.assertEqual(declared, actual, "scope обещает не то, что описано документами")
+
+    def test_every_collection_has_a_document(self):
+        for coll in self.man["scope"]:
+            with self.subTest(collection=coll):
+                self.assertTrue(self.kb.documents(coll))
+
+    def test_product_corpus_matches_the_loader_directory(self):
+        """Тот же приём, что у путей процедурного корпуса: шаблон манифеста и каталог загрузчика
+        обязаны давать ОДИН набор файлов, иначе состав снова живёт в двух местах."""
+        load_kb = _load("load_kb_manifest", "scripts/load_kb.py")
+        doc = self.kb.documents("pp719")[0]
+        self.assertEqual(self.kb.resolve_sources(doc), sorted(load_kb.STRUCT_DIR.glob("*.json")))
+
+    def test_cases_exclude_templates(self):
+        """Решение «файлы с `_` — шаблоны» переехало из условия в цикле в манифест. Проверяем,
+        что оно исполняется: иначе `_example.json` уедет в петлю обучения как настоящий кейс."""
+        doc = self.kb.documents("verified_cases")[0]
+        files = self.kb.resolve_sources(doc)
+        self.assertTrue(files)
+        self.assertEqual([f.name for f in files if f.name.startswith("_")], [])
+        self.assertIn("_*.json", doc.get("exclude") or [])
+
+    def test_cases_are_practice_not_a_norm(self):
+        """⚠ Кейс уходит в контекст ВЫШЕ первоисточника (правило 1а промпта). `K13` обязана
+        знать, что он уточняет ПРИМЕНЕНИЕ нормы, а не заменяет её."""
+        doc = self.kb.documents("verified_cases")[0]
+        self.assertEqual(doc["legal_force"], 5)
+        norms = [d["legal_force"] for d in self.man["documents"] if d["collection"] != "verified_cases"]
+        self.assertTrue(all(doc["legal_force"] > n for n in norms),
+                        "практика обязана быть слабее любой нормы корпуса")
+
+    def test_passport_reaches_product_and_case_records(self):
+        """Критерий тот же, что у `K8`: паспорт у ЗАПИСЕЙ, а не у документа на бумаге."""
+        import io
+        from contextlib import redirect_stdout
+
+        load_kb = _load("load_kb_manifest2", "scripts/load_kb.py")
+        seed = _load("seed_cases_manifest", "scripts/seed_cases.py")
+        with redirect_stdout(io.StringIO()):
+            products = load_kb.load_records()
+            cases = seed.load_cases()
+        for name, recs in (("pp719", products), ("verified_cases", cases)):
+            with self.subTest(collection=name):
+                self.assertTrue(recs)
+                missing = [f for f in self.kb.PASSPORT_FIELDS if any(f not in r for r in recs)]
+                self.assertEqual(missing, [])
+
+    def test_product_edition_equals_the_one_shown_to_the_user(self):
+        """`A6`: отставание товарного корпуса от действующей редакции становится видно в CI."""
+        from app.rag import edition
+
+        doc = self.kb.documents("pp719")[0]
+        self.assertEqual(doc["edition_expected"], edition.corpus_edition())
 
 
 class TestManifestMatchesLoaderPaths(unittest.TestCase):

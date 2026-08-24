@@ -36,6 +36,7 @@ if str(ROOT) not in sys.path:
 
 from app.core.config import settings  # noqa: E402
 from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+from app.core import manifest as kb_manifest  # noqa: E402
 
 # Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
 # предупреждения роняет скрипт UnicodeEncodeError'ом. Подробности — в app/core/console.py.
@@ -376,7 +377,14 @@ def _stamp_edition(recs: list[dict], text: str) -> None:
 # --------------------------------------------------------------------------- #
 # K8: манифест корпуса — единственный источник правды о его составе
 # --------------------------------------------------------------------------- #
-MANIFEST_PATH = ROOT / "knowledge_base" / "manifest.yaml"
+# Манифест читает общий модуль `app.core.manifest`: он нужен ТРЁМ загрузчикам сразу (процедурный
+# корпус, товарный, кейсы), и три копии правил разбора означали бы три расходящихся понимания
+# того, что такое «состав корпуса». Псевдонимы ниже — чтобы вызывающий код и тесты не знали,
+# в каком слое живёт читалка.
+MANIFEST_PATH = kb_manifest.MANIFEST_PATH
+PASSPORT_FIELDS = kb_manifest.PASSPORT_FIELDS
+RETIRED = kb_manifest.RETIRED
+COLLECTION = "pp719_rules"
 
 # Как читать источники документа. Ключ — `doc_type` из манифеста; в манифесте этого сопоставления
 # НЕТ намеренно: он описывает ДОКУМЕНТ (сила, статус, срок), а не устройство разбора. Формат
@@ -388,50 +396,14 @@ PARSERS = {
     "appendix_footnotes": parse_footnotes,
 }
 
-# Поля паспорта, уезжающие в payload КАЖДОГО пункта документа. `edition` сюда не входит: её
-# считает `detect_edition` из текста, а манифест лишь заявляет ожидаемую (см. `load_manifest`).
-PASSPORT_FIELDS = ("authority", "legal_force", "doc_kind", "topic", "key_type",
-                   "status", "valid_from", "valid_to", "supersedes")
-RETIRED = "утратил силу"
 
-
-def load_manifest(path: Path | None = None) -> dict:
-    """Читает манифест и проверяет значения по его же словарям.
-
-    ⚠ Проверка словарём — не бюрократия: опечатка в `status` («утратила силу») тихо превратила бы
-    исключённый документ в действующий, а `legal_force: "2"` строкой сломала бы сравнение при
-    K13. Ошибка здесь останавливает загрузку: индексировать корпус с неизвестным паспортом хуже,
-    чем не индексировать вовсе."""
-    import yaml  # локально: парсер Правил тестируется без внешних зависимостей
-
-    path = path or MANIFEST_PATH
-    if not path.exists():
-        sys.exit(f"Нет манифеста корпуса: {path} (K8 — состав корпуса задаётся им)")
-    data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
-    docs = data.get("documents") or []
-    if not docs:
-        sys.exit(f"В манифесте {path.name} нет ни одного документа")
-    vocab = data.get("vocabularies") or {}
-    seen: set[str] = set()
-    for d in docs:
-        dt = d.get("doc_type")
-        if not dt:
-            sys.exit(f"В манифесте есть документ без doc_type: {d.get('title')!r}")
-        if dt in seen:
-            sys.exit(f"doc_type {dt!r} в манифесте дважды — идентификатор обязан быть уникален")
-        seen.add(dt)
-        for field, allowed in vocab.items():
-            if field not in d:
-                continue
-            value = d[field]
-            if value is None and None in allowed:
-                continue
-            if value not in allowed:
-                sys.exit(f"{dt}: недопустимое {field}={value!r}; словарь манифеста: {allowed}")
-        missing = [f for f in PASSPORT_FIELDS if f not in d]
-        if missing:
-            sys.exit(f"{dt}: в паспорте нет полей {missing}")
-    return data
+def load_manifest(path=None) -> dict:
+    """Манифест с проверкой словарей. Ошибку превращаем в выход: индексировать корпус с
+    неизвестным паспортом хуже, чем не индексировать вовсе."""
+    try:
+        return kb_manifest.load_manifest(path)
+    except kb_manifest.ManifestError as e:
+        sys.exit(str(e))
 
 
 def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
@@ -444,17 +416,23 @@ def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
     recs: list[dict] = []
     rules_edition = ""
 
-    for doc in man["documents"]:
+    # ⚠ ТОЛЬКО СВОЯ КОЛЛЕКЦИЯ. Манифест описывает все три корпуса сервиса; без фильтра этот
+    # загрузчик попытался бы разобрать товарное приложение парсером норм и упал бы на первом же
+    # разделе — или, хуже, тихо добавил бы мусор в процедурную коллекцию.
+    for doc in [d for d in man["documents"] if d.get("collection") == COLLECTION]:
         dt = doc["doc_type"]
         title = doc.get("short") or doc.get("title") or dt
 
-        if doc.get("status") != "действует":
+        if doc.get("status") != kb_manifest.ACTIVE:
             # Не молча: исключение документа — решение, и оно обязано быть видно в логе загрузки.
-            print(f"⏭  {title}: статус «{doc.get('status')}» — в индекс НЕ идёт "
+            print(f"[skip] {title}: статус «{doc.get('status')}» — в индекс НЕ идёт "
                   f"(до {doc.get('valid_to') or '—'})")
             continue
 
-        sources = [ROOT / "knowledge_base" / s for s in (doc.get("sources") or [])]
+        try:
+            sources = kb_manifest.resolve_sources(doc)
+        except kb_manifest.ManifestError as e:
+            sys.exit(str(e))
         if not sources:
             print(f"⚠️  {title}: в манифесте нет источников — документ пропущен")
             continue
@@ -465,8 +443,6 @@ def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
         part: list[dict] = []
         texts: list[str] = []
         for path in sources:
-            if not path.exists():
-                sys.exit(f"{title}: нет файла {path} (перечислен в манифесте)")
             texts.append(_normalize(path.read_text(encoding="utf-8")))
             chunk = parser(path)
             if not chunk:
@@ -481,11 +457,10 @@ def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
             # ловит расхождение в CI; загрузчик обязан о нём сказать, а не решать за человека.
             print(f"⚠️  {title}: манифест ждёт «{expected}», в тексте «{edition}» — "
                   f"обновите манифест или текст (A6)")
+        stamp = kb_manifest.passport(doc)
         for r in part:
             r["edition"] = edition
-            for f in PASSPORT_FIELDS:
-                r[f] = doc.get(f)
-            r["doc_title"] = title
+            r.update(stamp)
         if dt == "rules_registry":
             rules_edition = edition
         recs.extend(part)

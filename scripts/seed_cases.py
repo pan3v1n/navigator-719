@@ -22,6 +22,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings  # noqa: E402
+from app.core import manifest as kb_manifest  # noqa: E402
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅»: без этого печать предупреждения
+# роняет загрузку кейсов. Подробности — app/core/console.py, долг — issue #107.
+enable_utf8()
 from app.rag.embeddings import embed_passages  # noqa: E402
 from app.rag.sparse import doc_length, document_vector  # noqa: E402
 
@@ -40,11 +46,37 @@ def build_text(case: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
+COLLECTION = "verified_cases"
+
+
+def manifest_doc() -> dict:
+    """Паспорт кейсов из манифеста (`K8` #39, `#106`).
+
+    ⚠ `legal_force: 5` — практика, а НЕ норма. Это не формальность: кейс уходит в контекст с
+    ВЫСШИМ приоритетом (правило 1а промпта, выше первоисточника), и когда `K13` начнёт строить
+    иерархию источников, она обязана знать, что кейс уточняет ПРИМЕНЕНИЕ нормы, а не заменяет её.
+    """
+    try:
+        docs = kb_manifest.documents(COLLECTION)
+    except kb_manifest.ManifestError as e:
+        sys.exit(str(e))
+    if len(docs) != 1:
+        sys.exit(f"в манифесте ожидался ровно один документ коллекции {COLLECTION}, найдено {len(docs)}")
+    return docs[0]
+
+
 def load_cases() -> list[dict]:
+    doc = manifest_doc()
+    stamp = kb_manifest.passport(doc)
+    try:
+        # Исключение шаблонов (`_*.json`) переехало в манифест: раньше это было условие внутри
+        # цикла, и тот, кто читал состав корпуса, о нём не узнавал.
+        files = kb_manifest.resolve_sources(doc)
+    except kb_manifest.ManifestError as e:
+        sys.exit(str(e))
+
     cases: list[dict] = []
-    for f in sorted(CASES_DIR.glob("*.json")):
-        if f.name.startswith("_"):
-            continue
+    for f in files:
         data = json.loads(f.read_text(encoding="utf-8"))
         items = data if isinstance(data, list) else [data]
         for it in items:
@@ -52,6 +84,7 @@ def load_cases() -> list[dict]:
                 print(f"  ⚠ пропуск (нет query/expert_answer): {f.name}")
                 continue
             it["_file"] = f.name
+            it.update(stamp)
             cases.append(it)
     return cases
 

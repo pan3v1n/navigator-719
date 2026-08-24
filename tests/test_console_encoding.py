@@ -36,7 +36,7 @@ SCRIPTS = ROOT / "scripts"
 # (issue #107), а не разрешение: список может только СОКРАЩАТЬСЯ. Тест ниже запрещает добавлять
 # в него новые имена — то есть класс перестаёт расти с сегодняшнего дня.
 #
-# Почему не починены разом: правка механическая, но затрагивает 37 файлов, и делать её в конце
+# Почему не починены разом: правка механическая, но затрагивает 36 файлов, и делать её в конце
 # длинной сессии — ровно тот способ внести дефект, от которого проект уже страдал. Чинятся по
 # мере того, как файл всё равно открывается по своей задаче.
 KNOWN_UNGUARDED = {
@@ -49,7 +49,7 @@ KNOWN_UNGUARDED = {
     "eval_paraphrase.py", "eval_perturbation.py", "eval_retrieval.py", "eval_rules.py",
     "eval_text_faithfulness.py", "eval_threshold_coverage.py", "eval_topics.py",
     "eval_truncation.py", "md2docx.py", "parse_rtf.py", "rechunk_appendix.py",
-    "reconcile_kb.py", "run_test_cases.py", "seed_cases.py", "seed_users.py",
+    "reconcile_kb.py", "run_test_cases.py", "seed_users.py",
     "structure_kb.py", "sync_payloads.py", "watch_edition.py",
 }
 
