@@ -189,6 +189,67 @@ class TestSourceThresholdMatchesRuntime(unittest.TestCase):
                     self.assertIn("_не указан_", line)
 
 
+class TestDBlockMatchesClassifier(unittest.TestCase):
+    """Блок Д (issue #95): числа в письме эксперту обязаны ПЕРЕСЧИТЫВАТЬСЯ, а не переписываться.
+
+    Урок проекта, стоивший двух отзывов опубликованных чисел за сутки: число, которое нечем
+    пересчитать, — не критерий, а цитата. Здесь цена ошибки выше обычной: документ уходит
+    НАРУЖУ, эксперту ТПП, и отозвать его нельзя.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.items = checklist.d13_items()
+        cls.block = "\n".join(checklist.render_d_block(cls.items))
+        cls.appendix = checklist.render_d_appendix(cls.items)
+
+    def test_counts_in_text_match_the_classifier(self):
+        for key, tag, _ in checklist.D13_CLASSES:
+            n = sum(1 for i in self.items if i["class"] == key)
+            with self.subTest(tag=tag):
+                self.assertRegex(self.block, rf"\*\*{tag} —[^*]*: {n} ")
+
+    def test_appendix_lists_every_position(self):
+        """Рендер мог бы тихо потерять строки — считаем их, а не верим заголовку."""
+        expected = sum(1 for i in self.items
+                       if i["class"] in {k for k, _, _ in checklist.D13_CLASSES})
+        rows = sum(1 for line in self.appendix.splitlines()
+                   if re.match(r"^\|\s*(\d+|—)\s*\|", line))
+        self.assertEqual(rows, expected)
+
+    def test_defect_classes_never_go_to_the_expert(self):
+        """⚠ Дефект разбора — работа для кода. Спрашивать про него эксперта значит просить его
+        чинить наш баг и тратить единственный дефицитный ресурс проекта."""
+        clf = sys.modules["classify_missing"]
+        self.assertFalse(
+            {k for k, _, _ in checklist.D13_CLASSES} & set(clf.DEFECT_CLASSES),
+            "в блок Д попал дефектный класс — его чинят кодом, а не письмом")
+
+    def test_position_number_distinguishes_rows_with_the_same_code(self):
+        """Код и наименование позицию НЕ определяют: «Устройства наведения промышленные»
+        (26.40.33) стоят в разделе IV дважды, позиции 11 и 34, с разными требованиями.
+        Без номера эксперт видит дубль и не знает, о какой строке речь.
+
+        ⚠ Номер уникален В ПРЕДЕЛАХ РАЗДЕЛА, не глобально: тот же код 26.40.33 есть в разделе IX
+        и там тоже позиция 34. Первая редакция теста сравнивала номера по всему корпусу и упала
+        на ВЕРНОМ коде — приложение группирует таблицы по разделам, там сравнение и уместно."""
+        twins = [i for i in self.items if i["code"] == "26.40.33" and i["section"] == "IV"]
+        self.assertGreater(len(twins), 1, "образец задачи исчез из корпуса — тест пересобрать")
+        numbers = {checklist._pos_no(i.get("anchor")) for i in twins}
+        self.assertEqual(len(numbers), len(twins), f"номера позиций не различают строки: {numbers}")
+        self.assertNotIn("—", numbers, "у записи нет якоря первоисточника")
+
+    def test_position_numbers_are_unique_inside_every_section_table(self):
+        """Инвариант, на котором держится адресность приложения: в одной таблице раздела номер
+        позиции встречается один раз. Иначе «проверьте позицию 34» снова неоднозначно."""
+        for key, tag, _ in checklist.D13_CLASSES:
+            rows = [i for i in self.items if i["class"] == key]
+            for sec in {r["section"] for r in rows}:
+                nums = [checklist._pos_no(r.get("anchor")) for r in rows if r["section"] == sec]
+                with self.subTest(tag=tag, section=sec):
+                    self.assertEqual(len(nums), len(set(nums)), f"повтор номера в разделе {sec}")
+
+
 class TestPython311Compatible(unittest.TestCase):
     """Обратный слэш внутри выражения f-строки разрешён только с Python 3.12 (PEP 701).
 
