@@ -35,6 +35,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings  # noqa: E402
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
+# предупреждения роняет скрипт UnicodeEncodeError'ом. Подробности — в app/core/console.py.
+enable_utf8()
 
 # embeddings/sparse импортируем ЛЕНИВО внутри index_all/hybrid_search (там, где нужны): так модуль
 # импортируется дёшево (без загрузки sentence_transformers) — парсер тестируется без тяжёлых зависимостей.

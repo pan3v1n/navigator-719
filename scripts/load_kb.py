@@ -39,6 +39,11 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings  # noqa: E402
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
+# предупреждения роняет ЗАГРУЗКУ КОРПУСА на середине. Подробности — app/core/console.py.
+enable_utf8()
 from app.rag.embeddings import embed_passages, embed_query  # noqa: E402
 from app.rag.sparse import doc_length, document_vector, query_vector  # noqa: E402
 

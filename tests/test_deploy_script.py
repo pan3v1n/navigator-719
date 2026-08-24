@@ -214,7 +214,8 @@ class TestReleaseProfiles(unittest.TestCase):
             with self.subTest(profile=p.name):
                 r = subprocess.run(
                     [shutil.which("bash"), str(DEPLOY_SH), "--release", str(p), "--dry-run"],
-                    capture_output=True, text=True, cwd=str(ROOT), env=env)
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    cwd=str(ROOT), env=env)
                 self.assertEqual(r.returncode, 0,
                                  f"сухой прогон {p.name} упал:\n{r.stdout}\n{r.stderr}")
 
@@ -244,9 +245,14 @@ class TestCiGate(unittest.TestCase):
             env = {**os.environ, "PATH": td + os.pathsep + os.environ.get("PATH", "")}
             env.pop("SKIP_CI_GATE", None)
             profile = sorted(RELEASES.glob("*.env"))[0]
+            # ⚠ `encoding="utf-8"` ОБЯЗАТЕЛЕН. `text=True` декодирует вывод кодировкой локали, и на
+            # Windows (cp1251) «КРАСНЫЙ» из `deploy.sh` возвращался как «К\xa0АСНЫЙ»: тест падал на
+            # ВЕРНОМ коде — предохранитель отрабатывал, `returncode` был правильным, не совпадала
+            # только строка. Ровно тот же класс, что и падение скриптов на печати «⚠».
             return subprocess.run(
                 [shutil.which("bash"), str(DEPLOY_SH), "--release", str(profile), "--dry-run"],
-                capture_output=True, text=True, cwd=str(ROOT), env=env)
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(ROOT), env=env)
 
     def test_red_ci_stops_the_dry_run(self):
         """Главное. Отчитаться о провале и продолжить — то же самое, что не проверять вовсе."""

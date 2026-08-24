@@ -39,6 +39,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from app.rag.thresholds import lookup_threshold  # noqa: E402  (только после sys.path)
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
+# предупреждения роняет скрипт UnicodeEncodeError'ом. Подробности — в app/core/console.py.
+enable_utf8()
 
 
 def _load_diag():
@@ -544,12 +549,16 @@ def render_d_block(items: list[dict]) -> list[str]:
         top = sections[0]
         add(f"Раздел **{top}** даёт больше половины вопроса — с него и стоит начать.")
         add("")
-    add("**Показательные позиции** (ответ по ним закрывает свой класс целиком):")
+    add("**Показательные позиции** (ответ по ним даёт правило для всего класса):")
     add("")
     add("| Класс | Раздел | Код ОКПД2 | Наименование | Что стоит в строке сейчас |")
     add("|---|---|---|---|---|")
     for key, tag, _ in D13_CLASSES:
-        pool = [i for i in groups[key] if i["section"] == sections[0]] or groups[key]
+        # ⚠ `sections` может быть пуст — и это не гипотетика, а ЦЕЛЬ работы по #95: когда все 300
+        # позиций разберутся, блок Д опустеет. Генератор листа обязан в этот день напечатать
+        # пустой раздел, а не упасть с IndexError. Восемью строками выше доступ уже под `if`.
+        top_section = sections[0] if sections else None
+        pool = [i for i in groups[key] if i["section"] == top_section] or groups[key]
         for i in sorted(pool, key=lambda x: str(x["code"]))[:3]:
             quote = " ".join((i.get("quote") or "").split())[:90] or "_величины нет_"
             name = " ".join((i.get("name") or "").split())[:60]

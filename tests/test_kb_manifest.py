@@ -76,6 +76,17 @@ class TestManifestItself(unittest.TestCase):
                 with self.subTest(doc=doc["doc_type"]):
                     self.assertIn(doc["doc_type"], loader.PARSERS)
 
+    def test_retired_wording_is_the_same_in_all_three_places(self):
+        """⚠ Строка «утратил силу» живёт В ТРЁХ местах: словарь манифеста, `loader.RETIRED` и
+        `retriever.RETIRED_STATUS` (фильтр Qdrant). Расхождение НЕВИДИМО: первый контур —
+        загрузчик, который такой документ и так не индексирует, — прикроет поломку второго, и
+        `must_not` тихо станет пустышкой. Ровно тот случай, о котором предупреждают комментарии
+        рядом: предохранитель, который ничего не сообщает, когда сломался."""
+        from app.rag import retriever
+
+        self.assertIn(loader.RETIRED, self.man["vocabularies"]["status"])
+        self.assertEqual(retriever.RETIRED_STATUS, loader.RETIRED)
+
     def test_retired_document_is_recorded_with_its_end_date(self):
         """Ради этой записи K8 и заводилась: решение об исключении обязано быть проверяемым."""
         retired = [d for d in self.man["documents"] if d["status"] == loader.RETIRED]
