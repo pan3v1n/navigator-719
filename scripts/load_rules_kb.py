@@ -35,11 +35,23 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings  # noqa: E402
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+from app.core import manifest as kb_manifest  # noqa: E402
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
+# предупреждения роняет скрипт UnicodeEncodeError'ом. Подробности — в app/core/console.py.
+enable_utf8()
 
 # embeddings/sparse импортируем ЛЕНИВО внутри index_all/hybrid_search (там, где нужны): так модуль
 # импортируется дёшево (без загрузки sentence_transformers) — парсер тестируется без тяжёлых зависимостей.
 
 CHUNKS_DIR = ROOT / "knowledge_base" / "pp719" / "chunks"
+
+# ⚠ СОСТАВ КОРПУСА ЗАДАЁТ МАНИФЕСТ (`knowledge_base/manifest.yaml`, K8), а не эти константы.
+# Здесь остались УДОБНЫЕ РУЧКИ для тестов парсеров: им нужен путь к файлу, а не паспорт документа.
+# Расхождение с манифестом ловит тест `TestManifestMatchesLoaderPaths` — тот же приём, которым
+# `.env.example` держится в согласии с `Settings`. Менять состав правкой этих списков бесполезно:
+# `load_records` их не читает.
 # ЯВНЫЙ список из 5 файлов (НЕ glob `1[1-5]*.txt` — он зацепит товарные 110_…129_ и 130_).
 RULES_FILES = [
     "11_I_obshchie_polozheniya.txt",
@@ -79,6 +91,11 @@ _AMEND_RE = re.compile(r"от\s*(\d{1,2}\.\d{1,2}\.(\d{4}))\s*[NН№]\s*(\d+)")
 # Определение сноски приложения начинается с маркера в начале строки: «<44> В случае …».
 # Ссылки на сноски внутри требований идут в середине строки и сюда не попадают.
 _FOOTNOTE_RE = re.compile(r"^(<\d+(?:\.\d+)?>)\s")
+# Заголовок раздела ВНУТРИ тела файла: «IV. Формирование реестровой записи, …».
+# Пункт начинается с цифры и под этот шаблон не подходит; требование заглавной буквы после
+# номера отсекает случайные строки прозы. Замер по корпусу Правил: пять файлов, ОДНО совпадение —
+# ровно тот заголовок IV, из-за которого 13 пунктов подписывались чужим разделом.
+_SECTION_HEAD_RE = re.compile(r"^([IVXLC]+)\.\s+([А-ЯЁ].*)$")
 
 
 def _normalize(text: str) -> str:
@@ -93,7 +110,15 @@ def _normalize(text: str) -> str:
 def parse_rules_file(path: Path) -> list[dict]:
     """Разбирает один файл Правил в записи-пункты. Первая строка `# <ROMAN>. <title>` даёт
     section_roman/section_title; тело режется на пункты по _POINT_RE (подпункты «а)/б)», строки
-    определений и пометки «(в ред. …)» остаются внутри текущего пункта)."""
+    определений и пометки «(в ред. …)» остаются внутри текущего пункта).
+
+    ⚠ РАЗДЕЛ БЕРЁТСЯ НЕ ТОЛЬКО ИЗ ИМЕНИ ФАЙЛА. Нарезка сложила в `13_III_vnesenie_izmeneniy.txt`
+    ДВА раздела: III и IV («Формирование реестровой записи, состав сведений, период действия
+    реестровой записи»). Раздел читался из первой строки и применялся ко всему файлу, поэтому
+    пункты 31–43 подписывались разделом III — а якорь печатается пользователю как источник, и
+    заголовок раздела уезжает в вектор (`add_index_text`). Правильный текст, привязанный не к
+    тому месту, — самый дорогой класс дефекта в этом проекте; здесь он жил в 13 пунктах.
+    Заголовок раздела внутри тела переключает раздел."""
     raw = _normalize(path.read_text(encoding="utf-8"))
     lines = raw.split("\n")
     roman, title = "", ""
@@ -129,6 +154,12 @@ def parse_rules_file(path: Path) -> list[dict]:
         })
 
     for ln in lines[body_start:]:
+        head = _SECTION_HEAD_RE.match(ln.strip())
+        if head:
+            _flush()
+            roman, title = head.group(1), head.group(2).strip()
+            cur_point, cur_lines = None, []
+            continue
         m = _POINT_RE.match(ln)
         if m:
             _flush()
@@ -343,63 +374,100 @@ def _stamp_edition(recs: list[dict], text: str) -> None:
         r["edition"] = ed
 
 
-def load_records() -> tuple[list[dict], str]:
+# --------------------------------------------------------------------------- #
+# K8: манифест корпуса — единственный источник правды о его составе
+# --------------------------------------------------------------------------- #
+# Манифест читает общий модуль `app.core.manifest`: он нужен ТРЁМ загрузчикам сразу (процедурный
+# корпус, товарный, кейсы), и три копии правил разбора означали бы три расходящихся понимания
+# того, что такое «состав корпуса». Псевдонимы ниже — чтобы вызывающий код и тесты не знали,
+# в каком слое живёт читалка.
+MANIFEST_PATH = kb_manifest.MANIFEST_PATH
+PASSPORT_FIELDS = kb_manifest.PASSPORT_FIELDS
+RETIRED = kb_manifest.RETIRED
+COLLECTION = "pp719_rules"
+
+# Как читать источники документа. Ключ — `doc_type` из манифеста; в манифесте этого сопоставления
+# НЕТ намеренно: он описывает ДОКУМЕНТ (сила, статус, срок), а не устройство разбора. Формат
+# файла — забота кода, и тест следит, что у каждого документа с источниками парсер есть.
+PARSERS = {
+    "rules_registry": parse_rules_file,
+    "decree_body": parse_decree_body,
+    "tpp_order_52": parse_order52,
+    "appendix_footnotes": parse_footnotes,
+}
+
+
+def load_manifest(path=None) -> dict:
+    """Манифест с проверкой словарей. Ошибку превращаем в выход: индексировать корпус с
+    неизвестным паспортом хуже, чем не индексировать вовсе."""
+    try:
+        return kb_manifest.load_manifest(path)
+    except kb_manifest.ManifestError as e:
+        sys.exit(str(e))
+
+
+def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
+    """Собирает записи процедурного корпуса ПО МАНИФЕСТУ.
+
+    Порядок документов и набор файлов больше не зашиты в код: раньше они жили тремя списками
+    (`RULES_FILES`, `BODY_PATH`, …), а решение «утратившие силу Правила выдачи заключения не
+    индексируем» не было записано нигде — его знал только тот, кто его принял."""
+    man = manifest or load_manifest()
     recs: list[dict] = []
-    # 1) Правила ведения реестра (chunks 11–15), doc_type=rules_registry
-    rules_recs: list[dict] = []
-    rules_text: list[str] = []
-    for name in RULES_FILES:
-        path = CHUNKS_DIR / name
-        if not path.exists():
-            sys.exit(f"Нет файла Правил: {path}")
-        txt = _normalize(path.read_text(encoding="utf-8"))
-        rules_text.append(txt)
-        part = parse_rules_file(path)
-        if not part:
-            print(f"⚠️  {name}: не распознано ни одного пункта — проверь формат")
-        rules_recs.extend(part)
-    rules_edition = detect_edition("\n".join(rules_text))
-    for r in rules_recs:
-        r["edition"] = rules_edition
-    recs.extend(rules_recs)
-    print(f"Правила ведения реестра: {len(rules_recs)} пунктов ({rules_edition})")
+    rules_edition = ""
 
-    # 2) Тело ПП №719 (критерии подтверждения, п. 1 а/б/в/г — СТ-1), doc_type=decree_body
-    if BODY_PATH.exists():
-        body = parse_decree_body(BODY_PATH)
-        _stamp_edition(body, _normalize(BODY_PATH.read_text(encoding="utf-8")))
-        if not body:
-            print(f"⚠️  {BODY_PATH.name}: тело постановления не распознано")
-        recs.extend(body)
-        print(f"Тело ПП №719 (критерии): {len(body)} пунктов")
-    else:
-        print(f"⚠️  нет {BODY_PATH} — критерии/СТ-1 не проиндексированы")
+    # ⚠ ТОЛЬКО СВОЯ КОЛЛЕКЦИЯ. Манифест описывает все три корпуса сервиса; без фильтра этот
+    # загрузчик попытался бы разобрать товарное приложение парсером норм и упал бы на первом же
+    # разделе — или, хуже, тихо добавил бы мусор в процедурную коллекцию.
+    for doc in [d for d in man["documents"] if d.get("collection") == COLLECTION]:
+        dt = doc["doc_type"]
+        title = doc.get("short") or doc.get("title") or dt
 
-    # 3) Приказ ТПП РФ №52 (порядок выдачи документов), doc_type=tpp_order_52
-    if ORDER52_PATH.exists():
-        order = parse_order52(ORDER52_PATH)
-        _stamp_edition(order, _normalize(ORDER52_PATH.read_text(encoding="utf-8")))
-        if not order:
-            print(f"⚠️  {ORDER52_PATH.name}: приказ не распознан")
-        recs.extend(order)
-        print(f"Приказ ТПП РФ №52: {len(order)} пунктов")
-    else:
-        print(f"⚠️  нет {ORDER52_PATH} — состав документов/сроки/акт на компоненты не проиндексированы")
+        if doc.get("status") != kb_manifest.ACTIVE:
+            # Не молча: исключение документа — решение, и оно обязано быть видно в логе загрузки.
+            print(f"[skip] {title}: статус «{doc.get('status')}» — в индекс НЕ идёт "
+                  f"(до {doc.get('valid_to') or '—'})")
+            continue
 
-    # 4) Определения сносок приложения (<1>…<56>), doc_type=appendix_footnotes
-    if FOOTNOTES_PATH.exists():
-        foot = parse_footnotes(FOOTNOTES_PATH)
-        _stamp_edition(foot, _normalize(FOOTNOTES_PATH.read_text(encoding="utf-8")))
-        if not foot:
-            print(f"⚠️  {FOOTNOTES_PATH.name}: сноски не распознаны")
-        recs.extend(foot)
-        print(f"Сноски приложения: {len(foot)} определений")
-    else:
-        print(f"⚠️  нет {FOOTNOTES_PATH} — определения сносок не проиндексированы "
-              f"(пересобрать: scripts/rechunk_appendix.py --write)")
+        try:
+            sources = kb_manifest.resolve_sources(doc)
+        except kb_manifest.ManifestError as e:
+            sys.exit(str(e))
+        if not sources:
+            print(f"⚠️  {title}: в манифесте нет источников — документ пропущен")
+            continue
+        parser = PARSERS.get(dt)
+        if parser is None:
+            sys.exit(f"{dt}: документ в манифесте есть, а парсер для него не заведён (PARSERS)")
+
+        part: list[dict] = []
+        texts: list[str] = []
+        for path in sources:
+            texts.append(_normalize(path.read_text(encoding="utf-8")))
+            chunk = parser(path)
+            if not chunk:
+                print(f"⚠️  {path.name}: не распознано ни одного пункта — проверь формат")
+            part.extend(chunk)
+
+        edition = detect_edition("\n".join(texts))
+        expected = doc.get("edition_expected")
+        if expected and expected != edition:
+            # ⚠ Расхождение НЕ останавливает загрузку: обычно это значит, что текст обновили, и
+            # индексировать надо именно его. Гейтом служит тест (`test_kb_manifest`), который
+            # ловит расхождение в CI; загрузчик обязан о нём сказать, а не решать за человека.
+            print(f"⚠️  {title}: манифест ждёт «{expected}», в тексте «{edition}» — "
+                  f"обновите манифест или текст (A6)")
+        stamp = kb_manifest.passport(doc)
+        for r in part:
+            r["edition"] = edition
+            r.update(stamp)
+        if dt == "rules_registry":
+            rules_edition = edition
+        recs.extend(part)
+        print(f"{title}: {len(part)} пунктов ({edition})")
 
     if not recs:
-        sys.exit("Процедурный корпус пуст — проверь knowledge_base/pp719/chunks/11..15")
+        sys.exit("Процедурный корпус пуст — проверь манифест и файлы источников")
 
     add_index_text(recs)  # P2: подпункт индексируется вместе с вводной родителя и разделом
     with_intro = sum(1 for r in recs if r.get("parent_intro"))
@@ -436,9 +504,31 @@ def recreate_collection(client) -> None:
     )
     client.create_payload_index(name, "doc_type", models.PayloadSchemaType.KEYWORD)
     client.create_payload_index(name, "section_roman", models.PayloadSchemaType.KEYWORD)
+    # K8: по `status` фильтруется КАЖДЫЙ процедурный запрос (`retriever.alive_only`) — без индекса
+    # это перебор payload'ов на каждом обращении. Урок K10 в силе: индекс по `doc_type` создавался
+    # и не использовался ни разу; здесь наоборот — сначала потребитель, потом индекс.
+    client.create_payload_index(name, "status", models.PayloadSchemaType.KEYWORD)
 
 
-def index_all(client, recs: list[dict], batch: int = 64) -> None:
+def corpus_avgdl(recs: list[dict]) -> float:
+    """Средняя длина документа ПО ВСЕМУ КОРПУСУ — в токенах sparse-канала.
+
+    ⚠⚠ ВЫНЕСЕНО ОТДЕЛЬНО РАДИ `K11`. `document_vector` ЗАПЕКАЕТ `avgdl` в значения sparse-вектора
+    (нормировка BM25 по длине). Если переиндексировать один документ, посчитав среднюю длину
+    только по нему, его вектора окажутся в ДРУГОМ масштабе, чем у соседей по коллекции: у Приказа
+    №52 пункты длинные, у сносок — короткие, средние отличаются кратно. Ранжирование поедет у
+    ВСЕХ, и ни один тест выдачи этого не покажет — числа останутся правдоподобными.
+
+    Поэтому инкрементальная переиндексация всё равно РАЗБИРАЕТ весь корпус (это дёшево, без
+    модели) и считает `avgdl` по нему, а эмбеддит и грузит только целевой документ. Экономится
+    ровно то, что дорого, — прогон e5."""
+    from app.rag.sparse import doc_length
+
+    lengths = [doc_length(r.get("index_text") or r["text"]) for r in recs]
+    return (sum(lengths) / len(lengths)) if lengths else 1.0
+
+
+def index_all(client, recs: list[dict], batch: int = 64, avgdl: float | None = None) -> None:
     from qdrant_client import models
 
     from app.rag.embeddings import embed_passages
@@ -454,7 +544,10 @@ def index_all(client, recs: list[dict], batch: int = 64) -> None:
     # раздела и вводная фраза родителя, для остальных — просто текст.
     texts = [r.get("index_text") or r["text"] for r in recs]
     lengths = [doc_length(t) for t in texts]
-    avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
+    # `avgdl` передаётся снаружи при частичной загрузке (`K11`): он обязан быть корпусным, иначе
+    # вектора документа окажутся в другом масштабе, чем у соседей. См. `corpus_avgdl`.
+    if avgdl is None:
+        avgdl = (sum(lengths) / len(lengths)) if lengths else 1.0
     print(f"Пунктов Правил: {len(recs)} | avgdl (токенов): {avgdl:.1f} | макс={max(lengths)} мин={min(lengths)}")
 
     bar = tqdm(total=len(recs), unit="пункт", desc="Эмбеддинг+апсерт") if tqdm else None
@@ -479,6 +572,47 @@ def index_all(client, recs: list[dict], batch: int = 64) -> None:
             bar.update(len(points))
     if bar:
         bar.close()
+
+
+def reindex_document(client, doc_type: str, recs_all: list[dict], batch: int = 64) -> int:
+    """`K11` (#41): переиндексировать ОДИН документ, не трогая точки остальных.
+
+    ЗАЧЕМ. `recreate_collection` сносит коллекцию целиком: добавление одного приказа
+    переиндексирует все 311 пунктов, то есть прогоняет e5 по всему корпусу. Дальше в очереди
+    четыре задачи, которые ДОБАВЛЯЮТ документы (`K15`, `K14`, `K16`, `K17`) — без этого каждая
+    платит полной переиндексацией.
+
+    ⚠⚠ `avgdl` СЧИТАЕТСЯ ПО ВСЕМУ КОРПУСУ (`recs_all`), а не по целевому документу. Причина — в
+    `corpus_avgdl`: иначе вектора документа окажутся в другом масштабе BM25, чем у соседей.
+    Поэтому весь корпус здесь разбирается (дёшево), а эмбеддится только целевой документ.
+
+    ⚠ СНАЧАЛА UPSERT, ПОТОМ УБОРКА. Обратный порядок («удалить документ, затем загрузить») даёт
+    окно, в котором пункты этого документа отсутствуют, — а сервис в это время отвечает. Уборка
+    точечная: точки ЭТОГО документа, которых нет в новой выдаче (пункт исчез из редакции).
+
+    Возвращает число загруженных пунктов."""
+    from qdrant_client import models
+
+    name = settings.QDRANT_RULES_COLLECTION
+    if not client.collection_exists(name):
+        sys.exit(f"коллекции {name} нет — сначала полная загрузка (без --doc)")
+
+    target = [r for r in recs_all if r.get("doc_type") == doc_type]
+    if not target:
+        sys.exit(f"в корпусе нет пунктов документа {doc_type!r} — проверьте манифест")
+
+    index_all(client, target, batch=batch, avgdl=corpus_avgdl(recs_all))
+
+    fresh_ids = [point_id(r) for r in target]
+    client.delete(
+        collection_name=name,
+        points_selector=models.FilterSelector(filter=models.Filter(
+            must=[models.FieldCondition(key="doc_type", match=models.MatchValue(value=doc_type))],
+            must_not=[models.HasIdCondition(has_id=fresh_ids)],
+        )),
+    )
+    print(f"{doc_type}: загружено {len(target)} пунктов, устаревшие точки этого документа убраны")
+    return len(target)
 
 
 def hybrid_search(client, query: str, limit: int = 5):
@@ -519,12 +653,30 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Загрузка корпуса Правил ведения реестра в Qdrant")
     ap.add_argument("--smoke", action="store_true", help="после загрузки прогнать смоук-запросы")
     ap.add_argument("--smoke-only", action="store_true", help="только смоук (без перезагрузки)")
+    ap.add_argument("--doc", metavar="DOC_TYPE",
+                    help="K11: переиндексировать ОДИН документ, не трогая остальные "
+                         "(коллекция не пересоздаётся)")
+    ap.add_argument("--list-docs", action="store_true", help="показать документы корпуса и выйти")
     ap.add_argument("--batch", type=int, default=64)
     args = ap.parse_args()
 
+    if args.list_docs:
+        for doc in kb_manifest.documents(COLLECTION):
+            mark = " " if doc.get("status") == kb_manifest.ACTIVE else "×"
+            print(f" {mark} {doc['doc_type']:32} {doc.get('short') or doc.get('title')}")
+        return
+
     client = make_client()
 
-    if not args.smoke_only:
+    if args.doc:
+        # ⚠ Разбираем ВЕСЬ корпус, грузим ОДИН документ: `avgdl` обязан быть корпусным
+        # (см. `corpus_avgdl`), а дорог здесь только прогон e5 — он и экономится.
+        recs, _ = load_records()
+        print(f"Коллекция: {settings.QDRANT_RULES_COLLECTION} (частичная переиндексация)")
+        reindex_document(client, args.doc, recs, batch=args.batch)
+        info = client.get_collection(settings.QDRANT_RULES_COLLECTION)
+        print(f"\n✅ Коллекция '{settings.QDRANT_RULES_COLLECTION}': точек = {info.points_count}")
+    elif not args.smoke_only:
         recs, edition = load_records()
         print(f"Редакция индексируемого текста Правил: {edition}")
         print(f"Коллекция: {settings.QDRANT_RULES_COLLECTION}")

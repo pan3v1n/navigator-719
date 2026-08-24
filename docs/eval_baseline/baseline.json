@@ -1,54 +1,71 @@
 {
   "_meta": {
     "purpose": "База сравнения для следующего прогона EVAL_GUIDE (EV14 #98). Абсолютные пороги ловят провалы, дельта к этой базе — тихую деградацию. Правило обновления — README.md в этом каталоге.",
-    "date": "2026-08-20",
-    "commit": "71a03fb",
-    "release_tag": "v0.5.0-test12",
-    "report": "docs/eval_baseline/2026-08-20_zahod2.md",
+    "date": "2026-08-21",
+    "commit": "2045193",
+    "release_tag": "v0.5.0-test13",
+    "report": "docs/eval_baseline/2026-08-21_zahod3.md",
     "corpus": {"pp719": 1377, "pp719_rules": 311, "verified_cases": 12},
-    "verified_cases_enabled": true,
-    "⚠ gap": "Замер снят на 71a03fb, а выкачен тег v0.5.0-test12 (02695d3): между ними thresholds.py изменился на 162 строки (правки EV13 #97). То есть уровни 2–3 на выкаченном коде НЕ мерились. База пригодна для дельты, но её нельзя называть замером релиза; первая полностью соответствующая гайду база — прогон захода 3.",
-    "⚠ verified_cases": "Прогон шёл с ВКЛЮЧЁННОЙ коллекцией кейсов вопреки §1.1 (EV15 #99). Замер scripts/eval_cases_influence.py показал: на уровнях 0–2 и наборах гейта отказа петля не срабатывает ни разу (0 из 102), поэтому эти числа сопоставимы с прогоном при выключенных кейсах. На детерминизме срабатывает 2 запроса из 10 — эти три числа несопоставимы."
+    "verified_cases_enabled": false,
+    "✅ первая полная база": "Прогон снят на ТОМ ЖЕ коммите, который выкачен (v0.5.0-test13 = 2045193), и с ВЫКЛЮЧЕННОЙ петлёй кейсов — оба предусловия EVAL_GUIDE §1.1 исполнены. Прежняя база (20.08) обоих не соблюдала: мерилась на 71a03fb при выкаченном 02695d3 и с включёнными кейсами.",
+    "⚠ сопоставимость": "Числа уровней 0-2 сопоставимы с базой 20.08: замер scripts/eval_cases_influence.py показал 0 срабатываний петли кейсов на этих наборах. Уровень 3 несопоставим дважды — кейсы выключены И метрика детерминизма перестроена (EV10)."
   },
 
   "level0": {
-    "unit_tests": {"value": 530, "threshold": "все зелёные", "unit": "тестов"},
+    "unit_tests": {"value": 611, "threshold": "все зелёные", "unit": "тестов"},
     "verify_structured_mismatches": {"value": 0, "threshold": 0, "of": 1366},
     "reconcile_kb": {"value": "29/29", "threshold": "29/29"}
   },
 
   "level1": {
-    "recall@1": {"value": 0.944, "spread": 0.000, "threshold": 0.93, "direction": "невозрастание"},
-    "mrr": {"value": 0.971},
+    "recall@1": {"value": 0.943, "spread": 0.000, "threshold": 0.93, "direction": "невозрастание",
+      "note": "база 20.08 давала 0.944 — разница в одну позицию из 1377"},
+    "mrr": {"value": 0.970},
     "recall@3": {"value": 0.999, "threshold": 0.99},
     "recall@10": {"value": 1.000, "threshold": 1.00},
     "invisible_positions": {"value": 0, "threshold": 0, "blocking": true},
     "cross_section_collisions": {"value": 9, "threshold": 12, "direction": "невозрастание"},
-    "code_hit_precision": {"value": 1.000, "threshold": 0.99, "of": 1366},
-    "attribution@1_procedural": {"value": 0.96, "threshold": 0.95},
-    "document_presence": {"value": 1.00, "threshold": 1.00}
+    "code_resolves_to_own_branch": {"value": 1.000, "threshold": 0.99, "of": 1366}
   },
 
   "level2": {
     "_runs": 3,
-    "faithfulness": {"values": [1.00, 1.00, 1.00], "threshold": 0.95},
+    "faithfulness": {"values": [1.00, 1.00, 1.00], "threshold": 0.95,
+      "numbers_claimed": [433, 439, 426], "fabricated": 0},
+    "section_attribution": {"values": [1.00, 1.00, 1.00]},
+    "inline_citations": {"values": [1.00, 1.00, 1.00]},
     "decline_out_of_scope": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 4},
-    "threshold_reached_answer": {"values": [1.00, 1.00, 1.00], "threshold": 0.90},
-    "points_reached_answer": {"values": [1.00, 1.00, 1.00], "threshold": 0.90},
+    "threshold_reached_answer": {"values": [1.00, 1.00, 1.00], "threshold": 0.90, "of": 19,
+      "note": "было 18/18 — K2 добавила порог позиции, у которой его не было"},
+    "points_reached_answer": {"values": [1.00, 1.00, 1.00], "threshold": 0.90, "of": 134},
     "warned_incomplete": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 5},
-    "named_requirements_source": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 3},
-    "prohibitions_2_2": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "note": "все семь запретов §2.2, 42/42 в каждом прогоне"}
+    "named_requirements_source": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 2,
+      "note": "знаменатель 3 → 2: уточняющий ответ исключён, он требований не показывает вовсе"},
+    "prohibitions_2_2": {"values": [1.00, 1.00, 1.00], "threshold": 1.00,
+      "note": "все восемь запретов §2.2, 42/42 в каждом прогоне"}
   },
 
   "level3": {
-    "no_foreign_numbers": {"value": 1.00, "threshold": 0.95, "leaks": 0, "of": 50},
-    "stable_attribution": {"value": 1.00},
-    "stable_number_set": {"value": 0.60, "threshold": 0.95, "debt": "EV10 #91",
-      "note": "историческая полоса 0.60–0.90 на НЕИЗМЕННОМ коде — по одиночному прогону судить нельзя; метрика меряет полноту упоминаний, а не воспроизводимость"}
+    "decisive_numbers_stable": {"values": [1.00, 1.00, 0.93], "mean": 0.98, "spread": 0.03,
+      "threshold": 0.95,
+      "note": "EV10: доля стабильных РЕШАЮЩИХ чисел — порог позиции и баллы операций. Закупочный порог исключён: он отвечает на другой вопрос."},
+    "mention_completeness": {"values": [0.90, 0.80, 0.70], "threshold": null,
+      "note": "справочная: считает ЛЮБОЕ число ответа, включая проценты в прозе. Порога нет намеренно."},
+    "no_foreign_numbers": {"values": [1.00, 1.00, 1.00], "threshold": 0.95, "leaks": 0, "of": 50,
+      "pool": 210},
+    "stable_attribution": {"values": [1.00, 1.00, 1.00]}
+  },
+
+  "context_size": {
+    "mean_chars": {"value": 5034, "was": 6890, "note": "K6: хвост кандидатов свёрнут в один блок"},
+    "median_chars": {"value": 3633, "was": 5583},
+    "candidate_tail_share": {"value": 0.31, "was": 0.50}
   },
 
   "corpus_metrics": {
-    "threshold_coverage_points_mixed_uncovered": {"value": 0.531, "of": 880,
-      "note": "K2 #47: доля позиций points+mixed без порога В БАЛЛАХ. Разделение на классы — A1 #56, полоса дефекта 16.6–31.6 %. Критерий ≤22 % отменён владельцем 20.08."}
+    "threshold_coverage_points_mixed_uncovered": {"value": 0.508, "was": 0.531, "of": 880,
+      "note": "K2 #47 закрыта. Критерий приёмки перенесён на дефекты привязки: 0 (A1 #56)."},
+    "attachment_defects": {"value": 0, "threshold": 0,
+      "note": "scripts/classify_missing_thresholds.py --max-defect-share 0"}
   }
 }

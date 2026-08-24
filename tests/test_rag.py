@@ -1756,12 +1756,29 @@ class TestRulesLoader(unittest.TestCase):
     def test_parse_all_sections(self):
         recs, _ = load_rules_kb.load_records()
         self.assertGreaterEqual(len(recs), 40)  # ~58 пунктов
-        romans = {r["section_roman"] for r in recs}
-        self.assertTrue({"I", "II", "III", "V", "VI"} <= romans)
-        for r in recs[:5]:
+        # ⚠ Выбираем Правила ПО doc_type, а не первые пять записей: порядок документов задаёт
+        # манифест (K8), и первым теперь идёт тело постановления. Тест, опиравшийся на порядок,
+        # проверял не то, что обещал.
+        rules = [r for r in recs if r["doc_type"] == "rules_registry"]
+        romans = {r["section_roman"] for r in rules}
+        self.assertTrue({"I", "II", "III", "IV", "V", "VI"} <= romans,
+                        f"раздел Правил потерялся: {sorted(romans)}")
+        for r in rules[:5]:
             self.assertTrue(r["text"])
             self.assertTrue(r["source_anchor"].startswith("Правила ведения реестра, п."))
             self.assertEqual(r["doc_type"], "rules_registry")
+
+    def test_section_iv_is_not_signed_as_iii(self):
+        """issue #105: нарезка сложила разделы III и IV в один файл, и раздел брался из его
+        ИМЕНИ — пункты 31–43 уходили с якорем «III. Внесение изменений». Якорь печатается
+        пользователю как источник, а заголовок раздела уезжает в вектор (`add_index_text`)."""
+        recs, _ = load_rules_kb.load_records()
+        rules = {r["point"]: r for r in recs if r["doc_type"] == "rules_registry"}
+        for point in ("31", "43"):
+            with self.subTest(point=point):
+                self.assertEqual(rules[point]["section_roman"], "IV")
+                self.assertIn("Формирование реестровой записи", rules[point]["source_anchor"])
+        self.assertEqual(rules["30"]["section_roman"], "III", "граница разделов уехала вверх")
 
     def test_edition_detected(self):
         _, edition = load_rules_kb.load_records()

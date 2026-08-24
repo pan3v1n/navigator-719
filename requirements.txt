@@ -24,6 +24,12 @@ python-docx==1.1.2
 striprtf==0.0.32
 # easyocr==1.7.1        # OCR для сканов — добавить в V2 (требует PyTorch)
 
+# Corpus manifest (K8): состав корпуса задаётся knowledge_base/manifest.yaml.
+# ⚠ Указан ЯВНО, хотя приходил транзитивно (через sentence-transformers): полагаться на чужую
+# зависимость — значит потерять её при первом же обновлении соседа, и загрузчик корпуса упадёт
+# на боевой машине, а не в CI.
+PyYAML==6.0.3
+
 # Settings & validation
 pydantic==2.9.2
 pydantic-settings==2.6.1

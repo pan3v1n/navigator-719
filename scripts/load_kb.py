@@ -39,6 +39,12 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.core.config import settings  # noqa: E402
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+from app.core import manifest as kb_manifest  # noqa: E402
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
+# предупреждения роняет ЗАГРУЗКУ КОРПУСА на середине. Подробности — app/core/console.py.
+enable_utf8()
 from app.rag.embeddings import embed_passages, embed_query  # noqa: E402
 from app.rag.sparse import doc_length, document_vector, query_vector  # noqa: E402
 
@@ -123,12 +129,55 @@ def build_embedding_text(rec: dict) -> str:
     return "\n".join(p for p in parts if p)
 
 
+COLLECTION = "pp719"
+
+
+def manifest_doc() -> dict:
+    """Паспорт товарного корпуса из манифеста (`K8` #39, `#106`).
+
+    Состав корпуса больше не задаётся `STRUCT_DIR.glob` в коде: манифест — единственный источник
+    правды о том, ЧТО индексируется, какой оно юридической силы и по какому ключу
+    классифицируется (`key_type: ОКПД2` — предусловие `K14`, где придёт второй ключ, ТН ВЭД)."""
+    try:
+        docs = kb_manifest.documents(COLLECTION)
+    except kb_manifest.ManifestError as e:
+        sys.exit(str(e))
+    if len(docs) != 1:
+        sys.exit(f"в манифесте ожидался ровно один документ коллекции {COLLECTION}, найдено {len(docs)}")
+    return docs[0]
+
+
 def load_records() -> list[dict]:
+    doc = manifest_doc()
+    if doc.get("status") != kb_manifest.ACTIVE:
+        sys.exit(f"{doc['doc_type']}: статус «{doc.get('status')}» — индексировать нечего")
+    try:
+        files = kb_manifest.resolve_sources(doc)
+    except kb_manifest.ManifestError as e:
+        sys.exit(str(e))
+
     recs: list[dict] = []
-    for f in sorted(STRUCT_DIR.glob("*.json")):
+    for f in files:
         recs.extend(json.loads(f.read_text(encoding="utf-8")))
     if not recs:
         sys.exit(f"Нет записей в {STRUCT_DIR} — сначала структуризация (structure_kb.py)")
+
+    # ⚠ Редакция проверяется, но НЕ проставляется руками: её считает `app.rag.edition` из текста
+    # постановления — той же реализацией, что показывает редакцию пользователю в интерфейсе и в
+    # каждой выгрузке. Расхождение с манифестом = отставание корпуса (A6); загрузчик о нём
+    # говорит, решает человек, гейтом служит тест.
+    from app.rag.edition import corpus_edition
+
+    edition = corpus_edition()
+    expected = doc.get("edition_expected")
+    if expected and expected != edition:
+        print(f"⚠️  манифест ждёт «{expected}», в тексте «{edition}» — обновите одно из двух (A6)")
+
+    stamp = kb_manifest.passport(doc)
+    for r in recs:
+        r["edition"] = edition
+        r.update(stamp)
+    print(f"{stamp['doc_title']}: {len(recs)} записей из {len(files)} файлов ({edition})")
     return recs
 
 

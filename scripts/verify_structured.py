@@ -35,6 +35,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:  # запуск как скрипта: нужен корень для `scripts.structure_kb`
     sys.path.insert(0, str(ROOT))
+
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+# Windows-консоль по умолчанию cp1251 и не знает «⚠», «✅», «→»: без этого печать
+# предупреждения роняет скрипт UnicodeEncodeError'ом. Подробности — в app/core/console.py.
+enable_utf8()
 CHUNKS = ROOT / "knowledge_base" / "pp719" / "chunks"
 STRUCT = ROOT / "knowledge_base" / "pp719" / "structured"
 

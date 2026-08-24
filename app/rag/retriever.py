@@ -492,6 +492,30 @@ def rules_topic(query: str) -> str | None:
     return winners[0] if len(winners) == 1 else None
 
 
+RETIRED_STATUS = "утратил силу"
+
+
+def alive_only(*must):
+    """Фильтр Qdrant «документ действует» (`K8`, issue #39) плюс переданные условия.
+
+    ⚠ ИМЕННО `must_not`, А НЕ `must status=действует`. Точка, проиндексированная ДО паспорта,
+    поля `status` не имеет — при `must` такой корпус исчез бы целиком, и правка кода без
+    переиндексации молча оставила бы процедурную ветку без единого пункта. `must_not` пропускает
+    записи без поля и отсекает ровно те, что помечены утратившими силу.
+
+    Второй контур к манифесту: загрузчик такой документ вовсе не индексирует. Здесь — страховка
+    на случай коллекции, собранной прежней версией загрузчика; предохранителей два, потому что
+    цена ошибки — ответ по недействующей норме, а это ровно то, на что уже жаловались
+    («ссылается на устаревшие редакции нормативных документов»)."""
+    from qdrant_client import models
+
+    return models.Filter(
+        must=list(must) or None,
+        must_not=[models.FieldCondition(key="status",
+                                        match=models.MatchValue(value=RETIRED_STATUS))],
+    )
+
+
 def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
                  primary_docs: tuple[str, ...] = ()) -> list[dict]:
     """Гибрид-поиск по корпусу «Правила ведения реестра» (отдельная коллекция pp719_rules).
@@ -522,7 +546,8 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
         if not client.collection_exists(name):
             return []
         # пул шире окна: из него квота набирает представителей каждого документа
-        points = _hybrid(query, max(limit * 4, 24), collection=name, qvec=qvec)
+        points = _hybrid(query, max(limit * 4, 24), collection=name, qvec=qvec,
+                         qfilter=alive_only())
     except Exception as e:  # noqa: BLE001 — Qdrant недоступен: не валим ответ, деферим
         logger.warning("корпус Правил недоступен, процедурный ответ деферится: {}: {}",
                        type(e).__name__, e)
@@ -559,8 +584,8 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
         try:
             from qdrant_client import models
             extra = _hybrid(query, RULES_QUOTA_PRIMARY, collection=name, qvec=qvec,
-                            qfilter=models.Filter(must=[models.FieldCondition(
-                                key="doc_type", match=models.MatchValue(value=doc))]))
+                            qfilter=alive_only(models.FieldCondition(
+                                key="doc_type", match=models.MatchValue(value=doc))))
             for p in extra:
                 by_doc.setdefault(doc, []).append(len(points))
                 points.append(p)
@@ -575,12 +600,12 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
         try:
             from qdrant_client import models
             extra = _hybrid(query, 12, collection=name, qvec=qvec,
-                            qfilter=models.Filter(must=[
+                            qfilter=alive_only(
                                 models.FieldCondition(key="doc_type",
                                                       match=models.MatchValue(value="tpp_order_52")),
                                 models.FieldCondition(key="section_roman",
                                                       match=models.MatchValue(value=RULES_DOC_LIST_SECTION)),
-                            ]))
+                            ))
             # Пункт может уже лежать в широком пуле — тогда берём ЕГО индекс, а не пропускаем:
             # «в пуле» не значит «в окне», квота отбирает только первые по рангу, и п. 4.1
             # (3844 знака, второй в разделе) в окно так и не попадал.
