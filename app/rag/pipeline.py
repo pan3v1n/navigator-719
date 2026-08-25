@@ -699,8 +699,26 @@ RULES_TEXT_CAP = 1400  # символов на пункт Правил в кон
 RULES_TEXT_CAP_DOC_LIST = 4000
 
 
-def format_rules_context(rules: list[dict]) -> str:
-    """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …)."""
+def format_rules_context(rules: list[dict], *, show_legal_force: bool = False) -> str:
+    """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …).
+
+    `show_legal_force` (`K13` #46) — печатать ли в шапке блока юридическую силу документа.
+
+    ⚠ ПАРАМЕТР, А НЕ ВСЕГДА. Функция зовётся из ДВУХ мест, и они разной природы:
+    * процедурный ответ (`_answer_procedural`) собирает окно из РАЗНЫХ документов — тело ПП №719,
+      Правила, Приказ №52 — и именно там модели нужен порядок старшинства. Пометка включена;
+    * товарный путь добирает блок состава документов (`docs_ctx`) и двумя строками выше
+      ФИЛЬТРУЕТ его до одного `tpp_order_52`. Все блоки там одной силы по построению: иерархии
+      нет, ранжировать нечего, а лишние 30 символов на блок — это бюджет контекста `K6`.
+      Пометка выключена. Если фильтр когда-нибудь ослабят — включать здесь же.
+
+    Решение вынесено в параметр намеренно: выводить его из данных («силы различаются → пометить»)
+    было бы самоподдерживающимся, но тогда САМО ПОЯВЛЕНИЕ пометки сигналило бы модели «здесь
+    конфликт», а конфликта в подавляющем большинстве окон нет — пункты просто отвечают на разные
+    вопросы. Подталкивать к поиску противоречий там, где их нет, дороже, чем помнить про флаг.
+    """
+    from app.core.manifest import legal_force_label
+
     blocks: list[str] = []
     for i, r in enumerate(rules, 1):
         # Атрибуция — из source_anchor записи (Правила / тело ПП №719 / Приказ ТПП №52); фолбэк на
@@ -712,6 +730,13 @@ def format_rules_context(rules: list[dict]) -> str:
             point = r.get("point") or "?"
             sect = r.get("section_title") or r.get("section_roman") or ""
             head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
+        # K13: юридическая сила документа — рядом с его именем, а не отдельной легендой сверху.
+        # Легенда потребовала бы от модели сопоставлять блок с документом по имени; пометка на
+        # месте не требует ничего. Урок проекта: правило промпта слабее устройства контекста.
+        if show_legal_force:
+            label = legal_force_label(r.get("doc_type"))
+            if label:
+                head += f" ({label})"
         text = (r.get("text") or "").strip()
         cap = RULES_TEXT_CAP_DOC_LIST if r.get("_doc_list") else RULES_TEXT_CAP
         if len(text) > cap:
@@ -971,7 +996,7 @@ def _answer_procedural(query: str, search_query: str,
     if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
         return Answer(text=procedural.DEFLECTION, hits=[])
 
-    ctx = format_rules_context(rules)
+    ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
     user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic))
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
