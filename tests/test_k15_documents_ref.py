@@ -67,16 +67,39 @@ class TestClosedList(unittest.TestCase):
         for d in documents_ref.CONFIRMING_DOCUMENTS:
             self.assertIn(d["name"], block)
 
-    def test_context_block_explains_instead_of_only_forbidding(self):
-        """Пользователь спрашивает про несуществующий документ своими словами — ответ обязан
+    def test_explanation_comes_only_when_the_user_raised_it(self):
+        """⚠⚠ Разъяснение отвечает на НЕЗАДАННЫЙ вопрос — и потому условное.
 
-        объяснить, а не промолчать. Поэтому блок несёт РАЗЪЯСНЕНИЕ: чего нет, что есть вместо,
-        и чем отличается законное «экспертное заключение»."""
-        block = documents_ref.documents_context_block()
-        self.assertIn("не существует", block)
-        self.assertIn("экспертное заключение", block)
-        self.assertIn("ИСКЛЮЧЕНИЯ реестровой записи", block)
+        Первая редакция клала его в контекст всегда. Живой прогон на бою 25.08.2026: на вопрос
+        «какие документы подготовить» ответ содержал строку «Документа «заключение ТПП» не
+        существует» — пользователю, который про этот документ не спрашивал. Правка, задуманная
+        чтобы термин ИСЧЕЗ из ответов, начала его туда ПРИНОСИТЬ (`EV12`: слово, живущее в
+        контексте, модель воспроизводит).
+        """
+        plain = documents_ref.documents_context_block(
+            "какие документы нужно подготовить для подтверждения производства")
+        self.assertNotIn("не существует", plain,
+                         "разъяснение приехало на вопрос, где про заключение не спрашивали")
+        self.assertIn("ЗАКРЫТЫЙ", plain, "закрытый перечень обязан быть ВСЕГДА")
+        for d in documents_ref.CONFIRMING_DOCUMENTS:
+            self.assertIn(d["name"], plain)
 
+    def test_explanation_arrives_when_asked(self):
+        """Обратная половина: спросили — объясняем. Без неё правка «починила» бы дефект,
+        просто выбросив разъяснение совсем."""
+        for q in ("нужно ли мне заключение ТПП для внесения в реестр",
+                  "что такое экспертное заключение ТПП"):
+            block = documents_ref.documents_context_block(q)
+            self.assertIn("не существует", block, q)
+            self.assertIn("экспертное заключение", block, q)
+            self.assertIn("ИСКЛЮЧЕНИЯ реестровой записи", block, q)
+
+    def test_explanation_is_a_third_of_the_block(self):
+        """Цена условности — измеренная, а не предполагаемая."""
+        plain = len(documents_ref.documents_context_block("какие документы нужны"))
+        full = len(documents_ref.documents_context_block("нужно ли заключение ТПП"))
+        self.assertLess(plain, full)
+        self.assertGreater(full - plain, 300, "разъяснение весит меньше, чем указано в решении")
     def test_table_is_markdown_and_lists_everything(self):
         t = documents_ref.documents_table()
         self.assertIn("|---|---|---|", t)
