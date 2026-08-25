@@ -1,75 +1,123 @@
 {
   "_meta": {
     "purpose": "База сравнения для следующего прогона EVAL_GUIDE (EV14 #98). Абсолютные пороги ловят провалы, дельта к этой базе — тихую деградацию. Правило обновления — README.md в этом каталоге.",
-    "date": "2026-08-24",
-    "commit": "d119e58",
-    "commit_measured": "048249d",
-    "release_tag": "v0.5.0-test14",
-    "report": "docs/eval_baseline/2026-08-24_zahod4.md",
-    "corpus": {"pp719": 1377, "pp719_rules": 311, "verified_cases": 12},
+    "date": "2026-08-25",
+    "commit": "3f3af8f",
+    "commit_measured": "a3a271e",
+    "release_tag": "v0.5.0-test15",
+    "report": "docs/eval_baseline/2026-08-25_zahod5.md",
+    "corpus": {"pp719": 1377, "pp719_rules": 328, "verified_cases": 12},
     "verified_cases_enabled": false,
-    "⚠ прогон и релиз на РАЗНЫХ коммитах": "Числа сняты на 048249d, выкачен d119e58. README требует одного коммита, и это отступление — но не подмена: дельта 048249d..d119e58 = 5 файлов, +255 строк, и НИ ОДНОЙ в app/ (отчёт прогона, профиль релиза, релизная проверка, шаг переиндексации в deploy.sh, 2 теста на него). Рантайм, который меряли, и рантайм, который выкачен, побайтно совпадают. Записано явно, чтобы следующий прогон не искал объяснения расхождению задним числом.",
-    "⚠ сопоставимость с базой 21.08": "Уровни 0-3 сопоставимы: оба прогона с выключенной петлёй кейсов, метрика детерминизма не перестраивалась между ними. Заход 4 переиндексировал pp719_rules (паспорт K8 + раздел IV #105); товарный pp719 остался в прежнем payload — это осознанное решение, паспорт там аддитивный и рантаймом не читается."
+    "выкатка состоялась": "Тег v0.5.0-test15 на бою с 25.08.2026, вердикт скрипта «все проверки прошли», провалов в логе 0. Коллекция pp719_rules переиндексирована ПОЛНОСТЬЮ (311 -> 328), avgdl на бою 96.7 — совпал с локальным замером 96.72.",
+    "⚠ прогон и релиз на разных коммитах": "Числа сняты на a3a271e, выкачен 3f3af8f. Дельта по app/, knowledge_base/, load_rules_kb.py и main.py между ними ПУСТА (проверено git diff --stat) — рантайм, который мерили, и рантайм, который выкачен, совпадают. Менялись только документы, проверки выкатки, тесты и кэш перефразов.",
+    "⚠⚠ ИЗВЕСТНОЕ ГРЯДУЩЕЕ ИЗМЕНЕНИЕ, НЕ РАССЛЕДОВАТЬ ЗАНОВО": "После этого замера в dev легли две рантаймовые правки K15, которых в базе НЕТ: ddd3e16 (гард учит отрицание) и dbfc622 (разъяснение про несуществующий документ идёт в контекст, только если пользователь сам его поднял). Вторая уменьшает блок справочника 1155 -> 727 символов на документных вопросах, то есть СЛЕДУЮЩИЙ прогон законно покажет меньший context_size на той их доле, что попадает в golden set. Причина известна заранее — это не деградация."
   },
 
   "level0": {
-    "unit_tests": {"value": 666, "threshold": "все зелёные", "unit": "тестов",
-      "note": "отчёт прогона называет 664 — столько было на 048249d; d119e58 добавил 2 теста на шаг переиндексации в deploy.sh. Проверено 25.08 документированной командой: 666, OK."},
+    "unit_tests": {"value": 726, "threshold": "все зелёные", "unit": "тестов",
+      "note": "прогон документированной командой из CLAUDE.md, без PYTHONUTF8"},
     "verify_structured_mismatches": {"value": 0, "threshold": 0, "of": 1366},
     "reconcile_kb": {"value": "29/29", "threshold": "29/29"}
   },
 
   "level1": {
-    "recall@1": {"value": 0.944, "spread": 0.000, "threshold": 0.93, "direction": "невозрастание",
-      "was": 0.943},
-    "mrr": {"value": 0.971, "was": 0.970},
+    "_command": "EXACT_SEARCH=1 python scripts/eval_coverage.py --sweep both",
+    "recall@1": {"value": 0.944, "spread": 0.000, "threshold": 0.93, "direction": "невозрастание"},
+    "mrr": {"value": 0.971},
     "recall@3": {"value": 0.999, "threshold": 0.99},
     "recall@10": {"value": 1.000, "threshold": 1.00},
     "invisible_positions": {"value": 0, "threshold": 0, "blocking": true},
     "cross_section_collisions": {"value": 9, "threshold": 12, "direction": "невозрастание"},
-    "code_resolves_to_own_branch": {"value": 1.000, "threshold": 0.99, "of": 1366}
+    "code_resolves_to_own_branch": {"value": 1.000, "threshold": 0.99, "of": 1366},
+
+    "out_of_scope_band": {
+      "_command": "EXACT_SEARCH=1 python scripts/eval_guard.py",
+      "negatives": {"min": 0.734, "median": 0.811, "max": 0.852},
+      "in_scope_borderline": {"min": 0.804, "median": 0.830, "max": 0.895},
+      "note": "RELEVANCE_SOFT = 0.83 внутри плато; вывод EV2 «двигать некуда» в силе. Полоса не менялась с 24.08."
+    },
+
+    "rules_axis": {
+      "_command": "EXACT_SEARCH=1 python scripts/eval_rules.py",
+      "attribution@1": {"value": 0.96, "threshold": 0.95, "of": 25},
+      "representation": {"value": 1.00, "threshold": 1.00, "of": 25},
+      "topic_accuracy": {"value": 0.84},
+      "window_share": {"tpp_order_52": 0.70, "rules_registry": 0.61, "decree_body": 0.38,
+        "note": "K15 добавила пятый документ. Четыре п.п. отдал Приказ №52 из своего избытка (был 0.74); Правила реестра держат 9/9 представленности и прежнюю долю окна."}
+    }
   },
 
   "level2": {
     "_runs": 3,
+    "_command": "python scripts/eval_answers.py --report … ; python scripts/eval_completeness.py --report …",
     "faithfulness": {"values": [1.00, 1.00, 1.00], "threshold": 0.95,
-      "numbers_claimed": [423, 437, 431], "fabricated": 0},
-    "section_attribution": {"values": [1.00, 1.00, 1.00]},
+      "numbers_claimed": [423, 431, 442], "fabricated": 0},
+    "section_attribution": {"values": [1.00, 0.98, 1.00], "mean": 0.993, "spread": 0.009,
+      "⚠ метрике не доверять": "EV17 #109: attributed() засчитывает атрибуцию по ЛЮБОМУ слову названия раздела длиннее 5 букв — для XXV это в том числе «оборудование». Строгий путь (римская цифра) не срабатывал НИ РАЗУ за четыре прямых прогона. Число меряет словоупотребление, а не атрибуцию; 0.98 в прогоне 2 — кейс 43, путь которого заход 5 не затрагивает."},
     "inline_citations": {"values": [1.00, 1.00, 1.00], "of": 42},
     "decline_out_of_scope": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 4},
     "threshold_reached_answer": {"values": [1.00, 1.00, 1.00], "threshold": 0.90,
-      "of": [19, 19, 18],
-      "note": "знаменатель гуляет между прогонами — эталон строится из КОНТЕКСТА этого прогона. Значение 1.00 во всех трёх; расследовать надо значение, а не знаменатель."},
+      "of": [19, 18, 19]},
     "points_reached_answer": {"values": [1.00, 1.00, 1.00], "threshold": 0.90,
-      "of": [134, 134, 129]},
+      "of": [134, 129, 128]},
     "warned_incomplete": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 5},
     "named_requirements_source": {"values": [1.00, 1.00, 1.00], "threshold": 1.00, "of": 2},
     "prohibitions_2_2": {"values": [1.00, 1.00, 1.00], "threshold": 1.00,
-      "note": "все восемь запретов §2.2, 42/42 в каждом прогоне"}
+      "note": "все восемь запретов §2.2, 42/42 в каждом прогоне. ⚠ Запрет «нет термина „заключение ТПП“» был зелёным и ДО K15 — это подтверждение «ничего не сломано», а не доказательство пользы справочника."}
   },
 
   "level3": {
+    "_runs": 3,
+    "_command": "EXACT_SEARCH=1 python scripts/eval_determinism.py --runs 5 --report …",
     "decisive_numbers_stable": {"values": [1.00, 1.00, 1.00], "mean": 1.00, "spread": 0.00,
-      "threshold": 0.95, "of": 56, "was_mean": 0.98, "was_spread": 0.03,
-      "note": "EV10: доля стабильных РЕШАЮЩИХ чисел — порог позиции и баллы операций. ⚠ Три прогона по 1.00 подтверждают порог, но НЕ закрывают метрику: до перестройки EV10 полоса гуляла 0.60-0.90 на неизменном коде."},
-    "mention_completeness": {"values": [0.80, 0.80, 0.90], "threshold": null,
-      "note": "справочная: считает ЛЮБОЕ число ответа, включая проценты в прозе. Порога нет намеренно."},
-    "no_foreign_numbers": {"values": [1.00, 1.00, 1.00], "threshold": 0.95, "leaks": 0, "of": 50,
-      "pool": 210},
-    "stable_attribution": {"values": [1.00, 1.00, 1.00]}
+      "threshold": 0.95, "of": 56,
+      "note": "EV10: доля стабильных РЕШАЮЩИХ чисел — порог позиции и баллы операций."},
+    "no_foreign_numbers": {"values": [1.00, 1.00, 1.00], "threshold": 0.95, "leaks": 0, "of": 50},
+    "stable_attribution": {"values": [1.00, 1.00, 1.00], "of": 10},
+    "mention_completeness": {"values": [0.90, 1.00, 0.80], "threshold": null,
+      "note": "справочная: считает ЛЮБОЕ число ответа. Порога нет намеренно."},
+
+    "⚠⚠ перефраз и возмущения — ПЕРВАЯ база": "EV19 #111: ни eval_paraphrase, ни eval_perturbation не запускались в заходах 3 и 4 — их чисел нет ни в одном прежнем отчёте, а сводки писали «уровень 3 ✅». С этой базы их отсутствие в прогоне становится РЕГРЕССИЕЙ, а не «нет данных».",
+
+    "paraphrase": {
+      "_command": "EXACT_SEARCH=1 python scripts/eval_paraphrase.py --per-section 3 --paraphrases 3",
+      "_params": {"per_section": 3, "paraphrases": 3, "seed": 42, "limit": 10,
+        "positions": 85, "queries": 255},
+      "⚠ воспроизводимость": "Перефразы кэшируются по source_anchor в scripts/eval_paraphrases.json и переиспользуются; выборка стратифицирована фиксированным seed. Числа сравнимы ТОЛЬКО при тех же параметрах — менять их значит заводить новую базу.",
+      "verbatim": {"exact_r@1": 0.882, "section_r@1": 0.988, "section_r@3": 1.000},
+      "paraphrase_raw": {"exact_r@1": 0.522, "exact_r@3": 0.769,
+        "section_r@1": 0.839, "section_r@3": 0.949},
+      "paraphrase_reranked_production": {"exact_r@1": 0.812, "exact_r@3": 0.871,
+        "section_r@1": 0.949, "section_r@3": 0.973},
+      "semantic_holes": {"value": 7, "of": 255,
+        "note": "перефраз описывает ФУНКЦИЮ, корпус назван по УСТРОЙСТВУ. Свойство корпуса, не дефект захода; та же причина, по которой заводилась и была отвергнута K3."}
+    },
+
+    "perturbation": {
+      "_command": "EXACT_SEARCH=1 python scripts/eval_perturbation.py",
+      "_params": {"per_section": 5, "seed": 42, "limit": 10, "positions": 138},
+      "verbatim": {"exact_r@1_raw": 0.906, "exact_r@1_reranked": 0.978, "section_r@3": 1.000},
+      "typos": {"exact_r@1_raw": 0.833, "exact_r@1_reranked": 0.971, "section_r@3": 0.986},
+      "abbreviations": {"exact_r@1_raw": 0.841, "exact_r@1_reranked": 0.957, "section_r@3": 0.986},
+      "degradation_section_r3_reranked": {"typos": -0.014, "abbreviations": -0.014,
+        "threshold": 0.03,
+        "note": "порог гайда «деградация recall@1 ≤3 п.п.». На ПРОДОВОМ пути (с реранкером) выполнен с запасом. ⚠ На сыром гибриде просадка exact r@1 −7.2 и −6.5 п.п.; гайд не уточняет, какой путь мерить — уточнить в нём."}
+    }
   },
 
   "context_size": {
-    "⚠ не перемерялось в заходе 4": "Числа ниже сняты на релизе v0.5.0-test13 (2045193, заход 3) и перенесены без замера: отчёт 24.08 этот блок не содержит. Заход 4 контекст не трогал (K8 и #105 меняют payload, не сборку), но это рассуждение, а не измерение. Следующий прогон обязан замерить блок заново — иначе дельта припишет заходу 5 то, что накопилось за два.",
-    "measured_at": "2045193 / v0.5.0-test13",
-    "mean_chars": {"value": 5034, "was": 6890, "note": "K6: хвост кандидатов свёрнут в один блок"},
-    "median_chars": {"value": 3633, "was": 5583},
-    "candidate_tail_share": {"value": 0.31, "was": 0.50}
+    "_command": "EXACT_SEARCH=1 python scripts/eval_context_size.py",
+    "впервые с инструментом": "Прежние числа (5 034 / 3 633 / 0.31) попали в базу из разовой сессии K6, и пересчитать их было НЕЧЕМ. Заведён scripts/eval_context_size.py (0 ₽, без LLM). Сравнивать сегодняшние с прежними НЕЛЬЗЯ — они сняты неизвестным способом; базой становятся эти.",
+    "cases": 42,
+    "mean_chars": {"value": 4934},
+    "median_chars": {"value": 3852},
+    "min_max_chars": [2137, 18681],
+    "candidate_tail_share": {"value": 0.33, "blocks_present": "42/42"}
   },
 
   "corpus_metrics": {
-    "threshold_coverage_points_mixed_uncovered": {"value": 0.508, "of": 880, "uncovered": 447,
-      "note": "K2 #47 закрыта. Критерий приёмки перенесён на дефекты привязки: 0 (A1 #56)."},
+    "_command": "python scripts/eval_threshold_coverage.py",
+    "threshold_coverage_points_mixed_uncovered": {"value": 0.508, "of": 880, "uncovered": 447},
     "attachment_defects": {"value": 0, "threshold": 0,
       "note": "scripts/classify_missing_thresholds.py --max-defect-share 0"}
   }
