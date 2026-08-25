@@ -145,7 +145,11 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
         from app.core.prompts import build_navigator_user_prompt
         user = build_navigator_user_prompt("какие документы нужны для этикетировщиков", "КОНТЕКСТ",
                                            documents="[1] Приказ №52, п. 4.2.1 — копия устава")
-        self.assertIn("ДОКУМЕНТЫ (Приказ ТПП РФ №52", user)
+        # ⚠ Якорь — СТАБИЛЬНЫЙ префикс блока, а не полная шапка: с `K15` в блок доехал ещё и
+        # закрытый справочник, и шапка описывает уже два источника. Проверяем отдельно, что
+        # Приказ №52 в ней по-прежнему назван, — иначе тест ловил бы формулировку, а не факт.
+        self.assertIn("ДОКУМЕНТЫ (", user)
+        self.assertIn("Приказа ТПП РФ №52", user)
         self.assertIn("копия устава", user)
         self.assertIn("п. 4.2.1", user)
         # ⚠ ссылки [N] в товарном ответе означают ПОЗИЦИЮ приложения — на пункт Приказа так ссылаться
@@ -155,7 +159,10 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
     def test_no_block_when_question_is_not_about_documents(self):
         from app.core.prompts import build_navigator_user_prompt
         user = build_navigator_user_prompt("требования к чиллерам", "КОНТЕКСТ")
-        self.assertNotIn("ДОКУМЕНТЫ (Приказ", user)
+        # ⚠ Тот же префикс, что в положительной половине. С прежним якорем
+        # ("ДОКУМЕНТЫ (Приказ") эта проверка стала бы зелёной ВХОЛОСТУЮ, как только шапка
+        # сменила формулировку, — и пропустила бы блок, приехавший не на свой вопрос.
+        self.assertNotIn("ДОКУМЕНТЫ (", user)
 
     def test_answered_documents_are_not_suggested_again(self):
         """Товарный двойник петли: смешанный вопрос уже получил перечень — предлагать его снова

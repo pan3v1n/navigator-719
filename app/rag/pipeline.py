@@ -23,7 +23,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import fragments, inheritance, okpd2_ref, sparse
+from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
 from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
@@ -61,6 +61,10 @@ class Answer:
     # Числа, которых нет в контексте, но которые назвал САМ пользователь: не выдумка, в приёмочный
     # флаг не идут (см. `echoed_numbers`), но класс остаётся наблюдаемым — пишется в журнал.
     echoed_numbers: list[str] = field(default_factory=list)
+    # K15: упоминания несуществующего «заключения ТПП» в ответе. Не отдаётся на фронт (как и
+    # `echoed_numbers`) — пишется в журнал: правило промпта может не сработать, и тогда дефект
+    # обязан быть ВИДЕН, а не уехать пользователю молча.
+    phantom_documents: list[str] = field(default_factory=list)
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
@@ -997,7 +1001,12 @@ def _answer_procedural(query: str, search_query: str,
         return Answer(text=procedural.DEFLECTION, hits=[])
 
     ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
-    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic))
+    # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
+    # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
+    # закрывала памятью.
+    docs_ref = documents_ref.documents_context_block() if topic == topics.DOCUMENTS else None
+    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
+                                        documents=docs_ref)
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
         messages.extend(history)
@@ -1016,12 +1025,16 @@ def _answer_procedural(query: str, search_query: str,
     echoed = echoed_numbers(raw, ctx, asked)
     if echoed:
         logger.info("процедурный ответ повторяет числа из вопроса (не выдумка): {}", echoed)
+    phantom = documents_ref.unverified_documents(raw)
+    if phantom:
+        logger.warning("K15: ответ называет несуществующий документ: {}", phantom)
     return Answer(
         text=raw,
         hits=[],
         low_relevance=False,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
+        phantom_documents=phantom,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=ctx,
@@ -1338,10 +1351,20 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         # какой-то части перечня не хватило по рангу, в блок попали бы пункты про печати, ЭЦП и
         # сроки из Правил — под шапкой, обещающей состав документов по Приказу. Промпт при этом
         # запрещает отсылать «спросите отдельно», то есть модель синтезировала бы перечень из
-        # пунктов, где его нет. Нечего показать — блока не будет вовсе, это честнее.
+        # пунктов, где его нет. Не нашлось — пунктов в блоке не будет, это честнее.
+        # ⚠ Прежде эта фраза кончалась словами «блока не будет ВОВСЕ» — с `K15` это уже не так:
+        # без пунктов остаётся справочник (ниже). Правится вместе, иначе два соседних
+        # комментария начнут утверждать противоположное — класс дефекта из ревью захода 4.
         doc_points = [p for p in doc_points if p.get("doc_type") == "tpp_order_52"]
+        # K15: закрытый справочник идёт в контекст ВСЕГДА, когда спросили про документы, — он
+        # детерминированный и от поиска не зависит. Пункты Приказа №52 добавляются, если нашлись.
+        # ⚠ Порядок обратный прежнему решению «нечего показать — блока не будет»: то рассуждение
+        # верно для ПУНКТОВ (пустая выдача честнее выдуманной), но справочник пуст не бывает, и
+        # именно его отсутствие оставляло модель наедине с памятью — так и родилось «заключение
+        # ТПП». Дефект возникал ровно тогда, когда добор пунктов не удавался.
+        docs_ctx = documents_ref.documents_context_block()
         if doc_points:
-            docs_ctx = format_rules_context(doc_points)
+            docs_ctx += "\n\n" + format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
     # обязан знать — иначе перечень задвоится: один раз от модели, второй от нас.
     # ⚠ Таблицу печатаем ТОЛЬКО когда целевая позиция одна. При точном совпадении кода целевых
@@ -1411,6 +1434,9 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     echoed = echoed_numbers(raw, planned.grounding, asked)
     if echoed:
         logger.info("ответ повторяет числа из вопроса пользователя (не выдумка): {}", echoed)
+    phantom = documents_ref.unverified_documents(raw)
+    if phantom:
+        logger.warning("K15: ответ называет несуществующий документ: {}", phantom)
     return Answer(
         text=raw,
         hits=planned.hits,
@@ -1418,6 +1444,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
+        phantom_documents=phantom,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
@@ -1472,6 +1499,9 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     echoed = echoed_numbers(raw, planned.grounding, asked)
     if echoed:
         logger.info("ответ повторяет числа из вопроса пользователя (не выдумка): {}", echoed)
+    phantom = documents_ref.unverified_documents(raw)
+    if phantom:
+        logger.warning("K15: ответ называет несуществующий документ: {}", phantom)
     yield "done", Answer(
         text=raw,
         hits=planned.hits,
@@ -1479,6 +1509,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
+        phantom_documents=phantom,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
