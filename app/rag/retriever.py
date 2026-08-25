@@ -501,6 +501,37 @@ def rules_topic(query: str) -> str | None:
 RETIRED_STATUS = "утратил силу"
 
 
+def _rules_order(points: list) -> list:
+    """Полный порядок процедурного пула: ничьих не оставляет (`M2` #115).
+
+    ⚠⚠ ЗАЧЕМ. Товарный путь давно сортируется `_order_key` — это `M1`, куплено диагностикой
+    16.08.2026: RRF выдаёт РАЗНЫМ записям буквально одинаковый score, и на границе окна две
+    такие записи конкурируют за место. Кто попадёт — решал порядок ответа Qdrant, то есть
+    случай. Процедурный путь такой сортировки НЕ ИМЕЛ.
+
+    Замер 25.08.2026: два прогона `eval_rules.py` ПОДРЯД, на НЕИЗМЕННОМ коде, с `EXACT_SEARCH=1`
+    и без LLM дали долю окна Приказа №52 **0.72 и 0.70** (кейс 23 плавал 4/6 -> 3/6). Метрики с
+    порогом при этом стабильны, но последствия те же, что описала `M1`: эксперту один и тот же
+    процедурный вопрос даёт РАЗНЫЙ контекст, а замер даёт фантомные дельты.
+
+    ⚠ ЧТО ЭТА СОРТИРОВКА НЕ ДЕЛАЕТ: она не меняет РАНЖИРОВАНИЕ. Пул приходит от Qdrant уже
+    упорядоченным по слитому score, и первый ключ (`-score`) этот порядок сохраняет —
+    переставляются только записи с РАВНЫМ score. Это важно: `K9` показал, что ответ строится
+    вокруг первого источника, и перестановка вслепую стоила 8 пунктов атрибуции@1 (0.96 -> 0.88).
+
+    ⚠ Ключ обязан быть ПОЛНЫМ. `id` в хвосте — гарантия, что двух одинаковых ключей не бывает:
+    без него ничья просто переехала бы на уровень ниже и осталась бы нерешённой.
+    """
+    def key(p):
+        pl = p.payload or {}
+        return (-(p.score or 0.0),
+                str(pl.get("doc_type") or ""),
+                str(pl.get("point") or ""),
+                str(pl.get("source_anchor") or ""),
+                str(p.id))
+
+    return sorted(points, key=key)
+
 def _doc_filter(only_docs: tuple[str, ...]) -> list:
     """Условие «только эти документы» для Qdrant, либо пусто (EV18 #110).
 
@@ -576,9 +607,12 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
         client = _client()
         if not client.collection_exists(name):
             return []
-        # пул шире окна: из него квота набирает представителей каждого документа
-        points = _hybrid(query, max(limit * 4, 24), collection=name, qvec=qvec,
-                         qfilter=alive_only(*_doc_filter(only_docs)))
+        # пул шире окна: из него квота набирает представителей каждого документа.
+        # ⚠ M2 #115: сразу приводим к ПОЛНОМУ порядку — ниже по индексам этого списка идёт всё:
+        # `by_doc`, `idxs[:quota]`, добор остатка и финальная сортировка. Ничья, не разрешённая
+        # здесь, разъезжается по всем четырём шагам.
+        points = _rules_order(_hybrid(query, max(limit * 4, 24), collection=name, qvec=qvec,
+                                      qfilter=alive_only(*_doc_filter(only_docs))))
     except Exception as e:  # noqa: BLE001 — Qdrant недоступен: не валим ответ, деферим
         logger.warning("корпус Правил недоступен, процедурный ответ деферится: {}: {}",
                        type(e).__name__, e)
@@ -620,9 +654,11 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     for doc in [d for d in (primary, *sorted(extra_primary)) if d and d not in by_doc]:
         try:
             from qdrant_client import models
-            extra = _hybrid(query, RULES_QUOTA_PRIMARY, collection=name, qvec=qvec,
-                            qfilter=alive_only(models.FieldCondition(
-                                key="doc_type", match=models.MatchValue(value=doc))))
+            # M2: добор тоже приводим к полному порядку — его записи ложатся в `by_doc` и
+            # отбираются тем же `idxs[:quota]`.
+            extra = _rules_order(_hybrid(query, RULES_QUOTA_PRIMARY, collection=name, qvec=qvec,
+                                         qfilter=alive_only(models.FieldCondition(
+                                             key="doc_type", match=models.MatchValue(value=doc)))))
             for p in extra:
                 by_doc.setdefault(doc, []).append(len(points))
                 points.append(p)
@@ -638,13 +674,15 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     if asks_document_list(query) and (not only_docs or "tpp_order_52" in only_docs):
         try:
             from qdrant_client import models
-            extra = _hybrid(query, 12, collection=name, qvec=qvec,
-                            qfilter=alive_only(
-                                models.FieldCondition(key="doc_type",
-                                                      match=models.MatchValue(value="tpp_order_52")),
-                                models.FieldCondition(key="section_roman",
-                                                      match=models.MatchValue(value=RULES_DOC_LIST_SECTION)),
-                            ))
+            # M2: и здесь тоже — из этого списка берётся по одному пункту на группу перечня,
+            # и какой именно, при равном ранге решала бы очерёдность ответа Qdrant.
+            extra = _rules_order(_hybrid(query, 12, collection=name, qvec=qvec,
+                                         qfilter=alive_only(
+                                             models.FieldCondition(key="doc_type",
+                                                                   match=models.MatchValue(value="tpp_order_52")),
+                                             models.FieldCondition(key="section_roman",
+                                                                   match=models.MatchValue(value=RULES_DOC_LIST_SECTION)),
+                                         )))
             # Пункт может уже лежать в широком пуле — тогда берём ЕГО индекс, а не пропускаем:
             # «в пуле» не значит «в окне», квота отбирает только первые по рангу, и п. 4.1
             # (3844 знака, второй в разделе) в окно так и не попадал.
