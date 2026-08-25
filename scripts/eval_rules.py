@@ -20,8 +20,8 @@
 напрямую, без DeepSeek.
 
 ЗАПУСК (нужен поднятый Qdrant с коллекцией pp719_rules):
-    PYTHONUTF8=1 .venv/Scripts/python.exe scripts/eval_rules.py
-    PYTHONUTF8=1 .venv/Scripts/python.exe scripts/eval_rules.py --report docs/eval_rules_report.md
+    .venv/Scripts/python.exe scripts/eval_rules.py
+    .venv/Scripts/python.exe scripts/eval_rules.py --report docs/eval_rules_report.md
 """
 
 from __future__ import annotations
