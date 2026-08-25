@@ -7,7 +7,10 @@ import glob
 import json
 import re
 
+from app.core.console import enable_utf8
 from app.rag.thresholds import lookup_threshold, note_scope
+
+enable_utf8()  # #107: проверка печатает значки вне cp1251
 
 bad = []
 for f in glob.glob("knowledge_base/pp719/structured/*.json"):

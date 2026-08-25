@@ -5,8 +5,11 @@
 ⚠ Звать надо тем же путём, что рантайм: буст по коду включается только при переданном `okpd2`,
 который пайплайн получает из `extract_okpd2`. Без него top-1 — мусор по совпадению хвоста «131».
 """
+from app.core.console import enable_utf8
 from app.rag.retriever import search
 from app.tools.navigator import extract_okpd2
+
+enable_utf8()  # #107: проверка печатает значки вне cp1251
 
 q = "14.12.30.131"  # кода в корпусе НЕТ, добираем группу 14.12
 hits = search(q, okpd2=extract_okpd2(q), limit=5)

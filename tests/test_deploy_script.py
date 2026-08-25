@@ -145,6 +145,19 @@ class TestCommonChecksAccumulate(unittest.TestCase):
         files = sorted(COMMON_CHECKS.glob("*.py"))
         self.assertTrue(files, "в checks/common нет ни одной проверки — выкатка пойдёт вслепую")
 
+    def test_every_check_survives_a_windows_console(self):
+        """⚠ Проверки выкатки печатают «→» и «✅» — на cp1251 они падали бы в момент печати.
+
+        В контейнере это не видно (там UTF-8), и потому дефект жил незаметно. Обнаружен
+        25.08.2026 предпродажным прогоном проверок с машины разработчика: две из шести падали
+        UnicodeEncodeError'ом на ВЕРНОМ корпусе. Предохранитель, который нельзя запустить там,
+        где готовят релиз, проверяет только один из двух контуров.
+
+        Тест закрывает класс: новая проверка обязана звать `enable_utf8()`."""
+        root = COMMON_CHECKS.parent
+        missing = [str(f.relative_to(root)) for f in sorted(root.rglob("*.py"))
+                   if "enable_utf8()" not in f.read_text(encoding="utf-8")]
+        self.assertFalse(missing, f"проверки без enable_utf8(): {missing}")
     def test_every_check_compiles(self):
         for f in sorted(COMMON_CHECKS.glob("*.py")):
             with self.subTest(check=f.name):

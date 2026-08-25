@@ -13,8 +13,11 @@
 `metodrek_tpp_full.txt` содержит отменённый текст и обязан его содержать — вырезание происходит
 на индексации. Значит, вопрос только рантаймовый: что лежит В КОЛЛЕКЦИИ.
 """
+from app.core.console import enable_utf8
 from app.core.config import settings
 from app.rag.retriever import _client
+
+enable_utf8()  # #107: проверка печатает «→» — на консоли Windows падала бы
 
 name = settings.QDRANT_RULES_COLLECTION
 client = _client()
