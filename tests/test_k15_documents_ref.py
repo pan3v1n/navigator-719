@@ -67,16 +67,39 @@ class TestClosedList(unittest.TestCase):
         for d in documents_ref.CONFIRMING_DOCUMENTS:
             self.assertIn(d["name"], block)
 
-    def test_context_block_explains_instead_of_only_forbidding(self):
-        """Пользователь спрашивает про несуществующий документ своими словами — ответ обязан
+    def test_explanation_comes_only_when_the_user_raised_it(self):
+        """⚠⚠ Разъяснение отвечает на НЕЗАДАННЫЙ вопрос — и потому условное.
 
-        объяснить, а не промолчать. Поэтому блок несёт РАЗЪЯСНЕНИЕ: чего нет, что есть вместо,
-        и чем отличается законное «экспертное заключение»."""
-        block = documents_ref.documents_context_block()
-        self.assertIn("не существует", block)
-        self.assertIn("экспертное заключение", block)
-        self.assertIn("ИСКЛЮЧЕНИЯ реестровой записи", block)
+        Первая редакция клала его в контекст всегда. Живой прогон на бою 25.08.2026: на вопрос
+        «какие документы подготовить» ответ содержал строку «Документа «заключение ТПП» не
+        существует» — пользователю, который про этот документ не спрашивал. Правка, задуманная
+        чтобы термин ИСЧЕЗ из ответов, начала его туда ПРИНОСИТЬ (`EV12`: слово, живущее в
+        контексте, модель воспроизводит).
+        """
+        plain = documents_ref.documents_context_block(
+            "какие документы нужно подготовить для подтверждения производства")
+        self.assertNotIn("не существует", plain,
+                         "разъяснение приехало на вопрос, где про заключение не спрашивали")
+        self.assertIn("ЗАКРЫТЫЙ", plain, "закрытый перечень обязан быть ВСЕГДА")
+        for d in documents_ref.CONFIRMING_DOCUMENTS:
+            self.assertIn(d["name"], plain)
 
+    def test_explanation_arrives_when_asked(self):
+        """Обратная половина: спросили — объясняем. Без неё правка «починила» бы дефект,
+        просто выбросив разъяснение совсем."""
+        for q in ("нужно ли мне заключение ТПП для внесения в реестр",
+                  "что такое экспертное заключение ТПП"):
+            block = documents_ref.documents_context_block(q)
+            self.assertIn("не существует", block, q)
+            self.assertIn("экспертное заключение", block, q)
+            self.assertIn("ИСКЛЮЧЕНИЯ реестровой записи", block, q)
+
+    def test_explanation_is_a_third_of_the_block(self):
+        """Цена условности — измеренная, а не предполагаемая."""
+        plain = len(documents_ref.documents_context_block("какие документы нужны"))
+        full = len(documents_ref.documents_context_block("нужно ли заключение ТПП"))
+        self.assertLess(plain, full)
+        self.assertGreater(full - plain, 300, "разъяснение весит меньше, чем указано в решении")
     def test_table_is_markdown_and_lists_everything(self):
         t = documents_ref.documents_table()
         self.assertIn("|---|---|---|", t)
@@ -120,6 +143,63 @@ class TestGuard(unittest.TestCase):
             "потребуется заключение ТПП о подтверждении производства"))
         self.assertFalse(documents_ref.unverified_documents(
             "ТПП РФ формирует экспертное заключение"))
+
+
+# Дословные фрагменты ОТВЕТОВ С БОЯ, снятые 25.08.2026 сразу после выкатки v0.5.0-test15.
+# Оракул взят ИЗВНЕ — это реальное поведение сервиса, а не сочинённый пример.
+REAL_DENIALS_FROM_PRODUCTION = (
+    "Перечень подтверждающих документов закрытый: производство подтверждается актом экспертизы "
+    "ТПП (для продукции из приложения) или сертификатом СТ-1 (для продукции вне приложения). "
+    "Документа «заключение ТПП» не существует.",
+    "Перечень подтверждающих документов закрытый: производство подтверждает именно акт экспертизы "
+    "ТПП (для продукции из приложения) или сертификат СТ-1 (для продукции вне приложения). "
+    "Документа «заключение ТПП» не существует.",
+)
+
+
+class TestGuardSparesTheDenial(unittest.TestCase):
+    """⚠⚠ ОТРИЦАНИЕ — ЭТО ЦЕЛЬ `K15`, А НЕ ЕЁ НАРУШЕНИЕ.
+
+    Найдено живым прогоном на бою 25.08.2026, сразу после выкатки: гард сработал на ЛУЧШЕМ из
+    возможных ответов — том, где перечень назван закрытым и прямо сказано, что «заключения ТПП»
+    не существует. Справочник кладёт разъяснение в контекст, модель им пользуется — а гард за это
+    наказывал и писал WARNING в админ-журнал, где эксперт видел «ответ называет несуществующий
+    документ» на самых правильных ответах.
+
+    ⚠ Почему не поймалось до выкатки: локально термин не появился НИ РАЗУ за четыре прогона
+    (и кейсы были выключены), на бою — 2 раза из 5. Разброс генерации ловится повтором, а не
+    одним прогоном.
+    """
+
+    def test_denial_is_not_a_defect(self):
+        for text in REAL_DENIALS_FROM_PRODUCTION:
+            self.assertEqual(documents_ref.unverified_documents(text), [],
+                             f"гард ударил по ВЕРНОМУ ответу: {text[-80:]!r}")
+
+    def test_negative_control_recommendation_still_caught(self):
+        """Обратная половина: без отрицания рядом — по-прежнему дефект.
+
+        Без неё правка «починила» бы гард, сделав его слепым: пропускать всё — тоже способ не
+        давать ложных срабатываний."""
+        for text in REAL_HALLUCINATIONS:
+            self.assertTrue(documents_ref.unverified_documents(text),
+                            f"гард ослеп на реальной выдумке: {text!r}")
+
+    def test_denial_window_is_bounded(self):
+        """Отрицание засчитывается только РЯДОМ, а не где-то в ответе.
+
+        Иначе одно «не существует» в начале длинного ответа оправдывало бы рекомендацию
+        несуществующего документа в конце."""
+        far = ("Документа такого не существует. " + "текст " * 120
+               + "Поэтому потребуется заключение ТПП о подтверждении производства.")
+        self.assertTrue(documents_ref.unverified_documents(far),
+                        "отрицание за 700 символов не должно оправдывать рекомендацию")
+
+    def test_denial_forms_cover_real_wordings(self):
+        for phrase in ("не существует", "нет такого документа", "не используй",
+                       "отсутствует", "не применяется"):
+            self.assertTrue(documents_ref._DENIAL.search(phrase), phrase)
+        self.assertFalse(documents_ref._DENIAL.search("обычный текст ответа"))
 
 
 class TestReachesTheModel(unittest.TestCase):

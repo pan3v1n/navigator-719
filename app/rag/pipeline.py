@@ -1004,7 +1004,8 @@ def _answer_procedural(query: str, search_query: str,
     # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
     # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
     # закрывала памятью.
-    docs_ref = documents_ref.documents_context_block() if topic == topics.DOCUMENTS else None
+    docs_ref = (documents_ref.documents_context_block(search_query)
+                if topic == topics.DOCUMENTS else None)
     user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
                                         documents=docs_ref)
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
@@ -1350,8 +1351,11 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         # не было; `K15` добавила второй, и замер 25.08 показал цену: на 2 смешанных
         # вопросах из 3 блок худел с 3 пунктов Приказа до 2. Решение «этот блок — только
         # Приказ №52» обязано жить в ОДНОМ месте, а не спорить само с собой.
+        # EV18 #110: ЖЁСТКИЙ фильтр, а не предпочтение квоты. `primary_docs` лишь резервировал
+        # места, и пункты чужих документов проходили общим рангом — а фильтр двумя строками ниже
+        # их выбрасывал: место потрачено, содержимое выброшено. Окно здесь всего три пункта.
         doc_points = search_rules(search_query, limit=RULES_DOC_POINTS, qvec=qvec,
-                                  primary_docs=("tpp_order_52",))
+                                  only_docs=("tpp_order_52",))
         # ⚠ Оставляем ТОЛЬКО пункты Приказа №52: `primary_docs` — это предпочтение квоты, а не
         # фильтр, и если добор раздела 4 не удался (он обёрнут в except и лишь логируется) или
         # какой-то части перечня не хватило по рангу, в блок попали бы пункты про печати, ЭЦП и
@@ -1368,7 +1372,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         # верно для ПУНКТОВ (пустая выдача честнее выдуманной), но справочник пуст не бывает, и
         # именно его отсутствие оставляло модель наедине с памятью — так и родилось «заключение
         # ТПП». Дефект возникал ровно тогда, когда добор пунктов не удавался.
-        docs_ctx = documents_ref.documents_context_block()
+        docs_ctx = documents_ref.documents_context_block(search_query)
         if doc_points:
             docs_ctx += "\n\n" + format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом

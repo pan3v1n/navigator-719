@@ -400,3 +400,133 @@ class TestCiGate(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestExitCodeOfCommandNotPipeline(unittest.TestCase):
+    """`O6` #114: четыре предохранителя выкатки были недостижимым кодом.
+
+    ⚠⚠ `set -o pipefail` в скрипте нет, поэтому статус конвейера — это статус ПОСЛЕДНЕЙ команды.
+    Шаги, отправлявшие вывод в `tail`, проверялись по коду `tail`, а он всегда 0:
+    бэкап боевой БД (предохранитель B из шапки, тот самый, что уже чинили 18.08 от ДРУГОГО
+    дефекта), обе ветки сборки образа и обе переиндексации.
+    """
+
+    def test_run_step_wrapper_exists(self):
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn("run_step() {", code, "обёртка исчезла — коды возврата снова съест конвейер")
+        self.assertIn('return $rc', code, "обёртка обязана возвращать код КОМАНДЫ")
+
+    def test_all_four_safeguards_use_it(self):
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        for step in ("backup_db.py", "compose build app", "build -f /tmp/Dockerfile.thin",
+                     'load_rules_kb.py --doc "$doc"'):
+            i = code.index(step)
+            head = code[max(0, i - 260):i]
+            self.assertIn("run_step", head, f"шаг {step!r} снова проверяется по коду конвейера")
+
+    def test_no_pipeline_swallows_a_checked_exit_code(self):
+        """⚠ Закрываем КЛАСС, а не четыре места: форма `cmd | tail` рядом с проверкой запрещена.
+
+        Дефект внесён дважды — заходом 4 и заходом 5, причём второй копировал форму первого."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        for line_no, line in enumerate(code.splitlines(), 1):
+            if "| tail" not in line and "| head" not in line:
+                continue
+            checked = line.lstrip().startswith("if ") or "||" in line or line.rstrip().endswith("\\")
+            self.assertFalse(checked,
+                             f"строка {line_no}: код возврата конвейера проверяется — {line.strip()!r}")
+
+    def test_full_reindex_failure_says_the_service_is_broken(self):
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertRegex(code, r"ПОЛНАЯ переиндексация НЕ УДАЛАСЬ[^\n]*СЕРВИС СЛОМАН")
+
+
+class TestDryRunChecksTheCodeThatWillShip(unittest.TestCase):
+    """`O5` #113: сухой прогон на VM сверял маркеры со СТАРОЙ рабочей копией.
+
+    То есть с кодом, который выкатка как раз ЗАМЕНЯЕТ, — и верный профиль получал «13 маркеров не
+    совпало, чинить ЗДЕСЬ». Воспроизведено 25.08.2026 на живой выкатке `v0.5.0-test15`.
+    """
+
+    def test_marker_roots_exist(self):
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn("MARKER_ROOTS", code)
+        self.assertIn('for root in ${MARKER_ROOTS}', code,
+                      "check_marker обязан искать файл по списку корней")
+
+    def test_dry_run_unpacks_the_package_when_it_is_there(self):
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn('tar -xzf "$PKG/navigator-719-$TAG.tar.gz" -C "$DRY_TMP"', code)
+        self.assertIn('MARKER_ROOTS="$DRY_TMP $APP"', code,
+                      "пакет обязан идти ПЕРВЫМ, рабочая копия — вторым (файл не менялся)")
+
+    def test_working_copy_is_not_a_lone_candidate_any_more(self):
+        """⚠ Отрицательный контроль: `$APP` в одиночку — заведомо неверный источник.
+
+        Он и есть код, который заменяют; сверка с ним всегда обвиняет верный профиль."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        i = code.index("for cand in")
+        line = code[i:code.index("\n", i)]
+        self.assertNotIn('"$APP"', line, "рабочая копия снова одна из кандидатов SRC")
+
+    def test_temp_dir_is_cleaned_on_every_exit(self):
+        """Распакованный пакет не должен оставаться на диске VM после сухого прогона."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(code.count('rm -rf "$DRY_TMP"'), 3,
+                                "уборка есть не на всех выходах сухого прогона")
+
+    def test_script_no_longer_contradicts_itself_about_where_it_runs(self):
+        """⚠ Корень дефекта: usage учил «запуск на VM», комментарий — «идёт на машине разработчика».
+
+        Два места скрипта утверждали противоположное, а резолвинг был написан под одно из
+        прочтений. Тот же класс, что «утратил силу в трёх местах без связи» из ревью захода 4."""
+        text = DEPLOY_SH.read_text(encoding="utf-8")
+        self.assertNotIn("идёт на машине разработчика, где", text,
+                         "противоречие вернулось в комментарий")
+
+
+class TestRunCompositionGate(unittest.TestCase):
+    """`EV19` #111: уровень 3 исполнялся частично ДВА релиза подряд, а сводки писали «✅»."""
+
+    MANDATORY = ("recall@1", "attribution@1", "faithfulness", "decisive_numbers_stable",
+                 "paraphrase", "perturbation", "context_size")
+
+    def test_gate_lives_in_the_dry_run(self):
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertIn("В БАЗЕ СРАВНЕНИЯ НЕТ МЕТРИК", code)
+        for metric in self.MANDATORY:
+            self.assertIn(metric, code, f"метрика {metric} не проверяется гейтом")
+
+    def test_gate_warns_and_does_not_stop(self):
+        """⚠ Осознанно предупреждение, а не остановка: замер — решение владельца.
+
+        Бывает выкатка без полного прогона (рантаймовая правка, откат). Но оператор обязан
+        УВИДЕТЬ, чего нет, а не узнать через два релиза."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        i = code.index("В БАЗЕ СРАВНЕНИЯ НЕТ МЕТРИК")
+        tail = code[i:i + 400]
+        self.assertNotIn("exit 2", tail, "гейт состава замера не должен останавливать выкатку")
+
+    def test_baseline_actually_carries_every_mandatory_metric(self):
+        """⚠⚠ ГЛАВНАЯ половина: гейт в скрипте увидит пропажу только на выкатке, а этот тест —
+
+        сразу, в CI. Обновление базы, недосчитавшее метрику, покраснеет здесь."""
+        import json
+        base = DEPLOY_DIR.parent.parent / "docs" / "eval_baseline" / "baseline.json"
+        self.assertTrue(base.exists(), "базы сравнения нет — EV14 #98")
+        raw = base.read_text(encoding="utf-8")
+        json.loads(raw)  # синтаксис
+        missing = [m for m in self.MANDATORY if f'"{m}"' not in raw]
+        self.assertFalse(missing, f"в базе сравнения нет метрик: {missing}")
+
+    def test_every_metric_in_the_baseline_has_a_command(self):
+        """Правило 6 `eval_baseline/README`: число без команды — цитата, а не критерий.
+
+        Куплено тем, что `context_size` пролежал в базе с 21.08 с пометкой «перемерить», а
+        перемерить его было НЕЧЕМ — скрипта не существовало."""
+        import json
+        base = DEPLOY_DIR.parent.parent / "docs" / "eval_baseline" / "baseline.json"
+        d = json.loads(base.read_text(encoding="utf-8"))
+        for level in ("level1", "level2", "level3", "context_size", "corpus_metrics"):
+            self.assertIn("_command", d[level], f"{level}: нет команды, которой считается")
+
