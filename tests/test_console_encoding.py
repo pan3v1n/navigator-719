@@ -43,14 +43,12 @@ KNOWN_UNGUARDED = {
     "backfill_block_thresholds.py", "backfill_okpd2_prefixes.py", "backup_db.py",
     "build_classifiers.py", "build_gs_natural.py", "calibrate_cases.py",
     "classify_missing_thresholds.py", "diag_orphan_requirements.py", "diff_edition.py",
-    "drop_excluded_positions.py", "eval_answers.py", "eval_cases_influence.py",
-    "eval_completeness.py", "eval_coverage.py", "eval_determinism.py", "eval_env.py",
-    "eval_experiments.py", "eval_faithfulness_stress.py", "eval_guard.py",
-    "eval_paraphrase.py", "eval_perturbation.py", "eval_retrieval.py", "eval_rules.py",
-    "eval_text_faithfulness.py", "eval_threshold_coverage.py", "eval_topics.py",
-    "eval_truncation.py", "md2docx.py", "parse_rtf.py", "rechunk_appendix.py",
-    "reconcile_kb.py", "run_test_cases.py", "seed_users.py",
-    "structure_kb.py", "sync_payloads.py", "watch_edition.py",
+    "drop_excluded_positions.py", "eval_cases_influence.py", "eval_env.py",
+    "eval_experiments.py", "eval_faithfulness_stress.py", "eval_text_faithfulness.py",
+    "eval_topics.py", "md2docx.py", "parse_rtf.py",
+    "rechunk_appendix.py", "reconcile_kb.py", "run_test_cases.py",
+    "seed_users.py", "structure_kb.py", "sync_payloads.py",
+    "watch_edition.py",
 }
 
 

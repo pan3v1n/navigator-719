@@ -36,6 +36,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+enable_utf8()  # #107: скрипт печатает значки вне cp1251 — падал бы в момент печати
 from app.rag import retriever, topics  # noqa: E402
 
 GOLDEN = ROOT / "scripts" / "eval_golden_rules.json"
