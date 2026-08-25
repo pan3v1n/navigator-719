@@ -72,16 +72,45 @@ def expected_section_title(hits, expected_roman: str) -> str | None:
 
 
 def attributed(text: str, expected_roman: str, hits) -> bool:
-    """Упомянут ли ожидаемый раздел: по римской цифре ИЛИ по значимому слову его названия."""
+    """АТРИБУЦИЯ СТРОГО: раздел НАЗВАН — римской цифрой или полным названием.
+
+    ⚠⚠ ПОЧЕМУ СТРОГО (`EV17` #109). Прежняя редакция засчитывала атрибуцию, если в ответе есть
+    ЛЮБОЕ слово названия раздела длиннее 5 букв. Для XXV «Музыкальные инструменты и звуковое
+    оборудование» это в том числе «оборудование» — слово из каждого второго товарного ответа.
+
+    Замер 25.08.2026 поймал это на прогоне уровня 2: 41/42 = 0.98 в одном прогоне из трёх при
+    1.00 в двух других. Разбор кейса 43 «микрофоны и громкоговорители» показал, что римская
+    цифра не печатается НИ РАЗУ за четыре прямых прогона, то есть строгий путь не срабатывал
+    никогда — число всё это время держалось на совпадении случайного слова и дрожало вместе с
+    формулировкой. Метрика меряла словоупотребление, а не атрибуцию.
+
+    Тот же класс, что `named_requirements_source` (найден 19.08, исправлен 21.08): величина,
+    зависящая от выбора модели между двумя правильными формами ответа, — не метрика.
+
+    Лексика раздела осталась ОТДЕЛЬНОЙ величиной — `topically_coherent`, наблюдаемой, без порога.
+    """
     if re.search(rf"\bраздел[а-я]*\s+{expected_roman}\b", text, re.IGNORECASE):
         return True
     title = expected_section_title(hits, expected_roman)
-    if title:
-        # значимые слова названия раздела (длиннее 5 букв) — хоть одно в ответе
-        for w in re.findall(r"[А-Яа-яЁёA-Za-z]{6,}", title):
-            if w.lower() in text.lower():
-                return True
-    return False
+    # Полное название раздела — тоже атрибуция: «Музыкальные инструменты и звуковое
+    # оборудование» названо целиком, спутать его не с чем.
+    return bool(title) and title.strip().lower() in text.lower()
+
+
+def topically_coherent(text: str, expected_roman: str, hits) -> bool:
+    """Есть ли в ответе ЛЕКСИКА ожидаемого раздела. Наблюдаемая величина, ПОРОГА НЕТ.
+
+    Ровно то, что раньше считалось атрибуцией. Само по себе полезно (ответ хотя бы про ту
+    предметную область), но атрибуцией не является: слово «оборудование» в ответе не значит,
+    что читатель узнал, к какому разделу приложения относится его продукция.
+
+    ⚠ Порог не назначается намеренно: пока не замерено, КАК ЧАСТО ответ вообще называет раздел,
+    неизвестно, чего от него требовать. Это и есть открытый вопрос `EV17`.
+    """
+    title = expected_section_title(hits, expected_roman)
+    if not title:
+        return False
+    return any(w.lower() in text.lower() for w in re.findall(r"[А-Яа-яЁёA-Za-z]{6,}", title))
 
 
 def evaluate(limit: int, cases_limit: int):
@@ -114,6 +143,8 @@ def evaluate(limit: int, cases_limit: int):
             "faithful": not hallucinated,
             "guard_flagged": bool(ans.unverified_numbers),  # пометил ли рантайм-guard
             "attributed": attributed(text, c["expected_section"], ans.hits) if c["in_scope"] else None,
+            "coherent": (topically_coherent(text, c["expected_section"], ans.hits)
+                         if c["in_scope"] else None),
             "declined": bool(DECLINE_RE.search(text)),
             "cited": bool(CITE_RE.search(text)),  # есть ли инлайн-ссылка [N] на позицию
             "cjk": bool(CJK_RE.search(text)),
@@ -140,6 +171,7 @@ def summarize(rows, limit: int) -> list[str]:
     if ins:
         f_ok, f_n = _rate(ins, lambda r: r["faithful"])
         a_ok, a_n = _rate(ins, lambda r: r["attributed"])
+        co_ok, co_n = _rate(ins, lambda r: r["coherent"])
         cit_ok, cit_n = _rate(ins, lambda r: r["cited"])
         c_ok, c_n = _rate(ins, lambda r: not r["cjk"])
         total_claims = sum(r["n_claims"] for r in ins)
@@ -152,7 +184,10 @@ def summarize(rows, limit: int) -> list[str]:
         if halluc_rows:
             L.append(f"      из них помечено рантайм-guard'ом эксперту: {g_ok}/{len(halluc_rows)} ответов "
                      f"(P0-постпроверка — незаземлённое число не уходит к эксперту незамеченным)")
-        L.append(f"  Атрибуция раздела                   = {a_ok}/{a_n} = {a_ok / a_n:.2f}")
+        L.append(f"  АТРИБУЦИЯ раздела (раздел НАЗВАН)   = {a_ok}/{a_n} = {a_ok / a_n:.2f}")
+        L.append(f"      строго: римская цифра раздела либо его полное название")
+        L.append(f"  _справочно_ лексика раздела в ответе = {co_ok}/{co_n} = {co_ok / co_n:.2f}"
+                 f"   [порога нет — EV17 #109]")
         L.append(f"  Инлайн-цитаты [N] на позицию        = {cit_ok}/{cit_n} = {cit_ok / cit_n:.2f}")
         L.append(f"  Без CJK-иероглифов                  = {c_ok}/{c_n} = {c_ok / c_n:.2f}")
         L.append("")
