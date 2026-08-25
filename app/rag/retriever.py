@@ -501,6 +501,19 @@ def rules_topic(query: str) -> str | None:
 RETIRED_STATUS = "утратил силу"
 
 
+def _doc_filter(only_docs: tuple[str, ...]) -> list:
+    """Условие «только эти документы» для Qdrant, либо пусто (EV18 #110).
+
+    Вынесено отдельно, потому что нужно в трёх местах: основной запрос и оба добора. Одно
+    решение — одно место; три копии условия разошлись бы при первой же правке.
+    """
+    if not only_docs:
+        return []
+    from qdrant_client import models
+
+    return [models.FieldCondition(key="doc_type",
+                                  match=models.MatchAny(any=list(only_docs)))]
+
 def alive_only(*must):
     """Фильтр Qdrant «документ действует» (`K8`, issue #39) плюс переданные условия.
 
@@ -523,7 +536,8 @@ def alive_only(*must):
 
 
 def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
-                 primary_docs: tuple[str, ...] = ()) -> list[dict]:
+                 primary_docs: tuple[str, ...] = (),
+                 only_docs: tuple[str, ...] = ()) -> list[dict]:
     """Гибрид-поиск по корпусу «Правила ведения реестра» (отдельная коллекция pp719_rules).
 
     Возвращает payload'ы пунктов со score в `_score` и темой запроса в `_topic`. Если коллекции
@@ -543,6 +557,17 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     добираем по общему рангу. Итог сортируется обратно по рангу, чтобы сильнейший пункт остался
     первым — квота меняет СОСТАВ окна, а не порядок внутри него.
 
+    ⚠⚠ `only_docs` — ЖЁСТКИЙ ФИЛЬТР, в отличие от `primary_docs` (`EV18` #110). Разницу стоит
+    держать в голове: `primary_docs` лишь резервирует места в окне, а пункты ЧУЖИХ документов
+    проходят общим рангом и место занимают. Пока у темы был один документ, это ничего не
+    стоило; `K15` завела второй — и блок состава документов, который двумя строками ниже
+    ФИЛЬТРУЕТ выдачу до Приказа №52, стал худеть с 3 пунктов до 2 на двух смешанных вопросах
+    из трёх: место потрачено, содержимое выброшено. Замер 25.08.2026.
+
+    `only_docs` кладёт условие в САМ ЗАПРОС, поэтому все места окна достаются тем пунктам,
+    которые переживут фильтр. Доборы (тематический документ и раздел 4) при этом тоже
+    ограничиваются — иначе они вернули бы то, что запрос только что исключил.
+
     Отказоустойчивость (R4): САМ ЗАПРОС тоже под try — иначе падение Qdrant в момент поиска
     улетало исключением наверх и превращалось в 503, а честный процедурный дефер (ради которого
     эта ветка и возвращает пустой список) был недостижим."""
@@ -553,7 +578,7 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
             return []
         # пул шире окна: из него квота набирает представителей каждого документа
         points = _hybrid(query, max(limit * 4, 24), collection=name, qvec=qvec,
-                         qfilter=alive_only())
+                         qfilter=alive_only(*_doc_filter(only_docs)))
     except Exception as e:  # noqa: BLE001 — Qdrant недоступен: не валим ответ, деферим
         logger.warning("корпус Правил недоступен, процедурный ответ деферится: {}: {}",
                        type(e).__name__, e)
@@ -572,6 +597,12 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     # строится вокруг ПЕРВОГО источника, и переставлять его вслепую нельзя.
     primary = rules_topic(query)
     extra_primary = {d for d in primary_docs if d != primary}
+    # ⚠ EV18: при жёстком фильтре доборы обязаны его уважать — иначе вернут то, что основной
+    # запрос только что исключил, и фильтр перестанет быть фильтром.
+    if only_docs:
+        if primary and primary not in only_docs:
+            primary = None
+        extra_primary = {d for d in extra_primary if d in only_docs}
     by_doc: dict[str, list[int]] = {}
     for i, p in enumerate(points):
         by_doc.setdefault((p.payload or {}).get("doc_type") or "—", []).append(i)
@@ -602,7 +633,9 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     # фильтром — ровно так же, как выше добирается тематический документ. Без этого перечень в
     # окно не попадал: его пункты длинные и проигрывают по рангу коротким пунктам про сроки и печати.
     doc_list_idxs: list[int] = []
-    if asks_document_list(query):
+    # ⚠ EV18: добор раздела 4 жёстко привязан к Приказу №52 — если фильтр его исключил,
+    # добирать нечего и незачем.
+    if asks_document_list(query) and (not only_docs or "tpp_order_52" in only_docs):
         try:
             from qdrant_client import models
             extra = _hybrid(query, 12, collection=name, qvec=qvec,
