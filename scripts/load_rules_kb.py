@@ -107,7 +107,7 @@ def _normalize(text: str) -> str:
     return re.sub(r"[ \t]{2,}", " ", text)
 
 
-def parse_rules_file(path: Path) -> list[dict]:
+def parse_rules_file(path: Path, doc: dict | None = None) -> list[dict]:
     """Разбирает один файл Правил в записи-пункты. Первая строка `# <ROMAN>. <title>` даёт
     section_roman/section_title; тело режется на пункты по _POINT_RE (подпункты «а)/б)», строки
     определений и пометки «(в ред. …)» остаются внутри текущего пункта).
@@ -187,7 +187,7 @@ def _strip_amend(text: str) -> str:
     return _AMEND_STRIP_RE.sub("", text).strip()
 
 
-def parse_decree_body(path: Path) -> list[dict]:
+def parse_decree_body(path: Path, doc: dict | None = None) -> list[dict]:
     """Тело ПП №719 (критерии подтверждения производства, п. 1 а/б/в/г — где «г» = СТ-1 для
     продукции, отсутствующей в приложении). Приложение (таблица продукции) НЕ индексируется —
     оно живёт в structured/*.json. Пункт 1 режем по подпунктам а/б/в/г, иначе критерий «г» тонет
@@ -232,7 +232,7 @@ def parse_decree_body(path: Path) -> list[dict]:
     return records
 
 
-def parse_order52(path: Path) -> list[dict]:
+def parse_order52(path: Path, doc: dict | None = None) -> list[dict]:
     """Приказ ТПП РФ №52 (Положение о порядке выдачи документов): состав документов (Раздел 4),
     сроки (Раздел 6), акт экспертизы на компоненты (Раздел 13), изменение реестровой записи
     (Раздел 9). Режем по «Раздел N. …» и пунктам N.N.N; приказ-часть до первого раздела
@@ -273,7 +273,7 @@ def parse_order52(path: Path) -> list[dict]:
     return records
 
 
-def parse_footnotes(path: Path) -> list[dict]:
+def parse_footnotes(path: Path, doc: dict | None = None) -> list[dict]:
     """Определения сносок приложения: одна запись на сноску, ключ — её номер («<44>»).
 
     Сноска — не процедурная норма, но живёт в той же коллекции: она отвечает на вопрос
@@ -354,6 +354,9 @@ def add_index_text(recs: list[dict]) -> None:
             r["parent_intro"] = intros[0]
 
 
+# Версия вместо редакции: «ВЕРСИЯ 1.18.3» у методрекомендаций ТПП (см. detect_edition).
+_VERSION_RE = re.compile(r"(?i)\bверси[яи]\s+(\d+(?:\.\d+)+)")
+
 def detect_edition(all_text: str) -> str:
     """Последняя (по дате) пометка «(в ред. … от ДД.ММ.ГГГГ N …)» во всём корпусе — честный штамп
     редакции индексируемого текста."""
@@ -364,7 +367,19 @@ def detect_edition(all_text: str) -> str:
         key = (y, mth, d, num)
         if key > best_key:
             best_key, best_label = key, f"ред. от {m.group(1)} N {m.group(3)}"
-    return best_label or "редакция не определена в тексте"
+    if best_label:
+        return best_label
+    # ⚠ K15: не всякий документ ВЕРСИОНИРУЕТСЯ редакциями. Методрекомендации ТПП пометок
+    # «(в ред. …)» не несут вовсе — у них ВЕРСИЯ. Без этой ветки штамп у них был бы
+    # «редакция не определена в тексте», то есть A6 (отставание корпуса от действующей
+    # редакции) на этом документе не работал бы НИКОГДА.
+    # ⚠ Ветка вторая, а не первая: у документа с пометками «в ред.» они и остаются штампом,
+    # даже если слово «версия» встретится в его тексте. Радиус проверен — штампы четырёх
+    # прежних документов не изменились (тест).
+    mv = _VERSION_RE.search(all_text)
+    if mv:
+        return f"Версия {mv.group(1)}"
+    return "редакция не определена в тексте"
 
 
 def _stamp_edition(recs: list[dict], text: str) -> None:
@@ -372,6 +387,107 @@ def _stamp_edition(recs: list[dict], text: str) -> None:
     ed = detect_edition(text)
     for r in recs:
         r["edition"] = ed
+
+
+# --------------------------------------------------------------------------- #
+# K15 #36: Методические рекомендации ТПП РФ — разъяснение, а не норма
+# --------------------------------------------------------------------------- #
+# Заголовок раздела: «4. ДОКУМЕНТЫ, ПРИЛАГАЕМЫЕ К ЗАЯВЛЕНИЮ…». Часть заголовков переносится на
+# вторую строку, и она тоже сплошь прописная — поэтому продолжение подбирается отдельно.
+_METODREK_HEAD_RE = re.compile(r"^(\d+)\.\s+([А-ЯЁ][А-ЯЁ0-9 ,\-()«»]+)$")
+_METODREK_CAP = 1200  # символов на запись: RULES_TEXT_CAP в контексте = 1400, режем с запасом
+
+
+def cut_fragments(text: str, doc: dict | None) -> tuple[str, int]:
+    """Вырезать из текста фрагменты, перечисленные в манифесте (`exclude_fragments`).
+
+    ⚠⚠ ЗАЧЕМ ЭТО ЕСТЬ ВООБЩЕ. Документ бывает действующим и при этом описывающим ОТМЕНЁННЫЙ шаг.
+    Методрекомендации вер. 1.18.3 помечены действующими, но их вводная и схема процесса ведут
+    заявителя за «заключением Минпромторга», а Правила выдачи заключения утратили силу 29.06.2024
+    (ПП РФ N 894) и заменены Правилами ведения реестра. Статуса «действует, но частично устарел» в
+    паспорте нет, а `legal_force` решает КОНФЛИКТ НОРМ, а не устаревание, — поэтому устаревшие
+    фрагменты не индексируются вовсе.
+
+    ⚠ РЕШЕНИЕ ЖИВЁТ В МАНИФЕСТЕ, а не здесь. Ровно по той причине, по которой туда переехало
+    исключение утративших силу Правил: «эти строки не индексируем» — решение, и знать его должен
+    тот, кто читает состав корпуса, а не тот, кто читает парсер.
+
+    ⚠ ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ ОБЯЗАТЕЛЕН. Правило, переставшее совпадать (текст переиздали, пробел
+    сменился), молча вернуло бы устаревшую норму в корпус — а снаружи «нечего вырезать» и «чистка
+    ослепла» неразличимы. Поэтому несовпавшее правило останавливает загрузку.
+    """
+    rules = (doc or {}).get("exclude_fragments") or []
+    cut = 0
+    for rule in rules:
+        frm, to = rule.get("from", ""), rule.get("to", "")
+        i = text.find(frm) if frm else -1
+        j = text.find(to, i) if (i != -1 and to) else -1
+        if i == -1 or j == -1:
+            sys.exit(f"{(doc or {}).get('doc_type')}: правило exclude_fragments не совпало "
+                     f"({rule.get('reason') or 'без причины'}). Текст изменился — сверьте границы, "
+                     f"молчаливый пропуск вернул бы устаревшую норму в индекс.")
+        removed = j + len(to) - i
+        print(f"   [cut] {removed} символов: {rule.get('reason') or 'причина не указана'} "
+              f"(с {rule.get('since') or '—'})")
+        text = text[:i] + text[j + len(to):]
+        cut += removed
+    return text, cut
+
+
+def parse_metodrek(path: Path, doc: dict | None = None) -> list[dict]:
+    """Методрекомендации ТПП РФ: одна запись на смысловой кусок раздела.
+
+    Пунктов вида N.N в документе нет — это проза с шестью разделами, поэтому режем по разделам, а
+    длинные разделы добираем по границам строк до `_METODREK_CAP`. Резать мельче нечем: подзаголовков
+    внутри разделов документ не имеет.
+    """
+    raw, _ = cut_fragments(_normalize(path.read_text(encoding="utf-8")), doc)
+    lines = raw.split("\n")
+
+    sections: list[tuple[str, str, list[str]]] = []
+    num, title, buf = "", "", []
+    for ln in lines:
+        m = _METODREK_HEAD_RE.match(ln.strip())
+        if m:
+            if num:
+                sections.append((num, title, buf))
+            num, title, buf = m.group(1), m.group(2).strip(), []
+            continue
+        # Перенос заголовка на вторую строку: сплошь прописная строка сразу после заголовка.
+        if num and not buf and ln.strip() and ln.strip() == ln.strip().upper() and len(ln.strip()) > 3:
+            title = (title + " " + ln.strip()).strip()
+            continue
+        if num:
+            buf.append(ln)
+    if num:
+        sections.append((num, title, buf))
+
+    records: list[dict] = []
+    for num, title, buf in sections:
+        chunks: list[list[str]] = [[]]
+        size = 0
+        for ln in buf:
+            if size + len(ln) > _METODREK_CAP and chunks[-1]:
+                chunks.append([])
+                size = 0
+            chunks[-1].append(ln)
+            size += len(ln) + 1
+        chunks = [c for c in chunks if "".join(c).strip()]
+        nice = title.capitalize() if title.isupper() else title
+        for k, c in enumerate(chunks, 1):
+            text = "\n".join(c).strip()
+            if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:  # обрывок/разделитель
+                continue
+            part = f" ч. {k}" if len(chunks) > 1 else ""
+            records.append({
+                "doc_type": "metodrek_tpp",
+                "section_roman": num,
+                "section_title": nice,
+                "point": f"{num}.{k}",
+                "text": text,
+                "source_anchor": f"Методрекомендации ТПП РФ, раздел {num} ({nice}){part}",
+            })
+    return records
 
 
 # --------------------------------------------------------------------------- #
@@ -394,6 +510,7 @@ PARSERS = {
     "decree_body": parse_decree_body,
     "tpp_order_52": parse_order52,
     "appendix_footnotes": parse_footnotes,
+    "metodrek_tpp": parse_metodrek,
 }
 
 
@@ -444,7 +561,7 @@ def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
         texts: list[str] = []
         for path in sources:
             texts.append(_normalize(path.read_text(encoding="utf-8")))
-            chunk = parser(path)
+            chunk = parser(path, doc)
             if not chunk:
                 print(f"⚠️  {path.name}: не распознано ни одного пункта — проверь формат")
             part.extend(chunk)
@@ -574,7 +691,26 @@ def index_all(client, recs: list[dict], batch: int = 64, avgdl: float | None = N
         bar.close()
 
 
-def reindex_document(client, doc_type: str, recs_all: list[dict], batch: int = 64) -> int:
+def _document_has_points(client, collection: str, doc_type: str) -> bool:
+    """Есть ли в коллекции хоть одна точка этого документа. Ошибку связи трактуем как «есть».
+
+    ⚠ Направление умолчания выбрано намеренно. Ошибка счёта не должна ПРЕВРАЩАТЬ переиндексацию в
+    отказ: оператор в этот момент чинит бой, и предохранитель, срабатывающий от обрыва сети,
+    научит его добавлять --allow-new-doc всегда — то есть выключит себя сам."""
+    from qdrant_client import models
+
+    try:
+        got = client.count(collection_name=collection, exact=True, count_filter=models.Filter(
+            must=[models.FieldCondition(key="doc_type", match=models.MatchValue(value=doc_type))]))
+        return got.count > 0
+    except Exception as e:  # noqa: BLE001
+        print(f"⚠ не удалось сосчитать точки {doc_type}: {type(e).__name__}: {e} — "
+              f"считаю, что документ в коллекции уже есть")
+        return True
+
+
+def reindex_document(client, doc_type: str, recs_all: list[dict], batch: int = 64,
+                     allow_new: bool = False) -> int:
     """`K11` (#41): переиндексировать ОДИН документ, не трогая точки остальных.
 
     ЗАЧЕМ. `recreate_collection` сносит коллекцию целиком: добавление одного приказа
@@ -600,6 +736,23 @@ def reindex_document(client, doc_type: str, recs_all: list[dict], batch: int = 6
     target = [r for r in recs_all if r.get("doc_type") == doc_type]
     if not target:
         sys.exit(f"в корпусе нет пунктов документа {doc_type!r} — проверьте манифест")
+
+    # ⚠⚠ ДОБАВЛЕНИЕ ДОКУМЕНТА — НЕ ТО ЖЕ, ЧТО ЕГО ПЕРЕИНДЕКСАЦИЯ. Найдено при заводе K15.
+    # `avgdl` считается по ВСЕМУ корпусу и ЗАПЕКАЕТСЯ в sparse-вектор каждой точки. Пока документ
+    # уже был в коллекции, частичная загрузка безопасна: состав корпуса не менялся, avgdl тот же.
+    # Но НОВЫЙ документ меняет среднюю длину для ВСЕХ — и тогда в другом масштабе оказываются не
+    # его точки, а точки СОСЕДЕЙ, загруженные раньше. Замер на K15: 95.84 -> 96.72 (+0.92 %).
+    # Сдвиг мал, но он неизмерен по влиянию, а «мало» без замера — это догадка. Полная загрузка
+    # стоит минуты; молчаливое расхождение масштабов BM25 не стоит ничего заметить.
+    # ⚠ Предохранитель стоит НА ПУТИ действия, а не рядом с ним: оператор идёт сюда именно тогда,
+    # когда добавляет документ (K15, K14, K16, K17 — все четыре про это).
+    if not _document_has_points(client, name, doc_type) and not allow_new:
+        sys.exit(
+            f"{doc_type}: документа НЕТ в коллекции {name} — это ДОБАВЛЕНИЕ, а не переиндексация.\n"
+            f"Новый документ меняет avgdl корпуса, а он запечён в векторах уже загруженных точек:\n"
+            f"  соседи останутся в прежнем масштабе BM25, новый документ — в новом.\n"
+            f"Нужна ПОЛНАЯ загрузка коллекции (без --doc).\n"
+            f"Если расхождение осознанно принято — повторите с --allow-new-doc.")
 
     index_all(client, target, batch=batch, avgdl=corpus_avgdl(recs_all))
 
@@ -656,6 +809,9 @@ def main() -> None:
     ap.add_argument("--doc", metavar="DOC_TYPE",
                     help="K11: переиндексировать ОДИН документ, не трогая остальные "
                          "(коллекция не пересоздаётся)")
+    ap.add_argument("--allow-new-doc", action="store_true",
+                    help="разрешить частичную загрузку документа, которого в коллекции ещё"
+                         " нет (он сдвигает avgdl корпуса — обычно нужна полная загрузка)")
     ap.add_argument("--list-docs", action="store_true", help="показать документы корпуса и выйти")
     ap.add_argument("--batch", type=int, default=64)
     args = ap.parse_args()
@@ -673,7 +829,8 @@ def main() -> None:
         # (см. `corpus_avgdl`), а дорог здесь только прогон e5 — он и экономится.
         recs, _ = load_records()
         print(f"Коллекция: {settings.QDRANT_RULES_COLLECTION} (частичная переиндексация)")
-        reindex_document(client, args.doc, recs, batch=args.batch)
+        reindex_document(client, args.doc, recs, batch=args.batch,
+                         allow_new=args.allow_new_doc)
         info = client.get_collection(settings.QDRANT_RULES_COLLECTION)
         print(f"\n✅ Коллекция '{settings.QDRANT_RULES_COLLECTION}': точек = {info.points_count}")
     elif not args.smoke_only:

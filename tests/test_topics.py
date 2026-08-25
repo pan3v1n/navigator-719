@@ -97,10 +97,24 @@ class TestWiring(unittest.TestCase):
         self.assertEqual(topics.fragment("выдуманная"), "")
 
     def test_doc_types_point_at_real_documents(self):
-        known = {"tpp_order_52", "rules_registry", "decree_body", "appendix_footnotes"}
+        """Список известных документов берётся ИЗ МАНИФЕСТА, а не переписывается сюда.
+
+        ⚠ Прежняя редакция держала четыре имени константой — и покраснела, когда `K15`
+        завела пятый документ, хотя ошибки не было: тест стерёг СВОЙ список, а не связь
+        темы с корпусом. Опечатку в `_DOC_TYPES` он ловит по-прежнему, а вот обновлять его
+        при каждом новом документе больше не нужно — иначе он превращается во второе место,
+        где записан состав корпуса."""
+        from app.core import manifest as kb_manifest
+
+        known = {d["doc_type"] for d in kb_manifest.load_manifest()["documents"]
+                 if d.get("collection") == "pp719_rules"
+                 and d.get("status") == kb_manifest.ACTIVE}
+        self.assertGreaterEqual(len(known), 4, "манифест не прочитан — проверка вхолостую")
         for t in topics.TOPICS:
             for d in topics.doc_types(t):
-                self.assertIn(d, known, f"{t}: неизвестный doc_type {d}")
+                self.assertIn(d, known,
+                              f"{t}: doc_type {d!r} не описан в манифесте как действующий "
+                              f"документ процедурного корпуса")
 
     def test_documents_rules_live_in_one_place(self):
         """Тема `documents` не заводит своих шаблонов — спрашивает детектор P2. Вторая копия
@@ -145,7 +159,11 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
         from app.core.prompts import build_navigator_user_prompt
         user = build_navigator_user_prompt("какие документы нужны для этикетировщиков", "КОНТЕКСТ",
                                            documents="[1] Приказ №52, п. 4.2.1 — копия устава")
-        self.assertIn("ДОКУМЕНТЫ (Приказ ТПП РФ №52", user)
+        # ⚠ Якорь — СТАБИЛЬНЫЙ префикс блока, а не полная шапка: с `K15` в блок доехал ещё и
+        # закрытый справочник, и шапка описывает уже два источника. Проверяем отдельно, что
+        # Приказ №52 в ней по-прежнему назван, — иначе тест ловил бы формулировку, а не факт.
+        self.assertIn("ДОКУМЕНТЫ (", user)
+        self.assertIn("Приказа ТПП РФ №52", user)
         self.assertIn("копия устава", user)
         self.assertIn("п. 4.2.1", user)
         # ⚠ ссылки [N] в товарном ответе означают ПОЗИЦИЮ приложения — на пункт Приказа так ссылаться
@@ -155,7 +173,10 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
     def test_no_block_when_question_is_not_about_documents(self):
         from app.core.prompts import build_navigator_user_prompt
         user = build_navigator_user_prompt("требования к чиллерам", "КОНТЕКСТ")
-        self.assertNotIn("ДОКУМЕНТЫ (Приказ", user)
+        # ⚠ Тот же префикс, что в положительной половине. С прежним якорем
+        # ("ДОКУМЕНТЫ (Приказ") эта проверка стала бы зелёной ВХОЛОСТУЮ, как только шапка
+        # сменила формулировку, — и пропустила бы блок, приехавший не на свой вопрос.
+        self.assertNotIn("ДОКУМЕНТЫ (", user)
 
     def test_answered_documents_are_not_suggested_again(self):
         """Товарный двойник петли: смешанный вопрос уже получил перечень — предлагать его снова

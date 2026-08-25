@@ -42,11 +42,14 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
 from app.rag import inheritance  # noqa: E402
 from app.rag.thresholds import (  # noqa: E402
     lookup_procurement_threshold,
     lookup_threshold,
 )
+
+enable_utf8()  # #107: скрипт печатает «←» и «⚠», которых нет в cp1251
 
 # ⚠ ПУТЬ ОТ КОРНЯ РЕПОЗИТОРИЯ, А НЕ ОТ CWD (ревью 20.08.2026). Относительный glob означал, что
 # из любого каталога, кроме корня, приёмочный гейт МОЛЧА мерил ноль записей и печатал

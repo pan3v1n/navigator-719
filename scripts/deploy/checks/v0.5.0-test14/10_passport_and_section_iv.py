@@ -8,8 +8,11 @@
 ⚠ Проверяется РАНТАЙМОМ, а не файлами пакета: вопрос не «лежит ли новый код», а «что лежит в
 коллекции». Маркеры пакета отвечают на первый вопрос, эта проверка — на второй.
 """
+from app.core.console import enable_utf8
 from app.core.config import settings
 from app.rag.retriever import _client
+
+enable_utf8()  # #107: проверка печатает «→» — на консоли Windows падала бы
 
 name = settings.QDRANT_RULES_COLLECTION
 client = _client()

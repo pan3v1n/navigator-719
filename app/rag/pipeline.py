@@ -23,7 +23,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import fragments, inheritance, okpd2_ref, sparse
+from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
 from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
@@ -61,6 +61,10 @@ class Answer:
     # Числа, которых нет в контексте, но которые назвал САМ пользователь: не выдумка, в приёмочный
     # флаг не идут (см. `echoed_numbers`), но класс остаётся наблюдаемым — пишется в журнал.
     echoed_numbers: list[str] = field(default_factory=list)
+    # K15: упоминания несуществующего «заключения ТПП» в ответе. Не отдаётся на фронт (как и
+    # `echoed_numbers`) — пишется в журнал: правило промпта может не сработать, и тогда дефект
+    # обязан быть ВИДЕН, а не уехать пользователю молча.
+    phantom_documents: list[str] = field(default_factory=list)
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
@@ -699,8 +703,26 @@ RULES_TEXT_CAP = 1400  # символов на пункт Правил в кон
 RULES_TEXT_CAP_DOC_LIST = 4000
 
 
-def format_rules_context(rules: list[dict]) -> str:
-    """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …)."""
+def format_rules_context(rules: list[dict], *, show_legal_force: bool = False) -> str:
+    """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …).
+
+    `show_legal_force` (`K13` #46) — печатать ли в шапке блока юридическую силу документа.
+
+    ⚠ ПАРАМЕТР, А НЕ ВСЕГДА. Функция зовётся из ДВУХ мест, и они разной природы:
+    * процедурный ответ (`_answer_procedural`) собирает окно из РАЗНЫХ документов — тело ПП №719,
+      Правила, Приказ №52 — и именно там модели нужен порядок старшинства. Пометка включена;
+    * товарный путь добирает блок состава документов (`docs_ctx`) и двумя строками выше
+      ФИЛЬТРУЕТ его до одного `tpp_order_52`. Все блоки там одной силы по построению: иерархии
+      нет, ранжировать нечего, а лишние 30 символов на блок — это бюджет контекста `K6`.
+      Пометка выключена. Если фильтр когда-нибудь ослабят — включать здесь же.
+
+    Решение вынесено в параметр намеренно: выводить его из данных («силы различаются → пометить»)
+    было бы самоподдерживающимся, но тогда САМО ПОЯВЛЕНИЕ пометки сигналило бы модели «здесь
+    конфликт», а конфликта в подавляющем большинстве окон нет — пункты просто отвечают на разные
+    вопросы. Подталкивать к поиску противоречий там, где их нет, дороже, чем помнить про флаг.
+    """
+    from app.core.manifest import legal_force_label
+
     blocks: list[str] = []
     for i, r in enumerate(rules, 1):
         # Атрибуция — из source_anchor записи (Правила / тело ПП №719 / Приказ ТПП №52); фолбэк на
@@ -712,6 +734,13 @@ def format_rules_context(rules: list[dict]) -> str:
             point = r.get("point") or "?"
             sect = r.get("section_title") or r.get("section_roman") or ""
             head = f"[{i}] Правила ведения реестра, п. {point}" + (f" ({sect})" if sect else "")
+        # K13: юридическая сила документа — рядом с его именем, а не отдельной легендой сверху.
+        # Легенда потребовала бы от модели сопоставлять блок с документом по имени; пометка на
+        # месте не требует ничего. Урок проекта: правило промпта слабее устройства контекста.
+        if show_legal_force:
+            label = legal_force_label(r.get("doc_type"))
+            if label:
+                head += f" ({label})"
         text = (r.get("text") or "").strip()
         cap = RULES_TEXT_CAP_DOC_LIST if r.get("_doc_list") else RULES_TEXT_CAP
         if len(text) > cap:
@@ -971,8 +1000,13 @@ def _answer_procedural(query: str, search_query: str,
     if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
         return Answer(text=procedural.DEFLECTION, hits=[])
 
-    ctx = format_rules_context(rules)
-    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic))
+    ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
+    # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
+    # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
+    # закрывала памятью.
+    docs_ref = documents_ref.documents_context_block() if topic == topics.DOCUMENTS else None
+    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
+                                        documents=docs_ref)
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
         messages.extend(history)
@@ -991,12 +1025,16 @@ def _answer_procedural(query: str, search_query: str,
     echoed = echoed_numbers(raw, ctx, asked)
     if echoed:
         logger.info("процедурный ответ повторяет числа из вопроса (не выдумка): {}", echoed)
+    phantom = documents_ref.unverified_documents(raw)
+    if phantom:
+        logger.warning("K15: ответ называет несуществующий документ: {}", phantom)
     return Answer(
         text=raw,
         hits=[],
         low_relevance=False,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
+        phantom_documents=phantom,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=ctx,
@@ -1306,17 +1344,33 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # детерминированно, поэтому просто доносим пункты раздела 4 Приказа №52 до контекста.
     docs_ctx = None
     if topics.classify(search_query) == topics.DOCUMENTS:
+        # ⚠⚠ ЗДЕСЬ ПРОСИМ РОВНО ПРИКАЗ №52, А НЕ «ДОКУМЕНТЫ ТЕМЫ». Два строки ниже блок
+        # ФИЛЬТРУЕТСЯ до `tpp_order_52` — значит, просить у окна что-то ещё означает
+        # потратить места, которые тут же выбросят. Пока у темы был один документ, разницы
+        # не было; `K15` добавила второй, и замер 25.08 показал цену: на 2 смешанных
+        # вопросах из 3 блок худел с 3 пунктов Приказа до 2. Решение «этот блок — только
+        # Приказ №52» обязано жить в ОДНОМ месте, а не спорить само с собой.
         doc_points = search_rules(search_query, limit=RULES_DOC_POINTS, qvec=qvec,
-                                  primary_docs=topics.doc_types(topics.DOCUMENTS))
+                                  primary_docs=("tpp_order_52",))
         # ⚠ Оставляем ТОЛЬКО пункты Приказа №52: `primary_docs` — это предпочтение квоты, а не
         # фильтр, и если добор раздела 4 не удался (он обёрнут в except и лишь логируется) или
         # какой-то части перечня не хватило по рангу, в блок попали бы пункты про печати, ЭЦП и
         # сроки из Правил — под шапкой, обещающей состав документов по Приказу. Промпт при этом
         # запрещает отсылать «спросите отдельно», то есть модель синтезировала бы перечень из
-        # пунктов, где его нет. Нечего показать — блока не будет вовсе, это честнее.
+        # пунктов, где его нет. Не нашлось — пунктов в блоке не будет, это честнее.
+        # ⚠ Прежде эта фраза кончалась словами «блока не будет ВОВСЕ» — с `K15` это уже не так:
+        # без пунктов остаётся справочник (ниже). Правится вместе, иначе два соседних
+        # комментария начнут утверждать противоположное — класс дефекта из ревью захода 4.
         doc_points = [p for p in doc_points if p.get("doc_type") == "tpp_order_52"]
+        # K15: закрытый справочник идёт в контекст ВСЕГДА, когда спросили про документы, — он
+        # детерминированный и от поиска не зависит. Пункты Приказа №52 добавляются, если нашлись.
+        # ⚠ Порядок обратный прежнему решению «нечего показать — блока не будет»: то рассуждение
+        # верно для ПУНКТОВ (пустая выдача честнее выдуманной), но справочник пуст не бывает, и
+        # именно его отсутствие оставляло модель наедине с памятью — так и родилось «заключение
+        # ТПП». Дефект возникал ровно тогда, когда добор пунктов не удавался.
+        docs_ctx = documents_ref.documents_context_block()
         if doc_points:
-            docs_ctx = format_rules_context(doc_points)
+            docs_ctx += "\n\n" + format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
     # обязан знать — иначе перечень задвоится: один раз от модели, второй от нас.
     # ⚠ Таблицу печатаем ТОЛЬКО когда целевая позиция одна. При точном совпадении кода целевых
@@ -1386,6 +1440,9 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     echoed = echoed_numbers(raw, planned.grounding, asked)
     if echoed:
         logger.info("ответ повторяет числа из вопроса пользователя (не выдумка): {}", echoed)
+    phantom = documents_ref.unverified_documents(raw)
+    if phantom:
+        logger.warning("K15: ответ называет несуществующий документ: {}", phantom)
     return Answer(
         text=raw,
         hits=planned.hits,
@@ -1393,6 +1450,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
+        phantom_documents=phantom,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
@@ -1447,6 +1505,9 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     echoed = echoed_numbers(raw, planned.grounding, asked)
     if echoed:
         logger.info("ответ повторяет числа из вопроса пользователя (не выдумка): {}", echoed)
+    phantom = documents_ref.unverified_documents(raw)
+    if phantom:
+        logger.warning("K15: ответ называет несуществующий документ: {}", phantom)
     yield "done", Answer(
         text=raw,
         hits=planned.hits,
@@ -1454,6 +1515,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         low_relevance=planned.low_relevance,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
+        phantom_documents=phantom,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,

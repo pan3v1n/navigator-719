@@ -8,7 +8,10 @@
 """
 import re
 
+from app.core.console import enable_utf8
 from app.rag.thresholds import lookup_threshold
+
+enable_utf8()  # #107: проверка печатает значки вне cp1251
 
 thr = lookup_threshold(["30.11.31.110"], "Суда рыболовные <9>", "XVIII")
 assert thr, "порог прим. 17 не находится"

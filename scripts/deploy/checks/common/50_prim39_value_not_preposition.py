@@ -2,7 +2,10 @@
 
 Перенос ячейки ЗНАЧЕНИЯ давал «Порог: … — от [прим. 39]» без числа (5 позиций).
 """
+from app.core.console import enable_utf8
 from app.rag.thresholds import lookup_threshold
+
+enable_utf8()  # #107: проверка печатает значки вне cp1251
 
 v = lookup_threshold(["28.30.59.114"], "Подборщики для зерновых", None)
 print("   ", (v or "")[:100])

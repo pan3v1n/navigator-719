@@ -20,8 +20,8 @@
 напрямую, без DeepSeek.
 
 ЗАПУСК (нужен поднятый Qdrant с коллекцией pp719_rules):
-    PYTHONUTF8=1 .venv/Scripts/python.exe scripts/eval_rules.py
-    PYTHONUTF8=1 .venv/Scripts/python.exe scripts/eval_rules.py --report docs/eval_rules_report.md
+    .venv/Scripts/python.exe scripts/eval_rules.py
+    .venv/Scripts/python.exe scripts/eval_rules.py --report docs/eval_rules_report.md
 """
 
 from __future__ import annotations
@@ -36,6 +36,10 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+enable_utf8()  # #107: скрипт печатает значки вне cp1251 — падал бы в момент печати
 from app.rag import retriever, topics  # noqa: E402
 
 GOLDEN = ROOT / "scripts" / "eval_golden_rules.json"
