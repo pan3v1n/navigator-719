@@ -213,6 +213,86 @@ class TestClassifierSeesLaterCoveringRow(unittest.TestCase):
                                       f"{[(d.get('name'), d['class']) for d in defects][:5]}")
 
 
+class TestEmptyCellsDoNotShiftYears(unittest.TestCase):
+    """⚠⚠ ДЕФЕКТ, ОТ КОТОРОГО `_tables` УЖЕ ЧИНИЛИ, ВЕРНУЛСЯ В СОСЕДНЮЮ ФУНКЦИЮ.
+
+    `_named_block_rows` собирал ячейки через `if c.strip()` и затем `zip(years, …)` — то есть
+    ровно та форма, которую инвариант в `_tables` запрещает («ПУСТЫЕ ЯЧЕЙКИ НЕЛЬЗЯ ВЫБРАСЫВАТЬ»,
+    ревью 20.08.2026): пропуск схлопывался и все значения строки уезжали ВЛЕВО, на чужой год.
+
+    ⚠ Дефект ЛАТЕНТНЫЙ: на текущем корпусе таких пропусков в прим. 37/74 нет, радиус правки 0.
+    Проверить его можно только синтетикой — иначе он ждал бы следующей редакции первоисточника.
+    Форма строк взята дословно из `130_PRIMECHANIYA_prilozheniya.txt` (прим. 74)."""
+
+    HEADER = " |до 31 декабря 2025 г.|с 1 января 2026 г.|"
+
+    def _rows(self, data_line: str):
+        lines = ['из 28.13.27 "Компрессорная установка смешанного хладагента":',
+                 "", self.HEADER, data_line, ""]
+        return th._named_block_rows(lines)
+
+    def test_full_row_is_unchanged(self):
+        got = self._rows("Компрессорная установка|не менее 160 баллов|не менее 210 баллов|")
+        self.assertEqual(len(got), 1)
+        self.assertIn("до 31 декабря 2025 г. — не менее 160 баллов", got[0]["threshold"])
+        self.assertIn("с 1 января 2026 г. — не менее 210 баллов", got[0]["threshold"])
+
+    def test_blank_cell_keeps_the_value_on_its_own_year(self):
+        """Значение обязано остаться против СВОЕГО года, а не съехать на предыдущий."""
+        got = self._rows("Компрессорная установка| |не менее 210 баллов|")
+        self.assertEqual(len(got), 1)
+        thr = got[0]["threshold"]
+        self.assertIn("с 1 января 2026 г. — не менее 210 баллов", thr)
+        self.assertNotIn("до 31 декабря 2025 г. — не менее 210 баллов", thr,
+                         "значение съехало на чужой год — дефект вернулся")
+
+
+class TestActTitleIsNotAProductName(unittest.TestCase):
+    """⚠ Прим. 8(1) цитирует «Об утверждении Правил квалификации…», и цитата становилась ИМЕНЕМ
+    строки-порога. Сегодня безвредно (у той строки нет кодов), но пост-проход снимает коды именно
+    по признаку «вводная назвала продукт»: вводная, цитирующая акт И перечисляющая коды ОКПД2,
+    молча потеряла бы привязку, и порог стал бы недостижим вовсе."""
+
+    def test_act_titles_are_dropped(self):
+        for t in ("Об утверждении Правил квалификации генерирующего объекта",
+                  "О внесении изменений в постановление", "О порядке ведения реестра"):
+            with self.subTest(t=t[:36]):
+                self.assertEqual(th._quoted_names(f'из 27.11.50 "{t}" - 100 баллов'), [])
+
+    def test_product_names_survive(self):
+        got = th._quoted_names('из 27.31.12.110 "Волокна оптические одномодовые" - 50 баллов')
+        self.assertEqual(got, ["Волокна оптические одномодовые"])
+
+    def test_no_row_carries_an_act_title_as_a_name(self):
+        bad = [(r.get("note"), n) for r in th._flat_thresholds()
+               for n in (r.get("names") or []) if th._ACT_TITLE_RE.match(n)]
+        self.assertEqual(bad, [], f"заголовок акта снова числится наименованием: {bad}")
+
+
+class TestNoteNumberKeepsItsSubpoint(unittest.TestCase):
+    """⚠⚠ ПРЕДОХРАНИТЕЛЬ, БЬЮЩИЙ ПО ВЕРНОМУ КОДУ, дороже отсутствующего — так говорит шапка
+    самого `deploy.sh`, и здесь он был именно таким.
+
+    Релизная проверка обрезала «прим. 8(1)» до «8», а это РАЗНЫЕ области:
+    `note_scope('8')` = procurement, `note_scope('8(1)')` = general. Верный релиз, сославшийся на
+    8(1), был бы ОСТАНОВЛЕН; закупочный подпункт N(M) при общем N, наоборот, проскочил бы."""
+
+    def test_subpoint_is_captured_whole(self):
+        import re
+        src = (ROOT / "scripts" / "deploy" / "checks" / "common"
+               / "20_k2_procurement_not_general.py").read_text(encoding="utf-8")
+        m = re.search(r're\.findall\(r"([^"]+)", got\)', src)
+        self.assertIsNotNone(m, "форма разбора номера примечания изменилась — перечитать проверку")
+        rx = re.compile(m.group(1))
+        self.assertEqual(rx.findall("[прим. 8(1)]"), ["8(1)"])
+        self.assertEqual(rx.findall("[прим. 26(2)]"), ["26(2)"])
+        self.assertEqual(rx.findall("[прим. 26.1]"), ["26.1"], "подпункт через точку потерян")
+
+    def test_the_two_forms_really_differ_in_scope(self):
+        """Отрицательный контроль: если бы области совпадали, обрезка была бы безобидной."""
+        self.assertNotEqual(th.note_scope("8"), th.note_scope("8(1)"))
+
+
 class TestRadiusIsPinned(unittest.TestCase):
     """⚠ Правка разбора бьёт шире списка позиций, который смотрели глазами (урок захода 3)."""
 
