@@ -686,7 +686,21 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
             # Пункт может уже лежать в широком пуле — тогда берём ЕГО индекс, а не пропускаем:
             # «в пуле» не значит «в окне», квота отбирает только первые по рангу, и п. 4.1
             # (3844 знака, второй в разделе) в окно так и не попадал.
-            known = {(p.payload or {}).get("point"): i for i, p in enumerate(points)}
+            # ⚠⚠ КЛЮЧ — (ДОКУМЕНТ, ПУНКТ), А НЕ ПУНКТ (ревью захода 5, 26.08.2026). Номер пункта
+            # НЕ УНИКАЛЕН между документами: `parse_metodrek` нумерует куски как «раздел.кусок» и
+            # даёт 4.1–4.4 — ровно те же строки, что пункты 4.1–4.4 Приказа №52, а
+            # `RULES_DOC_LIST_GROUPS` = («4.1», «4.2», «4.3»). При ключе по одному `point` в словаре
+            # побеждал ПОСЛЕДНИЙ вошедший в пул, и добор, нашедший пункт ПРИКАЗА, мог пометить
+            # `_doc_list` у куска МЕТОДРЕКОМЕНДАЦИЙ: тот получал место в перечне и лимит 4000
+            # знаков, а настоящий п. 4.1 с составом документов в окно не попадал вовсе.
+            #
+            # ⚠ На текущем корпусе это НЕ срабатывает — проверено живьём, Приказ п. 4.1 в окне и с
+            # `_doc_list`. Но выигрыш достаётся порядком в пуле, то есть рангом: сместится
+            # ранжирование (новый документ, правка корпуса, другая формулировка) — и слот заберёт
+            # метод-кусок. Ровно тот класс, который здесь уже чинили дважды (`M1`, `M2`):
+            # результат, зависящий от очерёдности, а не от правила.
+            known = {((p.payload or {}).get("doc_type"), (p.payload or {}).get("point")): i
+                     for i, p in enumerate(points)}
             taken_groups: set[str] = set()
             for p in extra:
                 point = str((p.payload or {}).get("point") or "")
@@ -694,8 +708,11 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
                 if group is None or group in taken_groups:
                     continue  # либо не часть перечня (4.4/4.5), либо эта часть уже представлена
                 taken_groups.add(group)
-                if point in known:
-                    doc_list_idxs.append(known[point])
+                # Ищем ТОТ ЖЕ пункт ТОГО ЖЕ документа: `extra` отфильтрован до `tpp_order_52`,
+                # значит и в пуле нас интересует только он.
+                key = ((p.payload or {}).get("doc_type"), (p.payload or {}).get("point"))
+                if key in known:
+                    doc_list_idxs.append(known[key])
                 else:
                     doc_list_idxs.append(len(points))
                     points.append(p)

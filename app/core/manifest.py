@@ -136,7 +136,6 @@ LEGAL_FORCE_NAMES = {
 }
 
 
-@lru_cache(maxsize=1)
 def legal_force_by_doc() -> dict[str, int]:
     """`doc_type` → юридическая сила документа. Для РАНТАЙМА, поэтому деградирует, а не падает.
 
@@ -160,15 +159,34 @@ def legal_force_by_doc() -> dict[str, int]:
 
     Кэш на процесс: манифест читается с диска и парсится yaml'ом, а зовётся это на КАЖДОМ
     процедурном ответе. В тестах сбрасывается `legal_force_by_doc.cache_clear()`.
+
+    ⚠⚠ КЭШИРУЕТСЯ ТОЛЬКО УСПЕХ (ревью захода 5, 26.08.2026). Прежде `@lru_cache` висел прямо на
+    этой функции, и деградация запоминалась НАВСЕГДА: одна временная ошибка чтения — манифест
+    подменён в момент выкатки, файл под блокировкой, контейнер читает посреди rsync — и пустой
+    словарь оставался в кэше до перезапуска процесса. Каждый следующий процедурный ответ молча
+    терял пометки `K13`, ВТОРОГО предупреждения в логе не было, а проверки рантайма выкатки этого
+    не видели вовсе: одно предупреждение при старте легко пропустить, а состояние необратимо.
+    Теперь кэш стоит на внутренней функции, которая БРОСАЕТ: `lru_cache` исключения не запоминает,
+    поэтому следующий вызов пробует прочитать манифест заново.
     """
     try:
-        docs = load_manifest()["documents"]
+        return _legal_force_loaded()
     except Exception as exc:  # noqa: BLE001 — любой сбой чтения манифеста, не только ManifestError
         from loguru import logger
         logger.warning("K13: манифест не прочитан ({}), иерархия источников в контекст не пойдёт", exc)
         return {}
+
+
+@lru_cache(maxsize=1)
+def _legal_force_loaded() -> dict[str, int]:
+    """Чтение манифеста БЕЗ деградации: бросает, значит результат не попадёт в кэш."""
+    docs = load_manifest()["documents"]
     return {d["doc_type"]: d["legal_force"] for d in docs
             if d.get("doc_type") and isinstance(d.get("legal_force"), int)}
+
+
+# Прежний интерфейс сохранён: тесты и диагностика зовут `legal_force_by_doc.cache_clear()`.
+legal_force_by_doc.cache_clear = _legal_force_loaded.cache_clear  # type: ignore[attr-defined]
 
 
 def legal_force_label(doc_type: str | None) -> str:

@@ -513,6 +513,16 @@ PARSERS = {
     "metodrek_tpp": parse_metodrek,
 }
 
+# ⚠⚠ КАКИЕ ПАРСЕРЫ ДЕЙСТВИТЕЛЬНО РЕЖУТ `exclude_fragments` (ревью захода 5, 26.08.2026).
+# `cut_fragments` зовётся ровно из одного парсера — `parse_metodrek`. Остальные принимают
+# аргумент `doc` и правило молча игнорируют, а `load_manifest` посторонних ключей не проверяет.
+# Манифест при этом подаёт `exclude_fragments` как ОБЩИЙ механизм, с обоснованием «несовпавшее
+# правило останавливает загрузку». Допиши кто-нибудь такое правило, скажем, к `rules_registry` —
+# фрагмент проиндексировался бы без изменений, без ошибки и без предупреждения, а
+# задокументированная гарантия молча не применилась бы. Отменённая норма вернулась бы в индекс
+# ровно тем способом, от которого `exclude_fragments` и заводилась.
+SUPPORTS_EXCLUDE_FRAGMENTS = frozenset({"metodrek_tpp"})
+
 
 def load_manifest(path=None) -> dict:
     """Манифест с проверкой словарей. Ошибку превращаем в выход: индексировать корпус с
@@ -539,6 +549,14 @@ def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
     for doc in [d for d in man["documents"] if d.get("collection") == COLLECTION]:
         dt = doc["doc_type"]
         title = doc.get("short") or doc.get("title") or dt
+
+        # Предохранитель на путь действия: правило, которое некому исполнить, останавливает
+        # загрузку здесь, а не превращается в тихо проиндексированный фрагмент.
+        if doc.get("exclude_fragments") and dt not in SUPPORTS_EXCLUDE_FRAGMENTS:
+            sys.exit(f"{dt}: в манифесте есть exclude_fragments, но парсер этого документа их НЕ "
+                     f"режет (режут только: {', '.join(sorted(SUPPORTS_EXCLUDE_FRAGMENTS))}). "
+                     f"Фрагмент уехал бы в индекс молча — добавьте вызов cut_fragments в парсер "
+                     f"и допишите doc_type в SUPPORTS_EXCLUDE_FRAGMENTS.")
 
         if doc.get("status") != kb_manifest.ACTIVE:
             # Не молча: исключение документа — решение, и оно обязано быть видно в логе загрузки.
