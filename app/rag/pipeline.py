@@ -978,6 +978,37 @@ def _anchor_code(history: list[dict] | None) -> str | None:
     return None
 
 
+def plan_procedural(query: str, search_query: str):
+    """Контекст и промпт процедурного ответа ДО вызова модели: `(topic, rules, ctx, user)`.
+
+    None — корпус недоступен или пуст (выше по стеку это честный дефер, а не выдумка процедуры).
+
+    ⚠ ЗАЧЕМ ВЫДЕЛЕНО. Поведение НЕ меняется — это тот же приём, что `_plan_answer` на товарном
+    пути. Причина та же и появилась она из `EV21` #119: до выделения размер процедурного контекста
+    нельзя было измерить, не заплатив за генерацию, и `eval_context_size` МОЛЧА пропускал всю
+    процедурную ветку («до контекста не дошли»). Пропускал он при этом ровно те вопросы, ради
+    которых делались `K12` и `K15`, — состав документов, кластер жалоб №1."""
+    from app.rag import topics
+
+    topic = topics.classify(search_query)
+    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
+    if not rules:
+        return None
+    ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
+    # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
+    # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
+    # закрывала памятью.
+    # ⚠ ИЛИ вопрос сам поднял документ (`K15-1` #120): гейт блока согласован с гейтом его
+    # содержимого. «Нужно ли заключение ТПП для внесения продукции в реестр» — тема
+    # `registry_entry`, и справочника не было вовсе там, где риск выдумать документ максимален.
+    docs_ref = (documents_ref.documents_context_block(search_query)
+                if topic == topics.DOCUMENTS or documents_ref.asks_about_conclusion(search_query)
+                else None)
+    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
+                                        documents=docs_ref)
+    return topic, rules, ctx, user
+
+
 def _answer_procedural(query: str, search_query: str,
                        history: list[dict] | None = None) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
@@ -987,7 +1018,7 @@ def _answer_procedural(query: str, search_query: str,
     поможет), корпус недоступен/пуст → `DEFLECTION` (предложить повторить). Иначе генерируем
     grounded-ответ по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ
     (unverified_deadlines)."""
-    from app.rag import followup, procedural, topics
+    from app.rag import followup, procedural
 
     # Оба дефера уходят БЕЗ подсказки (`input_hint` пуст): процедурная ветка сейчас не отвечает,
     # и предлагать следующий вопрос по ней — обещать то, чего сервис в этот момент не может.
@@ -995,19 +1026,11 @@ def _answer_procedural(query: str, search_query: str,
         return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
     # K12: намерение вопроса задаёт и приоритет документов в окне, и оговорки промпта. Тема
     # определяется детерминированно (регулярки), поэтому маршрутизация бесплатна и воспроизводима.
-    topic = topics.classify(search_query)
-    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
-    if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
+    planned = plan_procedural(query, search_query)
+    if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
         return Answer(text=procedural.DEFLECTION, hits=[])
+    topic, rules, ctx, user = planned
 
-    ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
-    # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
-    # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
-    # закрывала памятью.
-    docs_ref = (documents_ref.documents_context_block(search_query)
-                if topic == topics.DOCUMENTS else None)
-    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
-                                        documents=docs_ref)
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
         messages.extend(history)
@@ -1344,7 +1367,16 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # вопроса июльской волны уходили без перечня, хотя это кластер жалоб №1. Тема известна
     # детерминированно, поэтому просто доносим пункты раздела 4 Приказа №52 до контекста.
     docs_ctx = None
-    if topics.classify(search_query) == topics.DOCUMENTS:
+    # ⚠ ДВА РАЗНЫХ УСЛОВИЯ, И ЭТО НЕ ОПЕЧАТКА (`K15-1` #120). Закрытый СПРАВОЧНИК нужен всегда,
+    # когда вопрос вообще касается подтверждающего документа — он детерминирован, дёшев и держит
+    # анти-галлюцинационный контур. А ДОБОР пунктов Приказа №52 нужен только там, где спросили
+    # ПЕРЕЧЕНЬ: он стоит поиска и мест в окне. Прежде оба висели на одном гейте (тема
+    # `documents`), и вопрос «нужно ли заключение ТПП …» не получал НИ ТОГО, НИ ДРУГОГО.
+    docs_topic = topics.classify(search_query) == topics.DOCUMENTS
+    doc_points: list = []      # ⚠ инициализация обязательна: ниже её читает шапка промпта
+    if docs_topic or documents_ref.asks_about_conclusion(search_query):
+        docs_ctx = documents_ref.documents_context_block(search_query)
+    if docs_topic:
         # ⚠⚠ ЗДЕСЬ ПРОСИМ РОВНО ПРИКАЗ №52, А НЕ «ДОКУМЕНТЫ ТЕМЫ». Два строки ниже блок
         # ФИЛЬТРУЕТСЯ до `tpp_order_52` — значит, просить у окна что-то ещё означает
         # потратить места, которые тут же выбросят. Пока у темы был один документ, разницы
@@ -1366,13 +1398,13 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         # без пунктов остаётся справочник (ниже). Правится вместе, иначе два соседних
         # комментария начнут утверждать противоположное — класс дефекта из ревью захода 4.
         doc_points = [p for p in doc_points if p.get("doc_type") == "tpp_order_52"]
-        # K15: закрытый справочник идёт в контекст ВСЕГДА, когда спросили про документы, — он
-        # детерминированный и от поиска не зависит. Пункты Приказа №52 добавляются, если нашлись.
+        # K15: закрытый справочник уже в `docs_ctx` (он идёт ВСЕГДА, когда вопрос касается
+        # документа, — детерминирован и от поиска не зависит). Пункты Приказа №52 добавляются
+        # к нему, если нашлись.
         # ⚠ Порядок обратный прежнему решению «нечего показать — блока не будет»: то рассуждение
         # верно для ПУНКТОВ (пустая выдача честнее выдуманной), но справочник пуст не бывает, и
         # именно его отсутствие оставляло модель наедине с памятью — так и родилось «заключение
         # ТПП». Дефект возникал ровно тогда, когда добор пунктов не удавался.
-        docs_ctx = documents_ref.documents_context_block(search_query)
         if doc_points:
             docs_ctx += "\n\n" + format_rules_context(doc_points)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
@@ -1389,6 +1421,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
         tnved=tnved, okpd2_suggestions=okpd2_suggestions, points_table_appended=bool(table),
         documents=docs_ctx,
+        # ⚠ Шапка блока зависит от того, есть ли в нём ПУНКТЫ Приказа: без них нельзя велеть
+        # модели ссылаться на их номера (ревью 26.08.2026).
+        documents_points=bool(docs_topic and doc_points),
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]

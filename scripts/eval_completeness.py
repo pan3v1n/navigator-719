@@ -34,6 +34,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(ROOT / "scripts") not in sys.path:   # общий оракул документных кейсов (EV21 #119)
+    sys.path.insert(0, str(ROOT / "scripts"))
 
 
 from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
@@ -46,6 +48,7 @@ from app.rag.pipeline import (  # noqa: E402
     claim_numbers,
     number_in_context,
 )
+from eval_documents import conclusion_mentions  # noqa: E402  (общий оракул EV21 #119)
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
@@ -56,7 +59,22 @@ VERDICT_RE = re.compile(
     r"порог набирается|вы наберёте|соответствует требованиям 719", re.I)
 # Номера правил инструкции («[2б]», «правило 4») эксперт прочитает как ссылку на источник.
 RULE_REF_RE = re.compile(r"\[\s*\d+\s*[а-яё]\s*\]|правил[оа]\s+\d+[а-яё]?\b", re.I)
-ZAKL_RE = re.compile(r"заключени\w*\s+ТПП", re.I)
+# ⚠⚠ ЗАПРЕТ «ЗАКЛЮЧЕНИЯ ТПП» ТРИ МЕСЯЦА СЧИТАЛСЯ ТАМ, ГДЕ ТЕРМИН НЕ МОГ ПОЯВИТЬСЯ.
+# Метрика бежала по 42 ТОВАРНЫМ вопросам («производим станки»), и 1.00 ×3 в отчётах означало не
+# «термин не выдумывается», а «его неоткуда взять». Появляется он на ДОКУМЕНТНЫХ вопросах, а их в
+# наборе не было ни одного — это и есть `EV21` #119.
+#
+# ⚠ И сама проверка была той же формы, что рантайм-гард ДО правки `ddd3e16`: голая регулярка по
+# термину. Стоило добавить документный кейс — и она первой же покрасила бы ВЕРНЫЙ ответ
+# («Документа „заключение ТПП“ не существует»), то есть ровно то поведение, ради которого `K15`
+# и делалась. Поэтому здесь общий оракул: нарушение — УТВЕРЖДЕНИЕ несуществующего документа,
+# либо термин, приехавший в ответ на вопрос, где его не поднимали.
+#
+# ⚠ «Поднимал ли пользователь тему» здесь СВОЯ копия, а не `documents_ref._ASKS_ABOUT_CONCLUSION`,
+# и это осознанно. У продукта этот детектор решает, добавить ли разъяснение; у метрики — считать
+# ли упоминание утечкой. Свяжи их — и метрика перестанет ловить ошибку самого детектора:
+# разъяснение не приехало бы, а замер решил бы, что так и надо.
+ASKED_ABOUT_CONCLUSION_RE = re.compile(r"заключени", re.I)
 # Внутренняя кухня в ответе (правило 3г). Пользователь не видит ни контекста, ни промпта, и
 # «в контексте не указано» читает как «в системе чего-то не хватает» — класс R7, жалоба №1
 # платного теста. ⚠ Ловим только «контекст» и «промпт»: слова «инструкция», «база»,
@@ -159,9 +177,11 @@ def context_facts(hit, ctx: str) -> dict:
     }
 
 
-def evaluate(limit: int, cases_limit: int) -> list[dict]:
+def evaluate(limit: int, cases_limit: int, kind: str = "all") -> list[dict]:
     cases = json.loads(GOLDEN.read_text(encoding="utf-8"))["cases"]
     cases = [c for c in cases if c["in_scope"]]  # полноту меряем там, где есть что показывать
+    if kind != "all":                            # см. --kind: цена прогона и популяция базы
+        cases = [c for c in cases if c.get("kind", "product") == kind]
     if cases_limit:
         cases = cases[:cases_limit]
 
@@ -225,18 +245,44 @@ def evaluate(limit: int, cases_limit: int) -> list[dict]:
             attributed = None
             warned = None
 
+        # --- EV21 #119: ДОКУМЕНТНЫЙ ВОПРОС ---------------------------------------------------
+        # ТОВАРНАЯ полнота к нему неприменима ровно по той же причине, что и к уточняющему ответу
+        # двадцатью строками выше: на вопрос «какие документы готовить» ответ обязан дать перечень
+        # документов, а не расписать баллы операций. Требуй мы здесь порог и баллы — метрика
+        # штрафовала бы за предписанное поведение и толкала бы модель вываливать в документный
+        # ответ таблицу операций. Что документный ответ обязан показать, считает `eval_answers`
+        # (закрытый перечень, условность разъяснения, источник).
+        documents_case = c.get("kind") == "documents"
+        if documents_case:
+            thr_expected, thr_shown, pts, pts_shown = False, None, [], 0
+            schedule_mix, node_leak, attributed, warned = [], [], None, None
+
+        # §2.2 «заключение ТПП» — см. комментарий у ASKED_ABOUT_CONCLUSION_RE. Нарушение — это
+        # УТВЕРЖДЕНИЕ несуществующего документа либо термин, приехавший туда, где его не поднимали.
+        # Отрицание в ответе на прямой вопрос нарушением НЕ является: это цель `K15`.
+        mentions, affirmed = conclusion_mentions(text)
+        asked_conclusion = bool(ASKED_ABOUT_CONCLUSION_RE.search(c["query"]))
+        zakl = bool(affirmed) or (mentions > 0 and not asked_conclusion)
+
         rows.append({
             "id": c["id"], "query": c["query"], "section": c["expected_section"],
+            "kind": c.get("kind", "product"),
             "clarifying": clarifying, "asks_code": asks_code,
             "thr_expected": thr_expected, "thr_shown": thr_shown,
             "n_points": len(pts), "points_shown": pts_shown,
             "warned": warned, "attributed": attributed,
             "verdict": bool(VERDICT_RE.search(text)),
             "rule_ref": bool(RULE_REF_RE.search(text)),
-            "zakl": bool(ZAKL_RE.search(text)),
+            "zakl": zakl,
             "kitchen": bool(KITCHEN_RE.search(text)),
             "emoji": bool(EMOJI_RE.search(text)),
-            "cites_ok": (not cites) or max(cites) <= max(len(ans.hits), 1),
+            # ⚠ ИСТОЧНИКОВ У ОТВЕТА ДВА ВИДА, И ПРОВЕРКА ЗНАЛА ТОЛЬКО ОДИН.
+            # На товарном пути [N] нумерует `hits`, на ПРОЦЕДУРНОМ — `rule_sources` (пункты
+            # корпуса), а `hits` там пуст по построению. Порог был `max(len(hits), 1)` = 1, и
+            # честный процедурный ответ с шестью источниками объявлялся ссылающимся на
+            # несуществующую позицию. Не срабатывало три месяца ровно потому, что процедурных
+            # кейсов в наборе не было ни одного (`EV21` #119): найдено первым же их прогоном.
+            "cites_ok": (not cites) or max(cites) <= max(len(ans.hits), len(ans.rule_sources), 1),
             "node_leak": node_leak,
             "schedule_mix": schedule_mix,
             "unverified": ans.unverified_numbers,
@@ -252,6 +298,7 @@ def report(rows: list[dict]) -> list[str]:
     pt_cov = ([r["points_shown"] / r["n_points"] for r in pt_rows] or [0])
     warn_rows = [r for r in rows if r["warned"] is not None]
     attr_rows = [r for r in rows if r["attributed"] is not None]
+    docs_rows = [r for r in rows if r.get("kind") == "documents"]
 
     def pct(a, b):
         return f"{a}/{b} = {a / b:.2f}" if b else "— (случаев нет)"
@@ -260,6 +307,10 @@ def report(rows: list[dict]) -> list[str]:
     out = ["=" * 78,
            f"ПОЛНОТА ОТВЕТА — {n} in-scope кейсов; эталон = КОНТЕКСТ, который построил сам сервис",
            "=" * 78,
+           "",
+           f"Из них ДОКУМЕНТНЫХ (EV21 #119): {len(docs_rows)}"
+           + (" — товарная полнота (порог, баллы) к ним неприменима и в знаменатели не входит; "
+              "запреты §2.2 применяются ко всем" if docs_rows else ""),
            "",
            f"Уточняющих ответов (правило 1г, полнота неприменима): {len(clarifying)} из {n}"
            + (" — " + ", ".join(f"#{r['id']}" for r in clarifying) if clarifying else ""),
@@ -270,15 +321,22 @@ def report(rows: list[dict]) -> list[str]:
            "",
            "ПОЛНОТА (пара-ограничитель к faithfulness), по подтверждённым позициям:",
            f"  Порог доехал до ответа        = {pct(thr_ok, len(thr_rows))}   (порог гайда ≥0.90)",
-           f"  Баллы операций доехали        = {sum(pt_cov) / len(pt_cov):.2f} в среднем по кейсу "
-           f"({sum(r['points_shown'] for r in pt_rows)} из {sum(r['n_points'] for r in pt_rows)} чисел)",
+           # ⚠ «Случаев нет» и «ноль баллов доехало» — РАЗНЫЕ вещи, а печатались одинаково: при
+           # пустом `pt_rows` строка показывала 0.00, то есть провал там, где мерить было нечего.
+           # Видно стало на срезе `--kind documents`, где балльных кейсов нет по определению.
+           f"  Баллы операций доехали        = " + (
+               f"{sum(pt_cov) / len(pt_cov):.2f} в среднем по кейсу "
+               f"({sum(r['points_shown'] for r in pt_rows)} из "
+               f"{sum(r['n_points'] for r in pt_rows)} чисел)" if pt_rows else "— (случаев нет)"),
            f"  Предупредил о неполноте       = {pct(sum(1 for r in warn_rows if r['warned']), len(warn_rows))}   (порог 1.00)",
            f"  Назвал источник требований    = {pct(sum(1 for r in attr_rows if r['attributed']), len(attr_rows))}   (порог 1.00)",
            "",
            "ЗАПРЕТЫ §2.2 (порог 1.00 = ни одного нарушения):",
            f"  Нет вердикта «признана российской»  = {pct(n - sum(r['verdict'] for r in rows), n)}",
            f"  Нет номеров правил промпта          = {pct(n - sum(r['rule_ref'] for r in rows), n)}",
-           f"  Нет термина «заключение ТПП»        = {pct(n - sum(r['zakl'] for r in rows), n)}",
+           f"  «Заключение ТПП» не утверждается    = {pct(n - sum(r['zakl'] for r in rows), n)}"
+           + ("   ⚠ до EV21 считалось только на товарных вопросах, где термина взяться неоткуда"
+              if not docs_rows else ""),
            f"  Нет эмодзи                          = {pct(n - sum(r['emoji'] for r in rows), n)}",
            f"  Нет внутренней лексики («контекст») = {pct(n - sum(r['kitchen'] for r in rows), n)}",
            f"  Все [N] существуют                  = {pct(sum(r['cites_ok'] for r in rows), n)}",
@@ -302,7 +360,7 @@ def report(rows: list[dict]) -> list[str]:
             if r["rule_ref"]:
                 why.append("номер правила промпта")
             if r["zakl"]:
-                why.append("«заключение ТПП»")
+                why.append("несуществующий «заключение ТПП» — утверждён либо приехал без спроса")
             if r["emoji"]:
                 why.append("эмодзи")
             if r["kitchen"]:
@@ -313,7 +371,11 @@ def report(rows: list[dict]) -> list[str]:
                 why.append(f"график оговорки выдан за общий: {r['schedule_mix']}")
             if not r["cites_ok"]:
                 why.append("ссылка [N] на несуществующую позицию")
-            out.append(f"  #{r['id']:>3} [{r['section']:>5}] {r['query'][:52]:52} — {', '.join(why)}")
+            # ⚠ У документного вопроса раздела НЕТ (`expected_section: null`), и прежняя строка
+            # падала на нём `TypeError`. Поймано живым прогоном, а не батареей: до `EV21` каждый
+            # in-scope кейс нёс римскую цифру, и None сюда попасть не мог.
+            section = r["section"] or ("док" if r.get("kind") == "documents" else "—")
+            out.append(f"  #{r['id']:>3} [{section:>5}] {r['query'][:52]:52} — {', '.join(why)}")
         out.append("")
 
     out.append("ПОКРЫТИЕ БАЛЛОВ ПО КЕЙСАМ (худшие сверху):")
@@ -327,10 +389,14 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Полнота ответа относительно контекста (уровень 2)")
     ap.add_argument("--limit", type=int, default=5)
     ap.add_argument("--cases", type=int, default=0, help="только первые N кейсов (дёшево)")
+    # ⚠ Как и в eval_answers: `--cases N` берёт ПЕРВЫЕ N, а документные кейсы стоят в конце —
+    # без среза их нельзя проверить, не оплатив весь набор. И числа базы сняты на 42 товарных.
+    ap.add_argument("--kind", choices=("all", "product", "documents"), default="all",
+                    help="какие кейсы гнать: все · только товарные (популяция базы) · документные")
     ap.add_argument("--report", type=str, default="")
     args = ap.parse_args()
 
-    rows = evaluate(args.limit, args.cases)
+    rows = evaluate(args.limit, args.cases, args.kind)
     text = "\n".join(report(rows))
     print(text)
     if args.report:

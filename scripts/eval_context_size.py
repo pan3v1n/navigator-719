@@ -47,34 +47,83 @@ GOLDEN = ROOT / "scripts" / "eval_golden.json"
 TAIL_MARK = "ПРОЧИЕ КАНДИДАТЫ ОКНА"
 
 
-def context_of(query: str, okpd2: str | None) -> str | None:
-    """Контекст, который увидела бы модель. None — вопрос до контекста не дошёл (meta/дефер)."""
+def context_of(query: str, okpd2: str | None) -> tuple[str, str] | None:
+    """`(заземление, весь промпт)` — то, что увидела бы модель. None — до контекста не дошло.
+
+    ⚠⚠ ДВА ЧИСЛА, А НЕ ОДНО, И РАЗНИЦА МЕЖДУ НИМИ СОДЕРЖАТЕЛЬНАЯ. Скрипт с самого начала мерил
+    `grounding` — стог, по которому сверяются числа ответа. Но это ПОДМНОЖЕСТВО того, что получает
+    модель: блок документов (`K15`) в заземление осознанно не входит (см. комментарий в
+    `_plan_answer` — иначе номера пунктов Приказа отмывали бы выдуманные баллы в «заземлённые»).
+    Поэтому правку `dbfc622`, ужавшую справочник 1155 → 727 символов, этим скриптом нельзя было
+    увидеть В ПРИНЦИПЕ: она меняет промпт, а не стог. Я записал в базу предсказание, что число
+    просядет, — прогон дал те же 4934/3852, и причина была не в правке.
+
+    `grounding` остаётся первым числом: с ним сравнивается база. Промпт — второе, новое.
+
+    ⚠ Процедурная ветка раньше отдавала None («до контекста не дошёл») — и это молча выкидывало из
+    замера вопросы про состав документов, кластер жалоб №1 (`EV21` #119). Теперь она собирается
+    тем же кодом, что и рантайм (`plan_procedural`), без вызова модели и без денег."""
+    # ⚠⚠ ПРОЦЕДУРНАЯ ВЕТКА ПРОВЕРЯЕТСЯ ДО `_plan_answer`, И ЭТО НЕ СТИЛЬ, А ЦЕНА ПРОГОНА.
+    # Первая редакция звала `_plan_answer` первым, а он для процедурного вопроса уходит в
+    # `_answer_procedural` и ГЕНЕРИРУЕТ ОТВЕТ DeepSeek — только потом возвращал `Answer`, и лишь
+    # после этого скрипт пересобирал контекст сам. То есть «замер без вызова модели и без денег»
+    # платил за две генерации на прогон и без ключа падал вместо того, чтобы мерить. Найдено
+    # ревью пакета 26.08.2026; до `EV21` процедурных кейсов в наборе не было, и путь не исполнялся.
+    # ⚠ Условия повторяют рантайм ЦЕЛИКОМ, включая обе настройки: при выключенном
+    # `PROCEDURAL_ANSWER_FROM_RULES` сервис отвечает дефером, и мерить контекст было бы нечего.
+    from app.core.config import settings
+    from app.rag import procedural
+
+    if (settings.PROCEDURAL_DEFLECT_ENABLED and settings.PROCEDURAL_ANSWER_FROM_RULES
+            and procedural.is_procedural(query, has_code=bool(okpd2))):
+        proc = pipe.plan_procedural(query, query)
+        if proc is None:
+            return None
+        _topic, _rules, ctx, user = proc
+        return ctx, user
+
     planned = pipe._plan_answer(query, okpd2=okpd2 or None)
     if isinstance(planned, pipe.Answer):
-        return None
-    return getattr(planned, "grounding", "") or ""
+        return None    # meta / перевод кода / дефер — контекста нет, мерить нечего
+    return (getattr(planned, "grounding", "") or "",
+            planned.messages[-1]["content"] if planned.messages else "")
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Размер контекста навигатора (K6), без DeepSeek")
     ap.add_argument("--report", type=Path)
     ap.add_argument("--cases", type=int, default=0, help="только первые N кейсов")
+    # ⚠⚠ ФИЛЬТР ПО ТИПУ — НЕ УДОБСТВО, А ТРЕБОВАНИЕ БАЗЫ СРАВНЕНИЯ.
+    # Числа базы (`4934 / 3852`) сняты на 42 ТОВАРНЫХ кейсах. `EV21` добавила документные, и без
+    # этого флага прежнее число стало бы нечем пересчитать — ровно то, на чём проект уже горел
+    # дважды («24.6 % → 18.4 %» у `K2` и сам `context_size`, лежавший в базе без скрипта).
+    # Правило 6 базы: у каждого числа обязана быть КОМАНДА, которой оно считается.
+    ap.add_argument("--kind", choices=("all", "product", "documents"), default="all",
+                    help="какие кейсы мерить: все · только товарные (популяция базы) · документные")
     args = ap.parse_args()
 
     cases = json.loads(GOLDEN.read_text(encoding="utf-8"))["cases"]
     cases = [c for c in cases if c.get("in_scope")]
+    if args.kind != "all":
+        cases = [c for c in cases if c.get("kind", "product") == args.kind]
     if args.cases:
         cases = cases[: args.cases]
 
     sizes: list[int] = []
     tails: list[int] = []
+    prompts: list[int] = []
+    doc_prompts: list[int] = []
     skipped = 0
     for c in cases:
-        ctx = context_of(c["query"], c.get("okpd2"))
-        if ctx is None:
+        got = context_of(c["query"], c.get("okpd2"))
+        if got is None:
             skipped += 1
             continue
+        ctx, prompt = got
         sizes.append(len(ctx))
+        prompts.append(len(prompt))
+        if c.get("kind") == "documents":
+            doc_prompts.append(len(prompt))
         i = ctx.find(TAIL_MARK)
         tails.append(0 if i == -1 else len(ctx) - i)
 
@@ -89,7 +138,7 @@ def main() -> int:
 
     L = [
         "=" * 78,
-        f"РАЗМЕР КОНТЕКСТА — {len(sizes)} in-scope кейсов"
+        f"РАЗМЕР КОНТЕКСТА — {len(sizes)} in-scope кейсов, срез --kind {args.kind}"
         + (f" (пропущено {skipped}: до контекста не дошли)" if skipped else ""),
         "=" * 78,
         f"  средняя длина  = {mean:.0f} символов",
@@ -97,6 +146,17 @@ def main() -> int:
         f"  минимум / максимум = {min(sizes)} / {max(sizes)}",
         f"  доля ХВОСТА нецелевых кандидатов = {tail_share:.2f}"
         f"   (блок есть у {with_tail} из {len(sizes)} кейсов)",
+        "",
+        "ВЕСЬ ПРОМПТ (то, что реально получает модель; заземление — его подмножество):",
+        f"  средняя длина  = {statistics.mean(prompts):.0f} символов",
+        f"  МЕДИАНА        = {statistics.median(prompts):.0f} символов",
+    ] + ([
+        f"  документные кейсы (EV21): {len(doc_prompts)} шт., медиана "
+        f"{statistics.median(doc_prompts):.0f}   ← здесь и живёт блок справочника K15,"
+        " которого в заземлении нет",
+    ] if doc_prompts else [
+        "  ⚠ документных кейсов в наборе нет — блок справочника K15 не меряется ничем (EV21 #119)",
+    ]) + [
         "",
         "⚠ Доля 0.00 при непустом контексте означает НЕ «хвоста нет», а что маркер"
         f" {TAIL_MARK!r} больше не совпадает с промптом — проверить, а не радоваться.",

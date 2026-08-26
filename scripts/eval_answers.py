@@ -50,6 +50,10 @@ from app.core.config import settings  # noqa: E402
 # Логику faithfulness берём ИЗ пайплайна — рантайм-постпроверка и этот замер меряют одно и то же.
 from app.rag.pipeline import answer, claim_numbers, unverified_numbers  # noqa: E402
 from app.rag.retriever import _client  # noqa: E402
+from eval_documents import (  # noqa: E402  (общий оракул документных кейсов, EV21 #119)
+    check_documents_reference,
+    documents_row,
+)
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
@@ -113,13 +117,21 @@ def topically_coherent(text: str, expected_roman: str, hits) -> bool:
     return any(w.lower() in text.lower() for w in re.findall(r"[А-Яа-яЁёA-Za-z]{6,}", title))
 
 
-def evaluate(limit: int, cases_limit: int):
+def evaluate(limit: int, cases_limit: int, kind: str = "all"):
     data = json.loads(GOLDEN.read_text(encoding="utf-8"))
     cases = data["cases"]
+    if kind != "all":
+        cases = [c for c in cases if c.get("kind", "product") == kind]
     if cases_limit:
         cases = cases[:cases_limit]
+    # Положительный контроль ДО первого платного вызова — вместе с источниками, которые ожидает
+    # сам набор: иначе `KeyError` вылез бы на середине прогона, уже потратив деньги.
+    check_documents_reference({s for c in cases for s in (c.get("expect_sources") or [])})
     rows = []
     for c in cases:
+        # ⚠ `case_kind`, а не `kind`: параметр функции с тем же именем задаёт ФИЛЬТР набора, и
+        # переприсваивание молча уничтожало его после первой итерации (ревью 26.08.2026).
+        case_kind = c.get("kind", "product")
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
         # ⚠ Заземление берём У ОТВЕТА, а не пересобираем: пересборка — второе место, где
@@ -133,8 +145,9 @@ def evaluate(limit: int, cases_limit: int):
         # рантайм выдумкой не считает, то есть мерить не продукт, а расхождение с самим собой.
         hallucinated = unverified_numbers(text, ctx, c["query"])
 
-        rows.append({
+        row = {
             "id": c["id"],
+            "kind": case_kind,
             "in_scope": c["in_scope"],
             "expected": c["expected_section"] or "—",
             "query": c["query"],
@@ -142,14 +155,24 @@ def evaluate(limit: int, cases_limit: int):
             "hallucinated": hallucinated,
             "faithful": not hallucinated,
             "guard_flagged": bool(ans.unverified_numbers),  # пометил ли рантайм-guard
-            "attributed": attributed(text, c["expected_section"], ans.hits) if c["in_scope"] else None,
+            # ⚠ Атрибуция считается только там, где раздел ОЖИДАЕТСЯ. У документного вопроса раздела
+            # нет вовсе, и прежняя форма (`if c["in_scope"]`) искала бы «раздел None»: уверенно
+            # возвращала бы False и роняла метрику, ничего при этом не измеряя.
+            "attributed": (attributed(text, c["expected_section"], ans.hits)
+                           if c["in_scope"] and c["expected_section"] else None),
             "coherent": (topically_coherent(text, c["expected_section"], ans.hits)
-                         if c["in_scope"] else None),
+                         if c["in_scope"] and c["expected_section"] else None),
             "declined": bool(DECLINE_RE.search(text)),
             "cited": bool(CITE_RE.search(text)),  # есть ли инлайн-ссылка [N] на позицию
             "cjk": bool(CJK_RE.search(text)),
             "low_relevance": ans.low_relevance,
-        })
+            # Наблюдаемая величина: как ТОТ ЖЕ текст прочитал предохранитель продукта. Расхождение
+            # с `term_affirmed` — сигнал сам по себе: одно из двух чтений неверно.
+            "guard_phantom": list(ans.phantom_documents or []),
+        }
+        if case_kind == "documents":
+            row.update(documents_row(c, text))
+        rows.append(row)
     return rows
 
 
@@ -159,12 +182,19 @@ def _rate(items, pred) -> tuple[int, int]:
 
 
 def summarize(rows, limit: int) -> list[str]:
-    ins = [r for r in rows if r["in_scope"]]
+    # ⚠⚠ ТОВАРНЫЕ И ДОКУМЕНТНЫЕ КЕЙСЫ СЧИТАЮТСЯ РАЗДЕЛЬНО, И ЭТО НЕ КОСМЕТИКА.
+    # Числа базы сравнения сняты на 42 товарных вопросах. Сложи с ними четыре документных — и
+    # знаменатель поменяется, а дельта к базе перестанет читаться: просадка метрики и смена
+    # ПОПУЛЯЦИИ дадут одинаковое движение числа. Правило значимости дельты (`EVAL_GUIDE §1.2`)
+    # сравнивает величины, снятые на одном наборе; сравнивать разные наборы оно не умеет.
+    ins = [r for r in rows if r["in_scope"] and r.get("kind", "product") != "documents"]
+    docs = [r for r in rows if r.get("kind") == "documents"]
     out = [r for r in rows if not r["in_scope"]]
     L = []
     L.append("=" * 78)
-    L.append(f"EVAL ОТВЕТА — golden set {len(rows)} кейсов "
-             f"({len(ins)} in-scope, {len(out)} out-of-scope), limit={limit}, модель={settings.DEEPSEEK_MODEL}")
+    L.append(f"EVAL ОТВЕТА — golden set {len(rows)} кейсов ({len(ins)} товарных in-scope, "
+             f"{len(docs)} документных, {len(out)} out-of-scope), limit={limit}, "
+             f"модель={settings.DEEPSEEK_MODEL}")
     L.append("=" * 78)
     L.append("")
 
@@ -178,7 +208,7 @@ def summarize(rows, limit: int) -> list[str]:
         total_halluc = sum(len(r["hallucinated"]) for r in ins)
         halluc_rows = [r for r in ins if r["hallucinated"]]
         g_ok = sum(1 for r in halluc_rows if r["guard_flagged"])
-        L.append("In-scope (качество ответа):")
+        L.append("Товарные in-scope (качество ответа) — набор, на котором снята база сравнения:")
         L.append(f"  FAITHFULNESS (нет выдуманных чисел) = {f_ok}/{f_n} = {f_ok / f_n:.2f}")
         L.append(f"      чисел баллов/% в ответах: {total_claims}; из них выдумано (нет в контексте): {total_halluc}")
         if halluc_rows:
@@ -190,6 +220,45 @@ def summarize(rows, limit: int) -> list[str]:
                  f"   [порога нет — EV17 #109]")
         L.append(f"  Инлайн-цитаты [N] на позицию        = {cit_ok}/{cit_n} = {cit_ok / cit_n:.2f}")
         L.append(f"  Без CJK-иероглифов                  = {c_ok}/{c_n} = {c_ok / c_n:.2f}")
+        L.append("")
+
+    if docs:
+        d_ok, d_n = _rate(docs, lambda r: r["docs_ok"])
+        e_ok, e_n = _rate(docs, lambda r: r["explanation_ok"])
+        t_ok, t_n = _rate(docs, lambda r: not r["term_affirmed"])
+        src_rows = [r for r in docs if r["want_sources"]]
+        s_ok = sum(1 for r in src_rows if len(r["named_sources"]) == len(r["want_sources"]))
+        df_ok, df_n = _rate(docs, lambda r: r["faithful"])
+        disagree = [r for r in docs if bool(r["term_affirmed"]) != bool(r["guard_phantom"])]
+        L.append("Документные кейсы (EV21 #119) — кластер жалоб №1, 31 упоминание в отзывах:")
+        L.append(f"  Закрытый перечень доехал до ответа  = {d_ok}/{d_n} = {d_ok / d_n:.2f}"
+                 f"   (эталон — CONFIRMING_DOCUMENTS, не вывод сервиса)")
+        L.append(f"  Разъяснение ПО УСЛОВИЮ (K15)        = {e_ok}/{e_n} = {e_ok / e_n:.2f}"
+                 f"   (спросили → объясни; не спрашивали → термина нет вовсе)")
+        L.append(f"  Несуществующий документ не утверждён = {t_ok}/{t_n} = {t_ok / t_n:.2f}")
+        L.append(f"  Источник назван                     = "
+                 + (f"{s_ok}/{len(src_rows)} = {s_ok / len(src_rows):.2f}" if src_rows
+                    else "— (кейсов с ожидаемым источником нет)"))
+        L.append(f"  FAITHFULNESS на документных         = {df_ok}/{df_n} = {df_ok / df_n:.2f}")
+        if disagree:
+            L.append("  ⚠ РАСХОЖДЕНИЕ С РАНТАЙМ-ГАРДОМ (одно из двух чтений текста неверно): "
+                     + ", ".join(f"#{r['id']}" for r in disagree))
+        for r in docs:
+            miss = [d for d in r["want_docs"] if d not in r["named_docs"]]
+            bits = []
+            if miss:
+                bits.append("не назван: " + "; ".join(m.split(" ")[0].lower() for m in miss))
+            if not r["explanation_ok"] and r["want_explanation"] and not r["term_affirmed"]:
+                bits.append("про документ спросили, а разъяснения в ответе нет")
+            elif not r["explanation_ok"] and not r["want_explanation"]:
+                bits.append(f"термин приехал в ответ, хотя не спрашивали "
+                            f"({r['term_mentions']} упом.)")
+            if r["term_affirmed"]:
+                bits.append("УТВЕРЖДАЕТ несуществующий: " + ", ".join(r["term_affirmed"]))
+            miss_src = [s for s in r["want_sources"] if s not in r["named_sources"]]
+            if miss_src:
+                bits.append("источник не назван: " + ", ".join(miss_src))
+            L.append(f"    #{r['id']:>3} {r['query'][:46]:46} — " + ("; ".join(bits) if bits else "✓"))
         L.append("")
 
     if out:
@@ -207,6 +276,9 @@ def summarize(rows, limit: int) -> list[str]:
         cjk = "!" if r["cjk"] else "·"
         if not r["in_scope"]:
             attr = "↩" if r["declined"] else "✗"  # для OUT: отказал ли
+        if r.get("kind") == "documents":
+            sc = "ДОК"  # раздела у документного вопроса нет — в колонке итог документных проверок
+            attr = "✓" if (r["docs_ok"] and r["explanation_ok"] and not r["term_affirmed"]) else "✗"
         L.append(f"{r['id']:>3} {sc:<3} {r['expected']:>5} {faith:>6} {attr:>5} {cjk:>4}  {r['query'][:30]}")
     L.append("")
 
@@ -228,6 +300,12 @@ def main() -> None:
     ap = argparse.ArgumentParser(description="Eval-харнес КАЧЕСТВА ОТВЕТА навигатора 719 (вызывает DeepSeek)")
     ap.add_argument("--limit", type=int, default=5, help="глубина выдачи (top-k) для пайплайна")
     ap.add_argument("--cases", type=int, default=0, help="обработать только первые N кейсов (дёшево)")
+    # ⚠ Срез нужен по двум причинам сразу. ЦЕНА: `--cases N` берёт ПЕРВЫЕ N, а документные кейсы
+    # стоят в конце — проверить их можно было только оплатив весь набор. БАЗА: её числа сняты на
+    # 42 товарных, и без команды, воспроизводящей эту популяцию, они становятся нечем пересчитать
+    # (правило 6 базы сравнения).
+    ap.add_argument("--kind", choices=("all", "product", "documents"), default="all",
+                    help="какие кейсы гнать: все · только товарные (популяция базы) · документные")
     ap.add_argument("--report", type=str, default="", help="путь для сохранения отчёта (markdown)")
     args = ap.parse_args()
 
@@ -238,7 +316,7 @@ def main() -> None:
     if not (settings.DEEPSEEK_API_KEY or "").strip():
         sys.exit("Нет DEEPSEEK_API_KEY в .env — этот харнес вызывает DeepSeek.")
 
-    rows = evaluate(args.limit, args.cases)
+    rows = evaluate(args.limit, args.cases, args.kind)
     report = summarize(rows, args.limit)
     print("\n".join(report))
 

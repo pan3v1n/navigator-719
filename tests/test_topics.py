@@ -158,7 +158,8 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
     def test_prompt_carries_documents_block(self):
         from app.core.prompts import build_navigator_user_prompt
         user = build_navigator_user_prompt("какие документы нужны для этикетировщиков", "КОНТЕКСТ",
-                                           documents="[1] Приказ №52, п. 4.2.1 — копия устава")
+                                           documents="[1] Приказ №52, п. 4.2.1 — копия устава",
+                                           documents_points=True)
         # ⚠ Якорь — СТАБИЛЬНЫЙ префикс блока, а не полная шапка: с `K15` в блок доехал ещё и
         # закрытый справочник, и шапка описывает уже два источника. Проверяем отдельно, что
         # Приказ №52 в ней по-прежнему назван, — иначе тест ловил бы формулировку, а не факт.
@@ -169,6 +170,22 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
         # ⚠ ссылки [N] в товарном ответе означают ПОЗИЦИЮ приложения — на пункт Приказа так ссылаться
         # нельзя, иначе эксперт пойдёт сверять номер не туда
         self.assertIn("НЕ на номер позиции [N]", user)
+
+    def test_block_without_order_points_does_not_demand_paragraph_numbers(self):
+        """⚠⚠ Ревью пакета 26.08.2026 (`K15-1` #120). Шапка была ОДНА и безусловная: она велела
+        «ссылайся на НОМЕР ПУНКТА Приказа (например „п. 4.2.1“)». После согласования гейтов
+        справочник приезжает и БЕЗ пунктов Приказа — на вопросе, который лишь ПОДНЯЛ документ.
+        Модель получала приказ сослаться на номера, которых в контексте нет вовсе, а выдуманный
+        «п. 4.2.1» прошёл бы мимо всех гардов: номера пунктов не входят в заземление, и
+        `claim_numbers` их не считает утверждениями."""
+        from app.core.prompts import build_navigator_user_prompt
+        user = build_navigator_user_prompt(
+            "нужно ли заключение ТПП", "КОНТЕКСТ",
+            documents="СПРАВОЧНИК ПОДТВЕРЖДАЮЩИХ ДОКУМЕНТОВ (перечень ЗАКРЫТЫЙ…)")
+        self.assertIn("СПРАВОЧНИК ПОДТВЕРЖДАЮЩИХ ДОКУМЕНТОВ", user, "справочник не доехал")
+        self.assertNotIn("п. 4.2.1", user, "промпт зовёт ссылаться на пункт, которого в нём нет")
+        self.assertNotIn("НОМЕР ПУНКТА Приказа", user)
+        self.assertIn("не ссылайся на их номера", user, "запрет на выдуманный номер пункта исчез")
 
     def test_no_block_when_question_is_not_about_documents(self):
         from app.core.prompts import build_navigator_user_prompt
