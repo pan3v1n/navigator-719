@@ -187,17 +187,37 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                 "note": None, "quote": None}
 
     # Улики в примечаниях. Направление то же, что у рантайма: код примечания — предок или равен.
-    covering, narrower, by_name = None, None, None
+    # ⚠⚠ СОБИРАЕМ ВСЕ ПОКРЫВАЮЩИЕ СТРОКИ, А НЕ ПЕРВУЮ (ревью захода 3, 26.08.2026).
+    # Прежде стояло `covering = covering or row`, то есть побеждал первый по порядку корпуса, и
+    # вердикт `speaks_about_us` выносился по нему ОДНОМУ. Строка, которая называет позицию
+    # ДОСЛОВНО, но лежит ниже, не рассматривалась вовсе, и позиция уходила в `note_other_product`
+    # — «не наш дефект». ⚠ Цена ошибки прямая: `attachment_defects` гейтится порогом 0, значит
+    # гейт мог показывать НОЛЬ при живых неприсоединённых порогах. Предохранитель, который не
+    # умеет сработать, равен отсутствующему.
+    coverings: list[dict] = []
+    narrower, by_name = None, None
     for row in rows:
         for c in codes:
             for rc in row["codes"]:
                 if _code_applies(rc, c):
-                    covering = covering or row
+                    if row not in coverings:
+                        coverings.append(row)
                 elif _code_applies(c, rc):
                     narrower = narrower or row
         if by_name is None and any(_norm(_strip_fn(n)) == _norm(_strip_fn(name))
                                    for n in row["names"]):
             by_name = row
+
+    def _speaks_about_us(row: dict) -> bool:
+        nm = [n for n in (row.get("names") or []) if n.strip()]
+        return (not nm
+                or _name_overlap(name, nm) >= 2
+                or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
+
+    # Из покрывающих строк выбираем ту, что говорит про ЭТУ позицию; если такой нет — первую,
+    # и тогда вердикт прежний («порог написан для другой продукции, привязывать нельзя»).
+    covering = next((r for r in coverings if _speaks_about_us(r)), None) or (
+        coverings[0] if coverings else None)
 
     if covering:
         # ⚠ КОД СОВПАЛ — ЕЩЁ НЕ ЗНАЧИТ, ЧТО ПОРОГ НАШ. Первая редакция считала дефектом любое
@@ -213,10 +233,8 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         #     26(2), 71, 72: «Продукция, классифицируемая кодом …, может быть отнесена …»);
         #   * либо наименование совпадает с позицией (дословно или пересечением ≥2 значимых слов).
         names = [n for n in (covering.get("names") or []) if n.strip()]
-        speaks_about_us = (not names
-                           or _name_overlap(name, names) >= 2
-                           or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in names))
-        if speaks_about_us:
+        # Одно решение — одно место: тот же предикат, которым строка и выбиралась выше.
+        if _speaks_about_us(covering):
             return {"class": "defect_unattached",
                     "evidence": f"прим. {covering['note']} ({covering['kind']}), "
                                 f"коды {', '.join(covering['codes'][:3])} покрывают "
