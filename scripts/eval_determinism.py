@@ -309,6 +309,12 @@ def evaluate(runs: int, limit: int, progress: bool):
     for q, code in it:
         num_sets, dec_sets, secs, flags = [], [], [], []
         alien_runs, alien_seen, alien_pool = 0, set(), set()
+        # ⚠⚠ ЧТО БЫЛО ДОСТУПНО НАЗВАТЬ — отдельно от того, что назвали (ревью захода 3, 26.08.2026).
+        # Прежний `dec_pool` был ПОБАЙТНО тем же выражением, что `dec_union` (объединение того,
+        # что ответы сказали), то есть «доступно» равнялось «названо» ПО ПОСТРОЕНИЮ. Строка
+        # «⚠ доступно решающих чисел: N» не могла показать «назвали 1 из 60» — а ровно для этого
+        # у соседней метрики и заведён `alien_pool`, который считается по ОКНУ.
+        dec_avail: set[str] = set()
         for _ in range(runs):
             ans = answer(q, okpd2=code, limit=limit)
             nums = frozenset(claim_numbers(ans.text))
@@ -319,7 +325,9 @@ def evaluate(runs: int, limit: int, progress: bool):
             secs.append(tgt.section_roman if tgt else "—")
             # EV10: из чисел ответа оставляем только РЕШАЮЩИЕ — порог и баллы операций.
             parent = (inheritance.lookup(tgt.section_roman, tgt.product_name) if tgt else None)
-            dec_sets.append(frozenset(nums & decisive_numbers(tgt, parent)))
+            avail = decisive_numbers(tgt, parent)
+            dec_avail |= avail
+            dec_sets.append(frozenset(nums & avail))
             flags.append(bool(ans.unverified_numbers))
             # Чужие числа считаем по окну ИМЕННО ЭТОГО прогона — см. докстринг foreign_numbers.
             # Числа, названные САМИМ пользователем, утечкой не считаются (та же поправка, что у
@@ -345,7 +353,7 @@ def evaluate(runs: int, limit: int, progress: bool):
             # шкалу, на которой порог что-то значит.
             "dec_union": len(set().union(*dec_sets)) if dec_sets else 0,
             "dec_common": len(set.intersection(*[set(d) for d in dec_sets])) if dec_sets else 0,
-            "dec_pool": len(set().union(*dec_sets)) if dec_sets else 0,
+            "dec_pool": len(dec_avail),   # ДОСТУПНО назвать, а не названо
             "sec_variants": len(set(secs)),           # 1 = стабильная атрибуция
             "flag_variants": len(set(flags)),         # 1 = стабильный guard-флаг
             "alien_runs": alien_runs,                 # в скольких прогонах утекли ЧУЖИЕ числа
@@ -367,7 +375,10 @@ def report(rows, runs: int) -> list[str]:
     scored = [r for r in rows if r.get("dec_union", 0)]
     dec_union = sum(r["dec_union"] for r in scored)
     dec_common = sum(r["dec_common"] for r in scored)
-    dec_share = dec_common / dec_union if dec_union else 1.0
+    # ⚠ Нечего мерить — НЕ 1.00. Прежний фолбэк рисовал идеальный балл при пороге ≥0.95 там,
+    # где не измерено НИЧЕГО: «нет данных» выглядело как «всё стабильно». Ноль валит порог и
+    # заставляет посмотреть, а соседняя строка объясняет причину.
+    dec_share = dec_common / dec_union if dec_union else 0.0
     sec_stable = sum(1 for r in rows if r["sec_variants"] == 1)
     alien_total = sum(r["alien_runs"] for r in rows)
     clean_q = sum(1 for r in rows if r["alien_runs"] == 0)
