@@ -683,8 +683,20 @@ def _qualified_list_rows(lines: list[str]) -> list[dict]:
         blocks = [(q, v) for q, v in blocks if v]
         if not blocks:
             continue
+        # ⚠⚠ БЛОКИ ХРАНЯТСЯ СЫРЫМИ, А ПОРЯДОК РЕШАЕТСЯ ПРИ ЛУКАПЕ (ревью захода 3, 26.08.2026).
+        # Прежде `blocks[0]` жёстко становился главным `Порог:`, и какой график поедет первым, не
+        # зависело от того, о какой продукции спросили. Живой пример прим. 27, код 27.33:
+        # «Контакторы и пускатели электромагнитные низковольтные» получали главной строкой
+        # «для ВАКУУМНЫХ КОНТАКТОРОВ …: 41 балл; с 1 сентября 2025 г. — 51 балл», то есть чужой
+        # график со ступенью, к ним не относящейся, а собственное значение уезжало в сноску
+        # «⚠ ИНОЙ порог». Обе позиции возвращали побайтно одну строку.
+        #
+        # Это «правильное число, привязанное НЕ К ТОЙ позиции» — по урокам проекта самый дорогой
+        # класс дефекта, и чинить его в разборе нельзя ПО ПОСТРОЕНИЮ: на этапе парсинга ещё не
+        # известно, кто спросит. Поэтому строка несёт все блоки, а ведущий выбирает `_fmt_flat`.
         fmt = lambda q, v: f"{q}: " + "; ".join(v)  # noqa: E731
         rows.append({"codes": codes, "names": names,
+                     "blocks": blocks,
                      "threshold": fmt(*blocks[0]),
                      "exception": " · ".join(fmt(q, v) for q, v in blocks[1:]) or None,
                      "note": note, "strict_name": True})
@@ -827,7 +839,59 @@ def _name_overlap(product_name: str | None, names: list[str]) -> int:
     return max((len(pt & set(re.findall(r"\w{4,}", _norm(nm)))) for nm in names), default=0)
 
 
-def _fmt_flat(r: dict, group: bool = False) -> str:
+def _stems(text: str) -> set[str]:
+    """Основы СЛОВ текста. ⚠ Морфология одна на проект — та же, что у BM25 (`sparse.tokenize`).
+
+    Вторая копия стемминга разошлась бы с первой при первой же правке; в этом проекте так уже
+    расходились адрес первоисточника и «кто целевой».
+
+    ⚠⚠ ЧИСЛА ИСКЛЮЧЕНЫ, И ЭТО НЕ ОПТИМИЗАЦИЯ. Замер радиуса поймал дефект в первой редакции этой
+    правки: у позиции «Выключатель автоматический … на токи ДО 6300 А» два подблока — «на токи до
+    4000 А» и «на токи ОТ 4000 А ДО 6300 А». Позиция накрывает ОБА диапазона, а совпадение токена
+    «6300» вытащило вперёд второй — то есть УЖЕ, чем позиция. Число в квалификаторе означает
+    границу диапазона, а не тождество продукции; идентичность несут слова. Без чисел эти два
+    квалификатора становятся пословно одинаковыми → ничья → порядок первоисточника сохраняется,
+    и оба графика по-прежнему видны, каждый со своим условием. Это честнее выдуманного выбора."""
+    from app.rag.sparse import tokenize
+
+    return {t for t in tokenize(text or "") if len(t) > 2 and not t.isdigit()}
+
+
+def _lead_first(r: dict, product_name: str) -> tuple[str, str | None]:
+    """`(ведущий график, остальные)` для строки с подблоками «для …» — по ИМЕНИ позиции.
+
+    ⚠⚠ ЗАЧЕМ. Подблоки прим. 27 описывают РАЗНУЮ продукцию под одним кодом, и какой из них
+    «Порог:», а какой «⚠ ИНОЙ порог», зависит от того, кто спрашивает. Разбор этого знать не
+    может, поэтому порядок решается здесь (ревью захода 3, 26.08.2026).
+
+    ⚠ Совпадение считается по ОСНОВАМ слов, а не по подстроке: квалификатор пишется в родительном
+    («для вакуумных контакторов низковольтных переменного тока»), наименование позиции — в
+    именительном («Контакторы вакуумные низковольтные переменного тока»). Подстрока не совпала бы
+    ни разу, и правка выглядела бы работающей, ничего не меняя.
+
+    ⚠ НИЧЬЯ ОСТАВЛЯЕТ ПОРЯДОК ПЕРВОИСТОЧНИКА. Если ни один блок не ближе прочих, менять порядок
+    не на чем — и выдумывать его хуже, чем сохранить исходный: так ответ хотя бы воспроизводит
+    примечание. Тот же принцип, что у `rules_topic` при ничьей."""
+    blocks = r.get("blocks") or []
+    fmt = lambda q, v: f"{q}: " + "; ".join(v)  # noqa: E731
+    if len(blocks) < 2 or not product_name:
+        return r["threshold"], r.get("exception")
+    want = _stems(_strip_fn(product_name))
+    if not want:
+        return r["threshold"], r.get("exception")
+    scores = [len(want & _stems(q)) for q, _ in blocks]
+    best = max(scores)
+    # Ноль общих основ — блок не про эту позицию; одна и та же лучшая оценка у двух блоков — ничья.
+    if best == 0 or scores.count(best) != 1:
+        return r["threshold"], r.get("exception")
+    i = scores.index(best)
+    rest = [b for j, b in enumerate(blocks) if j != i]
+    return fmt(*blocks[i]), (" · ".join(fmt(q, v) for q, v in rest) or None)
+
+
+def _fmt_flat(r: dict, group: bool = False, product_name: str = "") -> str:
+    lead, rest = _lead_first(r, product_name)
+    r = {**r, "threshold": lead, "exception": rest}
     out = f"{r['threshold']} [прим. {r['note']}]" if r.get("note") else r["threshold"]
     if group:
         # Порог задан для ветки-предка, а не для самой позиции: показываем, но честно называем
@@ -900,7 +964,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                  and any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
                          for nm in r["names"])]
         if len(named) == 1:
-            return _fmt_flat(named[0])
+            return _fmt_flat(named[0], product_name=product_name)
 
     # 1б) ТАБЛИЦЫ, ПРИВЯЗАННЫЕ ПО КОДУ (K2, #47). Часть примечаний-таблиц раздела не называет
     #     (прим. 38 радиоэлектроника, 81/28/33 медизделия), поэтому матч по имени в рамках раздела
@@ -964,7 +1028,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             cands.append((r, exact))
         if len(cands) == 1:
             row, is_exact = cands[0]
-            return _fmt_flat(row, group=not is_exact)
+            return _fmt_flat(row, group=not is_exact, product_name=product_name)
         if len(cands) > 1:
             # ⚠ ТОЧНОЕ СОВПАДЕНИЕ ИМЕНИ РЕШАЕТ СРАЗУ. Правило «пересечение ≥2 слов» слепо к
             # ОДНОСЛОВНЫМ наименованиям: «Ледоколы», «Буровые суда», «Суда снабжения» названы в
@@ -976,7 +1040,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                                  for nm in rc[0]["names"])]
             if len(exact_name) == 1:
                 row, is_exact = exact_name[0]
-                return _fmt_flat(row, group=not is_exact)
+                return _fmt_flat(row, group=not is_exact, product_name=product_name)
             # ⚠ ЕДИНСТВЕННОЕ ТОЧНОЕ СОВПАДЕНИЕ КОДА РЕШАЕТ СРАЗУ — даже если имён у строки нет
             # (A1 #56, 21.08.2026). Примечание, написанное ДЛЯ ЭТОГО кода, конкретнее примечания,
             # написанного для его группы: спор прим. 26 (группа 26.20.22, «не менее 55 баллов»)
@@ -988,10 +1052,10 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             exact_code = [rc for rc in cands if rc[1]]
             if len(exact_code) == 1:
                 row, _is_exact = exact_code[0]
-                return _fmt_flat(row, group=False)
+                return _fmt_flat(row, group=False, product_name=product_name)
             # При равном пересечении имён точное совпадение кода приоритетнее группового.
             row, is_exact = max(cands, key=lambda rc: (_name_overlap(product_name, rc[0]["names"]), rc[1]))
             if _name_overlap(product_name, row["names"]) >= 2:
-                return _fmt_flat(row, group=not is_exact)
+                return _fmt_flat(row, group=not is_exact, product_name=product_name)
 
     return None
