@@ -978,6 +978,33 @@ def _anchor_code(history: list[dict] | None) -> str | None:
     return None
 
 
+def plan_procedural(query: str, search_query: str):
+    """Контекст и промпт процедурного ответа ДО вызова модели: `(topic, rules, ctx, user)`.
+
+    None — корпус недоступен или пуст (выше по стеку это честный дефер, а не выдумка процедуры).
+
+    ⚠ ЗАЧЕМ ВЫДЕЛЕНО. Поведение НЕ меняется — это тот же приём, что `_plan_answer` на товарном
+    пути. Причина та же и появилась она из `EV21` #119: до выделения размер процедурного контекста
+    нельзя было измерить, не заплатив за генерацию, и `eval_context_size` МОЛЧА пропускал всю
+    процедурную ветку («до контекста не дошли»). Пропускал он при этом ровно те вопросы, ради
+    которых делались `K12` и `K15`, — состав документов, кластер жалоб №1."""
+    from app.rag import topics
+
+    topic = topics.classify(search_query)
+    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
+    if not rules:
+        return None
+    ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
+    # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
+    # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
+    # закрывала памятью.
+    docs_ref = (documents_ref.documents_context_block(search_query)
+                if topic == topics.DOCUMENTS else None)
+    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
+                                        documents=docs_ref)
+    return topic, rules, ctx, user
+
+
 def _answer_procedural(query: str, search_query: str,
                        history: list[dict] | None = None) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
@@ -987,7 +1014,7 @@ def _answer_procedural(query: str, search_query: str,
     поможет), корпус недоступен/пуст → `DEFLECTION` (предложить повторить). Иначе генерируем
     grounded-ответ по найденным пунктам + пост-проверка незаземлённых чисел баллов/% И СРОКОВ
     (unverified_deadlines)."""
-    from app.rag import followup, procedural, topics
+    from app.rag import followup, procedural
 
     # Оба дефера уходят БЕЗ подсказки (`input_hint` пуст): процедурная ветка сейчас не отвечает,
     # и предлагать следующий вопрос по ней — обещать то, чего сервис в этот момент не может.
@@ -995,19 +1022,11 @@ def _answer_procedural(query: str, search_query: str,
         return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
     # K12: намерение вопроса задаёт и приоритет документов в окне, и оговорки промпта. Тема
     # определяется детерминированно (регулярки), поэтому маршрутизация бесплатна и воспроизводима.
-    topic = topics.classify(search_query)
-    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
-    if not rules:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка процедуры
+    planned = plan_procedural(query, search_query)
+    if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
         return Answer(text=procedural.DEFLECTION, hits=[])
+    topic, rules, ctx, user = planned
 
-    ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
-    # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
-    # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
-    # закрывала памятью.
-    docs_ref = (documents_ref.documents_context_block(search_query)
-                if topic == topics.DOCUMENTS else None)
-    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
-                                        documents=docs_ref)
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
         messages.extend(history)
