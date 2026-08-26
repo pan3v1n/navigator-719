@@ -1373,6 +1373,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # ПЕРЕЧЕНЬ: он стоит поиска и мест в окне. Прежде оба висели на одном гейте (тема
     # `documents`), и вопрос «нужно ли заключение ТПП …» не получал НИ ТОГО, НИ ДРУГОГО.
     docs_topic = topics.classify(search_query) == topics.DOCUMENTS
+    doc_points: list = []      # ⚠ инициализация обязательна: ниже её читает шапка промпта
     if docs_topic or documents_ref.asks_about_conclusion(search_query):
         docs_ctx = documents_ref.documents_context_block(search_query)
     if docs_topic:
@@ -1420,6 +1421,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
         tnved=tnved, okpd2_suggestions=okpd2_suggestions, points_table_appended=bool(table),
         documents=docs_ctx,
+        # ⚠ Шапка блока зависит от того, есть ли в нём ПУНКТЫ Приказа: без них нельзя велеть
+        # модели ссылаться на их номера (ревью 26.08.2026).
+        documents_points=bool(docs_topic and doc_points),
     )
     # Генерация видит историю диалога (мультитёрн): messages = [system, ...история, текущий вопрос].
     messages = [{"role": "system", "content": NAVIGATOR_SYSTEM_PROMPT}]

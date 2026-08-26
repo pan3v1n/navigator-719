@@ -63,28 +63,30 @@ def context_of(query: str, okpd2: str | None) -> tuple[str, str] | None:
     ⚠ Процедурная ветка раньше отдавала None («до контекста не дошёл») — и это молча выкидывало из
     замера вопросы про состав документов, кластер жалоб №1 (`EV21` #119). Теперь она собирается
     тем же кодом, что и рантайм (`plan_procedural`), без вызова модели и без денег."""
-    planned = pipe._plan_answer(query, okpd2=okpd2 or None)
-    if not isinstance(planned, pipe.Answer):
-        return (getattr(planned, "grounding", "") or "",
-                planned.messages[-1]["content"] if planned.messages else "")
-    # Ранний путь. Процедурный — единственный, у которого контекст ЕСТЬ: meta, перевод кода и
-    # дефер отвечают заготовкой без корпуса, и мерить там нечего.
-    # ⚠ Условия повторяют рантайм ЦЕЛИКОМ, включая обе настройки. Возьми я только
-    # `is_procedural`, и при выключенном `PROCEDURAL_ANSWER_FROM_RULES` замер печатал бы размер
-    # контекста для вопроса, на который сервис отвечает дефером, — то есть мерил бы то, чего в
-    # проде не происходит.
+    # ⚠⚠ ПРОЦЕДУРНАЯ ВЕТКА ПРОВЕРЯЕТСЯ ДО `_plan_answer`, И ЭТО НЕ СТИЛЬ, А ЦЕНА ПРОГОНА.
+    # Первая редакция звала `_plan_answer` первым, а он для процедурного вопроса уходит в
+    # `_answer_procedural` и ГЕНЕРИРУЕТ ОТВЕТ DeepSeek — только потом возвращал `Answer`, и лишь
+    # после этого скрипт пересобирал контекст сам. То есть «замер без вызова модели и без денег»
+    # платил за две генерации на прогон и без ключа падал вместо того, чтобы мерить. Найдено
+    # ревью пакета 26.08.2026; до `EV21` процедурных кейсов в наборе не было, и путь не исполнялся.
+    # ⚠ Условия повторяют рантайм ЦЕЛИКОМ, включая обе настройки: при выключенном
+    # `PROCEDURAL_ANSWER_FROM_RULES` сервис отвечает дефером, и мерить контекст было бы нечего.
     from app.core.config import settings
     from app.rag import procedural
 
-    if not (settings.PROCEDURAL_DEFLECT_ENABLED and settings.PROCEDURAL_ANSWER_FROM_RULES):
-        return None
-    if not procedural.is_procedural(query, has_code=bool(okpd2)):
-        return None
-    proc = pipe.plan_procedural(query, query)
-    if proc is None:
-        return None
-    _topic, _rules, ctx, user = proc
-    return ctx, user
+    if (settings.PROCEDURAL_DEFLECT_ENABLED and settings.PROCEDURAL_ANSWER_FROM_RULES
+            and procedural.is_procedural(query, has_code=bool(okpd2))):
+        proc = pipe.plan_procedural(query, query)
+        if proc is None:
+            return None
+        _topic, _rules, ctx, user = proc
+        return ctx, user
+
+    planned = pipe._plan_answer(query, okpd2=okpd2 or None)
+    if isinstance(planned, pipe.Answer):
+        return None    # meta / перевод кода / дефер — контекста нет, мерить нечего
+    return (getattr(planned, "grounding", "") or "",
+            planned.messages[-1]["content"] if planned.messages else "")
 
 
 def main() -> int:

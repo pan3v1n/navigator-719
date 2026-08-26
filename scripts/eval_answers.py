@@ -124,10 +124,14 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
         cases = [c for c in cases if c.get("kind", "product") == kind]
     if cases_limit:
         cases = cases[:cases_limit]
-    check_documents_reference()   # положительный контроль ДО первого платного вызова
+    # Положительный контроль ДО первого платного вызова — вместе с источниками, которые ожидает
+    # сам набор: иначе `KeyError` вылез бы на середине прогона, уже потратив деньги.
+    check_documents_reference({s for c in cases for s in (c.get("expect_sources") or [])})
     rows = []
     for c in cases:
-        kind = c.get("kind", "product")
+        # ⚠ `case_kind`, а не `kind`: параметр функции с тем же именем задаёт ФИЛЬТР набора, и
+        # переприсваивание молча уничтожало его после первой итерации (ревью 26.08.2026).
+        case_kind = c.get("kind", "product")
         ans = answer(c["query"], okpd2=c.get("okpd2") or None, limit=limit)
         text = ans.text or ""
         # ⚠ Заземление берём У ОТВЕТА, а не пересобираем: пересборка — второе место, где
@@ -143,7 +147,7 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
 
         row = {
             "id": c["id"],
-            "kind": kind,
+            "kind": case_kind,
             "in_scope": c["in_scope"],
             "expected": c["expected_section"] or "—",
             "query": c["query"],
@@ -166,7 +170,7 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
             # с `term_affirmed` — сигнал сам по себе: одно из двух чтений неверно.
             "guard_phantom": list(ans.phantom_documents or []),
         }
-        if kind == "documents":
+        if case_kind == "documents":
             row.update(documents_row(c, text))
         rows.append(row)
     return rows

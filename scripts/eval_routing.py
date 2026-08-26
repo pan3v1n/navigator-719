@@ -95,14 +95,27 @@ def collect() -> list[dict]:
 
 
 def _why(q: str) -> str:
-    """Чем вызван процедурный маршрут — чтобы расхождение можно было объяснить, а не только увидеть."""
-    if procedural._FOOTNOTE_REF_RE.search(q):
+    """Чем вызван процедурный маршрут — чтобы расхождение можно было объяснить, а не только увидеть.
+
+    ⚠⚠ ПОРЯДОК ПОВТОРЯЕТ `is_procedural`, И ЭТО НЕ ПЕДАНТИЗМ. Первая редакция (а) не знала про
+    маршрут по ТЕМЕ, добавленный той же правкой, и печатала «?» для 5 строк из 61; (б) сверяла
+    сноску без условия «и кода в вопросе нет», которое стоит в рантайме; (в) при GENERIC-глаголе
+    БЕЗ якоря — когда маршрут дала тема — писала «GENERIC:…», то есть неверную причину. Врущее
+    объяснение хуже отсутствующего: инструмент затем и нужен, чтобы объяснять, ПОЧЕМУ маршрут
+    изменился (ревью пакета 26.08.2026)."""
+    from app.rag.okpd2_ref import has_okpd2_code
+
+    if procedural._FOOTNOTE_REF_RE.search(q) and not has_okpd2_code(q):
         return "сноска"
     m = procedural._STRONG_RE.search(q)
     if m:
         return f"STRONG:{' '.join(m.group(0).split())[:40]}"
     m = procedural._GENERIC_RE.search(q)
-    return f"GENERIC:{' '.join(m.group(0).split())[:40]}" if m else "?"
+    if m and procedural._ANCHOR_RE.search(q):
+        return f"GENERIC:{' '.join(m.group(0).split())[:40]}"
+    if procedural._has_routing_topic(q):
+        return f"ТЕМА:{topics.classify(q)}"
+    return "?"
 
 
 def summarize(rows: list[dict]) -> list[str]:

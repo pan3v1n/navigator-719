@@ -64,8 +64,13 @@ _SOURCE_RECOGNIZERS: dict[str, re.Pattern[str]] = {
 }
 
 
-def check_source_recognizers() -> None:
-    """Положительный контроль: каждый паттерн узнаёт ярлык, которым корпус подписывает документ."""
+def check_source_recognizers(expected_sources: set[str] | None = None) -> None:
+    """Положительный контроль: каждый паттерн узнаёт ярлык, которым корпус подписывает документ.
+
+    ⚠ И каждый ожидаемый набором источник ИМЕЕТ распознаватель. Без второй половины
+    `documents_row` падал бы `KeyError` — не на старте, а В СЕРЕДИНЕ прогона, уже после платных
+    вызовов: тест сверял `expect_sources` только с манифестом, поэтому добавить в кейс
+    `rules_registry` можно было при зелёной батарее (ревью пакета 26.08.2026)."""
     from app.core.manifest import documents as manifest_documents
 
     labels = {d["doc_type"]: (d.get("short") or d.get("title") or "")
@@ -77,6 +82,12 @@ def check_source_recognizers() -> None:
             f"Распознаватель источника не узнаёт ярлык корпуса: {blind}.\n"
             f"  ярлыки манифеста: { {dt: labels.get(dt) for dt in blind} }\n"
             "Замер отчитался бы «источник не назван» на верных ответах.")
+    missing = sorted((expected_sources or set()) - set(_SOURCE_RECOGNIZERS))
+    if missing:
+        raise SystemExit(
+            f"Набор ожидает источник, которого замер не умеет узнавать: {missing}.\n"
+            "Добавьте распознаватель в `_SOURCE_RECOGNIZERS` — иначе прогон упал бы на середине, "
+            "уже потратив вызовы модели.")
 
 # ⚠⚠ ТЕРМИН ПРОВЕРЯЕТСЯ НЕЗАВИСИМО ОТ РАНТАЙМ-ГАРДА, И ЭТО НЕ ДУБЛИРОВАНИЕ, А УСЛОВИЕ ПРОВЕРКИ.
 # `documents_ref.unverified_documents` — сам предохранитель продукта. Позови его оракул — и снятие
@@ -99,9 +110,9 @@ DENIAL_RE = re.compile(r"не\s+существ|нет\s+так|так(ого|о�
 DENIAL_WINDOW = 200
 
 
-def check_documents_reference() -> None:
+def check_documents_reference(expected_sources: set[str] | None = None) -> None:
     """Положительный контроль: распознаватели описывают РОВНО закрытый перечень продукта."""
-    check_source_recognizers()
+    check_source_recognizers(expected_sources)
     names = {d["name"] for d in CONFIRMING_DOCUMENTS}
     if names != set(_DOC_RECOGNIZERS):
         raise SystemExit(

@@ -256,6 +256,118 @@ class TestRoutingSweepPinsTheNumbers(unittest.TestCase):
                              f"пропусков стало больше: {[(r['set'], r['id']) for r in miss]}")
 
 
+class TestConclusionIsADocumentNotAnAct(unittest.TestCase):
+    """Ревью пакета 26.08.2026: «заключение» бывает ДЕЙСТВИЕМ, и широкий детектор это ловил.
+
+    Справочник с разъяснением про несуществующий документ уезжал в товарные вопросы вроде «какие
+    требования при ЗАКЛЮЧЕНИИ СПИК» — то есть `dbfc622` (термин приходит к тому, кто не спрашивал)
+    переоткрывался на товарной ветке."""
+
+    DOCUMENT = ("нужно ли заключение ТПП для внесения продукции в реестр",
+                "сертификаты СТ-1 или заключения ТПП о происхождении сырья/материалов",
+                "какой порядок получения заключения о подтверждении производства",
+                "а что есть Заключение Минпромторга?")
+    ACT = ("какие требования при заключении СПИК для 27.11.42",
+           "производим станки, заключение договора с поставщиком",
+           "заключение специального инвестиционного контракта — это что",
+           "что нужно для заключения соглашения о защите капвложений")
+
+    def test_document_forms_are_recognised(self):
+        for q in self.DOCUMENT:
+            with self.subTest(q=q[:44]):
+                self.assertTrue(documents_ref.asks_about_conclusion(q))
+
+    def test_act_forms_are_not(self):
+        for q in self.ACT:
+            with self.subTest(q=q[:44]):
+                self.assertFalse(documents_ref.asks_about_conclusion(q),
+                                 "справочник уедет в вопрос, где «заключение» — действие")
+
+    def test_plain_product_question_gets_no_reference(self):
+        """⚠ Следствие для `input_hint`: `documents_answered` считается по этому же блоку, и на
+        товарном вопросе он не должен предлагать продолжение про сроки документов."""
+        for q in ("производим этикетировочные машины", "требования к чиллерам"):
+            with self.subTest(q=q[:40]):
+                self.assertFalse(documents_ref.asks_about_conclusion(q))
+
+
+class TestChamberMembershipIsOutOf719(unittest.TestCase):
+    """Ревью пакета: новый якорь `ТПП` уводил вопросы о САМОЙ ПАЛАТЕ на процедурную ветку."""
+
+    def test_membership_questions_do_not_take_the_procedural_branch(self):
+        for q in ("какие документы нужны для вступления в ТПП",
+                  "какой перечень документов нужен для членства в ТПП",
+                  "сколько стоит членский взнос в торгово-промышленной палате"):
+            with self.subTest(q=q[:44]):
+                self.assertFalse(procedural.is_procedural(q),
+                                 "вопрос о членстве в палате отвечается по Правилам реестра")
+
+    def test_legitimate_719_questions_with_tpp_survive(self):
+        for q in ("какой срок рассмотрения документов в ТПП",
+                  "нужно ли заключение ТПП для внесения продукции в реестр",
+                  "как получить акт экспертизы в ТПП"):
+            with self.subTest(q=q[:44]):
+                self.assertTrue(procedural.is_procedural(q))
+
+    def test_entry_into_force_is_not_membership(self):
+        """⚠ «Вступление В СИЛУ постановления» — законный 719-вопрос: запрет по одному слову
+        «вступление» убил бы его, поэтому в правиле обязательно соседство с палатой."""
+        self.assertIsNone(procedural._CHAMBER_MEMBERSHIP_RE.search(
+            "когда вступление в силу новой редакции постановления 719"))
+
+    def test_the_class_is_in_the_negative_set(self):
+        """Предохранитель переживает сессию только в наборе: свип обязан видеть этот класс."""
+        cases = json.loads((ROOT / "scripts" / "eval_golden_negative.json")
+                           .read_text(encoding="utf-8"))["cases"]
+        membership = [c for c in cases if c.get("category") == "членство-в-палате"]
+        self.assertGreaterEqual(len(membership), 3, "класс исчез из негативного набора")
+
+
+class TestMeasurementToolsAfterReview(unittest.TestCase):
+    """Находки ревью в самих инструментах замера."""
+
+    def test_context_size_does_not_generate_for_procedural_cases(self):
+        """⚠⚠ `context_of` звал `_plan_answer` первым, а тот для процедурного вопроса ГЕНЕРИРУЕТ
+        ответ DeepSeek. «Замер без вызова модели и без денег» платил за две генерации на прогон."""
+        import eval_context_size as ecs
+        from app.rag import pipeline
+
+        calls = []
+        fake = [{"doc_type": "rules_registry", "text": "п.", "source_anchor": "Правила, п. 1",
+                 "_score": 1.0}]
+        with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake), \
+             unittest.mock.patch.object(pipeline, "_plan_answer",
+                                        lambda *a, **k: calls.append(1)):
+            got = ecs.context_of(CASE_50, "")
+        self.assertIsNotNone(got, "процедурный кейс снова не измеряется")
+        self.assertEqual(calls, [], "_plan_answer позван на процедурном вопросе — это платный путь")
+
+    def test_source_recognizer_control_covers_the_set(self):
+        """`KeyError` вылезал бы В СЕРЕДИНЕ прогона, уже потратив вызовы модели."""
+        import eval_documents
+
+        with self.assertRaises(SystemExit):
+            eval_documents.check_source_recognizers({"rules_registry"})
+        eval_documents.check_source_recognizers({"tpp_order_52"})   # известный — не бросает
+
+    def test_sweep_explains_every_procedural_route(self):
+        """Врущее объяснение хуже отсутствующего: инструмент затем и нужен, чтобы объяснять ПОЧЕМУ."""
+        import eval_routing
+
+        unexplained = [r for r in eval_routing.collect() if r["procedural"] and r["why"] == "?"]
+        self.assertEqual(unexplained, [], f"маршрут без объяснения: "
+                                          f"{[r['query'][:40] for r in unexplained]}")
+
+    def test_sweep_attributes_the_topic_route_correctly(self):
+        import eval_routing
+
+        rows = {(r["set"], r["id"]): r for r in eval_routing.collect()}
+        row = rows[("golden_rules", 12)]        # «как получить выписку из реестра»
+        self.assertTrue(row["procedural"])
+        self.assertTrue(row["why"].startswith("ТЕМА:"),
+                        f"причина маршрута названа неверно: {row['why']}")
+
+
 class TestAcceptanceCaseIsInTheSet(unittest.TestCase):
     """Критерий приёмки #120 обязан жить в наборе, а не в тексте issue."""
 
