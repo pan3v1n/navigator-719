@@ -77,14 +77,25 @@ class TestNarrowFormWouldBreakIt(unittest.TestCase):
     положительной половиной не ловит снятие предохранителя (урок `O3` #104)."""
 
     def test_old_pattern_sends_case_50_to_the_product_branch(self):
+        """⚠ Сигнал темы (`P3` #121) приходится глушить, и это не ослабление теста, а факт:
+        после `P3` кейс #50 держат ДВА независимых сигнала — маркер и тема `registry_entry` с
+        якорем «реестр». Оставь я тест как был, он зеленел бы за счёт темы и перестал бы измерять
+        маркер вовсе — то самое насыщение, от которого страдали `is_clarifying` и `_target_hit`."""
         narrow = [p for p in procedural._STRONG_PATTERNS
                   if "внесени|включени|внести|включит" not in p]
         narrow += [r"внесени\w*\s+в\s+реестр", r"включени\w*\s+в\s+реестр",
                    r"внести\s+\w+(?:\s+\w+){0,4}\s+в\s+реестр"]
         with unittest.mock.patch.object(procedural, "_STRONG_RE",
-                                        re.compile("|".join(narrow), re.I)):
+                                        re.compile("|".join(narrow), re.I)), \
+             unittest.mock.patch.object(procedural, "_has_routing_topic", lambda _q: False):
             self.assertFalse(procedural.is_procedural(CASE_50),
                              "узкий шаблон обязан воспроизводить дефект — иначе тест мерит не его")
+
+    def test_case_50_is_now_held_by_two_independent_signals(self):
+        """Оба сигнала по отдельности доводят кейс #50 до процедурной ветки — эшелонирование."""
+        with unittest.mock.patch.object(procedural, "_has_routing_topic", lambda _q: False):
+            self.assertTrue(procedural.is_procedural(CASE_50), "маркер перестал держать кейс")
+        self.assertTrue(procedural._has_routing_topic(CASE_50), "тема перестала держать кейс")
 
 
 class TestProductQuestionsStayOnTheProductBranch(unittest.TestCase):
@@ -169,6 +180,80 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
             _t, _r, _c, user = pipeline.plan_procedural(q, q)
         self.assertNotIn(_reference_header(), user,
                          "справочник приезжает туда, где о документах не спрашивали")
+
+
+class TestTopicRoutesTheQuestion(unittest.TestCase):
+    """`P3` #121 — намерение вопроса стало сигналом маршрута, но только с 719-якорем."""
+
+    def test_topic_sends_a_registry_question_to_the_rules_branch(self):
+        for q in ("как получить выписку из реестра",
+                  "что делать если заявку направили на доработку",
+                  "нужен ли специальный инвестиционный контракт для подтверждения производства"):
+            with self.subTest(q=q[:40]):
+                self.assertTrue(procedural.is_procedural(q), q)
+
+    def test_without_the_topic_signal_they_are_missed(self):
+        """⚠ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ: снятие сигнала темы обязано вернуть дефект."""
+        q = "как получить выписку из реестра"
+        with unittest.mock.patch.object(procedural, "_has_routing_topic", lambda _q: False):
+            self.assertFalse(procedural.is_procedural(q),
+                             "вопрос проходит и без темы — тест мерит не сигнал темы")
+
+    def test_topic_alone_is_not_enough_without_a_719_anchor(self):
+        """⚠⚠ Вне-719 админ-вопрос обязан остаться вне процедурной ветки.
+
+        Шапка модуля называет «порядок получения загранпаспорта» примером ровно этого. Первая
+        редакция правки его пропускала: `topics.classify` даёт ему `registry_entry` по словам
+        «порядок получения», потому что калиброван он на вопросах, которые гейт УЖЕ пропустил, —
+        вне-719 он не видел никогда."""
+        q = "порядок получения загранпаспорта"
+        self.assertIsNotNone(topics.classify(q),
+                             "пример перестал быть примером: тема больше не срабатывает")
+        self.assertFalse(procedural._has_routing_topic(q), "тема без якоря маршрутизирует")
+        self.assertFalse(procedural.is_procedural(q))
+
+    def test_documents_topic_never_routes_by_itself(self):
+        """⚠⚠ СМЕШАННЫЙ ВОПРОС ОБЯЗАН ОСТАТЬСЯ ТОВАРНЫМ — ради него и заводилась `K12`.
+
+        Тема `documents` единственная работает на ОБЕИХ ветках: «какие документы нужны для
+        этикетировщиков» получает блок документов ДОПОЛНИТЕЛЬНО к требованиям позиции. Пропусти
+        мы эту оговорку — вопрос уехал бы на процедурную ветку и потерял требования продукции."""
+        q = "какие документы нужны для этикетировщиков"
+        self.assertEqual(topics.classify(q), topics.DOCUMENTS)
+        self.assertFalse(procedural._has_routing_topic(q))
+        self.assertFalse(procedural.is_procedural(q), "смешанный вопрос уехал с товарной ветки")
+
+    def test_tpp_is_a_719_anchor(self):
+        """Список якорей называл ГИСП и Минпромторг — и пропускал ТПП, ради которой сервис и есть."""
+        self.assertTrue(procedural._ANCHOR_RE.search("какой срок рассмотрения документов в ТПП"))
+        self.assertTrue(procedural._ANCHOR_RE.search("чем подтвердить страну происхождения товара"))
+
+
+class TestRoutingSweepPinsTheNumbers(unittest.TestCase):
+    """Свип — предохранитель на пути правки маркеров, а не отчёт постфактум."""
+
+    def setUp(self):
+        import eval_routing
+
+        self.ev = eval_routing
+        self.rows = eval_routing.collect()
+
+    def test_no_out_of_scope_question_takes_the_procedural_branch(self):
+        """⚠⚠ Вторая регрессия, чуть не уехавшая: свип её сначала не считал вовсе."""
+        oos = [r for r in self.rows if r["class"] == "вне сферы" and r["procedural"]]
+        self.assertEqual(oos, [], f"вне-719 вопрос ушёл процедурной веткой: "
+                                  f"{[r['query'][:40] for r in oos]}")
+
+    def test_documents_cases_keep_their_expected_route(self):
+        wrong = [(r["id"], r["procedural"]) for r in self.rows if r["class"] == "документный"
+                 and r["procedural"] != self.ev.EXPECTED_DOCUMENTS_ROUTE.get(r["id"])]
+        self.assertEqual(wrong, [], "документный кейс сменил ветку")
+
+    def test_misses_do_not_grow(self):
+        """Число закреплено: 11 на 26.08.2026. Может только УБЫВАТЬ (остаток — `P3` #121)."""
+        miss = [r for r in self.rows if r["class"] == "процедурный" and not r["procedural"]]
+        self.assertLessEqual(len(miss), 11,
+                             f"пропусков стало больше: {[(r['set'], r['id']) for r in miss]}")
 
 
 class TestAcceptanceCaseIsInTheSet(unittest.TestCase):
