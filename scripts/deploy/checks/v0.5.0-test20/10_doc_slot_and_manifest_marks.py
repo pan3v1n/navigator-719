@@ -36,8 +36,16 @@ print(f"   OK: коллизия номеров жива ({', '.join(f'{g}: {len(
       f"— ключ (doc_type, point) необходим")
 
 # --- 2. Правило, которое некому исполнить, останавливает загрузку ------------------------------
+# ⚠⚠ ТЕ ЖЕ ДВА ФИЛЬТРА, ЧТО У ЗАГРУЗЧИКА (ревью PR #127, раунд 3). Гард в `load_rules_kb` видит
+# только документы СВОЕЙ коллекции и только ДЕЙСТВУЮЩИЕ — второе сделано намеренно находкой 18
+# того же ревью: у документа, который в индекс не идёт, `exclude_fragments` исполнять НЕКОМУ по
+# совершенно законной причине. Проверка без этих фильтров остановила бы ВЫКАТКУ там, где
+# загрузчик спокойно проходит: предохранитель строже защищаемого им кода — это предохранитель,
+# бьющий по ВЕРНОМУ состоянию.
 declared = {d["doc_type"] for d in kb_manifest.load_manifest()["documents"]
-            if d.get("exclude_fragments")}
+            if d.get("exclude_fragments")
+            and d.get("collection") == loader.COLLECTION
+            and d.get("status") == kb_manifest.ACTIVE}
 orphan = declared - loader.SUPPORTS_EXCLUDE_FRAGMENTS
 assert not orphan, (
     f"в манифесте есть exclude_fragments у документов, чей парсер их НЕ режет: {sorted(orphan)}. "
