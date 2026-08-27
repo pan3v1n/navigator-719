@@ -100,6 +100,56 @@ class TestOpenBoundNamesAClass(unittest.TestCase):
                          "имя без открытой границы принимает чужую позицию по пересечению слов")
 
 
+class TestShortTokenLimitIsOutsideTheRule(unittest.TestCase):
+    """⚠⚠ ЗАПИСАННЫЙ ПРЕДЕЛ: `_words` отбрасывает токены короче четырёх знаков.
+
+    Значит позиции, различимые ТОЛЬКО коротким числом или буквенным индексом, для правила
+    неразличимы: «Арматура кабельная … 110 - 500 кВ» против «… 6 - 35 кВ», «Хладон 14» против
+    «Хладон-125 ХП», «Жидкость Б-1» против «М-1». Сегодня это безопасно ровно потому, что ни одна
+    такая пара не попадает под строку `strict_name`, а вне `strict_name` функция не зовётся.
+    Тест держит именно это условие: появится примечание такой формы над такой парой — покраснеет
+    здесь, а не на бою, где это будет «правильное число, привязанное не к той позиции».
+    """
+
+    def test_short_token_collisions_stay_outside(self):
+        from collections import defaultdict
+
+        from app.rag.thresholds import _flat_thresholds, _words
+
+        strict_codes = {c for r in _flat_thresholds() if r.get("strict_name")
+                        for c in (r.get("codes") or [])}
+        groups = defaultdict(set)
+        for f in glob.glob(str(ROOT / "knowledge_base/pp719/structured/*.json")):
+            for rec in json.load(open(f, encoding="utf-8")):
+                name = (rec.get("product_name") or "").strip()
+                codes = tuple(sorted(rec.get("okpd2_codes") or []))
+                if name:
+                    groups[(_words(name), codes)].add(name)
+
+        risky = [(codes, sorted(names)) for (_w, codes), names in groups.items()
+                 if len(names) > 1 and any(c in strict_codes for c in codes)]
+        self.assertEqual(risky, [], f"пара, неразличимая по коротким токенам, попала под "
+                                    f"строку strict_name: {risky}")
+
+    def test_the_limit_is_real_and_not_imaginary(self):
+        """⚠ Положительный контроль: предел существует. Иначе тест выше зелен потому, что
+        неразличимых пар нет вовсе, — и перестанет что-либо охранять незаметно."""
+        from collections import defaultdict
+
+        from app.rag.thresholds import _words
+
+        groups = defaultdict(set)
+        for f in glob.glob(str(ROOT / "knowledge_base/pp719/structured/*.json")):
+            for rec in json.load(open(f, encoding="utf-8")):
+                name = (rec.get("product_name") or "").strip()
+                codes = tuple(sorted(rec.get("okpd2_codes") or []))
+                if name:
+                    groups[(_words(name), codes)].add(name)
+        collisions = [n for n in groups.values() if len(n) > 1]
+        self.assertGreater(len(collisions), 0,
+                           "неразличимых пар не осталось — предел исчез, обновить запись в коде")
+
+
 class TestRadiusIsPinned(unittest.TestCase):
     """⚠⚠ РАДИУС ЗАКРЕПЛЯЕТСЯ СРАВНЕНИЕМ, А НЕ НАБЛЮДЕНИЕМ ЗА ВЫКЛЮЧАТЕЛЯМИ.
 
