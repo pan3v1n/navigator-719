@@ -781,29 +781,44 @@ class TestCiGateRefusesTheWrongCommit(unittest.TestCase):
     остановил бы ЗАКОННУЮ выкатку.
     """
 
+    # ⚠⚠ ВЕСЬ ПРОГОН ИДЁТ ВНЕ РЕПОЗИТОРИЯ (уточнено 27.08.2026). Прежняя редакция запускалась с
+    # `cwd=ROOT` и держалась на том, что тега релиза НЕ СУЩЕСТВУЕТ нигде: как только тег был
+    # создан перед выкаткой, `$PWD` его зарезолвил, гейт нашёл источник и тест покраснел на
+    # ВЕРНОМ коде. Тот же класс, что находка 2 раунда 5: тест, зависящий от отсутствия тега.
+    # Теперь единственный репозиторий поблизости — фикстура БЕЗ тега, как на VM.
+    # ⚠ Маркеры обязаны СОЙТИСЬ, иначе прогон останавливается ДО гейта и тест ничего не проверяет.
     SETUP = r"""
 TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
-mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/app"
+ROOT="$2"; PROFILE="$1"; DEPLOY="$3"; TAG="$4"; shift 4
+mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/app" "$TD/tree"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
 echo x > "$TD/src/app/core/config.py"
-tar -czf "$TD/pkg/navigator-719-$3.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
+for rel in "$@"; do
+  mkdir -p "$TD/app/$(dirname "$rel")"
+  cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
+done
+cp -r "$DEPLOY" "$TD/tree/deploy" || { echo "COPY-FAILED deploy"; exit 3; }
+tar -czf "$TD/pkg/navigator-719-$TAG.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
 # Репозиторий БЕЗ тега релиза — ровно то, чем является $APP на VM.
-cd "$TD/app" && git init -q . && git config user.email t@t && git config user.name t   && echo x > f && git add f && git commit -qm "prev release" && cd - >/dev/null
-PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app" bash "$1" --release "$2" --dry-run
+cd "$TD/app" && git init -q . && git config user.email t@t && git config user.name t   && git add -A && git commit -qm "prev release" >/dev/null && cd "$TD/pkg" || exit 3
+PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.sh" --release "$PROFILE" --dry-run
 """
 
     def test_repo_without_the_release_tag_is_not_accepted_as_a_source(self):
-        profile = sorted(RELEASES.glob("*.env"))[-1]
-        tag = re.search(r'TAG="([^"]+)"', profile.read_text(encoding="utf-8")).group(1)
+        profile, tag = TestCiGateIsReachableWithAPackageNearby._profile_with_an_existing_tag(self)
+        files = sorted({m[0] for m in TestReleaseProfiles.MARKER_RE.findall(
+            profile.read_text(encoding="utf-8")) if "/" in m[0]})
         env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
         r = subprocess.run(
-            [shutil.which("bash"), "-c", self.SETUP, "_", str(DEPLOY_SH), str(profile), tag],
-            capture_output=True, text=True, encoding="utf-8", errors="replace",
-            cwd=str(ROOT), env=env)
+            [shutil.which("bash"), "-c", self.SETUP, "_", str(profile), str(ROOT),
+             str(DEPLOY_DIR), tag, *files],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+        self.assertNotIn("COPY-FAILED", r.stdout + r.stderr)
         self.assertNotIn("TAR-FAILED", r.stdout, "сценарий не воспроизведён")
-        self.assertIn("сверяю маркеры с ПАКЕТОМ", r.stdout, f"развилка не та:\n{r.stdout}")
+        self.assertIn("маркеры сошлись", r.stdout,
+                      f"прогон остановился ДО гейта — тест ничего не проверил:\n{r.stdout}")
         self.assertIn("CI НЕ ПРОВЕРЕН", r.stdout,
                       f"репозиторий без тега принят за источник:\n{r.stdout}")
         self.assertNotIn("коммит под проверкой", r.stdout,

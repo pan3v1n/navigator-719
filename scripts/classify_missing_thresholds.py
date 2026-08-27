@@ -74,6 +74,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _name_overlap,
+    _rating_conflict,
     _flat_thresholds,
     _norm,
     _strip_fn,
@@ -210,6 +211,15 @@ def classify(rec: dict, rows: list[dict]) -> dict:
 
     def _speaks_about_us(row: dict) -> bool:
         nm = [n for n in (row.get("names") or []) if n.strip()]
+        # ⚠⚠ ВЕТО ПО НОМИНАЛУ — ТО ЖЕ, ЧТО В РАНТАЙМЕ (`K2-2` #128, 27.08.2026). Правило «≥2
+        # значимых слова» не различает наименования, расходящиеся только квалификатором и
+        # номиналом: «Выключатель … на токи до 2000 А» и названный в прим. 27 «Выключатель
+        # (ВОЗДУШНЫЙ) … на токи до 6300 А» совпадают по девяти словам. Без вето классификатор
+        # считает непривязку НАШИМ дефектом (`defect_unattached`) там, где рантайм отказывается
+        # ВЕРНО, — то есть проверка строже защищаемого ею кода, и гейт краснеет на верном
+        # состоянии. Импорт, а не копия: вторая редакция правила разошлась бы с первой.
+        if nm and _rating_conflict(name, nm):
+            return False
         return (not nm
                 or _name_overlap(name, nm) >= 2
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
