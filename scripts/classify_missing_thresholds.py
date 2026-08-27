@@ -74,6 +74,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _name_overlap,
+    _names_this_position,
     _flat_thresholds,
     _norm,
     _strip_fn,
@@ -125,8 +126,13 @@ def note_rows() -> list[dict]:
         if note_scope(r.get("note")) != "general":
             continue
         if _BALL_RE.search(r.get("threshold") or ""):
+            # ⚠ `strict_name` ПЕРЕНОСИТСЯ ИЗ ИСТОЧНИКА (ревью PR #133). Рантайм применяет вето
+            # по номиналу только к строкам с этим признаком, а строки классификатора его не
+            # несли вовсе — 0 из 419. Без переноса условие «то же, что в рантайме» отключало
+            # вето здесь целиком, и верный отказ рантайма снова считался НАШИМ дефектом.
             out.append({"codes": r["codes"], "names": r["names"], "note": r["note"],
-                        "quote": (r.get("threshold") or "").strip(), "kind": "список"})
+                        "quote": (r.get("threshold") or "").strip(), "kind": "список",
+                        "strict_name": bool(r.get("strict_name"))})
     for t in _tables():
         if note_scope(t["note"]) != "general":
             continue
@@ -135,8 +141,9 @@ def note_rows() -> list[dict]:
             if not _BALL_RE.search(" ".join(by_year.values())):
                 continue
             quote = "; ".join(f"{k} — {v}" for k, v in list(by_year.items())[:2])
+            # Табличные строки в рантайме идут другой веткой, вето к ним не применяется.
             out.append({"codes": row["codes"], "names": [row["name"]], "note": t["note"],
-                        "quote": quote, "kind": "таблица"})
+                        "quote": quote, "kind": "таблица", "strict_name": False})
     return out
 
 
@@ -210,6 +217,20 @@ def classify(rec: dict, rows: list[dict]) -> dict:
 
     def _speaks_about_us(row: dict) -> bool:
         nm = [n for n in (row.get("names") or []) if n.strip()]
+        # ⚠⚠ ВЕТО ПО НОМИНАЛУ — ТО ЖЕ, ЧТО В РАНТАЙМЕ (`K2-2` #128, 27.08.2026). Правило «≥2
+        # значимых слова» не различает наименования, расходящиеся только квалификатором и
+        # номиналом: «Выключатель … на токи до 2000 А» и названный в прим. 27 «Выключатель
+        # (ВОЗДУШНЫЙ) … на токи до 6300 А» совпадают по девяти словам. Без вето классификатор
+        # считает непривязку НАШИМ дефектом (`defect_unattached`) там, где рантайм отказывается
+        # ВЕРНО, — то есть проверка строже защищаемого ею кода, и гейт краснеет на верном
+        # состоянии. Импорт, а не копия: вторая редакция правила разошлась бы с первой.
+        # ⚠⚠ ДЛЯ `strict_name` — ТОТ ЖЕ ПРЕДИКАТ, ЧТО В РАНТАЙМЕ (ревью PR #133). Импорт, а не
+        # копия: вторая редакция правила разошлась бы с первой. Условие `strict_name` переносится
+        # ВМЕСТЕ с предикатом — рантайм применяет его только к таким строкам, и проверка, идущая
+        # шире защищаемого кода, объявила бы «не наш дефект» там, где дефект настоящий, при гейте
+        # `attachment_defects == 0`.
+        if row.get("strict_name"):
+            return _names_this_position(name, nm)
         return (not nm
                 or _name_overlap(name, nm) >= 2
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
