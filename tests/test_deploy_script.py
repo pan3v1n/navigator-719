@@ -322,6 +322,17 @@ class TestCiGate(unittest.TestCase):
         dry = code.split('if [ "$DRY_RUN" = "1" ]', 1)[-1].split("exit 0", 1)[0]
         self.assertIn("ci_gate ", dry, "гейт не вызывается в сухом прогоне")
 
+    def test_real_deploy_gate_also_requires_a_resolvable_tag(self):
+        """РАУНД 4: требование резолвящегося тега получил ТОЛЬКО сухой прогон.
+
+        То есть защищённым оказался необязательный путь, а незащищённым — тот, который и
+        выкатывает. На VM `$APP` это ПРЕДЫДУЩИЙ релиз, и `ci_gate` доложил бы о чужом коммите."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        i = code.index('CI_SRC="${SRC:-}"')
+        loop = code[i:code.index("ci_gate", i)]
+        self.assertIn("rev-parse", loop,
+                      "кандидат в источники гейта берётся по одному .git — тег не проверяется")
+
     def test_gate_runs_on_a_real_deploy_too(self):
         """⚠ Первая редакция звала гейт ТОЛЬКО в `--dry-run`, а ничто не требует, чтобы сухой
         прогон вообще состоялся: самая очевидная форма запуска (первая строка usage) обходила
@@ -657,13 +668,21 @@ class TestBuildkitIsActuallyDisabled(unittest.TestCase):
 
     def test_prefix_puts_env_after_sudo_for_both_shapes_of_DOCKER(self):
         """⚠ `$DOCKER` бывает и `sudo -n docker`, и голым `docker` — обе формы обязаны работать."""
+        # ⚠ ПУТЕВАЯ ФОРМА ОБЯЗАТЕЛЬНА В НАБОРЕ (ревью PR #127, раунд 4). Прежняя реализация
+        # ловила суффикс « docker», и документированное переопределение путём молча уходило в
+        # ветку «без sudo», то есть собиралось обратно в `env` ПЕРЕД `sudo` — ту самую форму,
+        # которую этот блок убирает. Прежний тест брал только две формы и был зелёным.
         for docker, want in (("sudo -n docker", "sudo -n env DOCKER_BUILDKIT=0 docker"),
-                             ("docker", "env DOCKER_BUILDKIT=0 docker")):
+                             ("docker", "env DOCKER_BUILDKIT=0 docker"),
+                             ("sudo -n /usr/bin/docker",
+                              "sudo -n env DOCKER_BUILDKIT=0 /usr/bin/docker"),
+                             ("sudo -n -u root docker",
+                              "sudo -n -u root env DOCKER_BUILDKIT=0 docker")):
             r = subprocess.run(
                 [shutil.which("bash"), "-c",
-                 'DOCKER="$1"; if [ "${DOCKER% docker}" != "$DOCKER" ]; then '
-                 'echo "${DOCKER% docker} env DOCKER_BUILDKIT=0 docker"; '
-                 'else echo "env DOCKER_BUILDKIT=0 $DOCKER"; fi', "_", docker],
+                 'DOCKER="$1"; case "$DOCKER" in sudo|sudo[[:space:]]*) '
+                 'echo "${DOCKER% *} env DOCKER_BUILDKIT=0 ${DOCKER##* }";; '
+                 '*) echo "env DOCKER_BUILDKIT=0 $DOCKER";; esac', "_", docker],
                 capture_output=True, text=True)
             self.assertEqual(r.stdout.strip(), want, f"для DOCKER={docker!r}")
 

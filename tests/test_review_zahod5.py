@@ -117,8 +117,16 @@ class TestExcludeFragmentsHasSomeoneToHonorIt(unittest.TestCase):
         m = self._mod()
         from app.core import manifest as kb
 
+        # ⚠⚠ ТЕ ЖЕ ДВА ФИЛЬТРА, ЧТО У ГАРДА (ревью PR #127, раунд 4). Гард в `load_rules_kb`
+        # видит только документы СВОЕЙ коллекции и только ДЕЙСТВУЮЩИЕ — второе сделано
+        # намеренно: у документа, который в индекс не идёт, `exclude_fragments` исполнять
+        # НЕКОМУ по законной причине. Тест без этих фильтров КРАСНЕЕТ на верном коде, стоит
+        # дописать правило утратившему силу документу или записи другого корпуса. Проверка,
+        # строже защищаемого ею кода, — предохранитель, бьющий по верному состоянию.
         declared = {d["doc_type"] for d in kb.load_manifest()["documents"]
-                    if d.get("exclude_fragments")}
+                    if d.get("exclude_fragments")
+                    and d.get("collection") == m.COLLECTION
+                    and d.get("status") == kb.ACTIVE}
         orphan = declared - m.SUPPORTS_EXCLUDE_FRAGMENTS
         self.assertEqual(orphan, set(),
                          f"правило объявлено, а резать его некому: {sorted(orphan)}")
