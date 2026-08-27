@@ -74,7 +74,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _name_overlap,
-    _rating_conflict,
+    _names_this_position,
     _flat_thresholds,
     _norm,
     _strip_fn,
@@ -224,15 +224,13 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         # считает непривязку НАШИМ дефектом (`defect_unattached`) там, где рантайм отказывается
         # ВЕРНО, — то есть проверка строже защищаемого ею кода, и гейт краснеет на верном
         # состоянии. Импорт, а не копия: вторая редакция правила разошлась бы с первой.
-        # ⚠ УСЛОВИЕ `strict_name` ПЕРЕНОСИТСЯ ВМЕСТЕ С ВЕТО (ревью PR #133). Рантайм применяет
-        # вето только к строкам `strict_name` (`thresholds.py`), а здесь оно стояло на ЛЮБОЙ
-        # покрывающей строке. Для групповой строки (прим. 7/37), где имя законно называет
-        # представителя группы, классификатор объявил бы «не наш дефект» там, где рантайм вето
-        # не применяет вовсе, — и настоящий `defect_unattached` оказался бы замаскирован при
-        # гейте `attachment_defects == 0`. Радиус сегодня нулевой (таких строк в корпусе нет),
-        # но расхождение проверки с проверяемым кодом — это и есть класс, который ловит гейт.
-        if nm and row.get("strict_name") and _rating_conflict(name, nm):
-            return False
+        # ⚠⚠ ДЛЯ `strict_name` — ТОТ ЖЕ ПРЕДИКАТ, ЧТО В РАНТАЙМЕ (ревью PR #133). Импорт, а не
+        # копия: вторая редакция правила разошлась бы с первой. Условие `strict_name` переносится
+        # ВМЕСТЕ с предикатом — рантайм применяет его только к таким строкам, и проверка, идущая
+        # шире защищаемого кода, объявила бы «не наш дефект» там, где дефект настоящий, при гейте
+        # `attachment_defects == 0`.
+        if row.get("strict_name"):
+            return _names_this_position(name, nm)
         return (not nm
                 or _name_overlap(name, nm) >= 2
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
