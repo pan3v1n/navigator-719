@@ -550,19 +550,23 @@ def load_records(manifest: dict | None = None) -> tuple[list[dict], str]:
         dt = doc["doc_type"]
         title = doc.get("short") or doc.get("title") or dt
 
-        # Предохранитель на путь действия: правило, которое некому исполнить, останавливает
-        # загрузку здесь, а не превращается в тихо проиндексированный фрагмент.
-        if doc.get("exclude_fragments") and dt not in SUPPORTS_EXCLUDE_FRAGMENTS:
-            sys.exit(f"{dt}: в манифесте есть exclude_fragments, но парсер этого документа их НЕ "
-                     f"режет (режут только: {', '.join(sorted(SUPPORTS_EXCLUDE_FRAGMENTS))}). "
-                     f"Фрагмент уехал бы в индекс молча — добавьте вызов cut_fragments в парсер "
-                     f"и допишите doc_type в SUPPORTS_EXCLUDE_FRAGMENTS.")
-
         if doc.get("status") != kb_manifest.ACTIVE:
             # Не молча: исключение документа — решение, и оно обязано быть видно в логе загрузки.
             print(f"[skip] {title}: статус «{doc.get('status')}» — в индекс НЕ идёт "
                   f"(до {doc.get('valid_to') or '—'})")
             continue
+
+        # Предохранитель на путь действия: правило, которое некому исполнить, останавливает
+        # загрузку здесь, а не превращается в тихо проиндексированный фрагмент.
+        # ⚠ ПОСЛЕ пропуска по статусу, а не до (ревью PR #127, 27.08.2026): документ, который в
+        # индекс не идёт, парсером не трогается вовсе, и его `exclude_fragments` исполнять
+        # НЕКОМУ по совершенно законной причине. Гард до пропуска останавливал бы всю загрузку
+        # из-за утратившего силу документа — предохранитель, бьющий по верному состоянию.
+        if doc.get("exclude_fragments") and dt not in SUPPORTS_EXCLUDE_FRAGMENTS:
+            sys.exit(f"{dt}: в манифесте есть exclude_fragments, но парсер этого документа их НЕ "
+                     f"режет (режут только: {', '.join(sorted(SUPPORTS_EXCLUDE_FRAGMENTS))}). "
+                     f"Фрагмент уехал бы в индекс молча — добавьте вызов cut_fragments в парсер "
+                     f"и допишите doc_type в SUPPORTS_EXCLUDE_FRAGMENTS.")
 
         try:
             sources = kb_manifest.resolve_sources(doc)

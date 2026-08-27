@@ -86,14 +86,26 @@ BREAKERS = frozenset({
 KNOWN_COLLAPSED = {FISHING, REEFERS, BREAKERS}
 
 shared: dict[str, set] = {}
+scanned = multi = 0
 for f in glob.glob("knowledge_base/pp719/structured/*.json"):
     for rec in json.load(open(f, encoding="utf-8")):
         if (rec.get("min_threshold") or "").strip():
             continue  # у позиции свой порог в приложении — примечание не при чём
+        scanned += 1
         name = (rec.get("product_name") or "").strip()
         got = lookup_threshold(rec.get("okpd2_codes") or [], name, rec.get("section_roman"))
         if name and got and MARK in got:
+            multi += 1
             shared.setdefault(got, set()).add(name)
+
+# ⚠⚠ ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ (ревью PR #127, 27.08.2026). Без него «новых склеек нет» и «я ничего
+# не посмотрел» неразличимы снаружи: пустой glob (проверка идёт через `docker compose exec -T app
+# python -`, то есть с чужим cwd) или сменившаяся строка MARK давали бы `shared = {}` и бодрое
+# «OK: склеек 0». У соседней проверки такой контроль есть (FLOOR), у этой не было.
+# Замерено 27.08.2026: просмотрено 1141, многоблочных 16. Полы ниже замера — законный рост
+# корпуса не красит проверку в красное.
+assert scanned >= 900, f"просмотрено всего {scanned} записей — корпус не на месте, проверка слепа"
+assert multi >= 8, f"многоблочных порогов найдено {multi} — MARK разошёлся с thresholds.py?"
 
 collapsed = {frozenset(v) for v in shared.values() if len(v) > 1}
 new = collapsed - KNOWN_COLLAPSED
@@ -104,5 +116,5 @@ assert not new, ("НОВАЯ склейка: разные позиции пол�
 # исчезнувшая группа означает, что позиции переименовали или потеряли порог, — это надо увидеть.
 if gone:
     print(f"   ⚠ склейка исчезла (проверить, что порог не потерян): {[sorted(g)[:2] for g in gone]}")
-print(f"   OK: склеек {len(collapsed)}, все известные; новых нет "
+print(f"   OK: просмотрено {scanned}, многоблочных {multi}, склеек {len(collapsed)} — все известные; новых нет "
       f"(суда {len(FISHING)} + рефрижераторы {len(REEFERS)} + выключатели {len(BREAKERS)} — долг)")

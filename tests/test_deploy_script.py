@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -312,9 +313,14 @@ class TestCiGate(unittest.TestCase):
 
     def test_gate_is_wired_into_dry_run(self):
         """Функция может существовать и не вызываться — проверяем именно ВЫЗОВ."""
+        # ⚠ УТВЕРЖДЕНИЕ ЦЕЛИТСЯ В СУХОЙ ПРОГОН, А НЕ В ЛЮБОЙ ВЫЗОВ (ревью PR #127). Прежняя
+        # редакция искала `ci_gate ` во всём файле — этому удовлетворял вызов на РЕАЛЬНОЙ
+        # выкатке, и удаление вызова из сухого прогона оставило бы тест зелёным при сообщении
+        # «гейт не вызывается в сухом прогоне».
         code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
         self.assertIn("ci_gate()", code, "функция гейта исчезла из скрипта")
-        self.assertIn("ci_gate ", code, "гейт не вызывается в сухом прогоне")
+        dry = code.split('if [ "$DRY_RUN" = "1" ]', 1)[-1].split("exit 0", 1)[0]
+        self.assertIn("ci_gate ", dry, "гейт не вызывается в сухом прогоне")
 
     def test_gate_runs_on_a_real_deploy_too(self):
         """⚠ Первая редакция звала гейт ТОЛЬКО в `--dry-run`, а ничто не требует, чтобы сухой
@@ -680,6 +686,73 @@ class TestEveryTestInThisFileActuallyRuns(unittest.TestCase):
         self.assertEqual(len(mains), 1, "блок __main__ должен быть ровно один")
         after = [type(n).__name__ for n in tree.body[mains[0] + 1:]]
         self.assertFalse(after, f"после unittest.main() снова стоит код — он не выполнится: {after}")
+
+
+class TestCiGateRefusesTheWrongCommit(unittest.TestCase):
+    """Ревью PR #127: фолбэк на `$APP` брал ПРЕДЫДУЩИЙ релиз и докладывал о ЧУЖОМ коммите.
+
+    ⚠⚠ На VM `$APP` — развёрнутая рабочая копия прошлого релиза, и нового тега туда не приносит
+    ничто: доставка идёт тарболом, не клоном. `ci_gate` откатился бы на `HEAD`, то есть на
+    прошлый релиз, и напечатал «CI зелёный» про коммит, который НЕ едет, — ровно класс `O3` #104,
+    ради которого гейт и заведён. Обратная беда не легче: красный прогон на прошлом коммите
+    остановил бы ЗАКОННУЮ выкатку.
+    """
+
+    SETUP = r"""
+TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
+mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/app"
+printf '#!/bin/sh
+echo success
+' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
+echo x > "$TD/src/app/core/config.py"
+tar -czf "$TD/pkg/navigator-719-$3.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
+# Репозиторий БЕЗ тега релиза — ровно то, чем является $APP на VM.
+cd "$TD/app" && git init -q . && git config user.email t@t && git config user.name t   && echo x > f && git add f && git commit -qm "prev release" && cd - >/dev/null
+PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app" bash "$1" --release "$2" --dry-run
+"""
+
+    def test_repo_without_the_release_tag_is_not_accepted_as_a_source(self):
+        profile = sorted(RELEASES.glob("*.env"))[-1]
+        tag = re.search(r'TAG="([^"]+)"', profile.read_text(encoding="utf-8")).group(1)
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
+        r = subprocess.run(
+            [shutil.which("bash"), "-c", self.SETUP, "_", str(DEPLOY_SH), str(profile), tag],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), env=env)
+        self.assertNotIn("TAR-FAILED", r.stdout, "сценарий не воспроизведён")
+        self.assertIn("сверяю маркеры с ПАКЕТОМ", r.stdout, f"развилка не та:\n{r.stdout}")
+        self.assertIn("CI НЕ ПРОВЕРЕН", r.stdout,
+                      f"репозиторий без тега принят за источник:\n{r.stdout}")
+        self.assertNotIn("коммит под проверкой", r.stdout,
+                         f"гейт доложил о ЧУЖОМ коммите:\n{r.stdout}")
+        self.assertEqual(r.returncode, 0, "невозможность проверить — не провал выкатки")
+
+
+class TestCorpusCheckHasAPositiveControl(unittest.TestCase):
+    """Ревью PR #127: корпусная половина `70_…` печатала OK на НУЛЕ данных.
+
+    ⚠⚠ «Новых склеек нет» и «я ничего не посмотрел» снаружи неразличимы: пустой glob (проверка
+    идёт через `docker compose exec -T app python -`, то есть с чужим cwd) или сменившаяся строка
+    `MARK` давали `shared = {}` → `assert not new` проходил → «OK: склеек 0». У соседней проверки
+    `80_…` контроль был (`FLOOR`), у этой не было. Правило проекта: у инструмента, чьё «нет» —
+    результат, обязан быть положительный контроль.
+    """
+
+    CHECK = (DEPLOY_DIR / "checks" / "common" / "70_lead_block_belongs_to_position.py")
+
+    def test_check_fails_loudly_when_the_corpus_is_not_there(self):
+        """Запуск с чужим cwd: корпус не найден → проверка обязана УПАСТЬ, а не отчитаться."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1",
+                   "PYTHONIOENCODING": "utf-8"}
+            r = subprocess.run([sys.executable, "-"], stdin=open(self.CHECK, encoding="utf-8"),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", cwd=td, env=env)
+            self.assertNotEqual(r.returncode, 0,
+                                f"проверка отчиталась на пустом корпусе:\n{r.stdout}")
+            self.assertNotIn("склеек 0, все известные", r.stdout,
+                             "проверка напечатала бодрое OK, ничего не посмотрев")
 
 
 if __name__ == "__main__":
