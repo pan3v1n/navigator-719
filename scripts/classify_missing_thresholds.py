@@ -126,8 +126,13 @@ def note_rows() -> list[dict]:
         if note_scope(r.get("note")) != "general":
             continue
         if _BALL_RE.search(r.get("threshold") or ""):
+            # ⚠ `strict_name` ПЕРЕНОСИТСЯ ИЗ ИСТОЧНИКА (ревью PR #133). Рантайм применяет вето
+            # по номиналу только к строкам с этим признаком, а строки классификатора его не
+            # несли вовсе — 0 из 419. Без переноса условие «то же, что в рантайме» отключало
+            # вето здесь целиком, и верный отказ рантайма снова считался НАШИМ дефектом.
             out.append({"codes": r["codes"], "names": r["names"], "note": r["note"],
-                        "quote": (r.get("threshold") or "").strip(), "kind": "список"})
+                        "quote": (r.get("threshold") or "").strip(), "kind": "список",
+                        "strict_name": bool(r.get("strict_name"))})
     for t in _tables():
         if note_scope(t["note"]) != "general":
             continue
@@ -136,8 +141,9 @@ def note_rows() -> list[dict]:
             if not _BALL_RE.search(" ".join(by_year.values())):
                 continue
             quote = "; ".join(f"{k} — {v}" for k, v in list(by_year.items())[:2])
+            # Табличные строки в рантайме идут другой веткой, вето к ним не применяется.
             out.append({"codes": row["codes"], "names": [row["name"]], "note": t["note"],
-                        "quote": quote, "kind": "таблица"})
+                        "quote": quote, "kind": "таблица", "strict_name": False})
     return out
 
 
@@ -218,7 +224,14 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         # считает непривязку НАШИМ дефектом (`defect_unattached`) там, где рантайм отказывается
         # ВЕРНО, — то есть проверка строже защищаемого ею кода, и гейт краснеет на верном
         # состоянии. Импорт, а не копия: вторая редакция правила разошлась бы с первой.
-        if nm and _rating_conflict(name, nm):
+        # ⚠ УСЛОВИЕ `strict_name` ПЕРЕНОСИТСЯ ВМЕСТЕ С ВЕТО (ревью PR #133). Рантайм применяет
+        # вето только к строкам `strict_name` (`thresholds.py`), а здесь оно стояло на ЛЮБОЙ
+        # покрывающей строке. Для групповой строки (прим. 7/37), где имя законно называет
+        # представителя группы, классификатор объявил бы «не наш дефект» там, где рантайм вето
+        # не применяет вовсе, — и настоящий `defect_unattached` оказался бы замаскирован при
+        # гейте `attachment_defects == 0`. Радиус сегодня нулевой (таких строк в корпусе нет),
+        # но расхождение проверки с проверяемым кодом — это и есть класс, который ловит гейт.
+        if nm and row.get("strict_name") and _rating_conflict(name, nm):
             return False
         return (not nm
                 or _name_overlap(name, nm) >= 2

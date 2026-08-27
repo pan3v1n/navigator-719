@@ -31,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from app.rag import thresholds  # noqa: E402
 from app.rag.thresholds import _rating_conflict, _ratings, lookup_threshold  # noqa: E402
 
 NAMED_BY_NOTE = ("Выключатель автоматический (воздушный) низковольтный в литом корпусе "
@@ -77,27 +78,62 @@ class TestRatingIsIdentity(unittest.TestCase):
 
 
 class TestRadiusIsPinned(unittest.TestCase):
-    """⚠ Радиус закрепляется ЧИСЛОМ: правка снимает порог, а снятие опаснее добавления.
+    """⚠⚠ РАДИУС ЗАКРЕПЛЯЕТСЯ СРАВНЕНИЕМ С ОТКЛЮЧЁННЫМ ВЕТО, А НЕ НАБЛЮДЕНИЕМ ЗА ВЫКЛЮЧАТЕЛЯМИ.
 
-    Замер 27.08.2026 по всем позициям без собственного порога: потеряно 1, появилось 0,
-    изменено 0. Если правка начнёт снимать пороги шире — тест покраснеет здесь, а не на бою.
+    Первая редакция теста фильтровала записи по `"ыключател" in name` и утверждала, что покраснеет,
+    если правка начнёт снимать пороги шире. Не покраснела бы: расширение вето на трансформаторы,
+    кабели или компрессоры (у всех в наименованиях есть «кВ», «кг», «мм») она не видела вовсе.
+    Вдобавок она проверяла ГРАНИЦУ («выключателей без порога не больше четырёх»), а не РАЗНОСТЬ,
+    то есть не могла отличить «вето сняло порог» от «его там никогда не было». Профиль
+    `v0.5.0-test21.env` ссылается на этот радиус как на гарантию релиза — значит мерить надо
+    честно: прогнать корпус ДВАЖДЫ, с вето и без него, и сверить симметрическую разность.
+
+    ⚠ Вето умеет ТОЛЬКО СНИМАТЬ порог. Поэтому расширение радиуса — это всегда потерянные числа
+    у эксперта, класс «Мочеприемников», который проект считает дороже исправляемого.
     """
 
-    def test_exactly_one_position_loses_its_note_threshold(self):
-        lost = []
-        for f in glob.glob(str(ROOT / "knowledge_base/pp719/structured/*.json")):
-            for rec in json.load(open(f, encoding="utf-8")):
-                if (rec.get("min_threshold") or "").strip():
-                    continue
-                name = (rec.get("product_name") or "").strip()
-                if not name:
-                    continue
-                if lookup_threshold(rec.get("okpd2_codes") or [], name,
-                                    rec.get("section_roman")) is None and "ыключател" in name:
-                    lost.append(name)
-        self.assertIn(NOT_NAMED, lost, "целевая позиция снова получает чужой порог")
-        # Прочие выключатели без порога были такими и до правки — «модульные до 125 А» и т. п.
-        self.assertLessEqual(len(lost), 4, f"порогов снято больше ожидаемого: {lost}")
+    @staticmethod
+    def _sweep():
+        """(с вето, без вето) по ВСЕМ записям без собственного порога."""
+        with_veto, without = {}, {}
+        real = thresholds._rating_conflict
+        try:
+            for f in glob.glob(str(ROOT / "knowledge_base/pp719/structured/*.json")):
+                for rec in json.load(open(f, encoding="utf-8")):
+                    if (rec.get("min_threshold") or "").strip():
+                        continue
+                    name = (rec.get("product_name") or "").strip()
+                    if not name:
+                        continue
+                    codes, sec = rec.get("okpd2_codes") or [], rec.get("section_roman")
+                    thresholds._rating_conflict = real
+                    with_veto[name] = thresholds.lookup_threshold(codes, name, sec)
+                    thresholds._rating_conflict = lambda *a, **k: False
+                    without[name] = thresholds.lookup_threshold(codes, name, sec)
+        finally:
+            thresholds._rating_conflict = real
+        return with_veto, without
+
+    def test_the_veto_changes_exactly_one_position(self):
+        with_veto, without = self._sweep()
+        changed = sorted(n for n in without if with_veto[n] != without[n])
+        self.assertEqual(changed, [NOT_NAMED],
+                         f"вето задело не только целевую позицию: {changed}")
+
+    def test_the_veto_only_ever_removes(self):
+        """⚠ Отрицательный контроль направления: вето не должно ничего ДОБАВЛЯТЬ.
+
+        Если оно что-то добавило — значит сравнение сломано (так уже было: старый модуль,
+        положенный вне репозитория, не нашёл корпус и показал «536 появившихся порогов»)."""
+        with_veto, without = self._sweep()
+        gained = [n for n in without if without[n] is None and with_veto[n] is not None]
+        self.assertEqual(gained, [], f"вето ДОБАВИЛО порог — замер сломан: {gained}")
+
+    def test_positive_control_the_sweep_actually_reads_the_corpus(self):
+        """«Ноль расхождений» и «я ничего не прочитал» снаружи неразличимы."""
+        with_veto, without = self._sweep()
+        self.assertGreater(len(without), 900, "корпус не прочитан — замер пуст")
+        self.assertTrue(any(v for v in without.values()), "ни у одной позиции нет порога")
 
 
 if __name__ == "__main__":

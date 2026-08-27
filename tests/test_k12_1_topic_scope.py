@@ -64,8 +64,11 @@ class TestStyleExampleIsNotATemplate(unittest.TestCase):
         p = PROCEDURAL_SYSTEM_PROMPT
         i = p.find("4. СТИЛЬ")
         head = p[i:i + 420]
-        self.assertGreaterEqual(head.count("«"), 3,
-                                "в правиле стиля меньше трёх примеров вводной фразы")
+        # ⚠ Считаем МАРКЕР примера, а не кавычки: `count("«")` засчитывал «воды» из соседней
+        # фразы, то есть требовал на деле два примера при сообщении про три, а переформулировка
+        # несвязанного оборота уронила бы тест на верном коде (ревью PR #133).
+        self.assertGreaterEqual(head.count("— «"), 2,
+                                "в правиле стиля меньше двух образцов вводной фразы")
 
 
 def _fragment(topic: str) -> str:
