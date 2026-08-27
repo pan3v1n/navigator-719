@@ -601,6 +601,8 @@ class TestCiGateIsReachableWithAPackageNearby(unittest.TestCase):
     # отдавала скрипту windows-пути: `tar -xzf` на них спотыкался, скрипт честно говорил «архив
     # не распаковался» и уходил в ДРУГУЮ ветку — то есть тест зеленел бы мимо проверяемой
     # развилки. Ровно «заглушка, обрывающая проверяемый путь», третий раз за неделю.
+    MARKER_FILES_RE = re.compile(r'"([^"|]+)\|([^"|]+)\|')
+
     SETUP = r"""
 TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
 mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core"
@@ -613,10 +615,28 @@ APP_DIR="$4"; [ "$APP_DIR" = "__none__" ] && APP_DIR="$TD/nope"
 PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry-run
 """
 
+    def _profile_with_an_existing_tag(self):
+        """⚠⚠ ПРОФИЛЬ С СУЩЕСТВУЮЩИМ ТЕГОМ, А НЕ ПРОСТО САМЫЙ НОВЫЙ (ревью PR #127, раунд 5).
+
+        Гейт теперь требует, чтобы тег релиза РЕЗОЛВИЛСЯ, а у профиля готовящегося релиза тега
+        ещё нет. Тест на нём уходил в ветку «репозитория нет» и удовлетворялся строкой «CI НЕ
+        ПРОВЕРЕН» — ровно той, что проверяет отрицательный контроль. То есть удаление вызова
+        `ci_gate` из сухого прогона оставило бы оба теста зелёными, и головная правка релиза
+        оказалась бы непроверенной."""
+        for prof in sorted(RELEASES.glob("*.env"), reverse=True):
+            tag = re.search(r'TAG="([^"]+)"', prof.read_text(encoding="utf-8"))
+            if not tag:
+                continue
+            r = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                                tag.group(1) + "^{commit}"],
+                               capture_output=True, text=True, cwd=str(ROOT))
+            if r.returncode == 0:
+                return prof, tag.group(1)
+        self.skipTest("нет профиля с существующим тегом — гейт не на чем проверить")
+
     def _dry_run(self, app: str):
         """Сухой прогон с ПАКЕТОМ рядом: ровно та развилка, где гейт замолкал."""
-        profile = sorted(RELEASES.glob("*.env"))[-1]
-        tag = re.search(r'TAG="([^"]+)"', profile.read_text(encoding="utf-8")).group(1)
+        profile, tag = self._profile_with_an_existing_tag()
         env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
         r = subprocess.run(
             [shutil.which("bash"), "-c", self.SETUP, "_", str(DEPLOY_SH), str(profile), tag, app],
@@ -630,16 +650,56 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry
     def test_gate_speaks_when_the_package_is_nearby(self):
         """Главная половина: в этом сценарии гейт обязан ВЫСКАЗАТЬСЯ, а не промолчать."""
         r = self._dry_run(str(ROOT))
-        self.assertRegex(r.stdout, r"коммит под проверкой|CI НЕ ПРОВЕРЕН",
-                         f"гейт CI смолчал при пакете рядом:\n{r.stdout}")
+        # ⚠ Именно «коммит под проверкой», а не «или НЕ ПРОВЕРЕН»: вторая половина совпадает с
+        # тем, что печатает отрицательный контроль, и делала утверждение бессодержательным.
+        self.assertIn("коммит под проверкой", r.stdout,
+                      f"гейт CI смолчал при пакете рядом:\n{r.stdout}")
+
+    # ⚠⚠ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ ИДЁТ ВНЕ РЕПОЗИТОРИЯ (ревью PR #127, раунд 5). После того как
+    # сухой прогон получил тот же список кандидатов, что и реальная выкатка, `$PWD` и
+    # `$SELF_DIR/../..` указывают на репозиторий всегда, когда скрипт запущен из него, — и ветка
+    # «репозитория нет» становится недостижимой. На VM всё иначе: дерево пакета без `.git`.
+    # ⚠ Маркеры при этом обязаны СОЙТИСЬ, иначе прогон останавливается ДО гейта и тест снова
+    # ничего не проверяет; поэтому файлы профиля копируются в фальшивый `$APP`, а вся подготовка
+    # идёт В BASH — windows-пути из Python `tar` и `[ -f ]` не переваривают (проверено дважды).
+    SETUP_NO_REPO = r"""
+TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
+ROOT="$2"; PROFILE="$1"; DEPLOY="$3"; TAG="$4"; shift 4
+mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/tree" "$TD/app"
+printf '#!/bin/sh
+echo success
+' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
+echo x > "$TD/src/app/core/config.py"
+for rel in "$@"; do
+  mkdir -p "$TD/app/$(dirname "$rel")"
+  cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
+done
+cp -r "$DEPLOY" "$TD/tree/deploy" || { echo "COPY-FAILED deploy"; exit 3; }
+tar -czf "$TD/pkg/navigator-719-$TAG.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
+cd "$TD/pkg" || exit 3
+PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.sh" --release "$PROFILE" --dry-run
+"""
 
     def test_missing_repository_is_said_out_loud(self):
         """⚠ Отрицательный контроль: без репозитория гейт обязан не «пройти», а СКАЗАТЬ.
 
         Тихий пропуск неотличим от зелёного — ровно то, чем дефект и был."""
-        r = self._dry_run("__none__")
+        profile, tag = self._profile_with_an_existing_tag()
+        files = sorted({m[0] for m in self.MARKER_FILES_RE.findall(
+            profile.read_text(encoding="utf-8")) if "/" in m[0]})
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
+        r = subprocess.run(
+            [shutil.which("bash"), "-c", self.SETUP_NO_REPO, "_", str(profile), str(ROOT),
+             str(DEPLOY_DIR), tag, *files],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+        self.assertNotIn("COPY-FAILED", r.stdout + r.stderr)
+        self.assertNotIn("TAR-FAILED", r.stdout)
+        self.assertIn("маркеры сошлись", r.stdout,
+                      f"прогон остановился ДО гейта — тест ничего не проверил:\n{r.stdout}")
         self.assertIn("CI НЕ ПРОВЕРЕН", r.stdout,
                       f"молчание вместо предупреждения:\n{r.stdout}")
+        self.assertNotIn("коммит под проверкой", r.stdout,
+                         "гейт доложил о коммите там, где репозитория нет")
         self.assertEqual(r.returncode, 0, "отсутствие репозитория — не провал выкатки")
 
 
@@ -678,11 +738,15 @@ class TestBuildkitIsActuallyDisabled(unittest.TestCase):
                               "sudo -n env DOCKER_BUILDKIT=0 /usr/bin/docker"),
                              ("sudo -n -u root docker",
                               "sudo -n -u root env DOCKER_BUILDKIT=0 docker")):
+            # ⚠⚠ БЛОК БЕРЁТСЯ ИЗ САМОГО `deploy.sh`, А НЕ ПЕРЕПЕЧАТЫВАЕТСЯ (ревью PR #127,
+            # раунд 5). Копия выражения в тесте означает, что правка или удаление блока в
+            # скрипте теста не касается — он зеленеет, проверяя сам себя.
+            text = DEPLOY_SH.read_text(encoding="utf-8")
+            i = text.index('case "$DOCKER" in')
+            block = text[i:text.index("esac", i) + 4]
             r = subprocess.run(
-                [shutil.which("bash"), "-c",
-                 'DOCKER="$1"; case "$DOCKER" in sudo|sudo[[:space:]]*) '
-                 'echo "${DOCKER% *} env DOCKER_BUILDKIT=0 ${DOCKER##* }";; '
-                 '*) echo "env DOCKER_BUILDKIT=0 $DOCKER";; esac', "_", docker],
+                [shutil.which("bash"), "-c", 'DOCKER="$1"; ' + block + '; echo "$DOCKER_NOBUILDKIT"',
+                 "_", docker],
                 capture_output=True, text=True)
             self.assertEqual(r.stdout.strip(), want, f"для DOCKER={docker!r}")
 
