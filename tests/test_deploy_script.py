@@ -21,6 +21,7 @@ import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -205,6 +206,31 @@ class TestReleaseProfiles(unittest.TestCase):
                 with self.subTest(profile=p.name, marker=path):
                     self.assertTrue((ROOT / path).is_file(), f"{path} нет в репозитории ({desc})")
 
+    def test_both_readers_of_a_profile_see_the_same_markers(self):
+        """⚠⚠ ПРОФИЛЬ ЧИТАЮТ ДВА МЕХАНИЗМА, И ОНИ МОГУТ РАЗОЙТИСЬ МОЛЧА (ревью захода 5.5).
+
+        `source` в `deploy.sh` разбирает запись по правилам bash, а этот файл — регуляркой
+        `MARKER_RE`, которая режет её по первой кавычке. Анти-маркер вида `ci_gate \".SRC\"`
+        первый читал верно, а второй ПРОПУСКАЛ — 17 записей из 18. Значит опечатка в такой
+        записи не ловится ничем до самой выкатки, а проверки этого файла тихо её не покрывают.
+        Предупреждение об этом расхождении стоит в профиле `test19` с 26.08.2026 — теперь оно
+        ещё и проверяется.
+        """
+        bash = shutil.which("bash")
+        if not bash:
+            self.skipTest("bash недоступен")
+        for p in self._profiles():
+            with self.subTest(profile=p.name):
+                r = subprocess.run(
+                    [bash, "-c", 'declare -A EXPECT=(); MARKERS=(); ANTI_MARKERS=(); . "$1"; '
+                                 'echo $(( ${#MARKERS[@]} + ${#ANTI_MARKERS[@]} ))', "_", str(p)],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace")
+                by_bash = int(r.stdout.strip() or -1)
+                by_regex = len(self.MARKER_RE.findall(p.read_text(encoding="utf-8")))
+                self.assertEqual(by_bash, by_regex,
+                                 f"{p.name}: bash видит {by_bash} записей, парсер тестов "
+                                 f"{by_regex} — какая-то запись не проверяется одним из них")
+
     def test_marker_patterns_compile(self):
         for p in self._profiles():
             text = p.read_text(encoding="utf-8")
@@ -287,9 +313,25 @@ class TestCiGate(unittest.TestCase):
 
     def test_gate_is_wired_into_dry_run(self):
         """Функция может существовать и не вызываться — проверяем именно ВЫЗОВ."""
+        # ⚠ УТВЕРЖДЕНИЕ ЦЕЛИТСЯ В СУХОЙ ПРОГОН, А НЕ В ЛЮБОЙ ВЫЗОВ (ревью PR #127). Прежняя
+        # редакция искала `ci_gate ` во всём файле — этому удовлетворял вызов на РЕАЛЬНОЙ
+        # выкатке, и удаление вызова из сухого прогона оставило бы тест зелёным при сообщении
+        # «гейт не вызывается в сухом прогоне».
         code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
         self.assertIn("ci_gate()", code, "функция гейта исчезла из скрипта")
-        self.assertIn('ci_gate "$SRC"', code, "гейт не вызывается в сухом прогоне")
+        dry = code.split('if [ "$DRY_RUN" = "1" ]', 1)[-1].split("exit 0", 1)[0]
+        self.assertIn("ci_gate ", dry, "гейт не вызывается в сухом прогоне")
+
+    def test_real_deploy_gate_also_requires_a_resolvable_tag(self):
+        """РАУНД 4: требование резолвящегося тега получил ТОЛЬКО сухой прогон.
+
+        То есть защищённым оказался необязательный путь, а незащищённым — тот, который и
+        выкатывает. На VM `$APP` это ПРЕДЫДУЩИЙ релиз, и `ci_gate` доложил бы о чужом коммите."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        i = code.index('CI_SRC="${SRC:-}"')
+        loop = code[i:code.index("ci_gate", i)]
+        self.assertIn("rev-parse", loop,
+                      "кандидат в источники гейта берётся по одному .git — тег не проверяется")
 
     def test_gate_runs_on_a_real_deploy_too(self):
         """⚠ Первая редакция звала гейт ТОЛЬКО в `--dry-run`, а ничто не требует, чтобы сухой
@@ -396,10 +438,6 @@ class TestCiGate(unittest.TestCase):
         text = DEPLOY_SH.read_text(encoding="utf-8")
         self.assertIn("gh НЕ ОТВЕТИЛ", text)
         self.assertIn("прогонов на $sha нет", text)
-
-
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestExitCodeOfCommandNotPipeline(unittest.TestCase):
@@ -514,10 +552,24 @@ class TestRunCompositionGate(unittest.TestCase):
         import json
         base = DEPLOY_DIR.parent.parent / "docs" / "eval_baseline" / "baseline.json"
         self.assertTrue(base.exists(), "базы сравнения нет — EV14 #98")
-        raw = base.read_text(encoding="utf-8")
-        json.loads(raw)  # синтаксис
-        missing = [m for m in self.MANDATORY if f'"{m}"' not in raw]
-        self.assertFalse(missing, f"в базе сравнения нет метрик: {missing}")
+        # ⚠⚠ ПО КЛЮЧАМ РАЗОБРАННОГО JSON, А НЕ ПО ТЕКСТУ (ревью захода 5.5, 27.08.2026).
+        # Прежняя форма `f'"{m}"' not in raw` удовлетворялась ЛЮБЫМ упоминанием имени — в том
+        # числе строкой-примечанием «"perturbation" в этом заходе не снимали». То есть проверка
+        # состава зеленела ровно там, где метрику не сняли, а именно это `EV19` и ловит.
+        doc = json.loads(base.read_text(encoding="utf-8"))
+
+        def keys(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    yield k
+                    yield from keys(v)
+            elif isinstance(node, list):
+                for v in node:
+                    yield from keys(v)
+
+        present = set(keys(doc))
+        missing = [m for m in self.MANDATORY if m not in present]
+        self.assertFalse(missing, f"в базе сравнения нет метрик (как КЛЮЧЕЙ): {missing}")
 
     def test_every_metric_in_the_baseline_has_a_command(self):
         """Правило 6 `eval_baseline/README`: число без команды — цитата, а не критерий.
@@ -530,3 +582,261 @@ class TestRunCompositionGate(unittest.TestCase):
         for level in ("level1", "level2", "level3", "context_size", "corpus_metrics"):
             self.assertIn("_command", d[level], f"{level}: нет команды, которой считается")
 
+
+class TestCiGateIsReachableWithAPackageNearby(unittest.TestCase):
+    """Ревью захода 5.5 (27.08.2026): гейт CI МОЛЧАЛ в сценарии из usage — «запуск на VM, из
+    каталога пакета».
+
+    ⚠⚠ ПОЧЕМУ ЭТО ХУЖЕ `O3` #104, РАДИ КОТОРОГО ГЕЙТ И ЗАВЕДЁН. Там предохранитель сказал, и его
+    не услышали. Здесь ветка «пакет рядом» ставила только `MARKER_ROOTS`, `SRC` оставался пустым,
+    а вызов стоял под `if [ -n "$SRC" ]` без `else` — гейт не звался и не печатал НИ СТРОКИ, то
+    есть лог выглядел полным. Проверка сверху («маркеры сошлись») при этом проходила, и оператор
+    видел успешный сухой прогон.
+
+    ⚠ Проверяется ПОВЕДЕНИЕ скрипта на подставных данных, а не текст: греп по исходнику здесь
+    зеленел бы и до правки — вызов-то в файле был.
+    """
+
+    # ⚠ ПОДГОТОВКА ИДЁТ В BASH, А НЕ В PYTHON. Первая редакция собирала архив `tarfile` и
+    # отдавала скрипту windows-пути: `tar -xzf` на них спотыкался, скрипт честно говорил «архив
+    # не распаковался» и уходил в ДРУГУЮ ветку — то есть тест зеленел бы мимо проверяемой
+    # развилки. Ровно «заглушка, обрывающая проверяемый путь», третий раз за неделю.
+    MARKER_FILES_RE = re.compile(r'"([^"|]+)\|([^"|]+)\|')
+
+    SETUP = r"""
+TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
+mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core"
+printf '#!/bin/sh
+echo success
+' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
+echo x > "$TD/src/app/core/config.py"
+tar -czf "$TD/pkg/navigator-719-$3.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
+APP_DIR="$4"; [ "$APP_DIR" = "__none__" ] && APP_DIR="$TD/nope"
+PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry-run
+"""
+
+    def _profile_with_an_existing_tag(self):
+        """⚠⚠ ПРОФИЛЬ С СУЩЕСТВУЮЩИМ ТЕГОМ, А НЕ ПРОСТО САМЫЙ НОВЫЙ (ревью PR #127, раунд 5).
+
+        Гейт теперь требует, чтобы тег релиза РЕЗОЛВИЛСЯ, а у профиля готовящегося релиза тега
+        ещё нет. Тест на нём уходил в ветку «репозитория нет» и удовлетворялся строкой «CI НЕ
+        ПРОВЕРЕН» — ровно той, что проверяет отрицательный контроль. То есть удаление вызова
+        `ci_gate` из сухого прогона оставило бы оба теста зелёными, и головная правка релиза
+        оказалась бы непроверенной."""
+        for prof in sorted(RELEASES.glob("*.env"), reverse=True):
+            tag = re.search(r'TAG="([^"]+)"', prof.read_text(encoding="utf-8"))
+            if not tag:
+                continue
+            r = subprocess.run(["git", "rev-parse", "--verify", "--quiet",
+                                tag.group(1) + "^{commit}"],
+                               capture_output=True, text=True, cwd=str(ROOT))
+            if r.returncode == 0:
+                return prof, tag.group(1)
+        self.skipTest("нет профиля с существующим тегом — гейт не на чем проверить")
+
+    def _dry_run(self, app: str):
+        """Сухой прогон с ПАКЕТОМ рядом: ровно та развилка, где гейт замолкал."""
+        profile, tag = self._profile_with_an_existing_tag()
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
+        r = subprocess.run(
+            [shutil.which("bash"), "-c", self.SETUP, "_", str(DEPLOY_SH), str(profile), tag, app],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), env=env)
+        self.assertNotIn("TAR-FAILED", r.stdout, "архив не собрался — сценарий не воспроизведён")
+        self.assertIn("сверяю маркеры с ПАКЕТОМ", r.stdout,
+                      f"ветка «пакет рядом» не сработала, проверяется НЕ та развилка:\n{r.stdout}")
+        return r
+
+    def test_gate_speaks_when_the_package_is_nearby(self):
+        """Главная половина: в этом сценарии гейт обязан ВЫСКАЗАТЬСЯ, а не промолчать."""
+        r = self._dry_run(str(ROOT))
+        # ⚠ Именно «коммит под проверкой», а не «или НЕ ПРОВЕРЕН»: вторая половина совпадает с
+        # тем, что печатает отрицательный контроль, и делала утверждение бессодержательным.
+        self.assertIn("коммит под проверкой", r.stdout,
+                      f"гейт CI смолчал при пакете рядом:\n{r.stdout}")
+
+    # ⚠⚠ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ ИДЁТ ВНЕ РЕПОЗИТОРИЯ (ревью PR #127, раунд 5). После того как
+    # сухой прогон получил тот же список кандидатов, что и реальная выкатка, `$PWD` и
+    # `$SELF_DIR/../..` указывают на репозиторий всегда, когда скрипт запущен из него, — и ветка
+    # «репозитория нет» становится недостижимой. На VM всё иначе: дерево пакета без `.git`.
+    # ⚠ Маркеры при этом обязаны СОЙТИСЬ, иначе прогон останавливается ДО гейта и тест снова
+    # ничего не проверяет; поэтому файлы профиля копируются в фальшивый `$APP`, а вся подготовка
+    # идёт В BASH — windows-пути из Python `tar` и `[ -f ]` не переваривают (проверено дважды).
+    SETUP_NO_REPO = r"""
+TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
+ROOT="$2"; PROFILE="$1"; DEPLOY="$3"; TAG="$4"; shift 4
+mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/tree" "$TD/app"
+printf '#!/bin/sh
+echo success
+' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
+echo x > "$TD/src/app/core/config.py"
+for rel in "$@"; do
+  mkdir -p "$TD/app/$(dirname "$rel")"
+  cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
+done
+cp -r "$DEPLOY" "$TD/tree/deploy" || { echo "COPY-FAILED deploy"; exit 3; }
+tar -czf "$TD/pkg/navigator-719-$TAG.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
+cd "$TD/pkg" || exit 3
+PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.sh" --release "$PROFILE" --dry-run
+"""
+
+    def test_missing_repository_is_said_out_loud(self):
+        """⚠ Отрицательный контроль: без репозитория гейт обязан не «пройти», а СКАЗАТЬ.
+
+        Тихий пропуск неотличим от зелёного — ровно то, чем дефект и был."""
+        profile, tag = self._profile_with_an_existing_tag()
+        files = sorted({m[0] for m in self.MARKER_FILES_RE.findall(
+            profile.read_text(encoding="utf-8")) if "/" in m[0]})
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
+        r = subprocess.run(
+            [shutil.which("bash"), "-c", self.SETUP_NO_REPO, "_", str(profile), str(ROOT),
+             str(DEPLOY_DIR), tag, *files],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+        self.assertNotIn("COPY-FAILED", r.stdout + r.stderr)
+        self.assertNotIn("TAR-FAILED", r.stdout)
+        self.assertIn("маркеры сошлись", r.stdout,
+                      f"прогон остановился ДО гейта — тест ничего не проверил:\n{r.stdout}")
+        self.assertIn("CI НЕ ПРОВЕРЕН", r.stdout,
+                      f"молчание вместо предупреждения:\n{r.stdout}")
+        self.assertNotIn("коммит под проверкой", r.stdout,
+                         "гейт доложил о коммите там, где репозитория нет")
+        self.assertEqual(r.returncode, 0, "отсутствие репозитория — не провал выкатки")
+
+
+class TestBuildkitIsActuallyDisabled(unittest.TestCase):
+    """Ревью захода 5.5: `env DOCKER_BUILDKIT=0 sudo docker …` НЕ передаёт переменную.
+
+    `sudo` при `env_reset` (дефолт sudoers) вычищает окружение дочернего процесса, поэтому любое
+    присваивание ПЕРЕД `sudo` до docker не доезжает. Дефект прятал фолбэк на тонкий слой: сборка
+    получалась, просто каждый раз длинным путём через TLS к auth.docker.io — то есть ровно через
+    то, от чего строка и уходила.
+    """
+
+    def test_env_comes_after_sudo_not_before(self):
+        # ⚠ ПРОВЕРЯЕТСЯ ВЫЗОВ, А НЕ ПРИСВАИВАНИЕ. Первая редакция этого теста запрещала строку
+        # `env DOCKER_BUILDKIT=0 $DOCKER` целиком — и падала на ВЕРНОМ коде: ровно так выглядит
+        # законная ветка «$DOCKER без sudo», где присваивание перед командой работает. Предохра-
+        # нитель, бьющий по верному коду, дороже отсутствующего (шапка `deploy.sh`, 18.08).
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        for broken in ("env DOCKER_BUILDKIT=0 $DOCKER compose",
+                       "env DOCKER_BUILDKIT=0 $DOCKER build"):
+            self.assertNotIn(broken, code,
+                             f"сборка снова зовётся как {broken!r} — переменная не доедет "
+                             f"через sudo")
+        self.assertEqual(code.count("run_step 5 $DOCKER_NOBUILDKIT"), 2,
+                         "обе ветки сборки обязаны идти через префикс без BuildKit")
+
+    def test_prefix_puts_env_after_sudo_for_both_shapes_of_DOCKER(self):
+        """⚠ `$DOCKER` бывает и `sudo -n docker`, и голым `docker` — обе формы обязаны работать."""
+        # ⚠ ПУТЕВАЯ ФОРМА ОБЯЗАТЕЛЬНА В НАБОРЕ (ревью PR #127, раунд 4). Прежняя реализация
+        # ловила суффикс « docker», и документированное переопределение путём молча уходило в
+        # ветку «без sudo», то есть собиралось обратно в `env` ПЕРЕД `sudo` — ту самую форму,
+        # которую этот блок убирает. Прежний тест брал только две формы и был зелёным.
+        for docker, want in (("sudo -n docker", "sudo -n env DOCKER_BUILDKIT=0 docker"),
+                             ("docker", "env DOCKER_BUILDKIT=0 docker"),
+                             ("sudo -n /usr/bin/docker",
+                              "sudo -n env DOCKER_BUILDKIT=0 /usr/bin/docker"),
+                             ("sudo -n -u root docker",
+                              "sudo -n -u root env DOCKER_BUILDKIT=0 docker")):
+            # ⚠⚠ БЛОК БЕРЁТСЯ ИЗ САМОГО `deploy.sh`, А НЕ ПЕРЕПЕЧАТЫВАЕТСЯ (ревью PR #127,
+            # раунд 5). Копия выражения в тесте означает, что правка или удаление блока в
+            # скрипте теста не касается — он зеленеет, проверяя сам себя.
+            text = DEPLOY_SH.read_text(encoding="utf-8")
+            i = text.index('case "$DOCKER" in')
+            block = text[i:text.index("esac", i) + 4]
+            r = subprocess.run(
+                [shutil.which("bash"), "-c", 'DOCKER="$1"; ' + block + '; echo "$DOCKER_NOBUILDKIT"',
+                 "_", docker],
+                capture_output=True, text=True)
+            self.assertEqual(r.stdout.strip(), want, f"для DOCKER={docker!r}")
+
+
+class TestEveryTestInThisFileActuallyRuns(unittest.TestCase):
+    """Ревью захода 5.5 (27.08.2026): `unittest.main()` стоял ПОСРЕДИ файла.
+
+    ⚠⚠ Три класса — 13 тестов предохранителей ВЫКАТКИ — были дописаны ПОСЛЕ него. При запуске
+    `python tests/test_deploy_script.py` интерпретатор доходил до `unittest.main()`, прогонял
+    первые шесть классов и завершал процесс `sys.exit()`; остальные не были даже определены.
+    Через `unittest discover` (документированная команда) шли все, поэтому расхождение было
+    МОЛЧАЛИВЫМ: тесты существуют, зелёные, и частью способов запуска не исполняются.
+    """
+
+    def test_main_block_is_the_last_statement(self):
+        import ast
+        tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+        mains = [i for i, node in enumerate(tree.body)
+                 if isinstance(node, ast.If) and ast.unparse(node.test).startswith("__name__")]
+        self.assertEqual(len(mains), 1, "блок __main__ должен быть ровно один")
+        after = [type(n).__name__ for n in tree.body[mains[0] + 1:]]
+        self.assertFalse(after, f"после unittest.main() снова стоит код — он не выполнится: {after}")
+
+
+class TestCiGateRefusesTheWrongCommit(unittest.TestCase):
+    """Ревью PR #127: фолбэк на `$APP` брал ПРЕДЫДУЩИЙ релиз и докладывал о ЧУЖОМ коммите.
+
+    ⚠⚠ На VM `$APP` — развёрнутая рабочая копия прошлого релиза, и нового тега туда не приносит
+    ничто: доставка идёт тарболом, не клоном. `ci_gate` откатился бы на `HEAD`, то есть на
+    прошлый релиз, и напечатал «CI зелёный» про коммит, который НЕ едет, — ровно класс `O3` #104,
+    ради которого гейт и заведён. Обратная беда не легче: красный прогон на прошлом коммите
+    остановил бы ЗАКОННУЮ выкатку.
+    """
+
+    SETUP = r"""
+TD="$(mktemp -d)"; trap 'rm -rf "$TD"' EXIT
+mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/app"
+printf '#!/bin/sh
+echo success
+' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
+echo x > "$TD/src/app/core/config.py"
+tar -czf "$TD/pkg/navigator-719-$3.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
+# Репозиторий БЕЗ тега релиза — ровно то, чем является $APP на VM.
+cd "$TD/app" && git init -q . && git config user.email t@t && git config user.name t   && echo x > f && git add f && git commit -qm "prev release" && cd - >/dev/null
+PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app" bash "$1" --release "$2" --dry-run
+"""
+
+    def test_repo_without_the_release_tag_is_not_accepted_as_a_source(self):
+        profile = sorted(RELEASES.glob("*.env"))[-1]
+        tag = re.search(r'TAG="([^"]+)"', profile.read_text(encoding="utf-8")).group(1)
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
+        r = subprocess.run(
+            [shutil.which("bash"), "-c", self.SETUP, "_", str(DEPLOY_SH), str(profile), tag],
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            cwd=str(ROOT), env=env)
+        self.assertNotIn("TAR-FAILED", r.stdout, "сценарий не воспроизведён")
+        self.assertIn("сверяю маркеры с ПАКЕТОМ", r.stdout, f"развилка не та:\n{r.stdout}")
+        self.assertIn("CI НЕ ПРОВЕРЕН", r.stdout,
+                      f"репозиторий без тега принят за источник:\n{r.stdout}")
+        self.assertNotIn("коммит под проверкой", r.stdout,
+                         f"гейт доложил о ЧУЖОМ коммите:\n{r.stdout}")
+        self.assertEqual(r.returncode, 0, "невозможность проверить — не провал выкатки")
+
+
+class TestCorpusCheckHasAPositiveControl(unittest.TestCase):
+    """Ревью PR #127: корпусная половина `70_…` печатала OK на НУЛЕ данных.
+
+    ⚠⚠ «Новых склеек нет» и «я ничего не посмотрел» снаружи неразличимы: пустой glob (проверка
+    идёт через `docker compose exec -T app python -`, то есть с чужим cwd) или сменившаяся строка
+    `MARK` давали `shared = {}` → `assert not new` проходил → «OK: склеек 0». У соседней проверки
+    `80_…` контроль был (`FLOOR`), у этой не было. Правило проекта: у инструмента, чьё «нет» —
+    результат, обязан быть положительный контроль.
+    """
+
+    CHECK = (DEPLOY_DIR / "checks" / "common" / "70_lead_block_belongs_to_position.py")
+
+    def test_check_fails_loudly_when_the_corpus_is_not_there(self):
+        """Запуск с чужим cwd: корпус не найден → проверка обязана УПАСТЬ, а не отчитаться."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            env = {**os.environ, "PYTHONPATH": str(ROOT), "PYTHONUTF8": "1",
+                   "PYTHONIOENCODING": "utf-8"}
+            r = subprocess.run([sys.executable, "-"], stdin=open(self.CHECK, encoding="utf-8"),
+                               capture_output=True, text=True, encoding="utf-8",
+                               errors="replace", cwd=td, env=env)
+            self.assertNotEqual(r.returncode, 0,
+                                f"проверка отчиталась на пустом корпусе:\n{r.stdout}")
+            self.assertNotIn("склеек 0, все известные", r.stdout,
+                             "проверка напечатала бодрое OK, ничего не посмотрев")
+
+
+if __name__ == "__main__":
+    unittest.main()
