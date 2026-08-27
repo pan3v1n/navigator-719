@@ -73,6 +73,17 @@ done
 PKG="${PKG:-$(pwd)}"
 APP="${APP:-$HOME/navigator-719}"
 DOCKER="${DOCKER:-sudo -n docker}"
+# ⚠⚠ ПРИСВАИВАНИЕ ПЕРЕД `sudo` ДО КОМАНДЫ НЕ ДОЕЗЖАЕТ (ревью захода 5.5, 27.08.2026). `sudo` при
+# `env_reset` — а это дефолт в sudoers — вычищает окружение дочернего процесса, поэтому и
+# `DOCKER_BUILDKIT=0 sudo docker …`, и `env DOCKER_BUILDKIT=0 sudo docker …` собирают С BuildKit,
+# ради отключения которого строка и написана. Дефект был не виден, потому что его гасил фолбэк
+# на тонкий слой: сборка «получалась», просто каждый раз длинным путём через TLS к
+# auth.docker.io — то есть ровно через то, от чего уходили. `env` обязан стоять ПОСЛЕ `sudo`.
+if [ "${DOCKER% docker}" != "$DOCKER" ]; then
+  DOCKER_NOBUILDKIT="${DOCKER% docker} env DOCKER_BUILDKIT=0 docker"   # sudo -n env … docker
+else
+  DOCKER_NOBUILDKIT="env DOCKER_BUILDKIT=0 $DOCKER"                    # docker без sudo
+fi
 
 # --- O6 (#114): КОД ВОЗВРАТА КОМАНДЫ, А НЕ КОНВЕЙЕРА ----------------------------------------
 #
@@ -290,9 +301,26 @@ if [ "$DRY_RUN" = "1" ]; then
   release_n=$(ls "$CHECKS_DIR"/*.py 2>/dev/null | wc -l)
   say "  проверки рантайма: общих $common_n, релизных $release_n"
   [ "$common_n" -gt 0 ] || say "  ⚠ общих проверок НЕТ — выкатка пойдёт вслепую"
-  if [ -n "$SRC" ]; then
-    ci_gate "$SRC" || { say "  ❌ сухой прогон остановлен красным CI"
-                        [ -n "$DRY_TMP" ] && rm -rf "$DRY_TMP"; exit 2; }
+  # ⚠⚠ ИСТОЧНИК ГЕЙТА CI ВЫБИРАЕТСЯ ОТДЕЛЬНО ОТ ИСТОЧНИКА МАРКЕРОВ (ревью захода 5.5,
+  # 27.08.2026). Ветка «пакет рядом» ставит только `MARKER_ROOTS` и оставляет `SRC` ПУСТЫМ, а гейт
+  # стоял под `if [ -n "$SRC" ]` без `else`. Значит в СЦЕНАРИИ ИЗ USAGE ЭТОЙ ШАПКИ — «ЗАПУСК
+  # на VM, из каталога пакета» — гейт не звался вовсе и не печатал НИ СТРОКИ. Это хуже
+  # инцидента `O3` #104, ради которого гейт и заведён: там предохранитель СКАЗАЛ, и его
+  # не услышали; здесь он МОЛЧАЛ, а лог выглядел полным.
+  #
+  # ⚠ Пакет источником быть не может: в архиве нет `.git`. Рабочая копия `$APP` — может, но
+  # НЕ как «код, который поедет» (для МАРКЕРОВ она именно поэтому из кандидатов убрана), а как
+  # РЕПОЗИТОРИЙ, в котором резолвится тег релиза: коммит `ci_gate` берёт из `$TAG`, а состояние
+  # рабочего дерева на выбор коммита не влияет. Если тега там нет, `ci_gate` скажет это вслух
+  # («HEAD — проверяется НЕ релизный коммит»), а не промолчит.
+  CI_DRY_SRC="$SRC"
+  if [ -z "$CI_DRY_SRC" ] && [ -d "$APP/.git" ]; then CI_DRY_SRC="$APP"; fi
+  if [ -n "$CI_DRY_SRC" ]; then
+    ci_gate "$CI_DRY_SRC" || { say "  ❌ сухой прогон остановлен красным CI"
+                               [ -n "$DRY_TMP" ] && rm -rf "$DRY_TMP"; exit 2; }
+  else
+    say "  ⚠⚠ CI НЕ ПРОВЕРЕН: git-репозитория нет ни в исходниках, ни в $APP —"
+    say "     откройте Actions руками. Это НЕ «зелено»"
   fi
 
   # --- EV19 (#111): СОСТАВ ЗАМЕРА, А НЕ ТОЛЬКО ЕГО ЧИСЛА ------------------------------------
@@ -313,7 +341,12 @@ if [ "$DRY_RUN" = "1" ]; then
     miss=""
     for metric in recall@1 attribution@1 faithfulness decisive_numbers_stable \
                   paraphrase perturbation context_size; do
-      grep -q "\"$metric\"" "$BASE" || miss="$miss $metric"
+      # ⚠ КЛЮЧ, А НЕ УПОМИНАНИЕ (ревью захода 5.5, 27.08.2026). Голый греп по имени
+      # удовлетворялся любой строкой-примечанием — напр. «"perturbation" в этом заходе не
+      # снимали», — и гейт красил состав зелёным РОВНО там, где метрику не сняли. Это тот
+      # класс, ради которого `EV19` и заводилась. Несущая проверка — в `test_deploy_script.py`,
+      # там есть `json`; здесь, на VM без python в хосте, требуем хотя бы двоеточие после имени.
+      grep -qE "\"$metric\"[[:space:]]*:" "$BASE" || miss="$miss $metric"
     done
     if [ -n "$miss" ]; then
       say "  ⚠ В БАЗЕ СРАВНЕНИЯ НЕТ МЕТРИК:$miss"
@@ -427,7 +460,7 @@ say "--- сборка образа ---"
 BUILT=0
 # DOCKER_BUILDKIT=0: BuildKit идёт в реестр за метаданными базового образа даже когда он есть
 # локально, и падает на TLS до auth.docker.io.
-if run_step 5 env DOCKER_BUILDKIT=0 $DOCKER compose build app; then
+if run_step 5 $DOCKER_NOBUILDKIT compose build app; then
   BUILT=1; say "собрано классическим сборщиком"
 else
   say "классический сборщик не справился — тонкий слой поверх текущего образа"
@@ -435,7 +468,7 @@ else
   [ -z "$IMG" ] && IMG="navigator-719-app:latest"
   say "базовый образ: $IMG"
   printf 'FROM %s\nWORKDIR /app\nCOPY . .\n' "$IMG" > /tmp/Dockerfile.thin
-  if run_step 5 env DOCKER_BUILDKIT=0 $DOCKER build -f /tmp/Dockerfile.thin -t "$IMG" .; then
+  if run_step 5 $DOCKER_NOBUILDKIT build -f /tmp/Dockerfile.thin -t "$IMG" .; then
     BUILT=1; say "собрано тонким слоем"
   fi
 fi

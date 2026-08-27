@@ -197,9 +197,20 @@ class TestGuardSparesTheDenial(unittest.TestCase):
 
     def test_denial_forms_cover_real_wordings(self):
         for phrase in ("не существует", "нет такого документа", "не используй",
-                       "отсутствует", "не применяется"):
+                       "такой документ отсутствует", "не применяется"):
             self.assertTrue(documents_ref._DENIAL.search(phrase), phrase)
         self.assertFalse(documents_ref._DENIAL.search("обычный текст ответа"))
+
+    def test_denial_needs_a_subject_it_can_deny(self):
+        """⚠⚠ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ, КОТОРОГО У ЭТОГО ТЕСТА НЕ БЫЛО (ревью захода 5.5).
+
+        Половина «формы ловятся» зеленела бы и у регулярки, ловящей ВСЁ подряд. Голое «отсутству»
+        именно такой и было: в домене 719 «при отсутствии продукции/сведений в реестре» — оборот
+        частый, и он глушил гард на соседней выдумке."""
+        for phrase in ("при отсутствии продукции в приложении",
+                       "при отсутствии сведений в реестре"):
+            self.assertFalse(documents_ref._DENIAL.search(phrase),
+                             f"отрицание засчитано там, где отрицается не документ: {phrase!r}")
 
 
 class TestReachesTheModel(unittest.TestCase):
