@@ -510,6 +510,9 @@ def main() -> int:
     ap.add_argument("--json", default="", help="куда положить результат")
     ap.add_argument("--max-failure-share", type=float, default=0.01,
                     help="порог доли отказов для КОДА ВОЗВРАТА; по гайду ≤0.01")
+    ap.add_argument("--warmup", type=int, default=1,
+                    help="сколько первых запросов отбросить: e5 грузится ЛЕНИВО, и первый "
+                         "запрос после рестарта несёт разовую загрузку модели")
     args = ap.parse_args()
 
     if args.mode == "selftest":
@@ -527,11 +530,26 @@ def main() -> int:
         jars.append(login(args.base_url, user, pw, timeout=args.timeout))
         print(f"   ✅ {user}")
 
+    # ⚠⚠ ПРОГРЕВ. `embeddings._model()` под `@lru_cache(maxsize=1)` — e5 грузится ЛЕНИВО, на
+    # первом запросе, а не при старте. Значит первый запрос после рестарта несёт разовую
+    # стоимость загрузки 2.1 ГБ и структурно отличается от остальных. На n=30 p95 — это 29-е
+    # значение, то есть ОДИН выброс наверху и ЕСТЬ p95: невыброшенный прогрев испортил бы ровно
+    # ту величину, ради которой всё меряется.
+    # ⚠ Умолчание 1, а не 0, сознательно: на бою приложение обычно давно прогрето и потеря
+    # одного замера из тридцати ничего не стоит, а холодный старт без прогрева портит p95.
+    # Число прогревочных пишется в сводку и в `_command` — молча выбрасывать замеры нельзя.
+    if args.warmup:
+        print(f"прогрев: {args.warmup} запрос(ов), результаты отбрасываются")
+        for q in load_questions(args.warmup, args.seed - 1):
+            r = ask(args.base_url, jars[0], q, args.timeout)
+            print(f"   прогрев: {r['class']} ttft={r['ttft']} total={r['total']}", flush=True)
+
     questions = load_questions(args.n, args.seed)
     cmd = (f"python scripts/eval_level4.py --mode {args.mode} --n {args.n}"
            + (f" --concurrency {args.concurrency}" if args.mode == "load" else "")
-           + f" --seed {args.seed} --timeout {args.timeout} --base-url {args.base_url}")
-    meta = {"mode": args.mode, "_command": cmd, "accounts": len(pairs),
+           + f" --seed {args.seed} --timeout {args.timeout} --warmup {args.warmup}"
+           f" --base-url {args.base_url}")
+    meta = {"mode": args.mode, "_command": cmd, "accounts": len(pairs), "warmup": args.warmup,
             "concurrency": args.concurrency if args.mode == "load" else 1,
             "base_url": args.base_url, "seed": args.seed, "timeout": args.timeout}
 
