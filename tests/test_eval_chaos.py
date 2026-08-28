@@ -160,6 +160,25 @@ class TestComposeFileIsExplicit(unittest.TestCase):
         sc = C.QdrantDown(["docker"], "/srv/app/", "app", "qdrant")
         self.assertIn("/srv/app/docker-compose.yml", " ".join(sc.compose))
 
+    def test_llm_restore_does_not_use_sed_i(self):
+        """⚠⚠ ИНЦИДЕНТ НА БОЮ 28.08.2026. `/etc/hosts` в контейнере — bind-mount отдельного файла,
+        а `sed -i` правит не на месте: пишет временный рядом и ПЕРЕИМЕНОВЫВАЕТ поверх. Ядро это
+        запрещает — `sed: cannot rename /etc/sedXXXX: Device or resource busy`. Поломка (`echo >>`)
+        работала, снятие не работало НИКОГДА: сервис отдавал 5xx, пока не починили руками.
+        Правильный способ — усечь и переписать ТОТ ЖЕ inode через `cat > файл`."""
+        sc = C.LLMDown(["docker"], ".", "app", "qdrant")
+        cmd = " ".join(sc.watchdog()) + " " + " ".join(sc.restore.__doc__ or "")
+        self.assertNotIn("sed -i", cmd)
+        self.assertIn("cat /tmp/hosts.new > /etc/hosts", " ".join(sc.watchdog()))
+
+    def test_watchdog_and_restore_are_the_same_idempotent_undo(self):
+        """⚠ Сторож и штатное восстановление обязаны делать ОДНО И ТО ЖЕ идемпотентное действие
+        — иначе один из них будет проверен, а другой нет. ⚠⚠ Но одинаковость и есть причина,
+        по которой холостая проверка восстановления ОБЯЗАТЕЛЬНА: два контура на одном механизме
+        — это один контур, и 28.08 они упали вместе."""
+        sc = C.LLMDown(["docker"], ".", "app", "qdrant")
+        self.assertEqual(sc.watchdog()[-1], sc._UNDO)
+
     def test_llm_restore_targets_exact_line(self):
         """⚠ Восстановление сносит ТОЧНУЮ строку, а не всё про этот хост: чужие записи в
         /etc/hosts не наши."""
