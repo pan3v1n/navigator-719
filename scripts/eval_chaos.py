@@ -332,11 +332,18 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
         # (два чат-запроса, ~13 с по замеренной медиане): «90 с» превращались в ~8 минут, а при
         # `--settle 45` — в одну попытку. Величина, которую задаёт оператор, обязана значить то,
         # что написано в справке.
-        while time.monotonic() - t_restore < recovery_deadline:
+        # ⚠⚠ ХОТЯ БЫ ОДНА ПРОБА ВСЕГДА (ревью PR #135, раунд 2). Прежняя форма с `range(max(1,…))`
+        # это гарантировала, а переход на `while` — нет: при `--recovery-deadline 0` (законное
+        # число) тело не выполнялось ни разу, `after` оставался `None`, и обращение к нему
+        # падало `TypeError` ВНУТРИ `finally` — то есть маскировало исходное исключение и
+        # обрывало заход СРАЗУ ПОСЛЕ намеренной поломки боя. Худшее место для падения.
+        while True:
             time.sleep(settle)
             after = probe(base, cookie, question, timeout)
             if healthy(after):
                 recovery_seconds = round(time.monotonic() - t_restore, 1)
+                break
+            if time.monotonic() - t_restore >= recovery_deadline:
                 break
         print(f"   после:   стрим={after['stream_class']} чат={after['plain_class']} "
               f"источников={after['sources']} возврат={recovery_seconds} с")

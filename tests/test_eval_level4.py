@@ -76,7 +76,11 @@ class TestInvalidatingClassesSuppressNumbers(unittest.TestCase):
     # список из самого модуля — и мутационный контроль показал, что при ОПУСТОШЁННОЙ константе
     # тест остаётся ЗЕЛЁНЫМ: цикл просто не выполняется ни разу. Оракул, выведенный из
     # проверяемого артефакта, проверяет сам себя.
-    MUST_INVALIDATE = ("http_401", "http_403", "http_429")
+    # ⚠⚠ `tool_error` ДОБАВЛЕН ОСОЗНАННО (ревью PR #135, раунд 2), и тест на состав это поймал —
+    # ради чего он и закрепляет множество В ОБЕ СТОРОНЫ. Побег исключения из `ask` — это дефект
+    # ИНСТРУМЕНТА, а не отказ сервиса: записанный как `conn_error`, он попадал в долю отказов и
+    # гнал вердикт, то есть сломанный измеритель выглядел как «сервис уронил N % соединений».
+    MUST_INVALIDATE = ("http_401", "http_403", "http_429", "tool_error")
 
     def test_each_invalidating_class_kills_percentiles(self):
         for bad in self.MUST_INVALIDATE:
@@ -104,6 +108,23 @@ class TestInvalidatingClassesSuppressNumbers(unittest.TestCase):
         s = L4.summarize(self._ok(3) + [{"class": L4.SSE_ERROR, "ttft": None, "total": 2.0}], {})
         self.assertTrue(s["valid"], "sse_error не отменяет замер — сервис ответил, но плохо")
         self.assertEqual(s["failure_share"], 0.25)
+
+
+class TestToolDefectIsNotAServiceFailure(unittest.TestCase):
+    """⚠⚠ Сломанный ИЗМЕРИТЕЛЬ и упавший СЕРВИС — разные вещи, и путать их нельзя: первое
+    означает «мы не измеряли», второе — «сервис не справился». Раньше побег исключения из `ask`
+    записывался как `conn_error` и утекал в долю отказов."""
+
+    def test_tool_error_invalidates_instead_of_counting(self):
+        ok = [{"class": L4.OK, "ttft": 1.0, "total": 2.0, "message_id": 1} for _ in range(5)]
+        s = L4.summarize(ok + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}], {})
+        self.assertFalse(s["valid"], "дефект инструмента не объявил замер недействительным")
+        self.assertNotIn("ttft_p50", s, "перцентили посчитались при сломанном инструменте")
+
+    def test_tool_error_is_not_in_failures(self):
+        """⚠ Обратная половина: попади он ещё и в `FAILURES`, число доли отказов описывало бы
+        поломку измерителя как поведение сервиса."""
+        self.assertNotIn(L4.TOOL_ERROR, L4.FAILURES)
 
 
 class TestVerdictStopsOnFailure(unittest.TestCase):

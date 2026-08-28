@@ -100,11 +100,17 @@ TIMEOUT = "timeout"
 CONN_ERROR = "conn_error"
 HTTP_401, HTTP_403, HTTP_429, HTTP_422 = "http_401", "http_403", "http_429", "http_422"
 HTTP_4XX, HTTP_5XX = "http_4xx", "http_5xx"
+# ⚠⚠ ДЕФЕКТ САМОГО ИНСТРУМЕНТА — ОТДЕЛЬНЫЙ КЛАСС, А НЕ ОТКАЗ СЕРВИСА (ревью PR #135, раунд 2).
+# Раньше любой побег из `ask` (опечатка после рефакторинга, кривой `--base-url`) записывался
+# как `conn_error`, попадал в долю отказов и гнал вердикт: сломанный ИНСТРУМЕНТ выглядел как
+# «сервис уронил N % соединений» — неотличимо от настоящего сбоя. У проекта уже есть верная
+# корзина для «мы не измеряли сервис» — `INVALIDATING`, туда этот класс и идёт.
+TOOL_ERROR = "tool_error"
 
 # ⚠⚠ ИСХОДЫ, ПРИ КОТОРЫХ ЗАМЕР НЕДЕЙСТВИТЕЛЕН: запрос развернулся НА ПОРОГЕ, не дойдя до движка.
 # Их наличие означает не «сервис справился», а «мы не измеряли сервис». Перцентили при них не
 # печатаются — иначе число уйдёт в отчёт и станет цитатой.
-INVALIDATING = frozenset({HTTP_401, HTTP_403, HTTP_429})
+INVALIDATING = frozenset({HTTP_401, HTTP_403, HTTP_429, TOOL_ERROR})
 # Отказы, которые считаются в «долю отказов» по гайду (сервис ответил, но плохо).
 FAILURES = frozenset({SSE_ERROR, TRUNCATED, TIMEOUT, CONN_ERROR, HTTP_5XX, HTTP_4XX, HTTP_422})
 
@@ -360,7 +366,7 @@ def summarize(results: list[dict], meta: dict) -> dict:
             f"запросы развернулись на пороге, не дойдя до движка: {invalid}. "
             "Это НЕ «сервис справился». 429 → мало аккаунтов (лимит "
             f"{RATE_LIMIT_PER_MIN}/мин на пользователя); 403 → роль `user` без профиля; "
-            "401 → сессия не установилась. Перцентили не печатаются намеренно.")
+            "401 → сессия не установилась; tool_error → сломан САМ ИНСТРУМЕНТ, и его дефект нельзя выдавать за отказ сервиса. Перцентили не печатаются намеренно.")
         return out
     out["ttft_p50"] = pct([r["ttft"] for r in ok if r["ttft"] is not None], 0.50)
     out["ttft_p95"] = pct([r["ttft"] for r in ok if r["ttft"] is not None], 0.95)
@@ -430,7 +436,7 @@ def run_load(base: str, jars: list[str], questions: list[str], timeout: float,
                 # ниже: реальный отказ пропадал ИЗ ТАБЛИЦЫ КЛАССОВ и одновременно УМЕНЬШАЛ
                 # знаменатель — то есть занижал ровно ту долю отказов, по которой выносится
                 # вердикт. Найдено ревью PR #135.
-                results[i] = {"class": CONN_ERROR, "status": None, "ttft": None,
+                results[i] = {"class": TOOL_ERROR, "status": None, "ttft": None,
                               "total": None, "message_id": None, "chars": 0,
                               "detail": f"побег из ask: {type(e).__name__}: {str(e)[:80]}"}
 
@@ -449,7 +455,7 @@ def run_load(base: str, jars: list[str], questions: list[str], timeout: float,
     if lost:
         print(f"   ⚠⚠ потоков умерло без записи исхода: {lost} — засчитаны отказами")
     return [r if r is not None else
-            {"class": CONN_ERROR, "status": None, "ttft": None, "total": None,
+            {"class": TOOL_ERROR, "status": None, "ttft": None, "total": None,
              "message_id": None, "chars": 0, "detail": "поток умер, исход не записан"}
             for r in results]
 

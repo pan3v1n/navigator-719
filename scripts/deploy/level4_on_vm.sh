@@ -42,6 +42,16 @@ if [ -z "$ACCOUNTS" ]; then
 fi
 n_acc=$(echo "$ACCOUNTS" | tr ',' '\n' | grep -c . )
 say "аккаунтов: $n_acc, ёмкость $((n_acc * 20)) запросов/мин"
+# ⚠⚠ ВЕРХНЯЯ ГРАНИЦА ТОЖЕ ЕСТЬ, И ОНА НЕ ОЧЕВИДНА (ревью PR #135, раунд 2). Строка выше зовёт
+# «добавить аккаунтов ради ёмкости», но КАЖДЫЙ срез логинит их все подряд, а вход — 10/мин НА IP.
+# С одиннадцатью аккаунтами срез умирает на 11-м входе, НЕ ЗАДАВ НИ ОДНОГО ВОПРОСА, и так все
+# четыре среза. Пауза между срезами от этого не спасает: буря внутри одного среза.
+if [ "$n_acc" -gt 10 ]; then
+  say "ОСТАНОВ: аккаунтов $n_acc > 10. Вход ограничен 10/мин НА IP, а каждый срез логинит все"
+  say "         аккаунты подряд — срез умрёт на 11-м входе, не задав ни одного вопроса."
+  say "         Для 50 одновременных достаточно 3–5 аккаунтов."
+  exit 2
+fi
 
 # ⚠⚠ ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ ПЕРВЫМ И БЛОКИРУЮЩИМ. Инструмент, чьё «ноль отказов» является
 # результатом, обязан сначала доказать, что вообще способен видеть отказ. Не доказал — числа
@@ -108,15 +118,43 @@ say "провалов: $fail; файлы в $OUT"
 # видимых в админке и в скоркарте волны. Драйвер не ходит в БД сам (он на хосте и без зависимостей
 # проекта), поэтому печатает ГОТОВУЮ команду — чтобы шаг нельзя было «забыть, потому что не
 # записан».
-say "⚠ УБОРКА ОБЯЗАТЕЛЬНА. Реплики нагрузочных аккаунтов остались в боевой БД:"
-say "   docker compose exec -T app python - <<'"'"'EOF'"'"' < /dev/null"
-say "   from app.db.engine import get_session; from app.db.models import User, Message"
-say "   with get_session() as db:"
-say "       u=db.query(User).filter(User.username.like('"'"'lt.load%'"'"')).all(); ids=[x.id for x in u]"
-say "       m=db.query(Message).filter(Message.user_id.in_(ids)).all()"
-say "       [db.delete(x) for x in m]; [db.delete(x) for x in u]; db.commit()"
-say "       print('"'"'осталось:'"'"', db.query(User).count(), db.query(Message).count())"
-say "   EOF"
+# ⚠⚠ УБОРКА ВЫДАЁТСЯ ФАЙЛОМ, А НЕ ТЕКСТОМ ДЛЯ КОПИРОВАНИЯ (ревью PR #135, раунд 2).
+# Первая редакция печатала heredoc через `say` — и была неработоспособна ТРИЖДЫ: каждая строка
+# выходила с префиксом времени; `python - <<EOF ... < /dev/null` отдаёт python ПУСТОЙ ввод
+# (последнее перенаправление побеждает), то есть команда завершалась кодом 0, НЕ ВЫПОЛНИВ НИ
+# СТРОКИ; а идиома кавычек внутри двойных кавычек ломала и разделитель, и сам фильтр
+# `like('lt.load%')`. Оператор увидел бы «ноль ошибок» и оставил ~115 искусственных диалогов в
+# боевой БД — ровно то, что этот шаг обязан предотвращать. Шаг-фикция в проекте уже был
+# (`backup_db.py --verify` без имени файла, 18.08) — второй раз тем же способом.
+cat > "$OUT/cleanup.py" <<'CLEAN'
+"""Удаляет нагрузочные аккаунты и их реплики из боевой БД (`EV22` #130).
+
+Запуск НА VM:  docker compose cp /tmp/level4/cleanup.py app:/app/cleanup.py                && docker compose exec -T app python /app/cleanup.py < /dev/null                && docker compose exec -T app rm -f /app/cleanup.py < /dev/null
+"""
+from app.db.engine import get_session
+from app.db.models import User, Message
+
+with get_session() as db:
+    users = db.query(User).filter(User.username.like("lt.load%")).all()
+    ids = [u.id for u in users]
+    msgs = db.query(Message).filter(Message.user_id.in_(ids)).all() if ids else []
+    print(f"удаляю: аккаунтов {len(users)}, реплик {len(msgs)}")
+    for m in msgs:
+        db.delete(m)
+    for u in users:
+        db.delete(u)
+    db.commit()
+    left = db.query(User).filter(User.username.like("lt.load%")).count()
+    print(f"ПОСЛЕ: пользователей {db.query(User).count()}, реплик {db.query(Message).count()}")
+    # ⚠ Положительный контроль: «ничего не удалено» и «удалено успешно» обязаны различаться.
+    assert left == 0, f"остались нагрузочные аккаунты: {left}"
+    print("остаток lt.load*: 0")
+CLEAN
+say "⚠ УБОРКА ОБЯЗАТЕЛЬНА — реплики нагрузочных аккаунтов остались в боевой БД."
+say "  Готовый скрипт: $OUT/cleanup.py. Запуск (три команды, каждая со своим stdin):"
+say "    sudo -n docker compose cp $OUT/cleanup.py app:/app/cleanup.py"
+say "    sudo -n docker compose exec -T app python /app/cleanup.py < /dev/null"
+say "    sudo -n docker compose exec -T app rm -f /app/cleanup.py < /dev/null"
 ls -l "$OUT" | sed 's/^/    /'
 say "⚠ ХАОС НЕ ЗАПУСКАЛСЯ — он отдельным вызовом scripts/eval_chaos.py, в согласованное окно."
 exit $((fail > 0 ? 1 : 0))
