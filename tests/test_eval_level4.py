@@ -115,11 +115,25 @@ class TestToolDefectIsNotAServiceFailure(unittest.TestCase):
     означает «мы не измеряли», второе — «сервис не справился». Раньше побег исключения из `ask`
     записывался как `conn_error` и утекал в долю отказов."""
 
-    def test_tool_error_invalidates_instead_of_counting(self):
-        ok = [{"class": L4.OK, "ttft": 1.0, "total": 2.0, "message_id": 1} for _ in range(5)]
-        s = L4.summarize(ok + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}], {})
+    @staticmethod
+    def _ok(n):
+        return [{"class": L4.OK, "ttft": 1.0, "total": 2.0, "message_id": i} for i in range(n)]
+
+    def test_mass_tool_error_invalidates(self):
+        """Массовый побег — измеритель сломан, числа не значат ничего."""
+        s = L4.summarize(self._ok(5) + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}
+                                        for _ in range(3)], {})
         self.assertFalse(s["valid"], "дефект инструмента не объявил замер недействительным")
         self.assertNotIn("ttft_p50", s, "перцентили посчитались при сломанном инструменте")
+
+    def test_single_tool_error_does_not_discard_the_window(self):
+        """⚠⚠ Ревью раунда 3: один побег в одном из 50 потоков обнулял ВЕСЬ прогон, за который
+        заплачено окном на боевой машине, — а этот же модуль называет «ничего не сняли» худшим
+        исходом захода. ⚠ Отличие от 429: тот приходит бурей и заражает соседей (окно лимита
+        общее), а побег из `ask` — событие ОДНОГО запроса."""
+        s = L4.summarize(self._ok(99) + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}], {})
+        self.assertTrue(s["valid"], "единичный дефект инструмента выбросил весь замер")
+        self.assertIsNotNone(s["ttft_p50"], "числа не напечатаны при одном побеге из ста")
 
     def test_tool_error_is_not_in_failures(self):
         """⚠ Обратная половина: попади он ещё и в `FAILURES`, число доли отказов описывало бы

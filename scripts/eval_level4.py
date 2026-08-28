@@ -351,7 +351,15 @@ def summarize(results: list[dict], meta: dict) -> dict:
     for r in results:
         by_class[r["class"]] = by_class.get(r["class"], 0) + 1
     ok = [r for r in results if r["class"] == OK]
-    invalid = {k: v for k, v in by_class.items() if k in INVALIDATING}
+    # ⚠⚠ ДЛЯ ДЕФЕКТА ИНСТРУМЕНТА — ПОРОГ, А НЕ АБСОЛЮТНЫЙ ЗАПРЕТ (ревью PR #135, раунд 3).
+    # Один побег исключения в одном из 50 потоков обнулял ВЕСЬ прогон, за который заплачено окном
+    # на боевой машине, — а этот же файл называет «ничего не сняли» худшим исходом захода.
+    # ⚠ Отличие от 429: тот приходит бурей и заражает соседей (окно лимита общее), а побег
+    # из `ask` — событие ОДНОГО запроса и о соседях ничего не говорит. Поэтому редкий добивается
+    # пометки, а массовый — отмены: порог 1 %, как у доли отказов в гайде.
+    tool_share = by_class.get(TOOL_ERROR, 0) / len(results) if results else 0.0
+    invalid = {k: v for k, v in by_class.items()
+               if k in INVALIDATING and (k != TOOL_ERROR or tool_share > 0.01)}
     failures = sum(v for k, v in by_class.items() if k in FAILURES)
     out = dict(meta)
     out["n"] = len(results)
@@ -450,10 +458,14 @@ def run_load(base: str, jars: list[str], questions: list[str], timeout: float,
     print(f"   волна из {len(questions)} запросов при {concurrency} одновременных "
           f"заняла {round(time.monotonic() - t0, 1)} с")
     # ⚠ Пустая ячейка означает, что поток умер, не записав исход. Молча её отбросить — значит
-    # уменьшить знаменатель доли отказов; поэтому она становится ОТКАЗОМ и видна в таблице.
+    # уменьшить знаменатель; поэтому она становится видимым классом.
+    # ⚠⚠ КЛАСС — `tool_error`, И ОН НЕ В `FAILURES` (ревью PR #135, раунд 3): прежняя строка
+    # говорила «засчитаны отказами», и оператор искал бы их в доле отказов, которой они не
+    # достигают. Дефект ИЗМЕРИТЕЛЯ — это «мы не измеряли», а не «сервис не справился».
     lost = sum(1 for r in results if r is None)
     if lost:
-        print(f"   ⚠⚠ потоков умерло без записи исхода: {lost} — засчитаны отказами")
+        print(f"   ⚠⚠ потоков умерло без записи исхода: {lost} — класс tool_error "
+              "(НЕ в доле отказов: это дефект измерителя, а не сервиса)")
     return [r if r is not None else
             {"class": TOOL_ERROR, "status": None, "ttft": None, "total": None,
              "message_id": None, "chars": 0, "detail": "поток умер, исход не записан"}
