@@ -95,6 +95,35 @@ class TestJudgeHasThreeOutcomes(unittest.TestCase):
         self.assertEqual(verdicts, {"НЕ ВОСПРОИЗВЕДЕНО", "ПРОЙДЕН"})
 
 
+class TestBoilerplateIsNotAFallback(unittest.TestCase):
+    """⚠⚠ Сырое тело HTTP-ошибки — НЕ «внятный фолбэк» (ревью PR #135). При не-200 `ask_plain`
+    кладёт в `text` декодированное тело, поэтому ветка «текста нет вовсе» для ошибки С ТЕЛОМ не
+    срабатывает никогда, и голая заглушка фреймворка проходила бы как внятное сообщение."""
+
+    def test_framework_stub_is_failure(self):
+        v = C.judge(before=probe(),
+                    during=probe(plain=L4.HTTP_5XX, sources=0,
+                                 text='{"detail":"Internal Server Error"}'),
+                    after=probe())
+        self.assertEqual(v["verdict"], "ПРОВАЛЕН")
+        self.assertIn("заглушку", v["why"])
+
+    def test_human_message_passes(self):
+        """⚠ Обратная половина: короткое, но осмысленное сообщение — это ВНЯТНАЯ ошибка.
+        Наблюдено на бою при недоступной LLM, и по гайду такой ответ засчитывается."""
+        v = C.judge(before=probe(),
+                    during=probe(plain=L4.HTTP_5XX, sources=0,
+                                 text='{"detail":"Сервис временно недоступен, повторите запрос."}'),
+                    after=probe(), recovery_seconds=5.0)
+        self.assertEqual(v["verdict"], "ПРОЙДЕН")
+
+    def test_boilerplate_detector_is_not_length_based(self):
+        """⚠ Различаем по СМЫСЛУ, а не по длине: длинная заглушка остаётся заглушкой, короткое
+        объяснение остаётся объяснением."""
+        self.assertTrue(C._is_boilerplate("x" * 200 + " Internal Server Error"))
+        self.assertFalse(C._is_boilerplate("Поиск недоступен"))
+
+
 class TestWatchdogFailureIsLoud(unittest.TestCase):
     """⚠⚠ Второй контур восстановления либо есть, либо о его отсутствии сказано ПРЯМО. Молчаливо
     невзведённый сторож хуже отсутствующего: оператор считает, что подстрахован, и ломает бой."""
@@ -115,7 +144,10 @@ class TestWatchdogFailureIsLoud(unittest.TestCase):
         sc = C.LLMDown(["sudo", "-n", "docker"], "/home/yc-user/navigator-719", "app", "qdrant")
         cmd = sc.watchdog()
         parsed = shlex.split(C.watchdog_command(cmd, 300))
-        self.assertEqual(parsed[:2], ["sleep", "300;"] if parsed[1] == "300;" else parsed[:2])
+        # ⚠ Первая редакция сравнивала `parsed[:2]` С САМИМ СОБОЙ в ветке else — тавтология,
+        # зелёная при любом результате. Ровно тот класс, от которого предостерегает шапка файла.
+        self.assertEqual(parsed[0], "sleep")
+        self.assertTrue(parsed[1].startswith("300"), f"задержка потерялась: {parsed[1]!r}")
         # хвост после `sleep N;` обязан побайтно совпасть с исходным argv
         self.assertEqual(parsed[-len(cmd):], cmd)
 
@@ -167,7 +199,10 @@ class TestComposeFileIsExplicit(unittest.TestCase):
         работала, снятие не работало НИКОГДА: сервис отдавал 5xx, пока не починили руками.
         Правильный способ — усечь и переписать ТОТ ЖЕ inode через `cat > файл`."""
         sc = C.LLMDown(["docker"], ".", "app", "qdrant")
-        cmd = " ".join(sc.watchdog()) + " " + " ".join(sc.restore.__doc__ or "")
+        # ⚠ Первая редакция склеивала сюда `" ".join(sc.restore.__doc__)` — join по СТРОКЕ
+        # вставляет пробел между КАЖДЫМ символом, поэтому «sed -i» не нашёлся бы там никогда,
+        # даже если бы он там был. Проверяем реальные команды: восстановление И сторож.
+        cmd = " ".join(sc.watchdog()) + " " + " ".join(sc.compose + [sc._UNDO])
         self.assertNotIn("sed -i", cmd)
         self.assertIn("cat /tmp/hosts.new > /etc/hosts", " ".join(sc.watchdog()))
 

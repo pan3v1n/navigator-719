@@ -53,8 +53,27 @@ if ! $PY scripts/eval_level4.py --mode selftest > "$OUT/selftest.log" 2>&1; then
 fi
 say "контроль пройден"
 
+# ⚠⚠ ПАУЗА МЕЖДУ СРЕЗАМИ — НЕ ВЕЖЛИВОСТЬ, А УСЛОВИЕ ДЕЙСТВИТЕЛЬНОСТИ ЗАМЕРА (ревью PR #135).
+# Оба лимита сервиса СКОЛЬЗЯЩИЕ, окно 60 с, и срезы идут встык:
+#   * вход — 10/мин НА IP (`RATE_LIMIT_LOGIN_PER_MIN`, ключ по адресу клиента). Каждый срез
+#     логинит ВСЕ аккаунты заново, и три-четыре среза подряд дают 3–4 × n_acc входов в одном окне:
+#     при 4 аккаунтах это уже 12 > 10, и срез падает с 429 ещё до первого вопроса;
+#   * чат — 20/мин НА ПОЛЬЗОВАТЕЛЯ. Предполётная проверка считает ёмкость ПОСРЕЗОВО, а окно общее:
+#     при минимально разрешённых трёх аккаунтах load25 и load50 дают одному аккаунту 9 + 17 = 26
+#     запросов внутри одного окна — 429, «ЗАМЕР НЕДЕЙСТВИТЕЛЕН», выход 1.
+# Пауза в 65 с даёт обоим окнам полностью стечь. Цена — три минуты на заход; альтернатива —
+# числа, которые нельзя использовать.
+COOLDOWN=${COOLDOWN:-65}
+first_stage=1
+cooldown() {
+  [ "$first_stage" = "1" ] && { first_stage=0; return 0; }
+  say "пауза ${COOLDOWN} с — даём стечь окнам лимитов (вход 10/мин на IP, чат 20/мин на юзера)"
+  sleep "$COOLDOWN"
+}
+
 run() {  # run <имя> <аргументы...>
   local name=$1; shift
+  cooldown
   say "=== $name ==="
   if $PY scripts/eval_level4.py "$@" --accounts "$ACCOUNTS" --base-url "$BASE" \
        --timeout "$TIMEOUT" --json "$OUT/$name.json" > "$OUT/$name.log" 2>&1; then
@@ -84,6 +103,20 @@ done
 
 say "=== итог ==="
 say "провалов: $fail; файлы в $OUT"
+# ⚠⚠ УБОРКА — ЧАСТЬ ЗАХОДА, А НЕ ДОБРАЯ ВОЛЯ ОПЕРАТОРА (ревью PR #135). Каждый успешный запрос
+# пишет пару реплик в боевую БД, и заход из ~115 запросов оставляет ~115 искусственных диалогов,
+# видимых в админке и в скоркарте волны. Драйвер не ходит в БД сам (он на хосте и без зависимостей
+# проекта), поэтому печатает ГОТОВУЮ команду — чтобы шаг нельзя было «забыть, потому что не
+# записан».
+say "⚠ УБОРКА ОБЯЗАТЕЛЬНА. Реплики нагрузочных аккаунтов остались в боевой БД:"
+say "   docker compose exec -T app python - <<'"'"'EOF'"'"' < /dev/null"
+say "   from app.db.engine import get_session; from app.db.models import User, Message"
+say "   with get_session() as db:"
+say "       u=db.query(User).filter(User.username.like('"'"'lt.load%'"'"')).all(); ids=[x.id for x in u]"
+say "       m=db.query(Message).filter(Message.user_id.in_(ids)).all()"
+say "       [db.delete(x) for x in m]; [db.delete(x) for x in u]; db.commit()"
+say "       print('"'"'осталось:'"'"', db.query(User).count(), db.query(Message).count())"
+say "   EOF"
 ls -l "$OUT" | sed 's/^/    /'
 say "⚠ ХАОС НЕ ЗАПУСКАЛСЯ — он отдельным вызовом scripts/eval_chaos.py, в согласованное окно."
 exit $((fail > 0 ? 1 : 0))

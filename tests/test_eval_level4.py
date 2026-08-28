@@ -16,9 +16,11 @@
 
 from __future__ import annotations
 
+import http.client
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -129,6 +131,51 @@ class TestVerdictStopsOnFailure(unittest.TestCase):
     def test_clean_run_returns_zero(self):
         """⚠ Обратная половина: код, всегда возвращающий 1, тоже «ловит все провалы»."""
         self.assertEqual(L4.verdict(self._s(ok=100, failures=0), 0.01), 0)
+
+
+class TestProtocolErrorsAreCounted(unittest.TestCase):
+    """⚠⚠ `IncompleteRead` — ЭТО ОБОРВАННЫЙ НА СЕРЕДИНЕ ПОТОК, то есть ровно класс `truncated`,
+    ради которого инструмент писался. И он НЕ является `OSError` (проверено: OSError=False,
+    HTTPException=True). До правки исключение уходило из `ask()` наружу, убивало поток замера,
+    ячейка результата оставалась пустой и ОТФИЛЬТРОВЫВАЛАСЬ — отказ исчезал из таблицы классов
+    и одновременно уменьшал знаменатель доли отказов. Найдено ревью PR #135.
+
+    ⚠ Проверяется ПОДМЕНОЙ соединения, а не фиктивным сервером: первая попытка сделать это
+    сервером дала `RemoteDisconnected`, который наследует и `OSError` и потому обрабатывался
+    ВСЕГДА. Контроль обязан бить в тот путь, который чинят, — иначе он зелен независимо от правки.
+    """
+
+    def _raising(self, exc):
+        class _Conn:
+            def request(self, *a, **k):
+                raise exc
+            def close(self):
+                pass
+        return lambda base, timeout: (_Conn(), "")
+
+    def test_incomplete_read_becomes_truncated(self):
+        exc = http.client.IncompleteRead(b"partial")
+        with mock.patch.object(L4, "_conn", self._raising(exc)):
+            r = L4.ask("http://127.0.0.1:1", "session=x", "q", 1.0)
+        self.assertEqual(r["class"], L4.TRUNCATED)
+        self.assertIn("IncompleteRead", r.get("detail", ""))
+
+    def test_bad_status_line_becomes_truncated(self):
+        with mock.patch.object(L4, "_conn", self._raising(http.client.BadStatusLine("мусор"))):
+            r = L4.ask("http://127.0.0.1:1", "session=x", "q", 1.0)
+        self.assertEqual(r["class"], L4.TRUNCATED)
+
+    def test_remote_disconnected_stays_conn_error(self):
+        """⚠ Обратная половина: `RemoteDisconnected` наследует И `OSError`, и его классификация
+        правкой меняться НЕ должна — иначе «починка» тихо переписала бы уже работавший случай."""
+        with mock.patch.object(L4, "_conn", self._raising(http.client.RemoteDisconnected("нет"))):
+            r = L4.ask("http://127.0.0.1:1", "session=x", "q", 1.0)
+        self.assertEqual(r["class"], L4.CONN_ERROR)
+
+    def test_plain_probe_survives_protocol_error(self):
+        with mock.patch.object(L4, "_conn", self._raising(http.client.IncompleteRead(b""))):
+            r = L4.ask_plain("http://127.0.0.1:1", "session=x", "q", 1.0)
+        self.assertEqual(r["class"], L4.CONN_ERROR)
 
 
 class TestOutcomeClassification(unittest.TestCase):

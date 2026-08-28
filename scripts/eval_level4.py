@@ -234,6 +234,19 @@ def ask(base: str, cookie: str, question: str, timeout: float) -> dict:
         out["total"] = round(time.monotonic() - t0, 3)
         out["detail"] = str(e)[:120]
         return out
+    except http.client.HTTPException as e:
+        # ⚠ ПОСЛЕ `OSError` НАМЕРЕННО: `RemoteDisconnected` наследует ОБА класса, и он обрабатывался
+        # как `conn_error` до этой правки. Правка нацелена на `IncompleteRead`/`BadStatusLine` —
+        # менять заодно классификацию уже работавшего случая она не должна.
+        # ⚠⚠ `IncompleteRead` НЕ является `OSError` (проверено: OSError=False,
+        # HTTPException=True) — а это ровно оборванный на середине поток, тот самый класс
+        # `TRUNCATED`, ради которого инструмент и писался. Без этой ветки исключение уходило из
+        # `ask()` наружу, поток замера рвался, и ОТКАЗ ИСЧЕЗАЛ ИЗ СТАТИСТИКИ вместо того чтобы
+        # в неё попасть. Найдено ревью PR #135.
+        out["class"] = TRUNCATED
+        out["total"] = round(time.monotonic() - t0, 3)
+        out["detail"] = f"{type(e).__name__}: {str(e)[:100]}"
+        return out
     finally:
         if c is not None:
             try:
@@ -286,9 +299,12 @@ def ask_plain(base: str, cookie: str, question: str, timeout: float) -> dict:
     except TimeoutError:
         out["class"], out["total"] = TIMEOUT, round(time.monotonic() - t0, 3)
         return out
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError, http.client.HTTPException) as e:
+        # ⚠ `HTTPException` здесь по той же причине, что в `ask()`: оборванный ответ не должен
+        # уходить исключением наружу и исчезать из статистики.
         out["class"] = (TIMEOUT if "timed out" in str(e).lower()
-                        else CONN_ERROR if isinstance(e, OSError) else SSE_ERROR)
+                        else CONN_ERROR if isinstance(e, (OSError, http.client.HTTPException))
+                        else SSE_ERROR)
         out["total"] = round(time.monotonic() - t0, 3)
         out["detail"] = str(e)[:120]
         return out
@@ -406,7 +422,17 @@ def run_load(base: str, jars: list[str], questions: list[str], timeout: float,
                 if i >= len(questions):
                     return
                 nxt[0] += 1
-            results[i] = ask(base, jars[i % len(jars)], questions[i], timeout)
+            try:
+                results[i] = ask(base, jars[i % len(jars)], questions[i], timeout)
+            except BaseException as e:  # noqa: BLE001
+                # ⚠⚠ ЛЮБОЙ ПОБЕГ ИЗ `ask` ОБЯЗАН СТАТЬ ЗАПИСАННЫМ ОТКАЗОМ, А НЕ ИСЧЕЗНУТЬ.
+                # Раньше исключение убивало поток, `results[i]` оставался `None` и отфильтровывался
+                # ниже: реальный отказ пропадал ИЗ ТАБЛИЦЫ КЛАССОВ и одновременно УМЕНЬШАЛ
+                # знаменатель — то есть занижал ровно ту долю отказов, по которой выносится
+                # вердикт. Найдено ревью PR #135.
+                results[i] = {"class": CONN_ERROR, "status": None, "ttft": None,
+                              "total": None, "message_id": None, "chars": 0,
+                              "detail": f"побег из ask: {type(e).__name__}: {str(e)[:80]}"}
 
     threads = [threading.Thread(target=worker, args=(w,), daemon=True)
                for w in range(concurrency)]
@@ -417,7 +443,15 @@ def run_load(base: str, jars: list[str], questions: list[str], timeout: float,
         t.join()
     print(f"   волна из {len(questions)} запросов при {concurrency} одновременных "
           f"заняла {round(time.monotonic() - t0, 1)} с")
-    return [r for r in results if r is not None]
+    # ⚠ Пустая ячейка означает, что поток умер, не записав исход. Молча её отбросить — значит
+    # уменьшить знаменатель доли отказов; поэтому она становится ОТКАЗОМ и видна в таблице.
+    lost = sum(1 for r in results if r is None)
+    if lost:
+        print(f"   ⚠⚠ потоков умерло без записи исхода: {lost} — засчитаны отказами")
+    return [r if r is not None else
+            {"class": CONN_ERROR, "status": None, "ttft": None, "total": None,
+             "message_id": None, "chars": 0, "detail": "поток умер, исход не записан"}
+            for r in results]
 
 
 def preflight(n: int, concurrency: int, accounts: int) -> None:

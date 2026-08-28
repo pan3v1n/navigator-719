@@ -239,6 +239,19 @@ def healthy(p: dict) -> bool:
     return p["plain_class"] == L4.OK and p.get("sources", 0) > 0
 
 
+_BOILERPLATE = ("internal server error", "bad gateway", "service unavailable",
+                "not found", "internal error")
+
+
+def _is_boilerplate(text: str) -> bool:
+    """Служебная заглушка фреймворка, а не объяснение пользователю.
+
+    ⚠ Сравнение по СМЫСЛОВОМУ содержанию, а не по длине: короткое «Сервис временно недоступен,
+    повторите запрос» — внятно, а длинный JSON с `Internal Server Error` — нет."""
+    low = text.lower()
+    return any(b in low for b in _BOILERPLATE)
+
+
 def judge(before: dict, during: dict, after: dict, recovery_seconds: float | None = None) -> dict:
     """Вердикт сценария. ⚠ Три состояния, а не два: пройдено / провалено / НЕ ВОСПРОИЗВЕДЕНО."""
     if healthy(during):
@@ -255,6 +268,15 @@ def judge(before: dict, during: dict, after: dict, recovery_seconds: float | Non
         return {"verdict": "ПРОВАЛЕН",
                 "why": f"пользователь не получил текста вовсе (класс {during['plain_class']}) — "
                        "гайд требует ВНЯТНОЙ ошибки, а не пустого ответа"}
+    # ⚠⚠ СЫРОЕ ТЕЛО HTTP-ОШИБКИ — НЕ «ВНЯТНЫЙ ФОЛБЭК» (ревью PR #135). При не-200 `ask_plain`
+    # кладёт в `text` ДЕКОДИРОВАННОЕ ТЕЛО ответа, поэтому ветка «текста нет вовсе» для ошибки
+    # с телом не срабатывает НИКОГДА, и голая заглушка фреймворка проходила бы как внятное
+    # сообщение. Различаем по существу: у осмысленного сообщения есть человеческий текст, а не
+    # только служебная формула.
+    if during["plain_class"] != L4.OK and _is_boilerplate(text):
+        return {"verdict": "ПРОВАЛЕН",
+                "why": f"пользователь получил служебную заглушку, а не объяснение: {text[:120]!r}. "
+                       "Гайд требует ВНЯТНОЙ ошибки — по ней должно быть понятно, что делать."}
     recovered = healthy(after)
     return {"verdict": "ПРОЙДЕН" if recovered else "ПРОВАЛЕН",
             "why": (f"фолбэк внятный, сервис вернулся за {recovery_seconds} с" if recovered
@@ -305,7 +327,12 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
         # к надёжности и в гайде своей строки не имеет.
         t_restore = time.monotonic()
         recovery_seconds = None
-        for _ in range(int(max(1, recovery_deadline // max(settle, 1)))):
+        # ⚠⚠ ДЕДЛАЙН В СЕКУНДАХ, А НЕ ЧИСЛО ИТЕРАЦИЙ (ревью PR #135). Первая редакция считала
+        # `range(deadline // settle)`, и каждая итерация стоила `settle` ПЛЮС полный `probe`
+        # (два чат-запроса, ~13 с по замеренной медиане): «90 с» превращались в ~8 минут, а при
+        # `--settle 45` — в одну попытку. Величина, которую задаёт оператор, обязана значить то,
+        # что написано в справке.
+        while time.monotonic() - t_restore < recovery_deadline:
             time.sleep(settle)
             after = probe(base, cookie, question, timeout)
             if healthy(after):
@@ -360,7 +387,16 @@ def main() -> int:
         for s in scenarios:
             print(f"  сценарий «{s.human}»\n     восстановление: {' '.join(s.watchdog())}")
         print(f"  сторож: {WATCHDOG_SECONDS} с, независимо от этого процесса")
-        return 0 if base["stream_class"] == L4.OK else 1
+        # ⚠⚠ ГОТОВНОСТЬ СУДИТСЯ `healthy()`, А НЕ КОДОМ ОТВЕТА (ревью PR #135). Первая редакция
+        # смотрела `stream_class == OK` — ровно ту проверку, которую `healthy()` и заменил: при
+        # УЖЕ лежащем Qdrant сервис отвечает 200, и сухой прогон объявил бы «готов» ровно в том
+        # случае, ради которого он и существует.
+        if healthy(base):
+            print("  готов: сервис здоров, ломать можно")
+            return 0
+        print(f"  ⚠⚠ НЕ ГОТОВ: сервис нездоров (класс {base['plain_class']}, "
+              f"источников {base['sources']}) — ломать нельзя")
+        return 1
 
     results = [run_scenario(s, args.base_url, cookie, args.question, args.timeout, args.settle,
                             args.recovery_deadline) for s in scenarios]
