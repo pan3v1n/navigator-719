@@ -224,6 +224,24 @@ def probe(base: str, cookie: str, question: str, timeout: float) -> dict:
             "unverified": plain.get("unverified") or [], "sources": plain.get("sources", 0)}
 
 
+# ⚠⚠ МИНИМАЛЬНЫЙ ИНТЕРВАЛ ОПРОСА — ЭТО ЗАЩИТА ОТ СЕБЯ (ревью PR #135, раунд 5).
+# `probe()` делает ДВА запроса (стрим и нестримовый), оба считаются одним и тем же счётчиком
+# `RATE_LIMIT_CHAT_PER_MIN = 20` НА ПОЛЬЗОВАТЕЛЯ, а весь заход идёт под ОДНИМ аккаунтом. Когда
+# зависимость сломана, запросы падают за миллисекунды, и опрос с паузой 3 с даёт 40 запросов в
+# минуту — вдвое выше лимита. Через полминуты аккаунт упирается в 429, `healthy()` навсегда
+# ложна, и скрипт печатает «СЕРВИС НЕ ВЕРНУЛСЯ» ПРО ЗДОРОВЫЙ СЕРВИС — сразу после того, как сам
+# сломал бой. Хуже того, 429 отравляет `before` следующего сценария.
+# 20 запросов в минуту при двух на пробу — это не чаще одной пробы в 6 с; берём 7 с с запасом.
+POLL_MIN_SECONDS = 7.0
+
+
+def rate_limited(p: dict) -> bool:
+    """⚠ 429 — это «НЕ ИЗМЕРЕНО», а не «нездоров». Соседний инструмент трактует его так же
+    (`INVALIDATING`), и путать эти два состояния нельзя: первое требует подождать, второе —
+    бить тревогу."""
+    return L4.HTTP_429 in (p.get("plain_class"), p.get("stream_class"))
+
+
 def healthy(p: dict) -> bool:
     """⚠⚠ ЗДОРОВЬЕ МЕРЯЕТСЯ ИСТОЧНИКАМИ, А НЕ КОДОМ ОТВЕТА И НЕ ТЕКСТОМ. Это выяснилось
     репетицией 28.08.2026 на настоящем Docker, и первая редакция `judge` на этом сгорела дважды.
@@ -327,6 +345,9 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
         # к надёжности и в гайде своей строки не имеет.
         t_restore = time.monotonic()
         recovery_seconds = None
+        # ⚠ Пауза опроса не быстрее лимита: иначе проверка сама себя и заблокирует.
+        poll = max(settle, POLL_MIN_SECONDS)
+        throttled = 0
         # ⚠⚠ ДЕДЛАЙН В СЕКУНДАХ, А НЕ ЧИСЛО ИТЕРАЦИЙ (ревью PR #135). Первая редакция считала
         # `range(deadline // settle)`, и каждая итерация стоила `settle` ПЛЮС полный `probe`
         # (два чат-запроса, ~13 с по замеренной медиане): «90 с» превращались в ~8 минут, а при
@@ -338,13 +359,22 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
         # падало `TypeError` ВНУТРИ `finally` — то есть маскировало исходное исключение и
         # обрывало заход СРАЗУ ПОСЛЕ намеренной поломки боя. Худшее место для падения.
         while True:
-            time.sleep(settle)
+            time.sleep(poll)
             after = probe(base, cookie, question, timeout)
             if healthy(after):
                 recovery_seconds = round(time.monotonic() - t_restore, 1)
                 break
+            if rate_limited(after):
+                # ⚠ Упёрлись в лимит — это НЕ «сервис не вернулся». Ждём дольше и не считаем
+                # такую пробу отрицательным ответом.
+                throttled += 1
+                poll = min(poll * 2, 60.0)
+                print(f"   ⚠ 429 при опросе (x{throttled}) — это НЕ нездоровье; пауза {poll} с")
             if time.monotonic() - t_restore >= recovery_deadline:
                 break
+        if throttled and not healthy(after):
+            print(f"   ⚠⚠ опрос упирался в 429 {throttled} раз — вердикт «не вернулся» может быть "
+                  "артефактом лимита, а не состоянием сервиса. Проверить вручную.")
         print(f"   после:   стрим={after['stream_class']} чат={after['plain_class']} "
               f"источников={after['sources']} возврат={recovery_seconds} с")
         if not healthy(after):

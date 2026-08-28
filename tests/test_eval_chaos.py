@@ -124,6 +124,31 @@ class TestBoilerplateIsNotAFallback(unittest.TestCase):
         self.assertFalse(C._is_boilerplate("Поиск недоступен"))
 
 
+class TestRateLimitIsNotIllHealth(unittest.TestCase):
+    """⚠⚠ Ревью раунда 5: опрос восстановления делает ДВА запроса на пробу, оба считаются одним
+    счётчиком 20/мин НА ПОЛЬЗОВАТЕЛЯ, а весь заход идёт под ОДНИМ аккаунтом. При сломанной
+    зависимости запросы падают мгновенно, и пауза 3 с давала 40 запросов в минуту — вдвое выше
+    лимита. Через полминуты 429, `healthy()` навсегда ложна, и скрипт печатал «СЕРВИС НЕ
+    ВЕРНУЛСЯ» ПРО ЗДОРОВЫЙ СЕРВИС — сразу после того, как сам сломал бой."""
+
+    def test_429_is_recognised_as_not_measured(self):
+        self.assertTrue(C.rate_limited({"plain_class": L4.HTTP_429, "stream_class": L4.OK}))
+        self.assertTrue(C.rate_limited({"plain_class": L4.OK, "stream_class": L4.HTTP_429}))
+
+    def test_healthy_service_is_not_rate_limited(self):
+        """⚠ Обратная половина: распознаватель, говорящий «да» всегда, тоже «ловит все 429»."""
+        self.assertFalse(C.rate_limited(probe()))
+        self.assertFalse(C.rate_limited(probe(plain=L4.HTTP_5XX, sources=0)))
+
+    def test_poll_floor_stays_under_the_chat_limit(self):
+        """⚠ Два запроса на пробу при 20/мин — не чаще одной пробы в 6 с. Число проверяется,
+        а не декларируется: разойдись оно с лимитом, проверка снова блокировала бы сама себя."""
+        requests_per_probe = 2
+        self.assertGreaterEqual(
+            C.POLL_MIN_SECONDS, 60.0 / L4.RATE_LIMIT_PER_MIN * requests_per_probe,
+            "интервал опроса быстрее лимита — проверка заблокирует сама себя")
+
+
 class TestWatchdogFailureIsLoud(unittest.TestCase):
     """⚠⚠ Второй контур восстановления либо есть, либо о его отсутствии сказано ПРЯМО. Молчаливо
     невзведённый сторож хуже отсутствующего: оператор считает, что подстрахован, и ломает бой."""

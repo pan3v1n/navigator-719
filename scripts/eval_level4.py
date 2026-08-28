@@ -408,8 +408,18 @@ def _print_summary(s: dict) -> None:
         print("   ⚠⚠ УСПЕШНЫХ ОТВЕТОВ НЕТ — измерять нечего. Числа не печатаются.")
         print(f"   доля отказов: {s['failure_share']} (классы выше)")
         return
-    print(f"   до первого токена: p50 {s['ttft_p50']} с · p95 {s['ttft_p95']} с   (n={n_ok})")
-    print(f"   до полного ответа: p50 {s['total_p50']} с · p95 {s['total_p95']} с   (n={n_ok})")
+    # ⚠⚠ КАЖДАЯ СТРОКА ГАСИТСЯ ОТДЕЛЬНО (ревью PR #135, раунд 5). Прежний гард ловил только
+    # «успехов ноль», а строка могла оказаться пустой и при непустом `ok`: ответ без единой
+    # непустой дельты даёт `ttft = None` у всех, и печаталось «p50 None с (n=3)» — то самое
+    # «пустое место читается как «мерили и получили»», от которого гард и заводился.
+    if s["ttft_p50"] is None:
+        print(f"   до первого токена: НЕ ИЗМЕРЕНО (ни одной непустой дельты)   (n={n_ok})")
+    else:
+        print(f"   до первого токена: p50 {s['ttft_p50']} с · p95 {s['ttft_p95']} с   (n={n_ok})")
+    if s["total_p50"] is None:
+        print(f"   до полного ответа: НЕ ИЗМЕРЕНО   (n={n_ok})")
+    else:
+        print(f"   до полного ответа: p50 {s['total_p50']} с · p95 {s['total_p95']} с   (n={n_ok})")
     print(f"   доля отказов: {s['failure_share']}")
     if n_ok < 20:
         print(f"   ⚠ n={n_ok}: p95 — это {math.ceil(0.95 * n_ok)}-е значение по порядку. Грубо.")
@@ -426,7 +436,16 @@ def run_single(base: str, jars: list[str], questions: list[str], timeout: float)
         if wait > 0 and i:
             time.sleep(wait)
         last = time.monotonic()
-        r = ask(base, jars[i % len(jars)], q, timeout)
+        try:
+            r = ask(base, jars[i % len(jars)], q, timeout)
+        except BaseException as e:  # noqa: BLE001
+            # ⚠⚠ ТА ЖЕ СЕТКА, ЧТО В `run_load` (ревью PR #135, раунд 5). Здесь её не было, и
+            # один побег из `ask` ронял ВЕСЬ последовательный прогон ДО записи JSON: тридцать
+            # запросов, оплаченных окном на боевой машине, не давали ни числа. Драйвер записал бы
+            # только «ПРОВАЛ».
+            r = {"class": TOOL_ERROR, "status": None, "ttft": None, "total": None,
+                 "message_id": None, "chars": 0,
+                 "detail": f"побег из ask: {type(e).__name__}: {str(e)[:80]}"}
         results.append(r)
         print(f"   [{i + 1}/{len(questions)}] {r['class']:10} "
               f"ttft={r['ttft']} total={r['total']}", flush=True)
