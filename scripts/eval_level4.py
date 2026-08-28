@@ -108,8 +108,12 @@ INVALIDATING = frozenset({HTTP_401, HTTP_403, HTTP_429})
 # Отказы, которые считаются в «долю отказов» по гайду (сервис ответил, но плохо).
 FAILURES = frozenset({SSE_ERROR, TRUNCATED, TIMEOUT, CONN_ERROR, HTTP_5XX, HTTP_4XX, HTTP_422})
 
-RATE_LIMIT_PER_MIN = 20  # app/core/config.Settings.RATE_LIMIT_CHAT_PER_MIN — держим синхронно
-_RATE_TEST = "tests/test_eval_level4.py"  # где это соответствие закреплено тестом
+# ⚠ Копия `app/core/config.Settings.RATE_LIMIT_CHAT_PER_MIN`. Совпадение закреплено тестом
+# `tests/test_eval_level4.py::TestRateLimitStaysInSync` — разойдись они, предполётный отказ
+# считал бы ёмкость по устаревшему числу и пропускал прогон, обречённый упереться в 429.
+# ⚠ Ссылка на тест — КОММЕНТАРИЕМ, не константой: мёртвое определение рядом с живым кодом уже
+# было находкой ревью сегодня (`BREAKERS` в checks/common/70).
+RATE_LIMIT_PER_MIN = 20
 
 
 class LoginError(RuntimeError):
@@ -227,6 +231,64 @@ def ask(base: str, cookie: str, question: str, timeout: float) -> dict:
         return out
     except OSError as e:  # socket.timeout наследует OSError; сюда же обрывы
         out["class"] = TIMEOUT if "timed out" in str(e).lower() else CONN_ERROR
+        out["total"] = round(time.monotonic() - t0, 3)
+        out["detail"] = str(e)[:120]
+        return out
+    finally:
+        if c is not None:
+            try:
+                c.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+
+def ask_plain(base: str, cookie: str, question: str, timeout: float) -> dict:
+    """НЕстримовый `/api/chat` — то, что пользователь видит на самом деле, когда стрим падает.
+
+    ⚠⚠ ЗАЧЕМ ОТДЕЛЬНАЯ ФУНКЦИЯ. `ask()` ходит только в `/api/chat/stream`, и когда движок падает,
+    стрим отдаёт `{"type":"error"}`. Но человеку это не показывается: фронт делает фолбэк на
+    `/api/chat` (комментарий R26 в `app/api/chat.py`), и ответ человек получает ОТТУДА. Значит на
+    вопрос гайда «Qdrant недоступен → внятная ошибка, не пустой ответ» стрим отвечает лишь
+    наполовину — вторую половину знает только этот эндпоинт. Предел был записан в шапке 28.08 и
+    закрывается здесь: хаос-проверка обязана смотреть туда, куда смотрит пользователь.
+
+    Возвращает те же классы, плюс `text` — сам ответ, чтобы проверить, что он ВНЯТНЫЙ, а не пустой.
+    """
+    # ⚠⚠ `sources` ВОЗВРАЩАЕТСЯ НАМЕРЕННО. Это единственный СТРУКТУРНЫЙ признак, отличающий
+    # здоровый ответ от деградированного: при отвалившемся Qdrant сервис отвечает честным
+    # фолбэком с кодом 200 и пустым списком источников. Ни код ответа, ни текст этого не
+    # показывают — см. `eval_chaos.judge`, где на этом сгорела первая редакция проверки.
+    out = {"class": None, "status": None, "total": None, "text": "", "unverified": [],
+           "sources": 0}
+    t0 = time.monotonic()
+    c = None
+    try:
+        c, prefix = _conn(base, timeout)
+        body = json.dumps({"message": question, "session_id": None}).encode("utf-8")
+        c.request("POST", prefix + "/api/chat", body=body, headers={
+            "Content-Type": "application/json", "Content-Length": str(len(body)),
+            "Cookie": cookie,
+        })
+        r = c.getresponse()
+        out["status"] = r.status
+        raw = r.read()
+        out["total"] = round(time.monotonic() - t0, 3)
+        if r.status != 200:
+            out["class"] = _class_for_status(r.status)
+            out["text"] = raw.decode("utf-8", "replace")[:400]
+            return out
+        payload = json.loads(raw.decode("utf-8", "replace"))
+        out["text"] = payload.get("answer") or ""
+        out["unverified"] = payload.get("unverified_numbers") or []
+        out["sources"] = len(payload.get("sources") or [])
+        out["class"] = OK
+        return out
+    except TimeoutError:
+        out["class"], out["total"] = TIMEOUT, round(time.monotonic() - t0, 3)
+        return out
+    except (OSError, ValueError) as e:
+        out["class"] = (TIMEOUT if "timed out" in str(e).lower()
+                        else CONN_ERROR if isinstance(e, OSError) else SSE_ERROR)
         out["total"] = round(time.monotonic() - t0, 3)
         out["detail"] = str(e)[:120]
         return out
@@ -403,11 +465,28 @@ def _fake_server():
                 self.wfile.flush()
             self.wfile.write(b"0\r\n\r\n")
 
+        def _json(self, payload: dict, code: int = 200):
+            raw = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            self.send_response(code)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def do_POST(self):  # noqa: N802
             case = self.path.split("/")[2] if self.path.startswith("/case/") else "fast"
             self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            # ⚠ НЕстримовый эндпоинт отвечает JSON'ом, а не SSE. Без этой ветки контроль
+            # `ask_plain` проверял бы разбор SSE json-парсером и «находил» несуществующий дефект.
+            plain = self.path.endswith("/api/chat")
             try:
-                if case == "fast":
+                if plain and case in ("fast", "slow", "oops", "half"):
+                    self._json({"answer": "ответ по существу", "unverified_numbers": [],
+                                "sources": [], "low_relevance": False, "session_id": "x"})
+                elif plain:
+                    code = {"boom": 500, "limit": 429, "denied": 403}.get(case, 500)
+                    self._json({"detail": "нет"}, code)
+                elif case == "fast":
                     self._sse([{"type": "delta", "text": "раз"}, {"type": "done", "message_id": 1}])
                 elif case == "slow":
                     self._sse([{"type": "delta", "text": "раз"}, {"type": "done", "message_id": 2}],
@@ -471,6 +550,22 @@ def selftest() -> int:
         print(f"  {mark} {human:38} ждали {expect:10} получили {got}")
         if got != expect:
             bad.append((case, expect, got))
+    # ⚠ НЕстримовый пробник — та половина, которую видит человек. Проверяется теми же случаями.
+    for case, expect, human in (("fast", OK, "нестримовый /api/chat: ответ"),
+                                ("boom", HTTP_5XX, "нестримовый /api/chat: 500"),
+                                ("limit", HTTP_429, "нестримовый /api/chat: 429")):
+        r = ask_plain(f"http://127.0.0.1:{port}/case/{case}", "session=x", "вопрос", timeout=2.0)
+        mark = "✅" if r["class"] == expect else "❌"
+        print(f"  {mark} {human:38} ждали {expect:10} получили {r['class']}")
+        if r["class"] != expect:
+            bad.append((f"plain:{case}", expect, r["class"]))
+    r = ask_plain(f"http://127.0.0.1:{port}/case/fast", "session=x", "вопрос", timeout=2.0)
+    if r["text"] != "ответ по существу":
+        bad.append(("plain:текст ответа", "ответ по существу", r["text"][:40]))
+        print(f"  ❌ {'нестримовый: текст ответа извлечён':38} получили {r['text'][:40]!r}")
+    else:
+        print(f"  ✅ {'нестримовый: текст ответа извлечён':38} {r['text']!r}")
+
     slow = ask(f"http://127.0.0.1:{port}/case/slow", "session=x", "вопрос", timeout=5.0)
     if not (slow["ttft"] and slow["ttft"] >= _SLOW_TTFT * 0.8):
         bad.append(("slow-ttft", f">={_SLOW_TTFT}", slow["ttft"]))
@@ -492,7 +587,9 @@ def selftest() -> int:
         print(f"\n❌ КОНТРОЛЬ ПРОВАЛЕН ({len(bad)}): {bad}\n"
               "Числа замера при непройденном контроле НЕ ИНТЕРПРЕТИРУЮТСЯ.")
         return 1
-    print("\n✅ контроль пройден — инструмент видит все восемь исходов; можно мерить")
+    # ⚠ Без числа в тексте: счётчик проверок уже менялся дважды, а устаревшее число рядом с
+    # «пройдено» читается как «проверок столько и есть». Тот же класс, что «0 ложных на 11 формах».
+    print("\n✅ контроль пройден — инструмент видит каждый проверенный исход; можно мерить")
     return 0
 
 
