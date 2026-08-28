@@ -412,8 +412,12 @@ def main() -> int:
     # «выключено настройкой» не должны выглядеть одинаково, иначе эксперт не поймёт, ждать ему
     # или звать администратора.
     texts = {r["scenario"]: (r.get("during") or {}).get("text", "") for r in results}
-    distinct = len({t.strip() for t in texts.values() if t.strip()}) == len(
-        [t for t in texts.values() if t.strip()])
+    # ⚠⚠ «РАЗНЫЕ» ТРЕБУЕТ ХОТЯ БЫ ДВУХ НАБЛЮДЕНИЙ (ревью PR #135, раунд 4). Прежняя форма при
+    # двух «НЕ ЗАПУЩЕН» сравнивала 0 == 0 и записывала в отчёт, что требование базы «два разных
+    # сообщения» ВЫПОЛНЕНО — на основании нуля наблюдений. Ровно тот пустой контроль, от которого
+    # этот файл защищается везде остальном.
+    seen = [t.strip() for t in texts.values() if t.strip()]
+    distinct = len(set(seen)) == len(seen) if len(seen) >= 2 else None
     if len(results) > 1:
         print(f"\nсообщения сценариев РАЗНЫЕ: {distinct}")
 

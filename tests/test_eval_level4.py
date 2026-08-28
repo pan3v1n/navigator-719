@@ -81,9 +81,15 @@ class TestInvalidatingClassesSuppressNumbers(unittest.TestCase):
     # ИНСТРУМЕНТА, а не отказ сервиса: записанный как `conn_error`, он попадал в долю отказов и
     # гнал вердикт, то есть сломанный измеритель выглядел как «сервис уронил N % соединений».
     MUST_INVALIDATE = ("http_401", "http_403", "http_429", "tool_error")
+    # ⚠⚠ ПОРОГИ У КЛАССОВ РАЗНЫЕ, И ЭТО ОСОЗНАННО (ревью PR #135, раунд 4). Один 401/403/429
+    # отменяет замер сразу: они приходят БУРЕЙ (окно лимита общее, сессия общая), и один
+    # наблюдённый означает, что задеты и соседи. Побег из `ask` — событие ОДНОГО запроса, поэтому
+    # у него допуск в одно событие: иначе единственная опечатка обнуляла бы весь прогон,
+    # оплаченный окном на боевой машине.
+    INVALIDATE_AT_ONE = ("http_401", "http_403", "http_429")
 
     def test_each_invalidating_class_kills_percentiles(self):
-        for bad in self.MUST_INVALIDATE:
+        for bad in self.INVALIDATE_AT_ONE:
             with self.subTest(bad=bad):
                 s = L4.summarize(self._ok(5) + [{"class": bad, "ttft": None, "total": 0.1}], {})
                 self.assertFalse(s["valid"], f"{bad} не объявил замер недействительным")
@@ -127,18 +133,24 @@ class TestToolDefectIsNotAServiceFailure(unittest.TestCase):
         self.assertNotIn("ttft_p50", s, "перцентили посчитались при сломанном инструменте")
 
     def test_single_tool_error_does_not_discard_the_window(self):
-        """⚠⚠ Ревью раунда 3: один побег в одном из 50 потоков обнулял ВЕСЬ прогон, за который
-        заплачено окном на боевой машине, — а этот же модуль называет «ничего не сняли» худшим
-        исходом захода. ⚠ Отличие от 429: тот приходит бурей и заражает соседей (окно лимита
-        общее), а побег из `ask` — событие ОДНОГО запроса."""
-        s = L4.summarize(self._ok(99) + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}], {})
-        self.assertTrue(s["valid"], "единичный дефект инструмента выбросил весь замер")
-        self.assertIsNotNone(s["ttft_p50"], "числа не напечатаны при одном побеге из ста")
+        """⚠⚠ РАЗМЕРЫ БЕРУТСЯ ТЕ, ЧТО РЕАЛЬНО ГОНЯЕТ ДРАЙВЕР: 30 (одиночный) и 10 / 25 / 50
+        (нагрузка). Первая редакция теста стояла на n=100 — популяции, которой драйвер НЕ
+        ПРОИЗВОДИТ, — и была ЗЕЛЁНОЙ при неизменившемся поведении: порог «доля > 1 %» достижим
+        только со ста запросов. Тест, написанный под удобное число, сертифицирует несуществующую
+        починку."""
+        for n in (10, 25, 30, 50):
+            with self.subTest(n=n):
+                s = L4.summarize(
+                    self._ok(n - 1) + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}], {})
+                self.assertTrue(s["valid"], f"n={n}: единичный дефект инструмента выбросил замер")
+                self.assertIsNotNone(s["ttft_p50"], f"n={n}: числа не напечатаны")
+                self.assertIn("⚠ дефект инструмента", s, f"n={n}: допуск применён МОЛЧА")
 
-    def test_tool_error_is_not_in_failures(self):
-        """⚠ Обратная половина: попади он ещё и в `FAILURES`, число доли отказов описывало бы
-        поломку измерителя как поведение сервиса."""
-        self.assertNotIn(L4.TOOL_ERROR, L4.FAILURES)
+    def test_two_tool_errors_do_invalidate_small_run(self):
+        """⚠ Обратная половина: допуск — в ОДНО событие, а не «сколько угодно»."""
+        s = L4.summarize(self._ok(28) + [{"class": L4.TOOL_ERROR, "ttft": None, "total": None}
+                                         for _ in range(2)], {})
+        self.assertFalse(s["valid"], "два побега на 30 запросах не отменили замер")
 
 
 class TestVerdictStopsOnFailure(unittest.TestCase):
