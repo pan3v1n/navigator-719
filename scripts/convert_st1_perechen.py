@@ -1,0 +1,248 @@
+"""Приложение 1 Соглашения СНГ («Перечень условий») → ТАБЛИЦА ФАКТОВ по ТН ВЭД (`K14` #35).
+
+⚠⚠ ПОЧЕМУ ТАБЛИЦА, А НЕ ПРОЗА В ВЕКТОРЕ — ЭТО НЕ СТИЛЬ, А КОРРЕКТНОСТЬ.
+Перечень устроен как СПИСОК ИСКЛЮЧЕНИЙ. Общее правило Соглашения (п. 2.4): критерий достаточной
+переработки — «изменение товарной позиции по ТН ВЭД на уровне хотя бы одного из первых четырёх
+знаков», и оно применяется КО ВСЕМ товарам, КРОМЕ включённых в Перечень. Значит промах поиска по
+Перечню молча вернёт ОБЩЕЕ правило — то есть НЕВЕРНОЕ условие для перечисленного товара, и внешне
+такой ответ неотличим от верного. Векторный поиск даёт вероятность попадания; здесь нужна
+определённость, поэтому лукап детерминированный. Ровно этот принцип записан в §2 KB_EXPANSION_TZ:
+«перечень условий по ТН ВЭД — таблица фактов, Qdrant — индекс навигации, не источник».
+
+⚠⚠ ИСХОДНИК В РЕПОЗИТОРИЙ НЕ ЕДЕТ (1 МБ RTF), поэтому единственное, что связывает результат с
+документом СНГ, — этот скрипт. Урок проекта: разбор первоисточника обязан воспроизводиться.
+
+ПЯТЬ ФОРМ СТРОКИ, И ТРИ ИЗ НИХ МЕНЯЮТ СМЫСЛ (посчитано на исходнике, а не угадано):
+  `0201`                    товарная позиция, 4 знака
+  `2101 12`                 субпозиция, 6 знаков
+  `0710 40 000`             десятизначный код
+  `из 0901`                 ⚠ условия применяются ТОЛЬКО К ЧАСТИ позиции (прим. 1.1 Перечня)
+  `1504 - 1506 00 000`      ⚠ ДИАПАЗОН кодов
+Плюс служебные строки: `(в ред. Протокола от ДД.ММ.ГГГГ)` — пометка к ПРЕДЫДУЩЕЙ записи, и
+`- Исключена.` — отменённая позиция.
+
+⚠ ПРЕДЛОГ «ИЗ» СОХРАНЯЕТСЯ ФЛАГОМ, А НЕ ВЫБРАСЫВАЕТСЯ. Прим. 1.1: «В случае если коду товара по
+ТН ВЭД предшествует предлог "из", это указывает на то, что условия и операции в графе третьей
+применяются только к товарам», перечисленным в графе второй. Потеряв флаг, лукап отдал бы условие
+ВСЕЙ позиции — тот же класс дефекта, что «правильное число, привязанное не к той позиции».
+
+⚠ НАИМЕНОВАНИЕ — НЕ КЛЮЧ. Прим. 1.1: «Товары в настоящем Перечне определяются исключительно кодом
+товара по ТН ВЭД; наименование товара приведено только для удобства пользования». Поэтому лукап
+идёт по коду, а имя едет рядом как справочное.
+
+ПОЛОЖИТЕЛЬНЫЕ КОНТРОЛИ (скрипт падает, если хоть один пуст). «Ноль срабатываний» и «парсер
+ослеп на изменившемся исходнике» снаружи неразличимы, а второй случай тихо отдал бы пустую
+таблицу — и лукап начал бы отвечать «в Перечне нет» про КАЖДЫЙ товар, то есть всегда возвращать
+общее правило. Это худший исход из возможных: он выглядит как нормальная работа.
+
+Запуск:
+    .venv\\Scripts\\python scripts/convert_st1_perechen.py
+    .venv\\Scripts\\python scripts/convert_st1_perechen.py --rtf "путь.rtf" --check
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+from app.core.console import enable_utf8  # noqa: E402  (только после sys.path)
+
+enable_utf8()
+
+DEFAULT_RTF = (Path.home() / "Downloads" /
+               "Соглашение о правилах определения страны происхождения товаров "
+               "в Содружестве Независимых Государств.rtf")
+OUT_JSON = ROOT / "knowledge_base" / "classifiers" / "tnved_st1_conditions.json"
+
+HEADER = "ПЕРЕЧЕНЬ УСЛОВИЙ"
+# Строка-заголовок таблицы и строка нумерации граф — не данные.
+_SKIP_EXACT = ("Код ТН ВЭД", "1 |2 |3 |")
+# Пометка о редакции относится к ПРЕДЫДУЩЕЙ записи.
+_EDITION = re.compile(r"^\(в ред\.\s*(.+?)\)\s*\|?\s*$")
+# Одна единица первой графы: необязательное «из», код, необязательный диапазон «- КОД».
+_ONE_CODE = r"(?:из\s+)?\d{4}(?:\s*\d{2,3})*(?:\s*-\s*\d{4}(?:\s*\d{2,3})*)?"
+# ⚠⚠ ПЕРВАЯ ГРАФА БЫВАЕТ СПИСКОМ ЧЕРЕЗ ЗАПЯТУЮ: «из 6804, из 6805 |…». Первая редакция шаблона
+# брала только первый код и ТЕРЯЛА второй — молча, потому что запись при этом выглядела целой.
+_ROW = re.compile(rf"^\s*(?P<codes>{_ONE_CODE}(?:\s*,\s*{_ONE_CODE})*)\s*\|(?P<rest>.*)$")
+# ⚠⚠ ОТМЕНЁННАЯ ПОЗИЦИЯ ПИШЕТСЯ БЕЗ ЧЕРТЫ ПОСЛЕ КОДА: «8803 - Исключена.|». Первая редакция
+# требовала `|` сразу за кодом, строка не совпадала — и уходила в ветку «продолжение ячейки»,
+# ПРИКЛЕИВАЯСЬ к условию ПРЕДЫДУЩЕЙ записи (проверено: попала в хвост условия позиции 8704).
+# Тот же класс, что «правильное число, привязанное не к той позиции»: снаружи запись цела.
+_ROW_EXCLUDED = re.compile(r"^\s*(?P<code>\d{4}(?:\s*\d{2,3})*)\s*-\s*Исключена?\.?\s*\|?\s*$", re.I)
+_EXCLUDED = re.compile(r"^\s*-?\s*Исключен", re.I)
+# Разбор одной единицы списка первой графы.
+_UNIT = re.compile(r"^\s*(?P<from>из\s+)?(?P<code>\d{4}(?:\s*\d{2,3})*)"
+                   r"(?:\s*-\s*(?P<code2>\d{4}(?:\s*\d{2,3})*))?\s*$")
+
+
+def _norm_code(raw: str) -> str:
+    """Код без пробелов: `0710 40 000` → `071040000`. Сравнение кодов — по цифрам."""
+    return re.sub(r"\s+", "", raw)
+
+
+def parse(text: str) -> tuple[list[dict], dict]:
+    """Записи Перечня + счётчики форм (счётчики нужны положительным контролям)."""
+    start = text.find(HEADER)
+    if start < 0:
+        sys.exit(f"ОСТАНОВ: в тексте нет заголовка «{HEADER}» — не тот документ или не тот формат")
+    body = text[start:]
+
+    rows: list[dict] = []
+    # ⚠⚠ ПОСЛЕДНЯЯ СТРОКА ТАБЛИЦЫ МОЖЕТ ДАВАТЬ НЕСКОЛЬКО ЗАПИСЕЙ («из 6804, из 6805»), и
+    # продолжение многострочной ячейки относится КО ВСЕМ ним, а не к последней. Дописывать в
+    # `rows[-1]` — значит оставить остальные с ОБРЕЗАННЫМ условием, снаружи выглядящим целым.
+    last_group: list[int] = []
+    forms = {"exact4": 0, "exact6": 0, "exact10": 0, "from": 0, "range": 0,
+             "excluded": 0, "editions": 0, "continuation": 0}
+
+    for line in body.splitlines():
+        stripped = line.strip()
+        if not stripped or stripped.startswith(_SKIP_EXACT):
+            continue
+
+        ed = _EDITION.match(stripped)
+        if ed:
+            # ⚠ Пометка о редакции — свойство ПРЕДЫДУЩЕЙ СТРОКИ ТАБЛИЦЫ, а не новая строка.
+            # Как и продолжение ячейки, она относится ко ВСЕМ записям, порождённым той строкой.
+            for idx in last_group:
+                rows[idx].setdefault("editions", []).append(ed.group(1).strip())
+            if last_group:
+                forms["editions"] += 1
+            continue
+
+        ex = _ROW_EXCLUDED.match(stripped)
+        if ex:
+            forms["excluded"] += 1
+            rows.append({"code": _norm_code(ex.group("code")), "code_to": None, "partial": False,
+                         "name": "", "condition": "", "excluded": True})
+            last_group = []          # к отменённой позиции продолжений не бывает
+            continue
+
+        m = _ROW.match(line)
+        if not m:
+            # Продолжение многострочной ячейки — дописываем ВСЕМ записям последней строки таблицы.
+            if last_group and "|" in line:
+                tail = line.strip(" |")
+                for idx in last_group:
+                    rows[idx]["condition"] = (rows[idx]["condition"] + " " + tail).strip()
+                forms["continuation"] += 1
+            continue
+
+        cells = [c.strip() for c in m.group("rest").split("|")]
+        name = cells[0] if cells else ""
+        condition = cells[1] if len(cells) > 1 else ""
+
+        if _EXCLUDED.match(name) or _EXCLUDED.match(condition):
+            forms["excluded"] += 1
+            u = _UNIT.match(m.group("codes").split(",")[0])
+            rows.append({"code": _norm_code(u.group("code")) if u else "", "code_to": None,
+                         "partial": False, "name": "", "condition": "", "excluded": True})
+            continue
+
+        # ⚠ Каждая единица списка первой графы даёт СВОЮ запись с ОДНИМ И ТЕМ ЖЕ условием:
+        # «из 6804, из 6805» — это два товара, к которым применяется одно правило.
+        last_group = []
+        for unit in m.group("codes").split(","):
+            u = _UNIT.match(unit)
+            if not u:
+                continue
+            code = _norm_code(u.group("code"))
+            code2 = _norm_code(u.group("code2")) if u.group("code2") else None
+            partial = bool(u.group("from"))
+            if code2:
+                forms["range"] += 1
+            elif partial:
+                forms["from"] += 1
+            else:
+                forms[{4: "exact4", 6: "exact6"}.get(len(code), "exact10")] += 1
+            last_group.append(len(rows))
+            rows.append({"code": code, "code_to": code2, "partial": partial,
+                         "name": name, "condition": condition, "excluded": False})
+    return rows, forms
+
+
+def controls(rows: list[dict], forms: dict) -> list[str]:
+    """⚠ Каждый контроль — про то, что МОЛЧА сломалось бы. Пустой контроль = провал разбора."""
+    problems = []
+    if len(rows) < 120:
+        problems.append(f"записей всего {len(rows)} — Перечень содержит ~155, разбор потерял строки")
+    for key, human in (("exact4", "четырёхзначные коды"), ("exact10", "десятизначные коды"),
+                       ("from", "форма «из CODE» (частичное применение)"),
+                       ("range", "диапазоны «A - B»"), ("editions", "пометки о редакции"),
+                       # ⚠ Контроль куплен дефектом: строка «8803 - Исключена.» не совпадала с
+                       # шаблоном и ПРИКЛЕИВАЛАСЬ к условию соседа (8704). Ноль здесь означает
+                       # либо исчезнувшую форму, либо возврат того же прилипания.
+                       ("excluded", "отменённые позиции «CODE - Исключена»")):
+        if not forms[key]:
+            problems.append(f"НЕ НАЙДЕНО: {human} — форма исчезла, значит шаблон ослеп")
+    without_condition = [r for r in rows if not r["excluded"] and not r["condition"]]
+    if len(without_condition) > len(rows) * 0.10:
+        problems.append(f"без условия осталось {len(without_condition)} записей из {len(rows)} — "
+                        "третья графа не доехала")
+    # ⚠ Промышленные разделы — то, ради чего K14 и делается. Их отсутствие обессмысливает таблицу.
+    industrial = [r for r in rows if r["code"][:2] in {"84", "85", "86", "87", "88", "89", "90", "94"}]
+    if len(industrial) < 40:
+        problems.append(f"промышленных позиций {len(industrial)} — ожидалось ~56, "
+                        "именно они нужны для 719")
+    return problems
+
+
+def main() -> None:
+    ap = argparse.ArgumentParser(description="Перечень условий СНГ → таблица фактов по ТН ВЭД")
+    ap.add_argument("--rtf", type=Path, default=DEFAULT_RTF)
+    ap.add_argument("--out", type=Path, default=OUT_JSON)
+    ap.add_argument("--check", action="store_true", help="только разобрать и проверить, не писать")
+    args = ap.parse_args()
+
+    if not args.rtf.exists():
+        sys.exit(f"ОСТАНОВ: нет исходника {args.rtf}\n"
+                 "Соглашение СНГ в репозиторий не едет — путь задаётся --rtf.")
+
+    from striprtf.striprtf import rtf_to_text
+
+    text = rtf_to_text(args.rtf.read_bytes().decode("cp1251", "replace"), errors="ignore")
+    rows, forms = parse(text)
+
+    print(f"исходник: {args.rtf.name}  ({len(text)} знаков текста)")
+    print(f"записей Перечня: {len(rows)}")
+    print("  формы: " + " · ".join(f"{k}={v}" for k, v in forms.items()))
+    industrial = [r for r in rows if r["code"][:2] in {"84", "85", "86", "87", "88", "89", "90", "94"}]
+    print(f"  из них промышленных (84–90, 94): {len(industrial)}")
+
+    problems = controls(rows, forms)
+    if problems:
+        print("\n⚠⚠ ПОЛОЖИТЕЛЬНЫЕ КОНТРОЛИ НЕ ПРОШЛИ:")
+        for p in problems:
+            print(f"   ✗ {p}")
+        sys.exit("разбор считается несостоявшимся — таблица НЕ записана")
+    print("✅ положительные контроли пройдены")
+
+    if args.check:
+        print("(--check: файл не записан)")
+        return
+
+    payload = {
+        "source": "Соглашение о правилах определения страны происхождения товаров в СНГ",
+        "source_short": "Соглашение СНГ о стране происхождения",
+        "appendix": "Приложение 1 — Перечень условий",
+        "general_rule": (
+            "Критерий достаточной обработки/переработки — изменение товарной позиции по ТН ВЭД "
+            "на уровне хотя бы одного из первых четырёх знаков. Применяется ко ВСЕМ товарам, "
+            "кроме включённых в настоящий Перечень."),
+        "key_type": "ТН ВЭД",
+        "rows": rows,
+    }
+    args.out.parent.mkdir(parents=True, exist_ok=True)
+    args.out.write_text(json.dumps(payload, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"записано: {args.out.relative_to(ROOT)}  ({args.out.stat().st_size} байт)")
+
+
+if __name__ == "__main__":
+    main()
