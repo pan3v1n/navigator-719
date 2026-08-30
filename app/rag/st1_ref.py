@@ -1,0 +1,169 @@
+"""Условия достаточной переработки по коду ТН ВЭД (`K14` #35) — детерминированный лукап.
+
+Данные: `knowledge_base/classifiers/tnved_st1_conditions.json` (сборка
+`scripts/convert_st1_perechen.py` из Приложения 1 Соглашения СНГ о правилах определения страны
+происхождения товаров). Без сети и без модели.
+
+⚠⚠ ГЛАВНОЕ ПРО СЕМАНТИКУ, БЕЗ ЧЕГО МОДУЛЬ ЧИТАЕТСЯ НЕВЕРНО. Перечень — это СПИСОК ИСКЛЮЧЕНИЙ.
+Общее правило Соглашения действует для ВСЕХ товаров: достаточной переработкой считается изменение
+товарной позиции по ТН ВЭД на уровне хотя бы одного из первых четырёх знаков. Перечень называет
+товары, для которых правило ДРУГОЕ.
+
+Отсюда два следствия, определяющие устройство модуля:
+  1. «Кода нет в Перечне» — это НЕ «ничего не нашли», а ПОЛНОЦЕННЫЙ ответ: применяется общее
+     правило. Поэтому `conditions_for` никогда не возвращает пустоту молча — она возвращает
+     `general_rule` с явным `matched=False`.
+  2. Поиск обязан быть ТОЧНЫМ, а не вероятностным. Промах по Перечню не даёт пустого результата —
+     он даёт общее правило, то есть ПРАВДОПОДОБНОЕ И НЕВЕРНОЕ условие, внешне неотличимое от
+     верного. Ровно поэтому таблица, а не вектор.
+
+⚠ ДВА НАПРАВЛЕНИЯ СОВПАДЕНИЯ, И ОНИ ЗНАЧАТ РАЗНОЕ.
+  * запись покрывает запрос (`8528` в Перечне, спросили `8528 72 000 0`) — условие ПРИМЕНЯЕТСЯ
+    к спрошенному товару;
+  * запрос покрывает запись (спросили `8528`, в Перечне `8528 72`) — условие применяется лишь
+    к ЧАСТИ спрошенного, и ответ обязан это сказать, иначе эксперт распространит его на всю
+    позицию.
+Смешивать их нельзя: во втором случае утверждение «ваше условие такое» было бы неверным.
+"""
+
+from __future__ import annotations
+
+import json
+from functools import lru_cache
+from pathlib import Path
+
+from app.rag.okpd2_ref import normalize_tnved
+
+_TABLE = (Path(__file__).resolve().parents[2] / "knowledge_base" / "classifiers"
+          / "tnved_st1_conditions.json")
+
+# Общее правило на случай, если таблицы нет вовсе: сам текст правила — норма Соглашения, и
+# отсутствие файла не должно превращать его в пустую строку.
+_FALLBACK_RULE = (
+    "Критерий достаточной обработки/переработки — изменение товарной позиции по ТН ВЭД "
+    "на уровне хотя бы одного из первых четырёх знаков.")
+
+
+@lru_cache(maxsize=1)
+def _data() -> dict:
+    if not _TABLE.exists():
+        return {"rows": [], "general_rule": _FALLBACK_RULE, "source": "", "source_short": ""}
+    return json.loads(_TABLE.read_text(encoding="utf-8"))
+
+
+@lru_cache(maxsize=1)
+def _rows() -> tuple[dict, ...]:
+    return tuple(_data().get("rows") or ())
+
+
+def is_available() -> bool:
+    """⚠ Отличать «таблицы нет» от «кода нет в Перечне». Первое — дефект развёртывания (файл не
+    доехал в архив, как это уже случалось с `classifiers/*.tsv` в T9 и с
+    `inherited_requirements.json`), второе — законный ответ. Снаружи они выглядят одинаково:
+    и там и там вернётся общее правило."""
+    return bool(_rows())
+
+
+def general_rule() -> str:
+    return _data().get("general_rule") or _FALLBACK_RULE
+
+
+def source_short() -> str:
+    return _data().get("source_short") or "Соглашение СНГ о стране происхождения"
+
+
+def _in_range(code: str, row: dict) -> bool:
+    """Диапазон «1504 - 1506 00 000». Сравниваем по общей длине префикса: коды разной длины
+    сопоставимы только по старшим разрядам."""
+    lo, hi = row["code"], row.get("code_to")
+    if not hi:
+        return False
+    n = min(len(lo), len(hi), len(code))
+    if n < 4:
+        return False
+    return lo[:n] <= code[:n] <= hi[:n]
+
+
+def conditions_for(tnved: str | None) -> dict:
+    """Условия для кода ТН ВЭД.
+
+    Возвращает:
+      matched     — код НАЙДЕН в Перечне (иначе действует общее правило);
+      exact       — записи, ПРИМЕНИМЫЕ к спрошенному товару (запись покрывает запрос);
+      narrower    — записи, применимые лишь к ЧАСТИ спрошенного (запрос покрывает запись);
+      general_rule, source, available.
+
+    ⚠ `narrower` не сливается с `exact` намеренно: условие подпозиции нельзя выдавать за условие
+    всей товарной позиции. Спросили «8528» — а в Перечне отдельные условия у «8528 72»: верный
+    ответ «для части вашей позиции условия иные, уточните код», а не «ваше условие такое»."""
+    code = normalize_tnved(tnved)
+    out = {"code": code, "matched": False, "exact": [], "narrower": [],
+           "general_rule": general_rule(), "source": source_short(),
+           "available": is_available()}
+    if len(code) < 4:
+        # ⚠ Короче товарной позиции сопоставлять нечему: «85» это ГРУППА, а Перечень ведётся
+        # по позициям. Молча вернуть общее правило здесь было бы утверждением о том, чего
+        # не спрашивали.
+        out["too_short"] = True
+        return out
+
+    for row in _rows():
+        if row.get("excluded"):
+            continue
+        rc = row["code"]
+        if row.get("code_to"):
+            if _in_range(code, row):
+                out["exact"].append(row)
+            continue
+        if code.startswith(rc):
+            out["exact"].append(row)      # запись покрывает спрошенный товар
+        elif rc.startswith(code):
+            out["narrower"].append(row)   # запись уже спрошенного: касается его части
+
+    out["matched"] = bool(out["exact"])
+    return out
+
+
+def is_excluded(tnved: str | None) -> bool:
+    """Позиция помечена в Перечне как исключённая (например, 8803). ⚠ Это НЕ «условий нет»:
+    позиция изъята из Перечня, значит к ней вернулось ОБЩЕЕ правило."""
+    code = normalize_tnved(tnved)
+    return bool(code) and any(r["code"] == code for r in _rows() if r.get("excluded"))
+
+
+def format_for_context(tnved: str | None, max_rows: int = 4) -> str:
+    """Блок для контекста модели. ⚠ Пишем ЯВНО, найден код или нет: без этого модель не отличит
+    «условие из Перечня» от «общего правила» и подаст второе как первое."""
+    res = conditions_for(tnved)
+    if not res["available"]:
+        return ""
+    if res.get("too_short"):
+        return (f"[{res['source']}] Указана группа, а не код товарной позиции. "
+                "Для условий достаточной переработки нужен код ТН ВЭД не короче четырёх знаков.")
+
+    head = f"[{res['source']}] Код ТН ВЭД {tnved}: "
+    if not res["matched"]:
+        body = ("в Перечень условий (приложение 1) НЕ включён — применяется общее правило: "
+                + res["general_rule"])
+        if res["narrower"]:
+            names = "; ".join(f"{r['code']} ({r['name'][:60]})" for r in res["narrower"][:max_rows])
+            body += (f" ⚠ Но отдельные условия установлены для более узких кодов: {names}. "
+                     "Уточните код полностью.")
+        return head + body
+
+    parts = []
+    for r in res["exact"][:max_rows]:
+        # ⚠⚠ ДИАПАЗОН ПЕЧАТАЕТСЯ ЦЕЛИКОМ. Первая редакция выводила только `code`, и строка
+        # «из 8702 - 8704» показывалась как «позиция 8702» — при запросе про 8704 эксперт видел
+        # условие ЧУЖОЙ позиции. Тот же класс, что «правильное правило, привязанное не к той
+        # позиции»: сам текст условия верен, неверна его адресация.
+        where = f"{r['code']} - {r['code_to']}" if r.get("code_to") else r["code"]
+        scope = "для ЧАСТИ товаров " if r.get("partial") else "для "
+        kind = "позиций " if r.get("code_to") else "позиции "
+        ed = f" (в ред. {r['editions'][-1]})" if r.get("editions") else ""
+        parts.append(f"{scope}{kind}{where} «{r['name'][:80]}»{ed}: {r['condition']}")
+    body = "включён в Перечень условий (приложение 1). " + " || ".join(parts)
+    if any(r.get("partial") for r in res["exact"][:max_rows]):
+        body += (" ⚠ Пометка «из» означает, что условие применяется только к части товаров "
+                 "позиции — сверьте наименование товара с графой 2 Перечня.")
+    return head + body
