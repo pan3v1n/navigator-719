@@ -256,3 +256,49 @@ class TestToolSelfControlPasses(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestInterruptInterrupts(unittest.TestCase):
+    """⚠⚠ ПРЕРЫВАНИЕ ОПЕРАТОРА — НЕ «ДЕФЕКТ ИНСТРУМЕНТА» (ревью PR #135, раунд 6, #136).
+
+    `run_load` ловит `BaseException` безопасно: там она в РАБОЧЕМ потоке, куда Ctrl-C не приходит.
+    `run_single` крутится В ГЛАВНОМ, и та же сетка глотала `KeyboardInterrupt`: оператор жмёт
+    Ctrl-C, чтобы прервать тридцать запросов по БОЕВОЙ машине, — а цикл писал `tool_error` и шёл
+    дальше. Хуже: один такой `tool_error` укладывается в допуск `max(1, ceil(0.01*30)) = 1`, и
+    прерванный прогон уходил в отчёт как ДЕЙСТВИТЕЛЬНЫЙ."""
+
+    def test_ctrl_c_propagates_out_of_run_single(self):
+        with mock.patch.object(L4, "ask", side_effect=KeyboardInterrupt):
+            with self.assertRaises(KeyboardInterrupt):
+                L4.run_single("http://x", ["jar"], ["вопрос"], timeout=1.0)
+
+    def test_ordinary_escape_is_still_caught(self):
+        """⚠ Обратная половина: сетка ради которой она заводилась, обязана остаться. Побег из
+        `ask` не должен ронять прогон ДО записи JSON — иначе оплаченное окно не даёт ни числа."""
+        with mock.patch.object(L4, "ask", side_effect=RuntimeError("побег")):
+            res = L4.run_single("http://x", ["jar"], ["вопрос"], timeout=1.0)
+        self.assertEqual([r["class"] for r in res], [L4.TOOL_ERROR])
+
+
+class TestPercentileNMatchesItsSample(unittest.TestCase):
+    """⚠⚠ ЧИСЛО РЯДОМ С ПЕРЦЕНТИЛЕМ ОБЯЗАНО БЫТЬ ЧИСЛОМ ЕГО ВЫБОРКИ (раунд 6, #136).
+
+    Прежний гард гасил строку, только когда `ttft` пуст У ВСЕХ. Если из успешных ответов у части
+    непустой дельты не было, перцентили считались по остатку, а печаталось `(n=<все успехи>)` —
+    то самое «пустое место читается как «мерили и получили»», ради которого гард и заводился."""
+
+    @staticmethod
+    def _ok(ttft):
+        return {"class": L4.OK, "status": 200, "ttft": ttft, "total": 5.0,
+                "message_id": None, "chars": 10}
+
+    def test_partial_none_reports_the_filtered_n(self):
+        s = L4.summarize([self._ok(1.0), self._ok(2.0), self._ok(None)], {"mode": "тест"})
+        self.assertEqual(s["ok"], 3)
+        self.assertEqual(s["ttft_n"], 2)          # ← перцентили посчитаны по двум, а не по трём
+        self.assertEqual(s["total_n"], 3)
+
+    def test_full_sample_reports_the_same_n(self):
+        """⚠ Обратная половина: на чистом наборе число не должно расходиться с числом успехов."""
+        s = L4.summarize([self._ok(1.0), self._ok(2.0)], {"mode": "тест"})
+        self.assertEqual(s["ttft_n"], s["ok"])

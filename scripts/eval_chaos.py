@@ -231,8 +231,22 @@ def probe(base: str, cookie: str, question: str, timeout: float) -> dict:
 # минуту — вдвое выше лимита. Через полминуты аккаунт упирается в 429, `healthy()` навсегда
 # ложна, и скрипт печатает «СЕРВИС НЕ ВЕРНУЛСЯ» ПРО ЗДОРОВЫЙ СЕРВИС — сразу после того, как сам
 # сломал бой. Хуже того, 429 отравляет `before` следующего сценария.
-# 20 запросов в минуту при двух на пробу — это не чаще одной пробы в 6 с; берём 7 с с запасом.
-POLL_MIN_SECONDS = 7.0
+# ⚠⚠ СЧИТАЕМ ВСЕХ ПОТРЕБИТЕЛЕЙ ОКНА, А НЕ ТОЛЬКО ОПРОС (ревью PR #135, раунд 6, #136).
+# Прежняя арифметика «20 в минуту при двух на пробу → 6 с, берём 7» исходила из того, что опрос —
+# ЕДИНСТВЕННЫЙ потребитель. Но сценарий тратит ещё две пробы (`before` и `during`), а сценариев
+# два подряд. При сломанной зависимости пробы возвращаются за миллисекунды, и к t≈59 набегало
+# 4 + 8 проб × 2 = 20 хитов — впритык к лимиту, без запаса, то есть 429 наступал закономерно.
+# Теперь пол ВЫВОДИТСЯ из бюджета, а не назначается: сначала вычитаем фиксированные пробы, потом
+# делим остаток. Числа ниже — те, из которых оракул теста обязан считать НЕЗАВИСИМО: тест,
+# повторяющий формулу кода, ловит только опечатку, а не ошибку модели (раунд 6 нашёл ровно это —
+# `test_poll_floor_stays_under_the_chat_limit` считал те же `requests_per_probe = 2`).
+_REQUESTS_PER_PROBE = 2          # `probe()` бьёт дважды: стрим и нестримовый, счётчик один
+_FIXED_PROBES_PER_SCENARIO = 2   # `before` и `during` — тратятся ДО опроса, в том же окне
+# ⚠ Запас не «на всякий случай», а на НАЛОЖЕНИЕ СЦЕНАРИЕВ: `main()` гоняет их подряд без паузы,
+# и хвост опроса первого попадает в то же минутное окно, что `before` второго.
+_POLL_SAFETY = 1.35
+_POLL_BUDGET = L4.RATE_LIMIT_PER_MIN - _FIXED_PROBES_PER_SCENARIO * _REQUESTS_PER_PROBE
+POLL_MIN_SECONDS = round(60.0 / (_POLL_BUDGET / _REQUESTS_PER_PROBE) * _POLL_SAFETY, 1)
 
 
 def rate_limited(p: dict) -> bool:
@@ -270,8 +284,28 @@ def _is_boilerplate(text: str) -> bool:
     return any(b in low for b in _BOILERPLATE)
 
 
-def judge(before: dict, during: dict, after: dict, recovery_seconds: float | None = None) -> dict:
-    """Вердикт сценария. ⚠ Три состояния, а не два: пройдено / провалено / НЕ ВОСПРОИЗВЕДЕНО."""
+def judge(before: dict, during: dict, after: dict, recovery_seconds: float | None = None,
+          throttled: int = 0) -> dict:
+    """Вердикт сценария. ⚠ ЧЕТЫРЕ состояния, а не три: пройдено / провалено / НЕ ВОСПРОИЗВЕДЕНО /
+    НЕ ИЗМЕРЕНО.
+
+    ⚠⚠ ЧЕТВЁРТОЕ ЗАВЕДЕНО РЕВЬЮ PR #135, РАУНД 6 (#136), И ЭТО БЫЛ ЛОЖНО ПОЛОЖИТЕЛЬНЫЙ ВЕРДИКТ —
+    худший класс дефекта у проверки, которая ЛОМАЕТ БОЙ. Разбор: `ask_plain` при не-200 кладёт в
+    `text` тело ответа, а тело 429 у приложения — `{"detail":"Слишком много вопросов подряд…"}`.
+    Дальше по цепочке: `healthy(during)` ложна (значит не «не воспроизведено»), `unverified` пуст,
+    текст НЕПУСТОЙ, `_is_boilerplate` знает только английские формулы и не срабатывает — и
+    выполнение доходило до `recovered = healthy(after)`, печатая «ПРОЙДЕН — фолбэк внятный».
+    То есть инструмент НЕ НАБЛЮДАЛ ПОЛОМКУ ВОВСЕ (упёрся в СВОЙ лимит), а отчитывался, что
+    фолбэк проверен. Сценарий достижим буднично: `during` — это 3-я и 4-я пробы окна сразу после
+    `before`, а во втором сценарии окно уже занято опросом первого.
+
+    ⚠ 429 — это «НЕ ИЗМЕРЕНО», а не «нездоров» и не «пройдено»: первое требует подождать и
+    повторить, второе — бить тревогу, третье — закрыть задачу. Путать их нельзя."""
+    if rate_limited(during):
+        return {"verdict": "НЕ ИЗМЕРЕНО", "throttled_polls": throttled, "throttled_during": True,
+                "why": "проба ВО ВРЕМЯ поломки упёрлась в 429: инструмент упёрся в собственный "
+                       f"лимит ({L4.RATE_LIMIT_PER_MIN}/мин на пользователя) и поведения сервиса "
+                       "не наблюдал. Это НЕ «пройдено» и НЕ «провалено» — повторить с паузой."}
     if healthy(during):
         return {"verdict": "НЕ ВОСПРОИЗВЕДЕНО",
                 "why": f"сервис остался здоров (источников {during.get('sources')}) — "
@@ -296,10 +330,22 @@ def judge(before: dict, during: dict, after: dict, recovery_seconds: float | Non
                 "why": f"пользователь получил служебную заглушку, а не объяснение: {text[:120]!r}. "
                        "Гайд требует ВНЯТНОЙ ошибки — по ней должно быть понятно, что делать."}
     recovered = healthy(after)
+    # ⚠⚠ «НЕ ВЕРНУЛСЯ» ПОД ТРОТТЛИНГОМ — ЭТО НЕ ВЕРДИКТ, А ОТСУТСТВИЕ НАБЛЮДЕНИЯ (раунд 6, #136).
+    # Прежде оговорка про лимит жила ТОЛЬКО в stdout, а в JSON — единственном артефакте, который
+    # переживает сессию, — не было ни поля `throttled`, ни следа 429. Читающий отчёт завтра видел
+    # «бой не вернулся, разбирать немедленно» без единого намёка, что инструмент упирался в
+    # собственный лимит. Тревога такого рода дороже отсутствующей: по ней идут чинить здоровое.
+    if not recovered and (rate_limited(after) or throttled):
+        return {"verdict": "НЕ ИЗМЕРЕНО", "recovered": False,
+                "recovery_seconds": recovery_seconds, "throttled_polls": throttled,
+                "why": f"опрос упирался в 429 {throttled} раз и дедлайн истёк под троттлингом — "
+                       "состояние сервиса НЕ НАБЛЮДАЛОСЬ. Это не «не вернулся»: проверить "
+                       "вручную и повторить, выждав окно лимита."}
     return {"verdict": "ПРОЙДЕН" if recovered else "ПРОВАЛЕН",
             "why": (f"фолбэк внятный, сервис вернулся за {recovery_seconds} с" if recovered
                     else "⚠⚠ СЕРВИС НЕ ВЕРНУЛСЯ ПОСЛЕ ВОССТАНОВЛЕНИЯ — разбирать немедленно"),
-            "recovered": recovered, "recovery_seconds": recovery_seconds}
+            "recovered": recovered, "recovery_seconds": recovery_seconds,
+            "throttled_polls": throttled}
 
 
 def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: float,
@@ -308,6 +354,17 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
     before = probe(base, cookie, question, timeout)
     print(f"   до:      стрим={before['stream_class']} чат={before['plain_class']} "
           f"источников={before['sources']}")
+    # ⚠⚠ 429 В `before` — ЭТО НЕ «СЕРВИС НЕЗДОРОВ» (ревью PR #135, раунд 6, #136). `main()` гоняет
+    # оба сценария подряд без паузы, и `before` второго приходит вплотную к опросу первого, когда
+    # в окне уже 16–20 хитов. Без этой ветки инструмент печатал ложный диагноз ПРО СЕРВИС и
+    # выходил с кодом 1 — ровно то отравление `before`, которое коммит раунда 5 объявил
+    # починенным, но закрыл только в опросе.
+    if rate_limited(before):
+        return {"scenario": sc.name, "verdict": "НЕ ИЗМЕРЕНО", "throttled_before": True,
+                "why": f"проба ДО поломки упёрлась в 429 (лимит {L4.RATE_LIMIT_PER_MIN}/мин на "
+                       "пользователя) — это состояние ИНСТРУМЕНТА, а не сервиса. Ломать нельзя, "
+                       "но и обвинять сервис не в чем: выждать окно и повторить.",
+                "before": before}
     if not healthy(before):
         return {"scenario": sc.name, "verdict": "НЕ ЗАПУЩЕН",
                 "why": f"сервис нездоров ДО поломки (класс {before['plain_class']}, источников "
@@ -358,8 +415,16 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
         # число) тело не выполнялось ни разу, `after` оставался `None`, и обращение к нему
         # падало `TypeError` ВНУТРИ `finally` — то есть маскировало исходное исключение и
         # обрывало заход СРАЗУ ПОСЛЕ намеренной поломки боя. Худшее место для падения.
+        # ⚠⚠ ПРОБА ПЕРВОЙ, ПАУЗА МЕЖДУ ПРОБАМИ (ревью PR #135, раунд 6, #136). Пока `sleep` стоял
+        # В НАЧАЛЕ тела, первая проба уходила не раньше `POLL_MIN_SECONDS`, и `recovery_seconds`
+        # получал ЖЁСТКИЙ ПОЛ, заданный самим инструментом: замеренное репетицией «Qdrant
+        # поднимает коллекции ~6 с» этот замер не мог показать В ПРИНЦИПЕ — число было
+        # систематически завышено на величину собственной паузы и нигде это не оговаривало.
+        # ⚠ Цена перестановки названа честно: первая проба идёт вплотную к `during`, то есть в
+        # окне подряд оказываются 6 запросов (before 2 + during 2 + первая after 2). Это учтено
+        # в расчёте `POLL_MIN_SECONDS` ниже — там же, где считаются все остальные потребители
+        # окна, а не только опрос.
         while True:
-            time.sleep(poll)
             after = probe(base, cookie, question, timeout)
             if healthy(after):
                 recovery_seconds = round(time.monotonic() - t_restore, 1)
@@ -372,6 +437,7 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
                 print(f"   ⚠ 429 при опросе (x{throttled}) — это НЕ нездоровье; пауза {poll} с")
             if time.monotonic() - t_restore >= recovery_deadline:
                 break
+            time.sleep(poll)
         if throttled and not healthy(after):
             print(f"   ⚠⚠ опрос упирался в 429 {throttled} раз — вердикт «не вернулся» может быть "
                   "артефактом лимита, а не состоянием сервиса. Проверить вручную.")
@@ -382,7 +448,7 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
 
     res = {"scenario": sc.name, "human": sc.human,
            "before": before, "during": during, "after": after}
-    res.update(judge(before, during, after, recovery_seconds))
+    res.update(judge(before, during, after, recovery_seconds, throttled))
     print(f"   ВЕРДИКТ: {res['verdict']} — {res['why']}")
     return res
 

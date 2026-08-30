@@ -386,10 +386,19 @@ def summarize(results: list[dict], meta: dict) -> dict:
             f"{RATE_LIMIT_PER_MIN}/мин на пользователя); 403 → роль `user` без профиля; "
             "401 → сессия не установилась; tool_error → сломан САМ ИНСТРУМЕНТ, и его дефект нельзя выдавать за отказ сервиса. Перцентили не печатаются намеренно.")
         return out
-    out["ttft_p50"] = pct([r["ttft"] for r in ok if r["ttft"] is not None], 0.50)
-    out["ttft_p95"] = pct([r["ttft"] for r in ok if r["ttft"] is not None], 0.95)
-    out["total_p50"] = pct([r["total"] for r in ok if r["total"] is not None], 0.50)
-    out["total_p95"] = pct([r["total"] for r in ok if r["total"] is not None], 0.95)
+    # ⚠⚠ N ПЕЧАТАЕТСЯ ОТ ТОЙ ЖЕ ВЫБОРКИ, ПО КОТОРОЙ СЧИТАЛИСЬ ПЕРЦЕНТИЛИ (раунд 6, #136).
+    # Гард выше гасит строку целиком, только когда `ttft` пуст У ВСЕХ. Но если из 30 успешных
+    # ответов у трёх не было непустой дельты, перцентили считались по 27 значениям, а рядом
+    # печаталось `(n=30)` — то самое «пустое место читается как «мерили и получили»», ради
+    # которого гард и заводился, только тоньше: число рядом с перцентилем обязано быть числом
+    # ЕГО выборки, иначе оно сообщает о полноте, которой не было.
+    ttft_vals = [r["ttft"] for r in ok if r["ttft"] is not None]
+    total_vals = [r["total"] for r in ok if r["total"] is not None]
+    out["ttft_n"], out["total_n"] = len(ttft_vals), len(total_vals)
+    out["ttft_p50"] = pct(ttft_vals, 0.50)
+    out["ttft_p95"] = pct(ttft_vals, 0.95)
+    out["total_p50"] = pct(total_vals, 0.50)
+    out["total_p95"] = pct(total_vals, 0.95)
     out["percentile_method"] = "ближайший ранг (nearest-rank), n указан рядом"
     out["message_ids"] = [r["message_id"] for r in ok if r.get("message_id")]
     return out
@@ -412,14 +421,20 @@ def _print_summary(s: dict) -> None:
     # «успехов ноль», а строка могла оказаться пустой и при непустом `ok`: ответ без единой
     # непустой дельты даёт `ttft = None` у всех, и печаталось «p50 None с (n=3)» — то самое
     # «пустое место читается как «мерили и получили»», от которого гард и заводился.
+    # ⚠ `n` у каждой строки — размер ЕЁ выборки, а не число успехов: см. `ttft_n` в `summarize`.
+    ttft_n, total_n = s.get("ttft_n", n_ok), s.get("total_n", n_ok)
     if s["ttft_p50"] is None:
-        print(f"   до первого токена: НЕ ИЗМЕРЕНО (ни одной непустой дельты)   (n={n_ok})")
+        print(f"   до первого токена: НЕ ИЗМЕРЕНО (ни одной непустой дельты)   (n={ttft_n})")
     else:
-        print(f"   до первого токена: p50 {s['ttft_p50']} с · p95 {s['ttft_p95']} с   (n={n_ok})")
+        note = "" if ttft_n == n_ok else f", у {n_ok - ttft_n} из {n_ok} дельты не было"
+        print(f"   до первого токена: p50 {s['ttft_p50']} с · p95 {s['ttft_p95']} с"
+              f"   (n={ttft_n}{note})")
     if s["total_p50"] is None:
-        print(f"   до полного ответа: НЕ ИЗМЕРЕНО   (n={n_ok})")
+        print(f"   до полного ответа: НЕ ИЗМЕРЕНО   (n={total_n})")
     else:
-        print(f"   до полного ответа: p50 {s['total_p50']} с · p95 {s['total_p95']} с   (n={n_ok})")
+        note = "" if total_n == n_ok else f", у {n_ok - total_n} из {n_ok} времени не было"
+        print(f"   до полного ответа: p50 {s['total_p50']} с · p95 {s['total_p95']} с"
+              f"   (n={total_n}{note})")
     print(f"   доля отказов: {s['failure_share']}")
     if n_ok < 20:
         print(f"   ⚠ n={n_ok}: p95 — это {math.ceil(0.95 * n_ok)}-е значение по порядку. Грубо.")
@@ -438,6 +453,16 @@ def run_single(base: str, jars: list[str], questions: list[str], timeout: float)
         last = time.monotonic()
         try:
             r = ask(base, jars[i % len(jars)], q, timeout)
+        except (KeyboardInterrupt, SystemExit):
+            # ⚠⚠ ПРЕРЫВАНИЕ ОПЕРАТОРА — НЕ «ДЕФЕКТ ИНСТРУМЕНТА» (ревью PR #135, раунд 6, #136).
+            # В `run_load` голый `except BaseException` безопасен: там он живёт в рабочем потоке,
+            # куда Ctrl-C не приходит. Здесь `run_single` крутится В ГЛАВНОМ потоке, и сетка
+            # ловила `KeyboardInterrupt`: оператор жмёт Ctrl-C, чтобы прервать 30 запросов ПО
+            # БОЕВОЙ МАШИНЕ, — а цикл записывал `tool_error` и шёл дальше.
+            # ⚠ Хуже того, прогон при этом объявлялся ДЕЙСТВИТЕЛЬНЫМ: один `tool_error`
+            # укладывается в допуск `max(1, ceil(0.01 * 30)) = 1`, то есть прерванный замер
+            # уходил в отчёт как полноценный. Прерывание обязано прерывать.
+            raise
         except BaseException as e:  # noqa: BLE001
             # ⚠⚠ ТА ЖЕ СЕТКА, ЧТО В `run_load` (ревью PR #135, раунд 5). Здесь её не было, и
             # один побег из `ask` ронял ВЕСЬ последовательный прогон ДО записи JSON: тридцать
