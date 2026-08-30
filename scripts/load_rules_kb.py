@@ -88,6 +88,16 @@ _POINT_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3})*)\.\s")
 # Пометка редакции: «(в ред. Постановления Правительства РФ от 13.04.2026 N 400)».
 # ⚠ «N» / «№» / кириллическая «Н» / неразрывный пробел — как в `app/rag/edition.py`.
 _AMEND_RE = re.compile(r"от\s*(\d{1,2}\.\d{1,2}\.(\d{4}))\s*[NН№]\s*(\d+)")
+# ⚠ K14: изменяющий акт международного договора — ПРОТОКОЛ, и номера у него нет.
+# «(в ред. Протоколов от 18.10.2011, от 28.09.2012, … от 08.06.2023)».
+# ⚠⚠ ПОМЕТКА ПЕРЕЧИСЛЯЕТ ВСЕ ПРОТОКОЛЫ СРАЗУ, поэтому ищем СНАЧАЛА саму пометку, а даты берём
+# ВНУТРИ неё. Первая редакция брала «Протокол…от ДАТА» одним шаблоном — и находила только ПЕРВУЮ
+# дату перечня (18.10.2011), потому что `finditer` продолжает после конца совпадения. Штамп
+# получался на двенадцать лет старше действительного, и выглядел он совершенно нормально.
+# ⚠ Требуем слово «Протокол» в пометке: голое «от ДД.ММ.ГГГГ» встречается в тексте сотнями (даты
+# договоров, писем, ссылки на чужие акты), и штамповать по нему было бы хуже, чем не штамповать.
+_PROTOCOL_BLOCK_RE = re.compile(r"в\s+ред\.\s+Протокол\w*([^)]{0,600})")
+_DATE_RE = re.compile(r"от\s*(\d{1,2}\.\d{1,2}\.\d{4})")
 # Определение сноски приложения начинается с маркера в начале строки: «<44> В случае …».
 # Ссылки на сноски внутри требований идут в середине строки и сюда не попадают.
 _FOOTNOTE_RE = re.compile(r"^(<\d+(?:\.\d+)?>)\s")
@@ -367,6 +377,21 @@ def detect_edition(all_text: str) -> str:
         key = (y, mth, d, num)
         if key > best_key:
             best_key, best_label = key, f"ред. от {m.group(1)} N {m.group(3)}"
+    # ⚠⚠ K14: МЕЖДУНАРОДНЫЙ ДОГОВОР ИЗМЕНЯЕТСЯ ПРОТОКОЛОМ, У КОТОРОГО НОМЕРА НЕТ.
+    # Соглашение СНГ идёт «(в ред. Протоколов от 18.10.2011, … от 08.06.2023)», и `_AMEND_RE`,
+    # требующая «N NNN», не видела здесь НИЧЕГО. Хуже, чем «не определена»: она находила
+    # `ред. от 18.06.2010 N 324` — ссылку на ПОСТОРОННИЙ акт внутри текста — и выдавала её за
+    # редакцию документа. Ложный штамп опаснее отсутствующего: гейт отставания корпуса (A6)
+    # сравнивал бы его с манифестом и молчал.
+    # ⚠ Сравнение общее, а не отдельная ветка: у протокола номера нет, поэтому в ключ идёт 0, и
+    # при равной дате пронумерованный акт выигрывает. Радиус замерен по ВСЕМ документам корпуса —
+    # штампы пяти прежних не изменились (`test_st1_corpus.TestEditionRadius`).
+    for block in _PROTOCOL_BLOCK_RE.finditer(all_text):
+        for m in _DATE_RE.finditer(block.group(1)):
+            d, mth, y = (int(x) for x in m.group(1).split("."))
+            key = (y, mth, d, 0)
+            if key > best_key:
+                best_key, best_label = key, f"ред. от {m.group(1)}"
     if best_label:
         return best_label
     # ⚠ K15: не всякий документ ВЕРСИОНИРУЕТСЯ редакциями. Методрекомендации ТПП пометок
@@ -502,6 +527,224 @@ PASSPORT_FIELDS = kb_manifest.PASSPORT_FIELDS
 RETIRED = kb_manifest.RETIRED
 COLLECTION = "pp719_rules"
 
+# --------------------------------------------------------------------------- #
+# K14 (#35): корпус СТ-1 — Соглашение СНГ и Приказ ТПП РФ №14
+# --------------------------------------------------------------------------- #
+# ⚠⚠ ПЕРЕЧНЯ УСЛОВИЙ (приложение 1 Соглашения) ЗДЕСЬ НЕТ И БЫТЬ НЕ ДОЛЖНО. Он вырезан на
+# конвертации (`scripts/convert_st1_docs.py`) и живёт таблицей фактов
+# `classifiers/tnved_st1_conditions.json` + лукапом `app/rag/st1_ref.py`. Причина не в объёме:
+# Перечень — список ИСКЛЮЧЕНИЙ из общего правила, и вероятностный поиск по нему возвращает не
+# пустоту, а ДРУГОЕ правдоподобное условие. Два источника одного факта расходятся молча.
+_SNG_SECTION_RE = re.compile(r"^Раздел\s+(\d+)\.\s*(.+)$")
+_SNG_APPX_RE = re.compile(r"^Приложение\s+(\d+)\s*$")
+
+# ⚠⚠ ТОЧКА ПОСЛЕ НОМЕРА ПУНКТА НЕОБЯЗАТЕЛЬНА, И ЭТО НЕ МЕЛОЧЬ. Приказ ТПП №14 нумерует пункты
+# БЕЗ неё («4.1 Сертификаты формы СТ-1 выдаются…»), а `_ORDER_POINT_RE` точку требует. Из-за
+# этого шаблон не находил НИ ОДНОГО настоящего пункта Приказа — зато исправно ловил подписи граф
+# БЛАНКОВ («1. Exporter», «2. Consignee»), где точка есть. Разбор давал 12 записей из 231
+# кандидата, и числа при этом выглядели правдоподобно: инверсия ровно та, которую в этом проекте
+# уже ловили на приложении 719.
+# ⚠ Требуем ХОТЯ БЫ ОДНУ подгруппу («4.1», а не «4»): одиночный номер с точкой — это и есть
+# подпись графы бланка, её брать не надо.
+_K14_POINT_RE = re.compile(r"^(\d{1,2}(?:\.\d{1,3})+)\.?\s")
+# Сколько символов на запись, если раздел пришлось резать целиком (см. `_section_records`).
+_K14_CAP = 1200
+
+
+def _section_records(base: dict, sec_lines: list[str], anchor_prefix: str) -> list[dict]:
+    """Раздел БЕЗ нумерованных пунктов — одной записью (длинный режется по границам строк).
+
+    ⚠⚠ БЕЗ ЭТОГО ТЕРЯЮТСЯ «ТЕРМИНЫ И ПОНЯТИЯ» — а это ровно тот словарь, которым спрашивают:
+    «критерий достаточной обработки/переработки», «кумулятивный принцип», «акт экспертизы»,
+    «партия товара». В обоих документах K14 определения идут списком через тире и нумерации не
+    имеют, поэтому парсер по пунктам проходил мимо целого раздела и молчал об этом."""
+    out: list[dict] = []
+    chunks: list[list[str]] = [[]]
+    size = 0
+    for ln in sec_lines:
+        if size + len(ln) > _K14_CAP and chunks[-1]:
+            chunks.append([])
+            size = 0
+        chunks[-1].append(ln)
+        size += len(ln) + 1
+    for k, c in enumerate(chunks, 1):
+        text = _strip_amend("\n".join(c)).strip()
+        if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:
+            continue
+        part = f" ч. {k}" if len(chunks) > 1 else ""
+        rec = dict(base)
+        rec["point"] = f"{base['section_roman']}.{k}"
+        rec["text"] = text
+        rec["source_anchor"] = f"{anchor_prefix}{part}"
+        out.append(rec)
+    return out
+
+
+def parse_sng_origin(path: Path, doc: dict | None = None) -> list[dict]:
+    """Правила определения страны происхождения товаров (Соглашение СНГ, ред. от 08.06.2023).
+
+    Разделы 1–8 (термины, критерии, операции не отвечающие критерию, особенности, режим свободной
+    торговли, подтверждение происхождения, заполнение СТ-1, дополнительные случаи выдачи) плюс
+    приложение 4 (электронная система сертификации). Режем по «Раздел N.» и пунктам N.N.
+    Преамбула Соглашения до первого раздела в индекс не идёт — там стороны и депозитарий."""
+    raw = _normalize(path.read_text(encoding="utf-8"))
+    records: list[dict] = []
+    sec_num, sec_title, started = "", "", False
+    cur, buf, sec_buf, sec_points = None, [], [], 0
+
+    def _flush():
+        nonlocal sec_points
+        if not cur or not buf:
+            return
+        text = _strip_amend("\n".join(buf))
+        if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:
+            return
+        loc = f"Раздел {sec_num}. {sec_title}" if sec_num.isdigit() else sec_title
+        sec_points += 1
+        records.append({
+            "doc_type": "sng_origin_rules", "section_roman": sec_num, "section_title": sec_title,
+            "point": cur, "text": text,
+            "source_anchor": f"Соглашение СНГ о стране происхождения, п. {cur}"
+                             + (f" ({loc})" if loc else "")})
+
+    def _close_section():
+        """⚠ Раздел без единого пункта отдаём целиком — иначе «Термины и понятия» пропадают."""
+        nonlocal sec_buf, sec_points
+        if sec_num and not sec_points and sec_buf:
+            loc = f"Раздел {sec_num}. {sec_title}" if sec_num.isdigit() else sec_title
+            records.extend(_section_records(
+                {"doc_type": "sng_origin_rules", "section_roman": sec_num,
+                 "section_title": sec_title},
+                sec_buf, f"Соглашение СНГ о стране происхождения, {loc}"))
+        sec_buf, sec_points = [], 0
+
+    for ln in raw.split("\n"):
+        msec = _SNG_SECTION_RE.match(ln.strip())
+        mappx = _SNG_APPX_RE.match(ln.strip())
+        mp = _K14_POINT_RE.match(ln)
+        if msec:
+            _flush(); _close_section()
+            cur, buf, started = None, [], True
+            sec_num, sec_title = msec.group(1), msec.group(2).strip()
+        elif mappx:
+            _flush(); _close_section()
+            cur, buf, started = None, [], True
+            sec_num = f"прил.{mappx.group(1)}"
+            sec_title = f"Приложение {mappx.group(1)} к Правилам"
+        elif started and mp:
+            _flush(); cur, buf = mp.group(1), [ln]
+            sec_buf.append(ln)
+        elif started:
+            if cur:
+                buf.append(ln)
+            sec_buf.append(ln)
+    _flush(); _close_section()
+    return records
+
+
+# ⚠⚠ У ПРИКАЗА №14 ДЕВЯТЬ ВЕРХНЕУРОВНЕВЫХ ПРИЛОЖЕНИЙ, И КАЖДОЕ — СВОЁ ПОЛОЖЕНИЕ (общий порядок,
+# общая форма, СТ-1, СТ-2, СТ-3, EAV, «A», пушнина, зерно). Разделы внутри них нумеруются С
+# ЕДИНИЦЫ: «Раздел 1. Термины и понятия» встречается ДЕВЯТЬ раз, номера пунктов повторяются.
+# Без хранения ВЛАДЕЛЬЦА пункта якорь указывал бы не на тот документ — самый дорогой класс
+# дефекта в этом проекте («правильный текст, привязанный не к тому месту», ср. #105 и R29).
+#
+# Различитель верхнего уровня — строка «к приказу ТПП России» СРАЗУ ЗА «Приложение N».
+# Вложенные приложения идут с «к Порядку» / «к Положению» и содержат БЛАНКИ (формы сертификатов,
+# заявлений, доверенностей, образцы подписей). В индекс они не идут: подписи граф — не норма,
+# это класс `D12` («записи-обрывки»).
+_P14_APPX_RE = re.compile(r"^Приложение\s+(\d+)\s*$")
+_P14_TOP_MARK = "к приказу ТПП России"
+_P14_NESTED_MARK = ("к Порядку", "к Положению")
+_P14_SECTION_RE = re.compile(r"^Раздел\s+(\d+)\.\s*(.+)$")
+
+
+def parse_prikaz14(path: Path, doc: dict | None = None) -> list[dict]:
+    """Приказ ТПП РФ №14 (в ред. №59 от 16.07.2026): порядок выдачи сертификатов о происхождении.
+
+    Ради `K14` главное — приложение 3 (Положение о порядке выдачи сертификатов формы СТ-1), но
+    берём все ПОЛОЖЕНИЯ: вопрос «какой у вас сертификат» решается сравнением форм.
+    Бланки (вложенные приложения) отбрасываются."""
+    raw = _normalize(path.read_text(encoding="utf-8"))
+    lines = raw.split("\n")
+    records: list[dict] = []
+    part_num, part_title = "", ""     # верхнеуровневое приложение = ПОЛОЖЕНИЕ
+    sec_num, sec_title = "", ""
+    in_form = False
+    cur, buf, sec_buf, sec_points = None, [], [], 0
+
+    def _where() -> str:
+        return f"прил. {part_num}" + (f" ({part_title})" if part_title else "")
+
+    def _flush():
+        nonlocal sec_points
+        if not cur or not buf or in_form:
+            return
+        text = _strip_amend("\n".join(buf))
+        if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:
+            return
+        loc = f"Раздел {sec_num}. {sec_title}" if sec_num else ""
+        sec_points += 1
+        records.append({
+            "doc_type": "prikaz14_tpp",
+            "section_roman": f"{part_num}.{sec_num}" if sec_num else part_num,
+            "section_title": (f"{part_title} — {sec_title}" if sec_title else part_title),
+            "point": f"{part_num}.{cur}",     # ⚠ номер пункта уникален только вместе с приложением
+            "text": text,
+            "source_anchor": f"Приказ ТПП РФ №14, {_where()}, п. {cur}"
+                             + (f" ({loc})" if loc else "")})
+
+    def _close_section():
+        """⚠ «Термины и понятия» нумерации не имеют — без этого раздел пропадал бы целиком."""
+        nonlocal sec_buf, sec_points
+        if sec_num and not sec_points and sec_buf and not in_form:
+            records.extend(_section_records(
+                {"doc_type": "prikaz14_tpp", "section_roman": f"{part_num}.{sec_num}",
+                 "section_title": f"{part_title} — {sec_title}" if sec_title else part_title},
+                sec_buf, f"Приказ ТПП РФ №14, {_where()}, Раздел {sec_num}. {sec_title}"))
+        sec_buf, sec_points = [], 0
+
+    for i, ln in enumerate(lines):
+        s = ln.strip()
+        mappx = _P14_APPX_RE.match(s)
+        if mappx:
+            _flush(); _close_section(); cur, buf = None, []
+            nxt = " ".join(x.strip() for x in lines[i + 1:i + 4])
+            if _P14_TOP_MARK in nxt:
+                in_form = False
+                part_num = mappx.group(1)
+                part_title = ""
+                sec_num, sec_title = "", ""
+            else:
+                # ⚠ Всё, что не помечено «к приказу», считаем БЛАНКОМ. Умолчание выбрано в сторону
+                # пропуска намеренно: незамеченный бланк засоряет индекс подписями граф, а
+                # незамеченная норма обнаруживается приёмочным кейсом.
+                in_form = True
+                sec_num, sec_title = "", ""
+            continue
+        if s.startswith("Положение о порядке выдачи") and not part_title:
+            part_title = s.split("(далее")[0].strip().rstrip(",")
+            continue
+        if s.startswith("ОБЩИЙ ПОРЯДОК") and not part_title:
+            part_title = "Общий порядок выдачи сертификатов о происхождении товара"
+            continue
+        msec = _P14_SECTION_RE.match(s)
+        if msec:
+            _flush(); _close_section(); cur, buf = None, []
+            in_form = False          # раздел означает норму, а не бланк
+            sec_num, sec_title = msec.group(1), msec.group(2).strip()
+            continue
+        mp = _K14_POINT_RE.match(ln)
+        if part_num and not in_form and mp:
+            _flush(); cur, buf = mp.group(1), [ln]
+            sec_buf.append(ln)
+        elif part_num and not in_form:
+            if cur:
+                buf.append(ln)
+            sec_buf.append(ln)
+    _flush(); _close_section()
+    return records
+
+
 # Как читать источники документа. Ключ — `doc_type` из манифеста; в манифесте этого сопоставления
 # НЕТ намеренно: он описывает ДОКУМЕНТ (сила, статус, срок), а не устройство разбора. Формат
 # файла — забота кода, и тест следит, что у каждого документа с источниками парсер есть.
@@ -510,6 +753,9 @@ PARSERS = {
     "decree_body": parse_decree_body,
     "tpp_order_52": parse_order52,
     "appendix_footnotes": parse_footnotes,
+    # K14 (#35): корпус СТ-1 и второй ключ классификации
+    "sng_origin_rules": parse_sng_origin,
+    "prikaz14_tpp": parse_prikaz14,
     "metodrek_tpp": parse_metodrek,
 }
 
