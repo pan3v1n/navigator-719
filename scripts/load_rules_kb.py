@@ -610,7 +610,7 @@ def parse_sng_origin(path: Path, doc: dict | None = None) -> list[dict]:
     raw = _normalize(path.read_text(encoding="utf-8"))
     records: list[dict] = []
     sec_num, sec_title, started = "", "", False
-    cur, buf, sec_buf, sec_points = None, [], [], 0
+    cur, buf, sec_buf, head_buf, sec_points = None, [], [], [], 0
 
     def _flush():
         nonlocal sec_points
@@ -628,15 +628,24 @@ def parse_sng_origin(path: Path, doc: dict | None = None) -> list[dict]:
                              + (f" ({loc})" if loc else "")})
 
     def _close_section():
-        """⚠ Раздел без единого пункта отдаём целиком — иначе «Термины и понятия» пропадают."""
-        nonlocal sec_buf, sec_points
+        """⚠ Раздел без единого пункта отдаём целиком — иначе «Термины и понятия» пропадают.
+
+        ⚠⚠ ВТОРАЯ половина того же отказа (находка 7 раунда). Условие «нет пунктов» покрывает
+        только раздел БЕЗ нумерации целиком, а у приложения 4 нумерация начинается со второго
+        уровня (2.1): вводная и весь «1. Общие положения» — текст ДО первого пункта — не попадали
+        никуда. Голова копится отдельным буфером, потому что `sec_buf` собирает и строки пунктов:
+        отдать его при живых пунктах значило бы удвоить их в индексе."""
+        nonlocal sec_buf, head_buf, sec_points
+        loc = f"Раздел {sec_num}. {sec_title}" if _is_section_num(sec_num) else sec_title
+        meta = {"doc_type": "sng_origin_rules", "section_roman": sec_num,
+                "section_title": sec_title}
         if sec_num and not sec_points and sec_buf:
-            loc = f"Раздел {sec_num}. {sec_title}" if _is_section_num(sec_num) else sec_title
             records.extend(_section_records(
-                {"doc_type": "sng_origin_rules", "section_roman": sec_num,
-                 "section_title": sec_title},
-                sec_buf, f"Соглашение СНГ о стране происхождения, {loc}"))
-        sec_buf, sec_points = [], 0
+                meta, sec_buf, f"Соглашение СНГ о стране происхождения, {loc}"))
+        elif sec_num and sec_points and head_buf:
+            records.extend(_section_records(
+                meta, head_buf, f"Соглашение СНГ о стране происхождения, {loc} (вводная)"))
+        sec_buf, head_buf, sec_points = [], [], 0
 
     for ln in raw.split("\n"):
         msec = _SNG_SECTION_RE.match(ln.strip())
@@ -657,6 +666,8 @@ def parse_sng_origin(path: Path, doc: dict | None = None) -> list[dict]:
         elif started:
             if cur:
                 buf.append(ln)
+            else:
+                head_buf.append(ln)
             sec_buf.append(ln)
     _flush(); _close_section()
     return records
