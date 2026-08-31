@@ -23,7 +23,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse
+from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse, st1_ref
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
 from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
@@ -979,7 +979,7 @@ def _anchor_code(history: list[dict] | None) -> str | None:
 
 
 def plan_procedural(query: str, search_query: str):
-    """Контекст и промпт процедурного ответа ДО вызова модели: `(topic, rules, ctx, user)`.
+    """Контекст и промпт процедурного ответа ДО вызова модели: `(topic, rules, ctx, user, grounding)`.
 
     None — корпус недоступен или пуст (выше по стеку это честный дефер, а не выдумка процедуры).
 
@@ -1004,9 +1004,29 @@ def plan_procedural(query: str, search_query: str):
     docs_ref = (documents_ref.documents_context_block(search_query)
                 if topic == topics.DOCUMENTS or documents_ref.asks_about_conclusion(search_query)
                 else None)
+    # K14: ВТОРОЙ КЛЮЧ. Условия достаточной переработки живут в разрезе ТН ВЭД, а весь корпус
+    # построен на ОКПД2 — поэтому Перечень условий отвечает не поиском, а детерминированным
+    # лукапом по коду из вопроса.
+    # ⚠ Гейт двойной: тема «путь СТ-1 / страна происхождения» И явный код. Без кода блока нет —
+    # `format_for_context(None)` вернул бы «указана группа, а не код», то есть упрекнул бы
+    # пользователя за то, чего он не писал. Без темы блок уезжал бы в чужие вопросы: четыре цифры
+    # рядом со словом «позиция» встречаются и вне этой оси.
+    st1_block = None
+    if topic == "st1_origin":
+        tnved = okpd2_ref.extract_tnved_position(search_query)
+        if tnved:
+            st1_block = st1_ref.format_for_context(tnved) or None
     user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
-                                        documents=docs_ref)
-    return topic, rules, ctx, user
+                                        documents=docs_ref, st1_conditions=st1_block)
+    # ⚠⚠ ЗАЗЕМЛЕНИЕ ШИРЕ ОКНА, И ЭТО НАЙДЕНО ПЛАТНЫМ ПРОГОНОМ, А НЕ РАССУЖДЕНИЕМ.
+    # Пока фактами были только пункты, `grounding = ctx` совпадало с истиной. Детерминированный
+    # блок принёс в ответ ЧИСЛА («не более 50 % цены»), которых в пунктах нет по построению —
+    # Перечень в вектор не индексируется. Гард честно объявил их выдумкой: 3 кейса из 8,
+    # faithfulness 0.62. Предохранитель бил по ВЕРНОМУ ответу, а числа приехали из первоисточника
+    # детерминированным лукапом — то есть заземлены сильнее, чем что-либо в окне.
+    # Правило: заземление — это ВСЁ фактическое, что мы отдали модели, а не только выдача поиска.
+    grounding = ctx + (("\n" + st1_block) if st1_block else "")
+    return topic, rules, ctx, user, grounding
 
 
 def _answer_procedural(query: str, search_query: str,
@@ -1029,7 +1049,7 @@ def _answer_procedural(query: str, search_query: str,
     planned = plan_procedural(query, search_query)
     if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
         return Answer(text=procedural.DEFLECTION, hits=[])
-    topic, rules, ctx, user = planned
+    topic, rules, ctx, user, grounding = planned
 
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
@@ -1045,8 +1065,9 @@ def _answer_procedural(query: str, search_query: str,
     # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
     # Числа из вопроса источником считаются законным (см. `unverified_numbers`).
     asked = _user_text(query, history)
-    ungrounded = unverified_numbers(raw, ctx, asked) + unverified_deadlines(raw, ctx, asked)
-    echoed = echoed_numbers(raw, ctx, asked)
+    ungrounded = (unverified_numbers(raw, grounding, asked)
+                  + unverified_deadlines(raw, grounding, asked))
+    echoed = echoed_numbers(raw, grounding, asked)
     if echoed:
         logger.info("процедурный ответ повторяет числа из вопроса (не выдумка): {}", echoed)
     phantom = documents_ref.unverified_documents(raw)
@@ -1061,7 +1082,7 @@ def _answer_procedural(query: str, search_query: str,
         phantom_documents=phantom,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
-        grounding=ctx,
+        grounding=grounding,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
         # U5: подсказку задаёт НАМЕРЕНИЕ вопроса — то самое `topic`, по которому выбрана квота окна
         # и фрагмент промпта. Раньше сюда шёл `rules[0]["_topic"]`, то есть лексическая догадка о

@@ -161,7 +161,7 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
         fake = [{"doc_type": "rules_registry", "text": "Пункт про реестр.",
                  "source_anchor": "Правила, п. 1", "_score": 1.0}]
         with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake):
-            _topic, _rules, _ctx, user = pipeline.plan_procedural(CASE_50, CASE_50)
+            *_head, user, _grounding = pipeline.plan_procedural(CASE_50, CASE_50)
         # ⚠ Якорь берём из самой функции, а не константой: первая редакция теста сверяла
         # `TABLE_TITLE` — заголовок ТАБЛИЦЫ ОТВЕТА, а не блока контекста, и падала на верном коде.
         self.assertIn(_reference_header(), user, "закрытый справочник не доехал до промпта")
@@ -177,7 +177,7 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
         q = "какой срок рассмотрения заявления о внесении в реестр"
         self.assertNotEqual(topics.classify(q), topics.DOCUMENTS)
         with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake):
-            _t, _r, _c, user = pipeline.plan_procedural(q, q)
+            *_head, user, _grounding = pipeline.plan_procedural(q, q)
         self.assertNotIn(_reference_header(), user,
                          "справочник приезжает туда, где о документах не спрашивали")
 
