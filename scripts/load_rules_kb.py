@@ -259,7 +259,7 @@ def parse_order52(path: Path, doc: dict | None = None) -> list[dict]:
         text = _strip_amend("\n".join(buf))
         if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:  # форма/пустышка
             return
-        loc = f"Раздел {sec_num}. {sec_title}" if sec_num.isdigit() else sec_title
+        loc = f"Раздел {sec_num}. {sec_title}" if _is_section_num(sec_num) else sec_title
         records.append({
             "doc_type": "tpp_order_52", "section_roman": sec_num, "section_title": sec_title,
             "point": cur, "text": text,
@@ -542,6 +542,18 @@ COLLECTION = "pp719_rules"
 # восстановления режима свободной торговли, НЕ СУЩЕСТВОВАЛ В КОРПУСЕ ВОВСЕ, а раздел 9-1
 # цитировался под заголовком раздела 9. Класс #105: верный текст, привязанный не туда, плюс
 # молчаливая потеря. ⚠ `test_st1_corpus` проверяет ИТОГ (58 записей) и проходил.
+# ⚠ НОМЕР РАЗДЕЛА БЫВАЕТ С ДЕФИСОМ («9-1», «9-2») — находка 5 шестого раунда ревью PR #137.
+# Соглашение дополнялось протоколами, и вставленные разделы носят такие номера. Проверка
+#  их не признавала, и якорь ТЕРЯЛ префикс «Раздел N.»: пользователь видел
+# «п. 9-2.1 (Восстановление режима…)» там, где у всех остальных «(Раздел N. Название)».
+# Якорь — это то, что печатается как ССЫЛКА на первоисточник, то есть видно эксперту.
+_SEC_NUM_RE = re.compile(r"^\d+(?:-\d+)?$")
+
+
+def _is_section_num(sec_num: str | None) -> bool:
+    return bool(_SEC_NUM_RE.match(sec_num or ""))
+
+
 _SNG_SECTION_RE = re.compile(r"^Раздел\s+(\d+(?:-\d+)?)\.\s*(.+)$")
 _SNG_APPX_RE = re.compile(r"^Приложение\s+(\d+)\s*$")
 
@@ -607,7 +619,7 @@ def parse_sng_origin(path: Path, doc: dict | None = None) -> list[dict]:
         text = _strip_amend("\n".join(buf))
         if len(re.sub(r"[_\s|.\-–—]", "", text)) < 25:
             return
-        loc = f"Раздел {sec_num}. {sec_title}" if sec_num.isdigit() else sec_title
+        loc = f"Раздел {sec_num}. {sec_title}" if _is_section_num(sec_num) else sec_title
         sec_points += 1
         records.append({
             "doc_type": "sng_origin_rules", "section_roman": sec_num, "section_title": sec_title,
@@ -619,7 +631,7 @@ def parse_sng_origin(path: Path, doc: dict | None = None) -> list[dict]:
         """⚠ Раздел без единого пункта отдаём целиком — иначе «Термины и понятия» пропадают."""
         nonlocal sec_buf, sec_points
         if sec_num and not sec_points and sec_buf:
-            loc = f"Раздел {sec_num}. {sec_title}" if sec_num.isdigit() else sec_title
+            loc = f"Раздел {sec_num}. {sec_title}" if _is_section_num(sec_num) else sec_title
             records.extend(_section_records(
                 {"doc_type": "sng_origin_rules", "section_roman": sec_num,
                  "section_title": sec_title},

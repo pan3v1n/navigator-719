@@ -249,7 +249,8 @@ class TestMetricMovesInBothDirections(unittest.TestCase):
         import eval_answers
 
         text = "\n".join(eval_answers.summarize(_rows(GOOD), 5))
-        self.assertIn("Условие Перечня доехало = 6/6 = 1.00", text)
+        # ⚠ Знаменатель 3, а не 6: находка 7 шестого раунда сузила его до позиций ИЗ Перечня.
+        self.assertIn("Условие Перечня доехало = 3/3 = 1.00", text)
         self.assertIn("Общее правило сформулировано = 2/2 = 1.00", text)
         self.assertIn("Источник назван = 7/7 = 1.00", text)
 
@@ -258,7 +259,7 @@ class TestMetricMovesInBothDirections(unittest.TestCase):
 
         bad = dict.fromkeys(GOOD, "Не могу ответить на этот вопрос.")
         text = "\n".join(eval_answers.summarize(_rows(bad), 5))
-        self.assertIn("Условие Перечня доехало = 0/6 = 0.00", text)
+        self.assertIn("Условие Перечня доехало = 0/3 = 0.00", text)
         self.assertIn("Общее правило сформулировано = 0/2 = 0.00", text)
         self.assertIn("Источник назван = 0/7 = 0.00", text)
 
