@@ -160,18 +160,35 @@ class TestFinding7ExcludedRowResetsTheGroup(unittest.TestCase):
     """Строка-продолжение после исключённой позиции не липнет к условию соседа."""
 
     def test_parser_resets_last_group_on_the_inline_excluded_form(self):
+        """⚠ Утверждение ПО СУЩЕСТВУ, а не по числу вхождений.
+
+        Первая редакция считала, сколько раз в файле встречается `last_group = []`, и упала, когда
+        раунд 4 добавил ещё две законные ветки сброса. Число вхождений — не свойство поведения:
+        проверяем, что после ОТМЕНЁННОЙ позиции продолжение не липнет к условию соседа.
+        """
         import convert_st1_perechen as conv
 
-        src = Path(conv.__file__).read_text(encoding="utf-8")
-        # Обе ветки исключения обязаны сбрасывать группу — асимметрия и была находкой.
-        self.assertEqual(src.count("last_group = []"), 3, "ветки исключения разошлись")
+        # ⚠ Заголовок обязателен: `parse` останавливается, если его нет («не тот документ»).
+        sample = "\n".join((
+            "ПЕРЕЧЕНЬ УСЛОВИЙ",
+            "Код ТН ВЭД |Наименование |Условие",
+            "8401 |Реакторы ядерные |Изготовление из материалов позиции 8401",
+            "8803 - Исключена.|",
+            "хвост продолжения|",
+        ))
+        rows, _forms = conv.parse(sample)
+        by_code = {r["code"]: r for r in rows}
+        self.assertIn("8401", by_code)
+        self.assertNotIn("хвост продолжения", by_code["8401"]["condition"],
+                         "продолжение после отменённой позиции приклеилось к соседу")
 
     def test_table_still_parses_to_the_measured_size(self):
         """Положительный контроль: правка не изменила разбор первоисточника."""
         table = json.loads(
             (ROOT / "knowledge_base" / "classifiers" / "tnved_st1_conditions.json")
             .read_text(encoding="utf-8"))
-        self.assertEqual(len(table["rows"]), 244)
+        # ⚠ 245 после раунда 4: восстановлена строка со сноской в графе кода «из 3901 - 3915 <*>».
+        self.assertEqual(len(table["rows"]), 245)
         self.assertEqual(sum(1 for r in table["rows"] if r.get("excluded")), 1)
 
 

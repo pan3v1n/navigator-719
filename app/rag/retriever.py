@@ -730,18 +730,43 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
             logger.warning("добор состава документов не удался: {}: {}", type(e).__name__, e)
 
     chosen: set[int] = set(doc_list_idxs[:RULES_QUOTA_DOC_LIST])
-    for doc_type, idxs in by_doc.items():  # квота: сначала представительство
+
+    def _quota_of(doc_type: str) -> int:
         if doc_type == primary:
-            quota = RULES_QUOTA_PRIMARY
-        elif doc_type in extra_primary:
+            return RULES_QUOTA_PRIMARY
+        if doc_type in extra_primary:
             # Второй документ темы: у «пути СТ-1» норма живёт в теле постановления, а порядок
             # выдачи сертификата — в Приказе №52; одного из них мало.
-            quota = RULES_QUOTA_PRIMARY - 1
-        elif doc_type in RULES_QUOTA_ON_DEMAND:
-            quota = 0  # документ «по запросу» — только по общему рангу
-        else:
-            quota = RULES_QUOTA_MIN
-        chosen.update(idxs[:quota])
+            return RULES_QUOTA_PRIMARY - 1
+        if doc_type in RULES_QUOTA_ON_DEMAND:
+            return 0  # документ «по запросу» — только по общему рангу
+        return RULES_QUOTA_MIN
+
+    # ⚠⚠ РАЗДАЧА ПО КРУГУ: СНАЧАЛА ПО ОДНОМУ МЕСТУ КАЖДОМУ, ПОТОМ ВТОРЫЕ И ТРЕТЬИ.
+    # Найдено ревью PR #137 (раунд 4) на ГЛАВНОМ вопросе задачи — «моей продукции нет в приложении
+    # 719, можно ли получить СТ-1», кластер жалоб №2. Прежде квота раздавалась ОДНИМ проходом
+    # (`chosen.update(idxs[:quota])`), а `order[:limit]` резал по индексу пула. Документ, которого
+    # в широком пуле не было и который пришёл ДОБОРОМ, дописывается в конец `points` — то есть
+    # получает САМЫЕ ВЫСОКИЕ индексы и режется ПЕРВЫМ. Ровно тогда, когда добор и понадобился.
+    # Замер: с тремя документами темы `decree_body` (тело ПП №719, где живёт подпункт «г»)
+    # получал 0 мест из 6, хотя тема указывала на него; с двумя — 2 места. То есть обещание
+    # «гарантированного представительства» исполнялось или нет в зависимости от того, сколько
+    # ЕЩЁ документов у темы, а не от того, нужен ли этот.
+    # ⚠ Порядок внутри круга: сначала документ по лексической теме, затем документы темы вопроса,
+    # затем остальные — чтобы при нехватке мест первым терял тот, у кого претензия слабее.
+    rank = {d: 0 for d in ([primary] if primary else [])}
+    rank.update({d: 1 for d in sorted(extra_primary)})
+    docs_by_claim = sorted(by_doc, key=lambda d: (rank.get(d, 2), d))
+    max_quota = max((_quota_of(d) for d in docs_by_claim), default=0)
+    for round_no in range(max_quota):
+        for doc_type in docs_by_claim:
+            if len(chosen) >= limit:
+                break
+            idxs = by_doc[doc_type]
+            if round_no < _quota_of(doc_type) and round_no < len(idxs):
+                chosen.add(idxs[round_no])
+        if len(chosen) >= limit:
+            break
     for i in range(len(points)):  # остаток окна — по общему рангу
         if len(chosen) >= limit:
             break

@@ -316,8 +316,6 @@ class TestShellReportsFailures(unittest.TestCase):
         self.assertTrue(out)
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 class TestThrottledBeforeDoesNotBreakProd(unittest.TestCase):
@@ -394,3 +392,11 @@ class TestRecoveryTimeHasNoArtificialFloor(unittest.TestCase):
             res["recovery_seconds"], C.POLL_MIN_SECONDS,
             f"возврат {res['recovery_seconds']} с не меньше паузы опроса "
             f"{C.POLL_MIN_SECONDS} с — число задано инструментом, а не измерено")
+
+
+# ⚠⚠ БЛОК ЗАПУСКА — ТОЛЬКО В КОНЦЕ ФАЙЛА (находка LOW-5 четвёртого раунда ревью PR #137).
+# Он стоял в середине, и два класса ниже при ПРЯМОМ запуске файла не определялись вовсе:
+# `unittest.main()` выходит раньше. Прямой прогон показывал 28 тестов вместо 32, причём
+# терялись сторожа класса «проверка ломает бой» — ровно те, ради которых файл и заведён.
+if __name__ == "__main__":
+    unittest.main()

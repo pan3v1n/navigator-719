@@ -144,30 +144,46 @@ class TestFindings4And5AnchorIsNarrow(unittest.TestCase):
                 self.assertTrue(route(q), q)
 
 
-class TestFinding6IsAMeasuredLimit(unittest.TestCase):
-    """⚠⚠ РАЗОБРАНО И НАМЕРЕННО НЕ ИСПРАВЛЕНО — механизм оказался НЕ тем, что назван в находке.
+class TestFinding6WasWrongAndIsNowFixed(unittest.TestCase):
+    """⚠⚠⚠ ЗДЕСЬ БЫЛ МОЙ НЕВЕРНЫЙ ВЫВОД, И ОН ИСПРАВЛЕН РАУНДОМ 4.
 
-    Находка объясняла отсутствие `decree_body` в окне пересозданием квоты (3+2+2 на шесть мест).
-    Замерено шесть комбинаций «ширина пула × состав документов темы» — `decree_body` не попадает
-    в окно НИ В ОДНОЙ, включая пул 48 (где он ТОЧНО есть среди кандидатов) и позицию второго
-    документа темы с квотой 2. Значит связывает не квота и не пул по отдельности.
+    Раундом 3 я записал, что `decree_body` не доезжает до окна «ни в одной из шести комбинаций»,
+    и объявил это неисправимым пределом, а механизм из находки — неподтверждённым. **Вывод был
+    неверен по построению замера:** все шесть комбинаций держали ТРИ документа темы, то есть один
+    и тот же перепрос квоты. Состав из ДВУХ документов я не проверил ни разу — а именно он и
+    показывал, что механизм в находке назван ВЕРНО.
 
-    Что это НЕ ломает: критерий приёмки выполняется, кейс 57 отвечает верно — норму подпункта «г»
-    дублирует п. 1.3 Соглашения, который в окне есть.
-    Что это ЗНАЧИТ: у главного вопроса задачи документ-норма в окно не доезжает, и разбирать это
-    надо в `_rules_order`, а не подкруткой констант в хвосте длинной сессии.
+    Настоящая причина: квота раздавалась одним проходом, `order[:limit]` резал по индексу пула, а
+    документ, пришедший ДОБОРОМ, дописывается в конец `points` и режется первым — ровно тогда,
+    когда добор и понадобился. Снято раздачей по кругу (`retriever.search_rules`).
 
-    Тест фиксирует ФАКТ, чтобы он не потерялся, и упадёт, когда кто-нибудь это починит.
+    ⚠ Урок записан отдельно: «ни одна из N комбинаций» — утверждение о ПЕРЕБОРЕ, и оно стоит
+    ровно столько, сколько стоит полнота перебора. Мой перебор варьировал порядок, а не число.
     """
 
-    def test_topic_docs_are_three_and_measured_equal(self):
-        self.assertEqual(topics.doc_types(topics.ST1_ORIGIN),
-                         ("sng_origin_rules", "prikaz14_tpp", "decree_body"))
+    NEED = {
+        "какие условия достаточной переработки для кода ТН ВЭД 8403": "sng_origin_rules",
+        "как получить сертификат СТ-1": "prikaz14_tpp",
+        "моей продукции нет в приложении 719, можно ли получить СТ-1": "decree_body",
+    }
 
-    def test_the_gap_is_recorded_not_forgotten(self):
+    def test_the_gap_is_closed(self):
+        from app.rag.pipeline import RULES_TOP_K
+        from app.rag.retriever import search_rules
+
+        for q, want in self.NEED.items():
+            with self.subTest(q=q[:44]):
+                docs = [h.get("doc_type") for h in
+                        search_rules(q, limit=RULES_TOP_K,
+                                     primary_docs=topics.doc_types(topics.classify(q)))]
+                self.assertIn(want, docs, f"{want} снова не доезжает: {docs}")
+
+    def test_the_correction_is_recorded(self):
+        """Неверный вывод обязан быть исправлен ТАМ ЖЕ, где был записан."""
         doc = (ROOT / "docs" / "eval_runs" / "2026-08-31_k14_step6_reindex.md").read_text(
             encoding="utf-8")
-        self.assertIn("decree_body", doc, "измеренный предел не записан в отчёт")
+        self.assertIn("ВЫВОД БЫЛ НЕВЕРЕН", doc,
+                      "в отчёте остался прежний вывод про «неисправимый предел»")
 
 
 class TestFinding7TopicNameIsAConstant(unittest.TestCase):
