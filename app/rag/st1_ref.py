@@ -46,9 +46,20 @@ _FALLBACK_RULE = (
 
 @lru_cache(maxsize=1)
 def _data() -> dict:
+    # ⚠⚠ БИТЫЙ ФАЙЛ ДЕГРАДИРУЕТ, А НЕ РОНЯЕТ ОТВЕТ (находка 4 второго раунда ревью PR #137).
+    # `_data()` лежит на ГОРЯЧЕМ пути: `plan_procedural` → `format_for_context` на каждом вопросе
+    # темы `st1_origin` с кодом. Голый `json.loads` бросал бы `JSONDecodeError` и уносил ВЕСЬ
+    # процедурный ответ. Отказ, который называет докстринг `is_available` — «файл не доехал в
+    # архив, как уже случалось с `classifiers/*.tsv` и `inherited_requirements.json`», — включает
+    # и НЕДОКОПИРОВАННЫЙ файл, а `.exists()` считает такой файл присутствующим.
+    # Сосед `inheritance._load` обрабатывает ровно этот случай так же: пусто → механизм просто не
+    # работает, ответ строится по общему правилу.
     if not _TABLE.exists():
         return {"rows": [], "general_rule": _FALLBACK_RULE, "source": "", "source_short": ""}
-    return json.loads(_TABLE.read_text(encoding="utf-8"))
+    try:
+        return json.loads(_TABLE.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, UnicodeDecodeError):
+        return {"rows": [], "general_rule": _FALLBACK_RULE, "source": "", "source_short": ""}
 
 
 @lru_cache(maxsize=1)
