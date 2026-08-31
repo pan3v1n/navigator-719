@@ -110,8 +110,14 @@ def check_source_recognizers(expected_sources: set[str] | None = None) -> None:
     # чтобы следующий читатель не принял эту проверку за гарантию.
     names = {d["doc_type"]: [s for s in (d.get("short"), d.get("title")) if s]
              for d in manifest_documents("pp719_rules")}
+    # ⚠⚠ ПУСТОЙ СПИСОК ИМЁН — ЭТО ПРОВАЛ, А НЕ ПРОПУСК (находка 3 ревью PR #137). Первая редакция
+    # перебирала `names.get(dt, [])`, и у распознавателя с НЕСУЩЕСТВУЮЩИМ `doc_type` тело цикла не
+    # исполнялось ни разу — контроль печатал «пройден». Прежняя форма (`labels.get(dt, "")` →
+    # поиск по пустой строке) такой распознаватель ловила. То есть «усиление» проверки СНЯЛО
+    # проверку: переименуй или убери документ в манифесте — и метрика «источник назван» мерила бы
+    # ничто, отчитываясь зелёным.
     blind = [(dt, n) for dt, pat in _SOURCE_RECOGNIZERS.items()
-             for n in names.get(dt, []) if not pat.search(n)]
+             for n in (names.get(dt) or [""]) if not pat.search(n)]
     if blind:
         raise SystemExit(
             f"Распознаватель источника не узнаёт ИМЯ документа: {blind}.\n"
