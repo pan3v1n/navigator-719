@@ -1012,7 +1012,7 @@ def plan_procedural(query: str, search_query: str):
     # пользователя за то, чего он не писал. Без темы блок уезжал бы в чужие вопросы: четыре цифры
     # рядом со словом «позиция» встречаются и вне этой оси.
     st1_block = None
-    if topic == "st1_origin":
+    if topic == topics.ST1_ORIGIN:
         tnved = okpd2_ref.extract_tnved_position(search_query)
         if tnved:
             st1_block = st1_ref.format_for_context(tnved) or None

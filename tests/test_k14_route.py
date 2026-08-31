@@ -97,8 +97,11 @@ class TestDisqualifierYieldsNarrowly(unittest.TestCase):
 
     def test_requirements_by_tnved_is_not_a_product_question(self):
         # Дословное ожидание эксперта из ТЗ `K14`: «укажите ваш код ТН ВЭД, распишу требования».
-        for q in ("укажите ваш код ТН ВЭД, распишите требования",
-                  "по какому коду смотреть требования СТ-1"):
+        # ⚠ «укажите ваш код ТН ВЭД, распишите требования» отсюда УБРАНА ревью PR #137: она
+        # пересекается с путём `T9` по слову «требования», а `T9` обязан идти товарной веткой.
+        # Уступка осталась для форм с явным токеном СТ-1 — они с `T9` не пересекаются.
+        for q in ("по какому коду смотреть требования СТ-1",
+                  "у вас итоговый документ скорее всего СТ-1, какие требования по коду ТН ВЭД"):
             with self.subTest(q=q):
                 self.assertTrue(route(q))
 
@@ -145,7 +148,10 @@ class TestSweepCoversSecondKey(unittest.TestCase):
         """
         cases = json.loads(ST1_SET.read_text(encoding="utf-8"))["cases"]
         residual = [c for c in cases if RESIDUAL_MARK in c.get("note", "")]
-        self.assertEqual(len(residual), 3, "остаток замера 31.08.2026 — ровно три кейса")
+        # ⚠ Четвёртым остаток стал по итогу ревью PR #137 (MED-4/MED-5): кейс 2 отдан
+        # ЗАМЕРЕННОЙ ценой за то, чтобы таможенные вопросы не получали 719-ответ, а путь
+        # `T9` работал. Число здесь — не порог качества, а перепись записанных пределов.
+        self.assertEqual(len(residual), 4, "список записанных пределов разошёлся с данными")
         for c in cases:
             if c.get("kind") == "control_product":
                 continue
