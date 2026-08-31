@@ -167,16 +167,12 @@ class TestFinding6WasWrongAndIsNowFixed(unittest.TestCase):
         "моей продукции нет в приложении 719, можно ли получить СТ-1": "decree_body",
     }
 
-    def test_the_gap_is_closed(self):
-        from app.rag.pipeline import RULES_TOP_K
-        from app.rag.retriever import search_rules
-
-        for q, want in self.NEED.items():
-            with self.subTest(q=q[:44]):
-                docs = [h.get("doc_type") for h in
-                        search_rules(q, limit=RULES_TOP_K,
-                                     primary_docs=topics.doc_types(topics.classify(q)))]
-                self.assertIn(want, docs, f"{want} снова не доезжает: {docs}")
+    # ⚠⚠ УТВЕРЖДЕНИЕ О ЗАКРЫТИИ ПЕРЕЕХАЛО В `tests/test_k14_window_quota.py`, И ВОТ ПОЧЕМУ.
+    # Здесь оно звало ЖИВОЙ Qdrant: локально зеленело, а CI валило — там коллекции нет,
+    # `search_rules` честно деградирует до `[]`, и окно пустое. Класс `O3` #104, заведённый
+    # моими руками при зелёной локальной батарее из 1118 тестов.
+    # Теперь механизм пинится на заглушке (сценарий, а не сегодняшняя выдача корпуса), а живое
+    # утверждение о НАСТОЯЩЕМ корпусе стоит в релизной проверке, которая идёт на боевой машине.
 
     def test_the_correction_is_recorded(self):
         """Неверный вывод обязан быть исправлен ТАМ ЖЕ, где был записан."""

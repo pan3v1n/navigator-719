@@ -70,37 +70,11 @@ class TestFinding1ConditionsAreNotPolluted(unittest.TestCase):
         self.assertEqual(len(rows()), 245)
 
 
-class TestFinding2QuotaIsRoundRobin(unittest.TestCase):
-    """⚠⚠ ИСПРАВЛЕНИЕ МОЕГО ЖЕ НЕВЕРНОГО ВЫВОДА.
-
-    Раундом ранее я записал в отчёт, что `decree_body` не доезжает до окна «ни в одной из шести
-    комбинаций», и объявил это неисправимым пределом. Вывод был НЕВЕРЕН: все шесть комбинаций
-    держали три документа темы, то есть ОДИН И ТОТ ЖЕ перепрос квоты. Ревью проверило состав из
-    ДВУХ документов — и `decree_body` в окне оказался.
-
-    Настоящий механизм: квота раздавалась ОДНИМ проходом, а `order[:limit]` резал по индексу пула.
-    Документ, пришедший ДОБОРОМ (его не было в широком пуле), дописывается в конец `points`,
-    получает самые высокие индексы и режется ПЕРВЫМ — ровно тогда, когда добор и понадобился.
-    Раздача по кругу это снимает: сначала по одному месту каждому, потом вторые.
-    """
-
-    NEED = {
-        "какие условия достаточной переработки для кода ТН ВЭД 8403": "sng_origin_rules",
-        "как получить сертификат СТ-1": "prikaz14_tpp",
-        # ⚠ Главный вопрос задачи: норма подпункта «г» живёт в теле ПП №719.
-        "моей продукции нет в приложении 719, можно ли получить СТ-1": "decree_body",
-    }
-
-    def test_every_topic_document_reaches_the_window(self):
-        from app.rag.pipeline import RULES_TOP_K
-        from app.rag.retriever import search_rules
-
-        for q, want in self.NEED.items():
-            with self.subTest(q=q[:44]):
-                docs = [h.get("doc_type") for h in
-                        search_rules(q, limit=RULES_TOP_K,
-                                     primary_docs=topics.doc_types(topics.classify(q)))]
-                self.assertIn(want, docs, f"{want} не доехал: {docs}")
+# ⚠⚠ НАХОДКА HIGH-2 (раздача квоты по кругу) ПРОВЕРЯЕТСЯ В `tests/test_k14_window_quota.py`.
+# Здесь утверждение звало живой Qdrant и валило CI — класс `O3` #104. Механизм пинится на
+# заглушке: она держит СЦЕНАРИЙ (документ темы отсутствует в широком пуле, приходит добором,
+# мест меньше, чем претензий), а не сегодняшнюю выдачу корпуса. Живое утверждение о настоящем
+# корпусе — в релизной проверке `scripts/deploy/checks/v0.5.0-test23/`.
 
 
 class TestFinding3YearWithoutPeriod(unittest.TestCase):
