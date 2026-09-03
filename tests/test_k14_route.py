@@ -135,7 +135,11 @@ class TestSweepCoversSecondKey(unittest.TestCase):
         import eval_routing
 
         rows = [r for r in eval_routing.collect() if r["set"] == "st1_route"]
-        self.assertEqual(len(rows), 21)
+        # 21 → 24: раунд 8 встроил ПОСТОЯННЫЙ пробник на экспортную формулировку (HIGH-4).
+        # ⚠ До него во всех 220 вопросах свипа было РОВНО НОЛЬ вхождений «экспорт»/«вывоз», и на
+        # правку `ST1_DISQUALIFIER` свип отвечал «0 расхождений» — то есть «не считаю», а не
+        # «чисто». После пробника та же правка видна свипу как +3 / −0.
+        self.assertEqual(len(rows), 24)
         # Контроли обязаны попасть в ТОВАРНЫЙ класс — иначе их перехват читался бы как улучшение.
         controls = [r for r in rows if r["class"] == "товарный"]
         self.assertEqual(len(controls), 2)

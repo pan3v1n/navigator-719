@@ -13,6 +13,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import NamedTuple
 
 from loguru import logger
 
@@ -49,6 +50,30 @@ RULES_DOC_POINTS = 3
 # полоса перекрытия узкая, поэтому порог НЕ режет жёстко, а лишь поднимает флаг для модели
 # (финальное решение «вне сферы» принимает LLM по смыслу контекста, см. правило 1б промпта).
 RELEVANCE_SOFT = 0.83
+# ⚠⚠ ПОРОГ ПРОЦЕДУРНОЙ ВЕТКИ — СВОЙ, И ЗАВЕДЁН РАУНДОМ 8 РЕВЬЮ PR #137. До него у ветки не было
+# гейта вне-сферы ВООБЩЕ: `_answer_procedural` держал `low_relevance=False` жёстко, и любой
+# вопрос, дошедший до корпуса норм, получал ответ, СИНТЕЗИРОВАННЫЙ из Правил СНГ и Приказа №14 —
+# снаружи неотличимый от верного. Раунд 7 записал этот диагноз и лечил его СЛОВАРЁМ маршрута;
+# раунд 8 показал, что словарь лечит симптом и порождает регрессии парами (три HIGH одного корня).
+#
+# ЗАМЕР (`scripts/eval_rules_relevance.py`, 108 вопросов четырёх популяций, из них три заведены
+# ЗАДОЛГО до порога). Ошибки = утечки + потери, маршрут в состоянии C:
+#     гейта нет   15 утечек / 17 потерь = 32
+#     0.845        8 / 21 = 29
+#     0.851        4 / 21 = 25   ← стоит
+#     0.860        1 / 26 = 27
+# ⚠ ЦЕНА НАЗВАНА ВСЛУХ: порог гасит ОДИН приёмочный вопрос `K9` (10 → 11 из 25). Ось `K9` не
+# двигалась ни за один из восьми раундов, поэтому сдвиг записан здесь, а не оставлен побочным.
+# ⚠ Базовые 10 из 25 — НЕ цена гейта, а известный долг `P3-1` #131 (маршрут не доводит их до
+# ветки вовсе); замер впервые дал ему число.
+#
+# ⚠⚠⚠ ПРЕДЕЛ ЭТОГО ГЕЙТА ИЗМЕРЕН И ЗАПИСАН: класс «вне сферы + ТН ВЭД» он НЕ разделяет.
+# Полоса перекрытия с целевыми вопросами — 0.8326 .. 0.8622, и в ней лежат 11 из 12 таможенных
+# вопросов и 12 из 32 целевых. Порог внутри этой полосы режет ОБЕ популяции. Сегодня класс
+# держит МАРШРУТ (0 из 12 доходит), и полагаться на гейт как на замену словаря НЕЛЬЗЯ — против
+# общей вне-сферы он работает (там сходство 0.73–0.80, полосы расходятся), против таможенной —
+# нет, потому что такие вопросы ДЕЙСТВИТЕЛЬНО про происхождение, и корпус про него же.
+RULES_RELEVANCE_SOFT = 0.851
 
 
 @dataclass
@@ -978,8 +1003,25 @@ def _anchor_code(history: list[dict] | None) -> str | None:
     return None
 
 
-def plan_procedural(query: str, search_query: str):
-    """Контекст и промпт процедурного ответа ДО вызова модели: `(topic, rules, ctx, user, grounding)`.
+class ProceduralPlan(NamedTuple):
+    """План процедурного ответа. ИМЕНОВАННЫЙ кортеж, и это не косметика.
+
+    ⚠⚠ Раунд 8 добавил шестое поле (`low_relevance`), и тест `K15-1`, распаковывавший план как
+    `*_head, user, _grounding`, МОЛЧА получил в `user` заземление вместо промпта. Он был написан
+    устойчивым к добавлению полей В НАЧАЛО и сломался от добавления В КОНЕЦ. Позиционная
+    распаковка — тот же класс, что «две таблицы про одно»: договорённость, которую ничто не
+    держит. Индексный доступ (`planned[3]` в релизной проверке) продолжает работать."""
+
+    topic: str | None
+    rules: list[dict]
+    ctx: str
+    user: str
+    grounding: str
+    low_relevance: bool
+
+
+def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
+    """Контекст и промпт процедурного ответа ДО вызова модели — см. `ProceduralPlan`.
 
     None — корпус недоступен или пуст (выше по стеку это честный дефер, а не выдумка процедуры).
 
@@ -994,6 +1036,20 @@ def plan_procedural(query: str, search_query: str):
     rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
     if not rules:
         return None
+    # ⚠⚠ ГЕЙТ ВНЕ-СФЕРЫ ПРОЦЕДУРНОЙ ВЕТКИ (раунд 8). Ниже по стеку это `low_relevance` в промпте —
+    # ровно тот же приём, что на товарной ветке, которая мерила релевантность с самого начала.
+    # ⚠ `_score` выдачи порогом служить НЕ МОЖЕТ и это проверено: там слитый RRF-ранг, а не
+    # близость (значения 0.5 / 0.7 / 0.8333 / 1.0 — артефакты обратного ранга), распределения
+    # целевых и чужих перекрываются почти полностью. Меряем ПЛОТНЫМ сходством по своей коллекции.
+    try:
+        low_rel = dense_top1(search_query,
+                             collection=settings.QDRANT_RULES_COLLECTION) < RULES_RELEVANCE_SOFT
+    except Exception as exc:                      # noqa: BLE001
+        # ⚠ ТРЕТИЙ ИСХОД: «не измерено» — это НЕ «релевантно». Но и гасить ответ по факту сбоя
+        # замера нельзя: пункты уже найдены, а ложно отрицательный гейт молча превратит рабочую
+        # ветку в отказ. Поэтому поведение остаётся прежним, и сбой ГОВОРИТ, а не молчит.
+        logger.warning("гейт релевантности не измерен ({}): отвечаем без него", exc)
+        low_rel = False
     ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
     # K15: вопрос про состав документов получает ЗАКРЫТЫЙ справочник. Пункты корпуса описывают
     # ПОРЯДОК получения, но нигде не перечисляют три документа списком — эту дыру модель и
@@ -1017,7 +1073,8 @@ def plan_procedural(query: str, search_query: str):
         if tnved:
             st1_block = st1_ref.format_for_context(tnved) or None
     user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
-                                        documents=docs_ref, st1_conditions=st1_block)
+                                        documents=docs_ref, st1_conditions=st1_block,
+                                        low_relevance=low_rel)
     # ⚠⚠ ЗАЗЕМЛЕНИЕ ШИРЕ ОКНА, И ЭТО НАЙДЕНО ПЛАТНЫМ ПРОГОНОМ, А НЕ РАССУЖДЕНИЕМ.
     # Пока фактами были только пункты, `grounding = ctx` совпадало с истиной. Детерминированный
     # блок принёс в ответ ЧИСЛА («не более 50 % цены»), которых в пунктах нет по построению —
@@ -1026,7 +1083,7 @@ def plan_procedural(query: str, search_query: str):
     # детерминированным лукапом — то есть заземлены сильнее, чем что-либо в окне.
     # Правило: заземление — это ВСЁ фактическое, что мы отдали модели, а не только выдача поиска.
     grounding = ctx + (("\n" + st1_block) if st1_block else "")
-    return topic, rules, ctx, user, grounding
+    return ProceduralPlan(topic, rules, ctx, user, grounding, low_rel)
 
 
 def _answer_procedural(query: str, search_query: str,
@@ -1049,7 +1106,7 @@ def _answer_procedural(query: str, search_query: str,
     planned = plan_procedural(query, search_query)
     if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
         return Answer(text=procedural.DEFLECTION, hits=[])
-    topic, rules, ctx, user, grounding = planned
+    topic, rules, ctx, user, grounding, low_rel = planned
 
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
@@ -1076,7 +1133,9 @@ def _answer_procedural(query: str, search_query: str,
     return Answer(
         text=raw,
         hits=[],
-        low_relevance=False,
+        # ⚠ Было жёстко `False` — то есть ветка ОБЪЯВЛЯЛА себя релевантной всегда, чем бы её ни
+        # спросили. Раунд 8: это и есть отсутствующий гейт вне-сферы, названный ещё раундом 7.
+        low_relevance=low_rel,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,

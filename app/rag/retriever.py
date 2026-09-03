@@ -225,14 +225,24 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
     return hits[:limit]
 
 
-def dense_top1(query: str, qvec: list[float] | None = None) -> float:
+def dense_top1(query: str, qvec: list[float] | None = None,
+               collection: str | None = None) -> float:
     """Косинусное сходство top-1 по ЧИСТО dense-поиску (e5). Сигнал релевантности для
     out-of-scope guard: на продукции вне 719 оно стабильно ниже, чем на профильной
     (калибровка — `docs/eval_report.md`). `qvec` — заранее посчитанный вектор запроса
-    (чтобы не эмбедить дважды), иначе считаем сами."""
+    (чтобы не эмбедить дважды), иначе считаем сами.
+
+    ⚠⚠ `collection` ЗАВЕДЁН ДЛЯ ПРОЦЕДУРНОЙ ВЕТКИ (раунд 8 ревью PR #137). До него сигнал умела
+    мерить только товарная коллекция, а `_answer_procedural` держал `low_relevance=False` ЖЁСТКО
+    — то есть у процедурной ветки не было гейта вне-сферы ВООБЩЕ, и таможенный вопрос получал
+    ответ, синтезированный из Правил СНГ и Приказа №14. Раунд 7 записал этот диагноз и лечил его
+    СЛОВАРЁМ маршрута; раунд 8 показал, что словарь лечит симптом и порождает регрессии парами.
+    ⚠ Порог у каждой коллекции СВОЙ: у корпуса норм проза, а не товарные записи, и полосы
+    сходства лежат иначе (`RELEVANCE_SOFT` 0.83 против `RULES_RELEVANCE_SOFT`). Ровно ради этого
+    корпус норм и заведён отдельной коллекцией — см. комментарий у `QDRANT_RULES_COLLECTION`."""
     dvec = qvec if qvec is not None else embed_query(query)
     res = _client().query_points(
-        collection_name=settings.QDRANT_COLLECTION,
+        collection_name=collection or settings.QDRANT_COLLECTION,
         query=dvec,
         using=DENSE,
         limit=1,

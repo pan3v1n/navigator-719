@@ -160,8 +160,11 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
 
         fake = [{"doc_type": "rules_registry", "text": "Пункт про реестр.",
                  "source_anchor": "Правила, п. 1", "_score": 1.0}]
+        # ⚠ ПО ИМЕНИ, а не по позиции. Прежняя распаковка `*_head, user, _grounding` была устойчива
+        # к добавлению полей В НАЧАЛО и сломалась, когда раунд 8 добавил поле В КОНЕЦ: в `user`
+        # МОЛЧА приезжало заземление, и тест падал на верном коде. План теперь именованный кортеж.
         with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake):
-            *_head, user, _grounding = pipeline.plan_procedural(CASE_50, CASE_50)
+            user = pipeline.plan_procedural(CASE_50, CASE_50).user
         # ⚠ Якорь берём из самой функции, а не константой: первая редакция теста сверяла
         # `TABLE_TITLE` — заголовок ТАБЛИЦЫ ОТВЕТА, а не блока контекста, и падала на верном коде.
         self.assertIn(_reference_header(), user, "закрытый справочник не доехал до промпта")
@@ -274,7 +277,8 @@ class TestRoutingSweepPinsTheNumbers(unittest.TestCase):
         спрятать её целиком.
         """
         st1 = [r for r in self.rows if r["set"] == "st1_route"]
-        self.assertEqual(len(st1), 21, "набор второго ключа выпал из свипа")
+        # 21 → 24: пробник на экспортную формулировку, встроенный раундом 8 (см. test_k14_route).
+        self.assertEqual(len(st1), 24, "набор второго ключа выпал из свипа")
 
 
 class TestConclusionIsADocumentNotAnAct(unittest.TestCase):
