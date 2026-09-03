@@ -13,6 +13,7 @@ import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from functools import lru_cache
+from typing import NamedTuple
 
 from loguru import logger
 
@@ -23,7 +24,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse
+from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse, st1_ref
 from app.rag.embeddings import embed_query
 from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
 from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
@@ -49,6 +50,29 @@ RULES_DOC_POINTS = 3
 # полоса перекрытия узкая, поэтому порог НЕ режет жёстко, а лишь поднимает флаг для модели
 # (финальное решение «вне сферы» принимает LLM по смыслу контекста, см. правило 1б промпта).
 RELEVANCE_SOFT = 0.83
+# ⚠⚠⚠ ПОРОГА РЕЛЕВАНТНОСТИ У ПРОЦЕДУРНОЙ ВЕТКИ НЕТ, И ЭТО ИЗМЕРЕННОЕ РЕШЕНИЕ, А НЕ ПРОБЕЛ.
+# Раунд 8 ревью PR #137 предписывал завести здесь гейт вне-сферы («щедрый маршрут + порог»),
+# он был написан, выкачен в ветку и ОТКАЧЕН 03.09.2026 по замеру. Не повторять, не измерив заново.
+#
+# ЗАМЕР (`scripts/eval_rules_relevance.py`, ПЯТЬ популяций, ошибки = утечки + потери).
+# ⚠ Замер снят на 164 вопросах; сейчас инструмент даёт 166 — раунд 9 добавил в набор вне-сферы два
+# экспортных пробника. На сравнение они не влияют: после сужения `ST1_OUT_OF_ZONE_RE` оба НЕ
+# маршрутизируются (проверено), то есть дают ноль и в утечки, и в потери у всех трёх вариантов.
+#     A  гейта нет                              15 утечек / 21 потеря = 36
+#     B  порог 0.851 всегда                      4 / 30 = 34
+#     C  порог мимо детерминированного пути     15 / 27 = 42   (доминирован, отвергнут)
+# B выигрывает у A ДВА пункта из 36 — это шум, — но создаёт ДЕВЯТЬ новых отказов, и среди них
+# «что такое кумулятивный принцип» (термин самого проиндексированного Соглашения), «какие условия
+# экспорта в Казахстан по ТН ВЭД 8403» (флагман HIGH-4), «моей продукции нет в приложении 719,
+# можно ли получить СТ-1» (подпункт «г», кластер жалоб №2) и «кто выдаёт сертификат происхождения
+# в Курской области» — вопрос про самого заказчика.
+#
+# ПОЧЕМУ НИ ОДИН ПОРОГ НЕ ГОДИТСЯ. Полосы перекрываются по существу: таможенные вопросы про
+# происхождение ДЕЙСТВИТЕЛЬНО про то же, про что корпус. Целевые лежат в 0.8316..0.8836, чужие —
+# в 0.8297..0.8622. Чтобы сохранить «кумулятивный принцип» (0.8316), нужен порог ниже 0.830, а там
+# утечек 13 против 14 без гейта — гейт вырождается. Направление ошибки решает: утечка это неверный
+# ответ, а отказ на «что такое кумулятивный принцип» — отказ на то, ради чего сервис существует.
+# Разбор — docs/eval_runs/2026-09-03_rules_relevance_gate.md.
 
 
 @dataclass
@@ -978,8 +1002,26 @@ def _anchor_code(history: list[dict] | None) -> str | None:
     return None
 
 
-def plan_procedural(query: str, search_query: str):
-    """Контекст и промпт процедурного ответа ДО вызова модели: `(topic, rules, ctx, user)`.
+class ProceduralPlan(NamedTuple):
+    """План процедурного ответа. ИМЕНОВАННЫЙ кортеж, и это не косметика.
+
+    ⚠⚠ Заведён раундом 8, и повод стоит помнить. Раунд добавил в план шестое поле, а тест `K15-1`,
+    распаковывавший план как `*_head, user, _grounding`, МОЛЧА получил в `user` заземление вместо
+    промпта: он был написан устойчивым к добавлению полей В НАЧАЛО и сломался от добавления
+    В КОНЕЦ. Позиционная распаковка — тот же класс, что «две таблицы про одно»: договорённость,
+    которую ничто не держит. Само шестое поле потом откачено (см. `RELEVANCE_SOFT` выше), а
+    именованный кортеж остался — он полезен независимо от того, что в нём лежит.
+    Индексный доступ (`planned[3]` в релизной проверке) продолжает работать."""
+
+    topic: str | None
+    rules: list[dict]
+    ctx: str
+    user: str
+    grounding: str
+
+
+def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
+    """Контекст и промпт процедурного ответа ДО вызова модели — см. `ProceduralPlan`.
 
     None — корпус недоступен или пуст (выше по стеку это честный дефер, а не выдумка процедуры).
 
@@ -1004,9 +1046,29 @@ def plan_procedural(query: str, search_query: str):
     docs_ref = (documents_ref.documents_context_block(search_query)
                 if topic == topics.DOCUMENTS or documents_ref.asks_about_conclusion(search_query)
                 else None)
+    # K14: ВТОРОЙ КЛЮЧ. Условия достаточной переработки живут в разрезе ТН ВЭД, а весь корпус
+    # построен на ОКПД2 — поэтому Перечень условий отвечает не поиском, а детерминированным
+    # лукапом по коду из вопроса.
+    # ⚠ Гейт двойной: тема «путь СТ-1 / страна происхождения» И явный код. Без кода блока нет —
+    # `format_for_context(None)` вернул бы «указана группа, а не код», то есть упрекнул бы
+    # пользователя за то, чего он не писал. Без темы блок уезжал бы в чужие вопросы: четыре цифры
+    # рядом со словом «позиция» встречаются и вне этой оси.
+    st1_block = None
+    if topic == topics.ST1_ORIGIN:
+        tnved = okpd2_ref.extract_tnved_position(search_query)
+        if tnved:
+            st1_block = st1_ref.format_for_context(tnved) or None
     user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
-                                        documents=docs_ref)
-    return topic, rules, ctx, user
+                                        documents=docs_ref, st1_conditions=st1_block)
+    # ⚠⚠ ЗАЗЕМЛЕНИЕ ШИРЕ ОКНА, И ЭТО НАЙДЕНО ПЛАТНЫМ ПРОГОНОМ, А НЕ РАССУЖДЕНИЕМ.
+    # Пока фактами были только пункты, `grounding = ctx` совпадало с истиной. Детерминированный
+    # блок принёс в ответ ЧИСЛА («не более 50 % цены»), которых в пунктах нет по построению —
+    # Перечень в вектор не индексируется. Гард честно объявил их выдумкой: 3 кейса из 8,
+    # faithfulness 0.62. Предохранитель бил по ВЕРНОМУ ответу, а числа приехали из первоисточника
+    # детерминированным лукапом — то есть заземлены сильнее, чем что-либо в окне.
+    # Правило: заземление — это ВСЁ фактическое, что мы отдали модели, а не только выдача поиска.
+    grounding = ctx + (("\n" + st1_block) if st1_block else "")
+    return ProceduralPlan(topic, rules, ctx, user, grounding)
 
 
 def _answer_procedural(query: str, search_query: str,
@@ -1029,7 +1091,7 @@ def _answer_procedural(query: str, search_query: str,
     planned = plan_procedural(query, search_query)
     if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
         return Answer(text=procedural.DEFLECTION, hits=[])
-    topic, rules, ctx, user = planned
+    topic, rules, ctx, user, grounding = planned
 
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
     if history:  # мультитёрн: процедурный follow-up видит историю диалога
@@ -1045,8 +1107,9 @@ def _answer_procedural(query: str, search_query: str,
     # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
     # Числа из вопроса источником считаются законным (см. `unverified_numbers`).
     asked = _user_text(query, history)
-    ungrounded = unverified_numbers(raw, ctx, asked) + unverified_deadlines(raw, ctx, asked)
-    echoed = echoed_numbers(raw, ctx, asked)
+    ungrounded = (unverified_numbers(raw, grounding, asked)
+                  + unverified_deadlines(raw, grounding, asked))
+    echoed = echoed_numbers(raw, grounding, asked)
     if echoed:
         logger.info("процедурный ответ повторяет числа из вопроса (не выдумка): {}", echoed)
     phantom = documents_ref.unverified_documents(raw)
@@ -1055,13 +1118,18 @@ def _answer_procedural(query: str, search_query: str,
     return Answer(
         text=raw,
         hits=[],
+        # ⚠⚠ ЖЁСТКО `False`, И ЭТО ИЗМЕРЕННОЕ РЕШЕНИЕ. Раунд 8 предписывал считать сюда порог
+        # плотного сходства по корпусу норм; он был написан и ОТКАЧЕН 03.09.2026 — замер трёх
+        # конструкций на 164 вопросах дал выигрыш 2 пункта из 36 (шум) ценой ДЕВЯТИ новых отказов,
+        # включая «что такое кумулятивный принцип» и «кто выдаёт сертификат происхождения в
+        # Курской области». Подробно — у `RELEVANCE_SOFT` выше и в отчёте прогона.
         low_relevance=False,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
-        grounding=ctx,
+        grounding=grounding,
         rule_sources=rules,  # те же пункты и в том же порядке, что в контексте [1]…[n] → кликабельные источники
         # U5: подсказку задаёт НАМЕРЕНИЕ вопроса — то самое `topic`, по которому выбрана квота окна
         # и фрагмент промпта. Раньше сюда шёл `rules[0]["_topic"]`, то есть лексическая догадка о

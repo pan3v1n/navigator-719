@@ -160,8 +160,11 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
 
         fake = [{"doc_type": "rules_registry", "text": "Пункт про реестр.",
                  "source_anchor": "Правила, п. 1", "_score": 1.0}]
+        # ⚠ ПО ИМЕНИ, а не по позиции. Прежняя распаковка `*_head, user, _grounding` была устойчива
+        # к добавлению полей В НАЧАЛО и сломалась, когда раунд 8 добавил поле В КОНЕЦ: в `user`
+        # МОЛЧА приезжало заземление, и тест падал на верном коде. План теперь именованный кортеж.
         with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake):
-            _topic, _rules, _ctx, user = pipeline.plan_procedural(CASE_50, CASE_50)
+            user = pipeline.plan_procedural(CASE_50, CASE_50).user
         # ⚠ Якорь берём из самой функции, а не константой: первая редакция теста сверяла
         # `TABLE_TITLE` — заголовок ТАБЛИЦЫ ОТВЕТА, а не блока контекста, и падала на верном коде.
         self.assertIn(_reference_header(), user, "закрытый справочник не доехал до промпта")
@@ -176,8 +179,12 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
                  "source_anchor": "Правила, п. 2", "_score": 1.0}]
         q = "какой срок рассмотрения заявления о внесении в реестр"
         self.assertNotEqual(topics.classify(q), topics.DOCUMENTS)
+        # ⚠⚠ ПО ИМЕНИ, как и в положительной половине выше (находка 8 раунда 9). Здесь позиционная
+        # распаковка опаснее: утверждение ОТРИЦАТЕЛЬНОЕ (`assertNotIn`), и подмена `user` на
+        # заземление оставила бы тест ЗЕЛЁНЫМ, проверяющим пустоту. Слепой отрицательный контроль
+        # хуже отсутствующего — он создаёт видимость охраны.
         with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake):
-            _t, _r, _c, user = pipeline.plan_procedural(q, q)
+            user = pipeline.plan_procedural(q, q).user
         self.assertNotIn(_reference_header(), user,
                          "справочник приезжает туда, где о документах не спрашивали")
 
@@ -250,10 +257,32 @@ class TestRoutingSweepPinsTheNumbers(unittest.TestCase):
         self.assertEqual(wrong, [], "документный кейс сменил ветку")
 
     def test_misses_do_not_grow(self):
-        """Число закреплено: 11 на 26.08.2026. Может только УБЫВАТЬ (остаток — `P3` #121)."""
-        miss = [r for r in self.rows if r["class"] == "процедурный" and not r["procedural"]]
+        """Число закреплено: 11 на 26.08.2026. Может только УБЫВАТЬ (остаток — `P3` #121).
+
+        ⚠⚠ СЧИТАЕМ ПО НАБОРАМ, НА КОТОРЫХ ЧИСЛО КАЛИБРОВАЛОСЬ. 31.08.2026 в свип добавился набор
+        второго ключа (`K14` #35) со своими тремя записанными остатками, и этот предохранитель
+        сработал: 11 → 14. Сработал ВЕРНО — храповик и обязан бить по росту. Но поднять порог до
+        14 значило бы утопить остаток `P3` в чужой популяции: число перестало бы значить то, что
+        на нём написано, и следующая настоящая регрессия в старых наборах прошла бы незамеченной.
+        Поэтому область счёта сужена явно, а остаток нового набора закреплён СВОИМ сторожем —
+        `tests/test_k14_route.py::test_notes_are_the_contract`, и он строже: называет, КАКИЕ
+        именно три кейса, а не сколько их.
+        """
+        miss = [r for r in self.rows if r["class"] == "процедурный" and not r["procedural"]
+                and r["set"] != "st1_route"]
         self.assertLessEqual(len(miss), 11,
                              f"пропусков стало больше: {[(r['set'], r['id']) for r in miss]}")
+
+    def test_second_key_set_has_its_own_pin(self):
+        """⚠ Положительный контроль на сужение выше: набор второго ключа обязан быть В СВИПЕ.
+
+        Без этого утверждения `!= "st1_route"` читалось бы как «этой популяции нет», и удаление
+        набора из `SETS` прошло бы молча — то есть сужение области счёта стало бы способом
+        спрятать её целиком.
+        """
+        st1 = [r for r in self.rows if r["set"] == "st1_route"]
+        # 21 → 24: пробник на экспортную формулировку, встроенный раундом 8 (см. test_k14_route).
+        self.assertEqual(len(st1), 24, "набор второго ключа выпал из свипа")
 
 
 class TestConclusionIsADocumentNotAnAct(unittest.TestCase):

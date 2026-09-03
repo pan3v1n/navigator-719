@@ -131,6 +131,40 @@ class TestRateLimitIsNotIllHealth(unittest.TestCase):
     лимита. Через полминуты 429, `healthy()` навсегда ложна, и скрипт печатал «СЕРВИС НЕ
     ВЕРНУЛСЯ» ПРО ЗДОРОВЫЙ СЕРВИС — сразу после того, как сам сломал бой."""
 
+    # ⚠⚠ РАСПОЗНАВАТЕЛЬ БЫЛ ЗАВЕДЁН РАУНДОМ 5 И ПОЗВАН В ОДНОМ МЕСТЕ ИЗ ТРЁХ (раунд 6, #136).
+    # Ниже закреплены оставшиеся два: `during` в `judge` и `after` под истёкшим дедлайном.
+    # Правка, заводящая распознаватель, обязана позвать его ВЕЗДЕ, где распознаваемое возможно.
+    _BODY_429 = '{"detail":"Слишком много вопросов подряд. Повторите через 12 с."}'
+
+    def test_429_during_is_not_a_pass(self):
+        """⚠⚠ ЛОЖНО ПОЛОЖИТЕЛЬНЫЙ ВЕРДИКТ — ХУДШИЙ КЛАСС ДЕФЕКТА У ПРОВЕРКИ, КОТОРАЯ ЛОМАЕТ БОЙ.
+        Тело 429 непустое и по-русски, поэтому мимо `_is_boilerplate` (он знает только английские
+        формулы) выполнение доходило до `recovered = healthy(after)` и печатало «ПРОЙДЕН — фолбэк
+        внятный». Инструмент НЕ НАБЛЮДАЛ ПОЛОМКУ ВОВСЕ: он упёрся в собственный лимит."""
+        v = C.judge(before=probe(),
+                    during=probe(plain=L4.HTTP_429, stream=L4.HTTP_429, sources=0,
+                                 text=self._BODY_429),
+                    after=probe(), recovery_seconds=5.0)
+        self.assertEqual(v["verdict"], "НЕ ИЗМЕРЕНО")
+        self.assertNotEqual(v["verdict"], "ПРОЙДЕН")
+
+    def test_429_after_under_expired_deadline_is_not_a_failure(self):
+        """⚠ Зеркальная половина: «сервис не вернулся» под троттлингом — тоже не вердикт.
+        Прежде оговорка про лимит жила только в stdout, а в JSON её не было вовсе, и читающий
+        отчёт видел «разбирать немедленно» про сервис, которого никто не наблюдал."""
+        v = C.judge(before=probe(), during=probe(text="внятно", sources=0),
+                    after=probe(plain=L4.HTTP_429, sources=0, text=self._BODY_429),
+                    recovery_seconds=None, throttled=3)
+        self.assertEqual(v["verdict"], "НЕ ИЗМЕРЕНО")
+        self.assertEqual(v["throttled_polls"], 3)
+
+    def test_throttle_count_reaches_the_report(self):
+        """⚠ След лимита обязан быть в JSON — единственном артефакте, переживающем сессию."""
+        v = C.judge(before=probe(), during=probe(text="внятно", sources=0), after=probe(),
+                    recovery_seconds=5.0, throttled=2)
+        self.assertEqual(v["verdict"], "ПРОЙДЕН")
+        self.assertEqual(v["throttled_polls"], 2)
+
     def test_429_is_recognised_as_not_measured(self):
         self.assertTrue(C.rate_limited({"plain_class": L4.HTTP_429, "stream_class": L4.OK}))
         self.assertTrue(C.rate_limited({"plain_class": L4.OK, "stream_class": L4.HTTP_429}))
@@ -140,13 +174,41 @@ class TestRateLimitIsNotIllHealth(unittest.TestCase):
         self.assertFalse(C.rate_limited(probe()))
         self.assertFalse(C.rate_limited(probe(plain=L4.HTTP_5XX, sources=0)))
 
-    def test_poll_floor_stays_under_the_chat_limit(self):
-        """⚠ Два запроса на пробу при 20/мин — не чаще одной пробы в 6 с. Число проверяется,
-        а не декларируется: разойдись оно с лимитом, проверка снова блокировала бы сама себя."""
-        requests_per_probe = 2
-        self.assertGreaterEqual(
-            C.POLL_MIN_SECONDS, 60.0 / L4.RATE_LIMIT_PER_MIN * requests_per_probe,
-            "интервал опроса быстрее лимита — проверка заблокирует сама себя")
+    @staticmethod
+    def _hits_in_window(poll_seconds: float, window: float = 60.0) -> int:
+        """НЕЗАВИСИМЫЙ оракул: сколько запросов сценарий кладёт в минутное окно.
+
+        ⚠⚠ СИМУЛЯЦИЯ, А НЕ ПОВТОР ФОРМУЛЫ КОДА (ревью PR #135, раунд 6, #136). Прежний тест брал
+        `requests_per_probe = 2` и делил лимит на него — ту же модель «опрос единственный
+        потребитель», из-за которой пол и был занижен. Оракул, повторяющий ошибку кода, ловит
+        только опечатку в константе, но не ошибку МОДЕЛИ, и раунд 6 нашёл ровно это.
+
+        Считаем ВСЕХ потребителей окна честным перебором: `before` и `during` тратят по пробе ДО
+        опроса, а при сломанной зависимости пробы возвращаются за миллисекунды, то есть опрос
+        идёт ровно с шагом `poll_seconds` начиная с t=0 (проба первая, пауза после — см.
+        `run_scenario`)."""
+        probes = 2                                    # before + during
+        t = 0.0
+        while t < window:                             # пробы опроса: t=0, poll, 2*poll, …
+            probes += 1
+            t += poll_seconds
+        return probes * 2                             # `probe()` бьёт дважды: стрим + нестрим
+
+    def test_poll_floor_counts_every_consumer_of_the_window(self):
+        """⚠ Проверка не должна блокировать сама себя: все запросы сценария обязаны умещаться
+        в лимит, а не только запросы опроса."""
+        hits = self._hits_in_window(C.POLL_MIN_SECONDS)
+        self.assertLessEqual(
+            hits, L4.RATE_LIMIT_PER_MIN,
+            f"при паузе {C.POLL_MIN_SECONDS} с сценарий кладёт {hits} запросов в минуту при "
+            f"лимите {L4.RATE_LIMIT_PER_MIN} — проверка упрётся в собственный лимит и обвинит "
+            "в этом сервис")
+
+    def test_the_old_floor_would_now_fail(self):
+        """⚠⚠ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ. Без него тест выше зелен и при возврате прежнего числа:
+        7.0 с давало 4 + 9 проб × 2 = 22 хита при лимите 20 — впритык и мимо. Проверка обязана
+        КРАСНЕТЬ на том значении, ради которого её переписали."""
+        self.assertGreater(self._hits_in_window(7.0), L4.RATE_LIMIT_PER_MIN)
 
 
 class TestWatchdogFailureIsLoud(unittest.TestCase):
@@ -254,5 +316,87 @@ class TestShellReportsFailures(unittest.TestCase):
         self.assertTrue(out)
 
 
+
+
+class TestThrottledBeforeDoesNotBreakProd(unittest.TestCase):
+    """⚠⚠⚠ САМОЕ ДОРОГОЕ СВОЙСТВО ВСЕГО МОДУЛЯ: не ломать бой, когда измерить НЕЛЬЗЯ.
+
+    Ревью PR #135, раунд 6 (#136). `main()` гоняет оба сценария подряд без паузы, и `before`
+    второго приходит вплотную к опросу первого, когда в окне уже 16–20 хитов. Без распознавания
+    429 инструмент объявлял «сервис нездоров ДО поломки» — ложный диагноз ПРО СЕРВИС, — и это
+    ровно то отравление `before`, которое коммит раунда 5 объявил починенным, закрыв только
+    опрос. Распознаватель был заведён и позван В ОДНОМ МЕСТЕ ИЗ ТРЁХ."""
+
+    class _Spy(C.Chaos):
+        name, human = "шпион", "шпион"
+
+        def __init__(self):
+            super().__init__(["docker"], "/tmp", "app", "qdrant")
+            self.broke = False
+
+        def break_it(self):
+            self.broke = True
+            return 0, "сломал"
+
+        def restore(self):
+            return 0, "починил"
+
+        def watchdog(self):
+            return ["true"]
+
+    def _run(self, probe_result):
+        sc = self._Spy()
+        with mock.patch.object(C, "probe", return_value=probe_result):
+            res = C.run_scenario(sc, "http://x", "jar", "вопрос", timeout=1.0, settle=0.0)
+        return sc, res
+
+    def test_429_before_does_not_touch_the_service(self):
+        sc, res = self._run(probe(plain=L4.HTTP_429, stream=L4.HTTP_429, sources=0,
+                                  text='{"detail":"Слишком много вопросов подряд."}'))
+        self.assertEqual(res["verdict"], "НЕ ИЗМЕРЕНО")
+        self.assertFalse(sc.broke, "инструмент СЛОМАЛ БОЙ, не сумев его измерить")
+
+    def test_genuinely_sick_service_is_still_not_broken(self):
+        """⚠ Соседняя половина: нездоровый сервис ломать тоже нельзя, но диагноз ДРУГОЙ."""
+        sc, res = self._run(probe(sources=0, text="фолбэк"))
+        self.assertEqual(res["verdict"], "НЕ ЗАПУЩЕН")
+        self.assertFalse(sc.broke)
+
+    def test_healthy_service_is_actually_broken(self):
+        """⚠⚠ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ. Проверка «не сломал» зелена и у инструмента, который не
+        ломает НИКОГДА, — то есть у полностью мёртвого. На здоровом сервисе поломка обязана
+        произойти, иначе два предыдущих теста ничего не значат."""
+        sc, _ = self._run(probe())
+        self.assertTrue(sc.broke, "на здоровом сервисе поломка не сработала — сценарий мёртв")
+
+
+class TestRecoveryTimeHasNoArtificialFloor(unittest.TestCase):
+    """⚠⚠ ЧИСЛО, ЗАВЫШЕННОЕ САМИМ ИНСТРУМЕНТОМ, — НЕ ЗАМЕР (раунд 6, #136).
+
+    `time.sleep(poll)` стоял В НАЧАЛЕ тела цикла, поэтому первая проба уходила не раньше
+    `POLL_MIN_SECONDS`. Замеренное репетицией «Qdrant поднимает коллекции ~6 с» инструмент не мог
+    показать В ПРИНЦИПЕ: любое восстановление быстрее паузы округлялось вверх до неё, и нигде это
+    не оговаривалось. Пауза обязана стоять МЕЖДУ пробами, а не перед первой."""
+
+    def test_instant_recovery_is_reported_as_instant(self):
+        # Последовательность настоящего захода: здоров → сломан → снова здоров с первой пробы.
+        sequence = [probe(),                                        # before
+                    probe(text="Поиск недоступен", sources=0),      # during
+                    probe()]                                        # after, сразу здоров
+        sc = TestThrottledBeforeDoesNotBreakProd._Spy()
+        with mock.patch.object(C, "probe", side_effect=sequence):
+            res = C.run_scenario(sc, "http://x", "jar", "в", timeout=1.0, settle=0.0)
+        self.assertEqual(res["verdict"], "ПРОЙДЕН")
+        self.assertIsNotNone(res["recovery_seconds"])
+        self.assertLess(
+            res["recovery_seconds"], C.POLL_MIN_SECONDS,
+            f"возврат {res['recovery_seconds']} с не меньше паузы опроса "
+            f"{C.POLL_MIN_SECONDS} с — число задано инструментом, а не измерено")
+
+
+# ⚠⚠ БЛОК ЗАПУСКА — ТОЛЬКО В КОНЦЕ ФАЙЛА (находка LOW-5 четвёртого раунда ревью PR #137).
+# Он стоял в середине, и два класса ниже при ПРЯМОМ запуске файла не определялись вовсе:
+# `unittest.main()` выходит раньше. Прямой прогон показывал 28 тестов вместо 32, причём
+# терялись сторожа класса «проверка ломает бой» — ровно те, ради которых файл и заведён.
 if __name__ == "__main__":
     unittest.main()

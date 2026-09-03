@@ -54,6 +54,7 @@ from eval_documents import (  # noqa: E402  (общий оракул докум�
     check_documents_reference,
     documents_row,
 )
+from eval_st1_cases import check_st1_reference, st1_row  # noqa: E402  (оракул СТ-1, K14 #35)
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
@@ -127,6 +128,9 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
     # Положительный контроль ДО первого платного вызова — вместе с источниками, которые ожидает
     # сам набор: иначе `KeyError` вылез бы на середине прогона, уже потратив деньги.
     check_documents_reference({s for c in cases for s in (c.get("expect_sources") or [])})
+    # То же для оси СТ-1: ожидания кейсов сверяются с ПЕРВОИСТОЧНИКОМ (таблица фактов Перечня)
+    # до первого платного вызова. Кейс с числом, которого в Перечне нет, красил бы верные ответы.
+    check_st1_reference(cases)
     rows = []
     for c in cases:
         # ⚠ `case_kind`, а не `kind`: параметр функции с тем же именем задаёт ФИЛЬТР набора, и
@@ -172,6 +176,8 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
         }
         if case_kind == "documents":
             row.update(documents_row(c, text))
+        elif case_kind == "st1":
+            row.update(st1_row(c, text))
         rows.append(row)
     return rows
 
@@ -187,14 +193,19 @@ def summarize(rows, limit: int) -> list[str]:
     # знаменатель поменяется, а дельта к базе перестанет читаться: просадка метрики и смена
     # ПОПУЛЯЦИИ дадут одинаковое движение числа. Правило значимости дельты (`EVAL_GUIDE §1.2`)
     # сравнивает величины, снятые на одном наборе; сравнивать разные наборы оно не умеет.
-    ins = [r for r in rows if r["in_scope"] and r.get("kind", "product") != "documents"]
+    # ⚠ Кейсы СТ-1 (`K14` #35) — ТРЕТЬЯ популяция, и по той же причине: они отвечаются по
+    # Соглашению СНГ и Приказу №14, а не по приложению 719. Смешай их с товарными — и
+    # знаменатель базы сравнения снова поедет.
+    ins = [r for r in rows if r["in_scope"]
+           and r.get("kind", "product") not in ("documents", "st1")]
     docs = [r for r in rows if r.get("kind") == "documents"]
+    st1 = [r for r in rows if r.get("kind") == "st1"]
     out = [r for r in rows if not r["in_scope"]]
     L = []
     L.append("=" * 78)
     L.append(f"EVAL ОТВЕТА — golden set {len(rows)} кейсов ({len(ins)} товарных in-scope, "
-             f"{len(docs)} документных, {len(out)} out-of-scope), limit={limit}, "
-             f"модель={settings.DEEPSEEK_MODEL}")
+             f"{len(docs)} документных, {len(st1)} СТ-1/ТН ВЭД, {len(out)} out-of-scope), "
+             f"limit={limit}, модель={settings.DEEPSEEK_MODEL}")
     L.append("=" * 78)
     L.append("")
 
@@ -261,6 +272,46 @@ def summarize(rows, limit: int) -> list[str]:
             L.append(f"    #{r['id']:>3} {r['query'][:46]:46} — " + ("; ".join(bits) if bits else "✓"))
         L.append("")
 
+    if st1:
+        L.append("Кейсы СТ-1 / ТН ВЭД (второй ключ классификации, `K14` #35):")
+        # ⚠⚠ ЗНАМЕНАТЕЛЬ — ТОЛЬКО ПОЗИЦИИ ИЗ ПЕРЕЧНЯ (находка 7 шестого раунда ревью PR #137).
+        # Считалось по «не ждём общего правила», а туда попадали и кейсы БЕЗ кода вовсе (#55, #56,
+        # #57): у них нет условия Перечня, и метрика с названием «условие Перечня доехало»
+        # отчитывалась 6/6 там, где настоящих случаев ТРИ. Число было завышено собственным
+        # знаменателем — класс, уже записанный в уроках проекта («число, завышенное самим
+        # инструментом, — не замер»).
+        cond = [r for r in st1 if r["in_perechen"] is True]
+        rule = [r for r in st1 if r["want_general_rule"]]
+        if cond:
+            ok, n = _rate(cond, lambda r: r["condition_ok"])
+            L.append(f"  Условие Перечня доехало = {ok}/{n} = {ok / n:.2f}")
+        if rule:
+            ok, n = _rate(rule, lambda r: r["general_rule_ok"])
+            L.append(f"  Общее правило сформулировано = {ok}/{n} = {ok / n:.2f}")
+        src = [r for r in st1 if r["want_sources"]]
+        if src:
+            ok, n = _rate(src, lambda r: len(r["named_sources"]) == len(r["want_sources"]))
+            L.append(f"  Источник назван = {ok}/{n} = {ok / n:.2f}")
+        f_ok, f_n = _rate(st1, lambda r: r["faithful"])
+        L.append(f"  Faithfulness (числа заземлены) = {f_ok}/{f_n} = {f_ok / f_n:.2f}")
+        for r in st1:
+            bits = []
+            if r["missing_numbers"]:
+                bits.append("нет величин: " + ", ".join(r["missing_numbers"]))
+            if r["missing_keywords"]:
+                bits.append("нет по смыслу: "
+                            + "; ".join("/".join(g) for g in r["missing_keywords"]))
+            if r["want_general_rule"] and not r["general_rule_found"]:
+                bits.append("общее правило не сформулировано")
+            miss_src = [s for s in r["want_sources"] if s not in r["named_sources"]]
+            if miss_src:
+                bits.append("источник не назван: " + ", ".join(miss_src))
+            if r["hallucinated"]:
+                bits.append("выдуманные числа: " + ", ".join(r["hallucinated"]))
+            L.append(f"    #{r['id']:>3} {r['query'][:46]:46} — "
+                     + ("; ".join(bits) if bits else "✓"))
+        L.append("")
+
     if out:
         dec_ok, dec_n = _rate(out, lambda r: r["declined"])
         L.append("Out-of-scope (продукция вне 719):")
@@ -279,6 +330,10 @@ def summarize(rows, limit: int) -> list[str]:
         if r.get("kind") == "documents":
             sc = "ДОК"  # раздела у документного вопроса нет — в колонке итог документных проверок
             attr = "✓" if (r["docs_ok"] and r["explanation_ok"] and not r["term_affirmed"]) else "✗"
+        if r.get("kind") == "st1":
+            sc = "СТ1"  # раздела нет и здесь: в колонке — итог проверок оси второго ключа
+            ok = r["condition_ok"] and (r["general_rule_ok"] is not False)
+            attr = "✓" if ok else "✗"
         L.append(f"{r['id']:>3} {sc:<3} {r['expected']:>5} {faith:>6} {attr:>5} {cjk:>4}  {r['query'][:30]}")
     L.append("")
 
@@ -304,8 +359,8 @@ def main() -> None:
     # стоят в конце — проверить их можно было только оплатив весь набор. БАЗА: её числа сняты на
     # 42 товарных, и без команды, воспроизводящей эту популяцию, они становятся нечем пересчитать
     # (правило 6 базы сравнения).
-    ap.add_argument("--kind", choices=("all", "product", "documents"), default="all",
-                    help="какие кейсы гнать: все · только товарные (популяция базы) · документные")
+    ap.add_argument("--kind", choices=("all", "product", "documents", "st1"), default="all",
+                    help="какие кейсы гнать: все · только товарные (популяция базы) · документные · СТ-1/ТН ВЭД")
     ap.add_argument("--report", type=str, default="", help="путь для сохранения отчёта (markdown)")
     args = ap.parse_args()
 
