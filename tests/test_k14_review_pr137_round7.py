@@ -126,13 +126,34 @@ class TestCompanionVocabularyHasOneDefinition(unittest.TestCase):
 
     FRAGMENT = r"перечн\w*\s+услови"
 
+    @staticmethod
+    def _code_only(path) -> str:
+        """Исходник БЕЗ строк-комментариев.
+
+        ⚠⚠ Считать сырые вхождения текста нельзя, и это купленный урок (18.08): `grep` по имени
+        удалённой константы поймал её В КОММЕНТАРИИ, ОБЪЯСНЯЮЩЕМ УДАЛЕНИЕ, и остановил ВЕРНУЮ
+        выкатку. Здесь тот же класс: сторож считал вхождения в файле целиком и падал, стоило
+        комментарию НАЗВАТЬ фрагмент — то есть наказывал за объяснение. Предохранитель, бьющий по
+        верному коду, дороже отсутствующего: он заставляет усомниться в правке.
+        Инвариант — про ОПРЕДЕЛЕНИЯ, поэтому комментарии из счёта исключены."""
+        return "\n".join(ln for ln in path.read_text(encoding="utf-8").splitlines()
+                         if not ln.lstrip().startswith("#"))
+
     def test_single_literal_definition(self):
-        top = (ROOT / "app" / "rag" / "topics.py").read_text(encoding="utf-8")
+        top = self._code_only(ROOT / "app" / "rag" / "topics.py")
         self.assertEqual(top.count(self.FRAGMENT), 1,
                          "словарь спутников определён в `topics` не один раз")
 
+    def test_comment_may_name_the_fragment(self):
+        """Отрицательный контроль к самому сторожу: упоминание в комментарии — НЕ определение.
+
+        Без него правка сторожа выглядела бы подгонкой под мою же правку комментария."""
+        top = (ROOT / "app" / "rag" / "topics.py").read_text(encoding="utf-8")
+        self.assertGreater(top.count(self.FRAGMENT), 1,
+                           "фрагмент больше не назван в комментариях — контроль выродился")
+
     def test_procedural_has_no_own_copy(self):
-        proc = (ROOT / "app" / "rag" / "procedural.py").read_text(encoding="utf-8")
+        proc = self._code_only(ROOT / "app" / "rag" / "procedural.py")
         self.assertEqual(proc.count(self.FRAGMENT), 0,
                          "`procedural` завёл собственную копию словаря спутников")
         self.assertIn("topics.ST1_COMPANION", proc,
@@ -170,6 +191,28 @@ class TestTopicVocabularyIsWiderByConstruction(unittest.TestCase):
                   "мой код ТН ВЭД 8471 30 000 0, какие требования к продукции"):
             with self.subTest(q=q):
                 self.assertFalse(route(q), "путь T9 ушёл на процедурную ветку")
+
+    def test_topic_dictionary_actually_reaches_the_gate(self):
+        """⚠⚠ СТОРОЖ ВЫШЕ БЫЛ СЛЕПЫМ, И ЭТО НАХОДКА MED-1 ВОСЬМОГО РАУНДА.
+
+        Он проходит потому, что его три строки не дают попадания в `_ANCHOR_RE` ВООБЩЕ —
+        короткое замыкание на якоре, а не на теме. То есть он не проверяет механизм, который
+        называет, и прежний комментарий у `ST1_TOPIC_COMPANION` («тема стоит ЗА гейтом»)
+        оставался неопровергнутым.
+
+        Здесь утверждается сам механизм: словарь темы КОРМИТ гейт — `_has_routing_topic` зовёт
+        `classify` и является одним из двух дизъюнктов `is_procedural`. Пока это так, расширение
+        `ST1_TOPIC_COMPANION` расширяет маршрут, и обосновывать его «тема шире, ей можно» нельзя.
+        """
+        import inspect
+
+        from app.rag import procedural as P
+
+        src = inspect.getsource(P._has_routing_topic)
+        self.assertIn("topics.classify", src,
+                      "гейт больше не спрашивает тему — перепроверьте обоснование асимметрии")
+        self.assertIn("_has_routing_topic", inspect.getsource(P.is_procedural),
+                      "тема выпала из гейта — обоснование асимметрии надо пересматривать")
 
 
 class TestAmountWordDoesNotSwallowCode(unittest.TestCase):
