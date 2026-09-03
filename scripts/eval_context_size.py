@@ -79,7 +79,7 @@ def context_of(query: str, okpd2: str | None) -> tuple[str, str] | None:
         proc = pipe.plan_procedural(query, query)
         if proc is None:
             return None
-        _topic, _rules, ctx, user, _grounding, _low_rel = proc
+        ctx, user = proc.ctx, proc.user
         return ctx, user
 
     planned = pipe._plan_answer(query, okpd2=okpd2 or None)

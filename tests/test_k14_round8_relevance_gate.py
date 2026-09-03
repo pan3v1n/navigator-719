@@ -1,131 +1,35 @@
 # -*- coding: utf-8 -*-
-"""Гейт вне-сферы ПРОЦЕДУРНОЙ ветки — структурная замена словарного механизма (раунд 8, PR #137).
+"""HIGH-4 восьмого раунда ревью PR #137 — и ЗАПРЕТ на порог релевантности процедурной ветки.
 
-ЧТО ЧИНИТСЯ. Раунд 7 записал диагноз «у процедурной ветки НЕТ гейта вне-сферы» и лечил его
-СЛОВАРЁМ маршрута. Раунд 8: три HIGH из шести имели один корень (расширенная тема, кормящая
-гейт), а замер на независимой популяции дал 22 → 23 — правка не улучшила ничего. Причина не была
-тронута: `_answer_procedural` держал `low_relevance=False` ЖЁСТКО, то есть ветка объявляла себя
-релевантной всегда, чем бы её ни спросили.
+⚠⚠⚠ ЭТОТ ФАЙЛ ХРАНИТ ОТРИЦАТЕЛЬНЫЙ РЕЗУЛЬТАТ. Раунд 8 предписывал завести у процедурной ветки
+гейт вне-сферы («щедрый маршрут + порог по плотному сходству»). Гейт был написан, выкачен в ветку
+и ОТКАЧЕН 03.09.2026 — замером, а не спором. Тесты ниже держат обе половины решения: правку
+маршрута, которая осталась, и отсутствие порога, которое стало осознанным.
 
-⚠⚠ ВСЁ ОФЛАЙН. Тест, зовущий живой Qdrant, — это класс `O3` #104: CI стоял красным шесть прогонов
-подряд, и в этой красноте пакет уехал на бой. Здесь и поиск, и сходство подменены заглушками.
+ЗАМЕР (`scripts/eval_rules_relevance.py`, 164 вопроса пяти популяций):
+    A  гейта нет                            15 утечек / 21 потеря = 36
+    B  порог 0.851 всегда                    4 / 30 = 34
+    C  порог мимо детерминированного пути   15 / 27 = 42   (доминирован)
+B выигрывает у A два пункта из 36 — шум, — но создаёт ДЕВЯТЬ новых отказов: «что такое
+кумулятивный принцип» (термин самого проиндексированного Соглашения), «какие условия экспорта в
+Казахстан по ТН ВЭД 8403» (флагман HIGH-4), «моей продукции нет в приложении 719, можно ли
+получить СТ-1» (подпункт «г»), «кто выдаёт сертификат происхождения в Курской области» — вопрос
+про самого заказчика. Полосы перекрываются ПО СУЩЕСТВУ: таможенный вопрос про происхождение и
+целевой вопрос про происхождение — про одно и то же, и корпус про то же.
 """
 
 import unittest
-from unittest import mock
 
-from app.core.prompts import build_procedural_user_prompt
+from app.core import prompts
 from app.rag import pipeline, topics
 
 
-def _rule(point="1", text="Пункт про реестр"):
-    return {"doc_type": "rules_reestr", "section_roman": "I", "point": point,
-            "text": text, "source_anchor": "Правила, п. 1", "_score": 1.0, "_topic": None}
-
-
-class TestGateIsWiredIntoThePlan(unittest.TestCase):
-    """`plan_procedural` обязан ВЫЧИСЛЯТЬ релевантность, а не объявлять её."""
-
-    def _plan(self, score: float):
-        with mock.patch.object(pipeline, "search_rules", return_value=[_rule()]), \
-             mock.patch.object(pipeline, "dense_top1", return_value=score) as dt:
-            planned = pipeline.plan_procedural("вопрос", "вопрос")
-        return planned, dt
-
-    def test_plan_returns_the_relevance_flag(self):
-        planned, _ = self._plan(0.95)
-        self.assertEqual(len(planned), 6, "план обязан нести признак релевантности шестым полем")
-
-    def test_low_similarity_raises_the_flag(self):
-        planned, _ = self._plan(pipeline.RULES_RELEVANCE_SOFT - 0.01)
-        self.assertTrue(planned[5])
-
-    def test_high_similarity_does_not(self):
-        planned, _ = self._plan(pipeline.RULES_RELEVANCE_SOFT + 0.01)
-        self.assertFalse(planned[5])
-
-    def test_similarity_is_measured_on_the_rules_collection(self):
-        """⚠ Своя коллекция, а не товарная: у корпуса норм проза, и полосы сходства лежат иначе.
-        Ровно ради этого корпус и заведён отдельной коллекцией."""
-        from app.core.config import settings
-
-        _planned, dt = self._plan(0.95)
-        self.assertEqual(dt.call_args.kwargs.get("collection"),
-                         settings.QDRANT_RULES_COLLECTION)
-
-    def test_threshold_is_its_own_not_the_product_one(self):
-        self.assertNotEqual(pipeline.RULES_RELEVANCE_SOFT, pipeline.RELEVANCE_SOFT)
-
-
-class TestGateHasThreeOutcomes(unittest.TestCase):
-    """⚠⚠ «Не измерено» — третий исход, а не молчаливое «релевантно».
-
-    Правило проекта, купленное дважды за 30.08: у всякой пробы три исхода. Но направление ошибки
-    решает форму — ложно отрицательный гейт молча превратил бы рабочую ветку в отказ, поэтому при
-    сбое ЗАМЕРА поведение остаётся прежним, и сбой ГОВОРИТ в журнал."""
-
-    def test_measurement_failure_does_not_silently_refuse(self):
-        with mock.patch.object(pipeline, "search_rules", return_value=[_rule()]), \
-             mock.patch.object(pipeline, "dense_top1", side_effect=RuntimeError("Qdrant упал")):
-            planned = pipeline.plan_procedural("вопрос", "вопрос")
-        self.assertIsNotNone(planned, "сбой ЗАМЕРА не имеет права гасить найденные пункты")
-        self.assertFalse(planned[5])
-
-    def test_measurement_failure_is_logged(self):
-        with mock.patch.object(pipeline, "search_rules", return_value=[_rule()]), \
-             mock.patch.object(pipeline, "dense_top1", side_effect=RuntimeError("boom")), \
-             mock.patch.object(pipeline.logger, "warning") as warn:
-            pipeline.plan_procedural("вопрос", "вопрос")
-        self.assertTrue(warn.called, "молчаливая деградация гейта — это его отсутствие")
-
-
-class TestFlagReachesThePrompt(unittest.TestCase):
-    """Признак обязан ДОЕХАТЬ до модели: гейт, не меняющий промпт, ничего не гейтит."""
-
-    def test_prompt_carries_an_honest_refusal(self):
-        low = build_procedural_user_prompt("вопрос", "ПУНКТ", low_relevance=True)
-        high = build_procedural_user_prompt("вопрос", "ПУНКТ", low_relevance=False)
-        self.assertIn("СИГНАЛ РЕЛЕВАНТНОСТИ", low)
-        self.assertNotIn("СИГНАЛ РЕЛЕВАНТНОСТИ", high)
-
-    def test_refusal_names_the_off_domain_classes(self):
-        low = build_procedural_user_prompt("вопрос", "ПУНКТ", low_relevance=True)
-        for word in ("таможен", "вне сферы"):
-            self.assertIn(word, low)
-
-    def test_plan_passes_the_flag_into_the_prompt(self):
-        """Сквозная проверка: не «функция умеет», а «путь до неё существует»."""
-        with mock.patch.object(pipeline, "search_rules", return_value=[_rule()]), \
-             mock.patch.object(pipeline, "dense_top1", return_value=0.10):
-            planned = pipeline.plan_procedural("вопрос", "вопрос")
-        self.assertIn("СИГНАЛ РЕЛЕВАНТНОСТИ", planned[3])
-
-
-class TestFlagReachesTheAnswer(unittest.TestCase):
-    """⚠⚠ Флаг нужен НЕ ТОЛЬКО промпту. `Answer.low_relevance` пишется в БД (`chat.py`), считается
-    в триаже админки (`admin_stats.py`) и ОТБРАСЫВАЕТ ответы при сборке `gs_natural`. Промпт и
-    поле — два РАЗНЫХ потребителя одного признака, и тест на первый не проверяет второй."""
-
-    def _answer(self, score: float):
-        fake_resp = mock.Mock()
-        fake_resp.choices = [mock.Mock(message=mock.Mock(content="Ответ по пунктам [1]."))]
-        fake_resp.usage = mock.Mock(prompt_tokens=10, completion_tokens=5)
-        fake_client = mock.Mock()
-        fake_client.chat.completions.create.return_value = fake_resp
-        with mock.patch.object(pipeline, "search_rules", return_value=[_rule()]), \
-             mock.patch.object(pipeline, "dense_top1", return_value=score), \
-             mock.patch.object(pipeline, "_client", return_value=fake_client):
-            return pipeline._answer_procedural("вопрос", "вопрос")
-
-    def test_low_similarity_marks_the_answer(self):
-        self.assertTrue(self._answer(pipeline.RULES_RELEVANCE_SOFT - 0.01).low_relevance)
-
-    def test_high_similarity_does_not_mark_it(self):
-        self.assertFalse(self._answer(pipeline.RULES_RELEVANCE_SOFT + 0.01).low_relevance)
-
-
 class TestOwnDomainVocabularyIsNotDisqualified(unittest.TestCase):
-    """HIGH-4: `экспорт` и `вывоз` — лексика САМОЙ сделки, под которую выдаётся СТ-1."""
+    """HIGH-4: `экспорт` и `вывоз` — лексика САМОЙ сделки, под которую выдаётся СТ-1.
+
+    Раунд 7 положил их в `ST1_DISQUALIFIER`, то есть запретил словарь того, ради чего документ
+    существует: СТ-1 — сертификат происхождения под экспорт в зону свободной торговли СНГ.
+    Частота стволов в индексируемых этим же релизом документах: экспорт 111+12, вывоз 54+25."""
 
     def test_export_wording_keeps_the_st1_topic(self):
         for q in ("какие условия экспорта в Казахстан по ТН ВЭД 8403",
@@ -146,6 +50,48 @@ class TestOwnDomainVocabularyIsNotDisqualified(unittest.TestCase):
             self.assertNotIn(own, topics.ST1_DISQUALIFIER)
         for alien in ("ввоз", "импорт"):
             self.assertIn(alien, topics.ST1_DISQUALIFIER)
+
+
+class TestProceduralBranchHasNoRelevanceThreshold(unittest.TestCase):
+    """⚠⚠ Отсутствие порога — РЕШЕНИЕ, и оно закреплено, чтобы не быть «починенным» молча.
+
+    Правило проекта: осознанное решение, снятое по находке ревью, возвращают только новым
+    замером. Раунд 9 (или любой следующий) обязан упереться в эти утверждения и прочитать шапку,
+    а не завести порог заново «потому что у товарной ветки он есть»."""
+
+    def test_no_threshold_constant_exists(self):
+        self.assertFalse(hasattr(pipeline, "RULES_RELEVANCE_SOFT"),
+                         "порог процедурной ветки заведён заново — см. шапку файла, нужен ЗАМЕР")
+
+    def test_plan_carries_no_relevance_field(self):
+        self.assertNotIn("low_relevance", pipeline.ProceduralPlan._fields)
+
+    def test_procedural_prompt_takes_no_relevance_flag(self):
+        """Параметр, которого никто не выставляет, — предохранитель, не могущий сработать."""
+        import inspect
+
+        sig = inspect.signature(prompts.build_procedural_user_prompt)
+        self.assertNotIn("low_relevance", sig.parameters)
+
+    def test_product_branch_keeps_its_own_threshold(self):
+        """⚠ Отрицательный контроль: откат НЕ имеет права задеть товарный гейт.
+
+        Там полосы расходятся (продукция вне 719 стабильно ниже профильной), порог измерен и
+        работает с самого начала. Откатывалась ПРОЦЕДУРНАЯ ветка, а не идея порога вообще."""
+        self.assertTrue(hasattr(pipeline, "RELEVANCE_SOFT"))
+        self.assertAlmostEqual(pipeline.RELEVANCE_SOFT, 0.83)
+
+
+class TestCollectionParameterSurvived(unittest.TestCase):
+    """`dense_top1(collection=…)` оставлен: им меряет `eval_rules_relevance.py`, и без него
+    отрицательный результат нельзя перепроверить. Инструмент замера переживает откат правки."""
+
+    def test_dense_top1_accepts_a_collection(self):
+        import inspect
+
+        from app.rag.retriever import dense_top1
+
+        self.assertIn("collection", inspect.signature(dense_top1).parameters)
 
 
 if __name__ == "__main__":
