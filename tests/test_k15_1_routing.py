@@ -179,8 +179,12 @@ class TestReferenceGateFollowsTheQuestion(unittest.TestCase):
                  "source_anchor": "Правила, п. 2", "_score": 1.0}]
         q = "какой срок рассмотрения заявления о внесении в реестр"
         self.assertNotEqual(topics.classify(q), topics.DOCUMENTS)
+        # ⚠⚠ ПО ИМЕНИ, как и в положительной половине выше (находка 8 раунда 9). Здесь позиционная
+        # распаковка опаснее: утверждение ОТРИЦАТЕЛЬНОЕ (`assertNotIn`), и подмена `user` на
+        # заземление оставила бы тест ЗЕЛЁНЫМ, проверяющим пустоту. Слепой отрицательный контроль
+        # хуже отсутствующего — он создаёт видимость охраны.
         with unittest.mock.patch.object(pipeline, "search_rules", lambda *a, **k: fake):
-            *_head, user, _grounding = pipeline.plan_procedural(q, q)
+            user = pipeline.plan_procedural(q, q).user
         self.assertNotIn(_reference_header(), user,
                          "справочник приезжает туда, где о документах не спрашивали")
 

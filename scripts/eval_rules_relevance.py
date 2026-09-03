@@ -59,6 +59,11 @@ POPULATIONS = [
     # Для проверки ГЕЙТА он независим, для проверки СЛОВАРЯ — нет.
     ("eval_offdomain_tnved.json", "вне сферы + ТН ВЭД", False),
     ("eval_route_st1_population.json", "маршрут СТ-1 (порог подбирался ЗДЕСЬ)", None),
+    # ⚠⚠ ПЯТАЯ ПОПУЛЯЦИЯ ВОССТАНОВЛЕНА (находка 5 раунда 9). Замер, которым обоснован откат гейта,
+    # шёл по ПЯТИ наборам (164 вопроса), а в коммит уехал инструмент с четырьмя (140). Число,
+    # которого инструмент не производит, не может защищать откаченный предохранитель: 25+39+12+64
+    # даёт 140, и ровно эти 24 кейса приёмки СТ-1 недоставало. Именно на них видны потери гейта.
+    ("eval_st1_route.json", "СТ-1 приёмка", "st1set"),
 ]
 
 THRESHOLDS = [0.0, 0.830, 0.840, 0.845, 0.851, 0.855, 0.860, 0.870]
@@ -71,6 +76,8 @@ def _cases(path: Path, expect: bool | None) -> list[dict]:
     for c in raw:
         if expect is None:                       # популяция маршрута несёт своё поле
             want = c["expect"] == "st1"
+        elif expect == "st1set":                 # приёмка СТ-1: контроли там ТОВАРНЫЕ намеренно
+            want = c.get("kind") != "control_product"
         elif expect is False:                    # golden_negative: in_scope=False → вне сферы
             want = bool(c.get("in_scope", False))
         else:
@@ -81,21 +88,36 @@ def _cases(path: Path, expect: bool | None) -> list[dict]:
 
 
 def collect(cache: Path | None) -> list[dict]:
-    """Сходство + маршрут для каждого вопроса. Дорогая часть (эмбеддинг), поэтому кэшируется."""
+    """Сходство + маршрут для каждого вопроса. Эмбеддинг дорог, поэтому кэшируются СХОДСТВА.
+
+    ⚠⚠ КЭШИРУЕТСЯ ТОЛЬКО СХОДСТВО, МАРШРУТ СЧИТАЕТСЯ ВСЕГДА ЗАНОВО (находка 4 раунда 9).
+    Прежняя редакция возвращала сохранённые строки целиком, включая `routed`, — и после правки
+    `ST1_DISQUALIFIER`, сделанной в этом же диапазоне, печатала СТАРЫЙ маршрут, утверждая в шапке,
+    что мерит текущее дерево. Это ровно «инструмент упёрся в своё состояние и отчитался о нём как
+    о состоянии сервиса», класс, который проект уже дважды покупал. Сходство от словаря маршрута
+    не зависит (плотный косинус по корпусу), поэтому его кэшировать безопасно.
+    ⚠ Кэш ещё и помечен составом популяций: сменился набор — кэш недействителен.
+    """
+    stamp = [f"{f}:{lab}" for f, lab, _ in POPULATIONS]
+    scores: dict[str, float] = {}
     if cache and cache.exists():
-        return json.loads(cache.read_text(encoding="utf-8"))["rows"]
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        if saved.get("stamp") == stamp:
+            scores = saved.get("scores", {})
 
     rows = []
     for fname, label, expect in POPULATIONS:
         for c in _cases(ROOT / "scripts" / fname, expect):
-            # ⚠ Маршрут — тем же вызовом, что в рантайме: тест, зовущий компонент напрямую,
-            # не проверяет путь до него (урок PR #137).
-            routed = bool(procedural.is_procedural(c["query"], has_code=False))
-            score = dense_top1(c["query"], collection=RULES)
-            rows.append({**c, "pop": label, "routed": routed, "score": round(score, 4)})
+            q = c["query"]
+            # ⚠ Маршрут — тем же вызовом, что в рантайме, и НИКОГДА не из кэша: тест, зовущий
+            # компонент напрямую, не проверяет путь до него (урок PR #137).
+            routed = bool(procedural.is_procedural(q, has_code=False))
+            if q not in scores:
+                scores[q] = round(dense_top1(q, collection=RULES), 4)
+            rows.append({**c, "pop": label, "routed": routed, "score": scores[q]})
     if cache:
-        cache.write_text(json.dumps({"rows": rows}, ensure_ascii=False, indent=1),
-                         encoding="utf-8")
+        cache.write_text(json.dumps({"stamp": stamp, "scores": scores},
+                                    ensure_ascii=False, indent=1), encoding="utf-8")
     return rows
 
 

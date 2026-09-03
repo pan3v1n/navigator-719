@@ -76,3 +76,6 @@ dump_tables.json
 # рабочие worktree Claude Code и посторонние файлы в корне — не код проекта
 .claude/worktrees/
 /*.xlsx
+
+# Кэш сходств замера релевантности (scripts/eval_rules_relevance.py) — воспроизводим, не артефакт
+scripts/_rules_relevance.json
