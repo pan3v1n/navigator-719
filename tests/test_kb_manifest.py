@@ -207,14 +207,39 @@ class TestAllThreeCollectionsDescribed(unittest.TestCase):
         self.assertEqual([f.name for f in files if f.name.startswith("_")], [])
         self.assertIn("_*.json", doc.get("exclude") or [])
 
+    PRACTICE = 5   # словарь манифеста: 5 — практика, 0-4 — нормы и разъяснения
+
     def test_cases_are_practice_not_a_norm(self):
         """⚠ Кейс уходит в контекст ВЫШЕ первоисточника (правило 1а промпта). `K13` обязана
-        знать, что он уточняет ПРИМЕНЕНИЕ нормы, а не заменяет её."""
+        знать, что он уточняет ПРИМЕНЕНИЕ нормы, а не заменяет её.
+
+        ⚠⚠ СРАВНЕНИЕ ИДЁТ С НОРМАМИ, А НЕ СО ВСЕМ КОРПУСОМ (`K16` #48). Прежняя редакция
+        требовала, чтобы кейсы были СТРОГО слабее КАЖДОГО документа, и это работало ровно пока
+        практика в корпусе была одна. `K16` завела вторую — FAQ ГИСП, разъяснение оператора
+        портала, тоже `legal_force: 5` (так прямо сформулирована issue #48). Условие «5 > 5»
+        ложно, и тест краснел НА ВЕРНОМ СОСТАВЕ корпуса.
+        Инвариант, который держится на самом деле: практика слабее ЛЮБОЙ НОРМЫ; две практики
+        между собой равны, и это не дефект, а их общий статус."""
         doc = self.kb.documents("verified_cases")[0]
-        self.assertEqual(doc["legal_force"], 5)
-        norms = [d["legal_force"] for d in self.man["documents"] if d["collection"] != "verified_cases"]
-        self.assertTrue(all(doc["legal_force"] > n for n in norms),
+        self.assertEqual(doc["legal_force"], self.PRACTICE)
+        norms = [d for d in self.man["documents"] if d["legal_force"] < self.PRACTICE]
+        self.assertTrue(norms, "в корпусе не осталось НОРМ — сравнивать не с чем")
+        self.assertTrue(all(doc["legal_force"] > d["legal_force"] for d in norms),
                         "практика обязана быть слабее любой нормы корпуса")
+
+    def test_every_practice_document_is_marked_as_such(self):
+        """Обратная половина: `legal_force: 5` носят только те, кто нормой НЕ является.
+
+        ⚠ Без неё предыдущий тест ослаб бы молча: пометить нормативный акт практикой стало бы
+        способом «починить» сравнение."""
+        practice = [d for d in self.man["documents"] if d["legal_force"] == self.PRACTICE]
+        self.assertGreaterEqual(len(practice), 2, "практики в корпусе меньше двух — состав изменился")
+        for d in practice:
+            with self.subTest(doc=d["doc_type"]):
+                self.assertIn(d["authority"], ("ТПП РФ", "Минпромторг"),
+                              "практику ведёт организация, а не законодатель")
+                self.assertIsNone(d.get("edition_expected"),
+                                  "у практики нет редакции нормативного акта")
 
     def test_passport_reaches_product_and_case_records(self):
         """Критерий тот же, что у `K8`: паспорт у ЗАПИСЕЙ, а не у документа на бумаге."""
