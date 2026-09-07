@@ -43,6 +43,7 @@ import json
 import sys
 import unittest
 from pathlib import Path
+from unittest import mock
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -133,7 +134,15 @@ class TestKeyLengthsComeFromTheSource(unittest.TestCase):
 
 
 class TestNoImpossibleKeyEverReachesTheLookup(unittest.TestCase):
-    """Находки 2 и 3: ключ невозможной длины не должен рождаться НИ НА КАКОМ пути."""
+    """Находка 2 раунда 10: ключ невозможной длины не должен рождаться НА ПУТИ ОТСЕЧЕНИЯ.
+
+    ⚠⚠⚠ ОБЛАСТЬ СУЖЕНА ПОСЛЕ НАХОДКИ 2 ОДИННАДЦАТОГО РАУНДА (HIGH). Прежний докстринг говорил
+    «НИ НА КАКОМ пути», и по этой формуле гейт длины поставили ещё и на обычный путь — туда, где
+    матч никем не опровергнут. Это стоило **147 потерь вердикта из 308** на классе «код Перечня
+    с лишним знаком»: `st1_ref.conditions_for` матчит по ПРЕФИКСУ, поэтому ключ длиннее записи
+    доезжает до СВОЕЙ строки и отвечает верно, а усечение до родителя даёт «НЕ включён».
+    Инвариант, который держится на самом деле: **невозможная длина не должна появляться там, где
+    мы САМИ отбросили часть матча**; то, что написал пользователь, отдаётся как есть."""
 
     def _sweep(self) -> list[tuple[str, str]]:
         bad = []
@@ -157,12 +166,54 @@ class TestNoImpossibleKeyEverReachesTheLookup(unittest.TestCase):
         bad = self._sweep()
         self.assertEqual(bad, [], f"ключ невозможной длины: {bad[:3]}")
 
-    def test_ordinary_path_validates_length_too(self):
-        """Находка 2: без слова-опровержения проверка длины раньше не выполнялась вовсе."""
-        self.assertEqual(extract_tnved_position(
-            "какие условия достаточной переработки для кода ТН ВЭД 8403 10 1"), "8403 10")
-        key = extract_tnved_position("по ТН ВЭД 8403 10 00 00 00 какие условия")
-        self.assertIn(len(_digits(key)), okpd2_ref._TNVED_KEY_LENGTHS)
+    def test_ordinary_path_returns_what_the_user_wrote(self):
+        """Находка 2 одиннадцатого раунда: на НЕопровергнутом матче гейта длины быть не должно.
+
+        Ключ отдаётся как написан, даже если длина «невозможная»: решает не форма, а лукап."""
+        for q, want in (
+            ("какие условия достаточной переработки для кода ТН ВЭД 8403 10 1", "8403 10 1"),
+            ("по ТН ВЭД 8403 10 00 00 00 какие условия", "8403 10 00 00 00"),
+        ):
+            with self.subTest(q=q):
+                self.assertEqual(extract_tnved_position(q), want)
+
+    def test_such_a_key_still_resolves(self):
+        """Положительный контроль к предыдущему: «невозможная» длина НЕ мешает лукапу.
+
+        ⚠ Без него предыдущий тест защищал бы только строку, а утверждение проверяется здесь —
+        именно оно опровергает посылку «ключ недопустимой длины не обозначает НИЧЕГО», из-за
+        которой гейт и поставили на обычный путь."""
+        if not st1_ref.is_available():
+            self.skipTest("таблица условий Перечня не сгенерирована")
+        for key in ("8403 10 1", "8403 10 00 00 00"):
+            with self.subTest(key=key):
+                self.assertNotIn(len(_digits(key)), okpd2_ref._TNVED_KEY_LENGTHS,
+                                 "пример перестал быть примером: длина стала допустимой")
+                self.assertTrue(st1_ref.conditions_for(key)["matched"],
+                                "ключ с лишним знаком перестал попадать в свою строку — "
+                                "посылка гейта длины изменилась, перечитайте находку 2")
+
+    def test_mutation_the_gate_on_the_ordinary_path_costs_verdicts(self):
+        """Отрицательный контроль: вернуть гейт на обычный путь — и вердикты обязаны посыпаться.
+
+        Считаем ЦЕНУ, а не форму: сколько кодов Перечня с лишним знаком перестанут отвечать.
+        Без этого «гейта здесь нет» — утверждение о тексте, а не о поведении."""
+        if not st1_ref.is_available():
+            self.skipTest("таблица условий Перечня не сгенерирована")
+        codes = sorted({_digits(r["code"]) for r in _rows(self)
+                        if r.get("code") and not r.get("code_to")
+                        and len(_digits(r["code"])) >= 6})[:40]
+        self.assertGreaterEqual(len(codes), 10, "кодов от 6 знаков в Перечне вдруг нет")
+        would_lose = 0
+        for c in codes:
+            longer = c + "1"
+            if not st1_ref.conditions_for(longer)["matched"]:
+                continue
+            if len(longer) not in okpd2_ref._TNVED_KEY_LENGTHS:
+                would_lose += 1          # гейт длины отверг бы разрешимый ключ
+        self.assertGreater(would_lose, 0,
+                           "гейт на обычном пути больше ничего не ломает — контроль выродился, "
+                           "проверьте, что _TNVED_KEY_LENGTHS и лукап не разъехались")
 
     def test_positive_control_real_codes_are_not_touched(self):
         """Без этого «отдавать None на всё подряд» тоже дало бы ноль невозможных длин."""
@@ -242,19 +293,44 @@ class TestGapIsATextDistance(unittest.TestCase):
 
 
 class TestParentClimbCostIsRecorded(unittest.TestCase):
-    """Находка 6: цена подъёма к родителю НАЗВАНА и закреплена, а не оставлена в прозе.
+    """Находка 6 раунда 10 — цена подъёма к родителю. ⚠⚠⚠ ЦЕНА БОЛЬШЕ НЕ ПЛАТИТСЯ (раунд 11).
 
-    Докстринг `_trim_to_code` обосновывал отсечение тем, что подъём к товарной позиции стоит
-    лишь «более общего условия». Замер: из 79 кодов Перечня длиннее четырёх знаков у 73 родитель
-    условия не несёт ВООБЩЕ — подъём даёт «в Перечень не включён», то есть уверенный неверный
-    ответ, а не более общий. Поведение оставлено прежним осознанно (разбор — в докстринге), но
-    цена обязана быть исполняемой: снимающий её увидит здесь, ЧТО именно меняет."""
+    Раунд 10 назвал цену и оставил поведение: подъём «CCCC DD счётчик» → «CCCC» у 73 из 79 кодов
+    даёт «в Перечень НЕ включён» о позиции, которой пользователь не называл. Раунд 11 показал,
+    что этот же класс расширяется окном разрыва (находка 1), и что разводить два вида подъёма
+    ПРИЗНАКОМ ФОРМЫ нельзя — пять раундов пробовали пять признаков.
+    Развела их не форма, а ФАКТ: `_climb_resolves` спрашивает Перечень, есть ли запись у
+    родителя. Есть — поднимаемся (замер: 453 верных вердикта из 906 на классе подъёма); нет —
+    отказываемся молча (замер: 38 ложных «НЕ включён» убрано, потерь 0)."""
 
-    def test_climb_is_reachable_only_for_six_digit_codes(self):
-        """Подъём требует четырёхзначной ОСНОВЫ, значит достижим у записи 4+2."""
-        self.assertEqual(extract_tnved_position("ТН ВЭД 2101 12 шт"), "2101")
+    def test_climb_happens_only_to_a_parent_that_exists(self):
+        """Ядро правки раунда 11: подъём разрешён к записи, отказ — к пустоте."""
+        if not st1_ref.is_available():
+            self.skipTest("таблица условий Перечня не сгенерирована")
+        self.assertTrue(st1_ref.conditions_for("8403")["matched"],
+                        "пример протух: 8403 обязан быть в Перечне")
+        self.assertFalse(st1_ref.conditions_for("2101")["matched"],
+                         "пример протух: 2101 обязан ОТСУТСТВОВАТЬ в Перечне")
+        self.assertEqual(extract_tnved_position("ТН ВЭД 8403 12 шт"), "8403",
+                         "родитель В Перечне — подъём обязан состояться")
+        self.assertIsNone(extract_tnved_position("ТН ВЭД 2101 12 шт"),
+                          "родителя в Перечне НЕТ — вместо уверенного «НЕ включён» обязан "
+                          "быть отказ (находки 1 и 6 одиннадцатого раунда)")
         self.assertEqual(extract_tnved_position("ТН ВЭД 2101 12"), "2101 12",
                          "без слова-счётчика шестизначный код обязан уцелеть")
+
+    def test_mutation_unconditional_climb_would_assert_a_false_negative(self):
+        """Отрицательный контроль: снять `_climb_resolves` — и появится ложное «НЕ включён».
+
+        ⚠ Проверяется ПОСЛЕДСТВИЕ, а не наличие вызова: сторож, считающий имя функции, зеленеет
+        на верном коде и краснеет на комментарии (урок находок 4 и 13 десятого раунда)."""
+        if not st1_ref.is_available():
+            self.skipTest("таблица условий Перечня не сгенерирована")
+        with mock.patch.object(okpd2_ref, "_climb_resolves", return_value=True):
+            key = extract_tnved_position("ТН ВЭД 2101 12 шт")
+        self.assertEqual(key, "2101", "без проверки подъём обязан вернуться")
+        self.assertFalse(st1_ref.conditions_for(key)["matched"],
+                         "и обязан дать именно тот вердикт, ради которого правка сделана")
 
     def test_the_cost_is_what_was_measured(self):
         rows = _rows(self)
