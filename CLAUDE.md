@@ -170,6 +170,7 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
     ├── REVIEW_2026-08-10.md ← аудит-снимок на дату (НЕ редактируется)
     ├── RAG_EXPLAINED.md   ← разбор архитектуры RAG + границы faithfulness-гарда
     ├── LAUNCH.md · DEPLOY.md · BRANCHING.md · BUDGET.md · SETUP-соседи
+    ├── HARDWARE_ONPREM.md ← сборка сервера из железа кладовой ТПП (спеки, отбор, приёмка)
     ├── TESTING.md         ← протокол приёмки с экспертом ТПП
     ├── USER_GUIDE.md      ← инструкция для пользователя/эксперта ТПП
     ├── IDEAS.md           ← бэклог идей/гипотез по доработкам
