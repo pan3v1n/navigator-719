@@ -84,8 +84,11 @@ class TestClimbAsksTheTableNotTheShape(unittest.TestCase):
     """Ядро правки: подъём к родителю разрешён фактом наличия записи, а не формой записи."""
 
     def setUp(self):
+        # ⚠ Провал, а не пропуск: таблица коммитится в репозиторий, её отсутствие — дефект
+        # выкатки (находка 9 одиннадцатого раунда: `skipTest` снимал шесть сторожей HIGH разом).
         if not st1_ref.is_available():
-            self.skipTest("таблица условий Перечня не сгенерирована")
+            self.fail("таблица условий Перечня недоступна — это дефект выкатки, "
+                      "сторожа HIGH не должны молча исчезать")
 
     def test_parent_present_climb_allowed(self):
         self.assertTrue(st1_ref.conditions_for("8403")["matched"], "пример протух")
@@ -119,8 +122,11 @@ class TestOrdinaryPathHasNoLengthGate(unittest.TestCase):
     """HIGH раунда 11: то, что написал пользователь, отдаётся как есть — решает лукап."""
 
     def setUp(self):
+        # ⚠ Провал, а не пропуск: таблица коммитится в репозиторий, её отсутствие — дефект
+        # выкатки (находка 9 одиннадцатого раунда: `skipTest` снимал шесть сторожей HIGH разом).
         if not st1_ref.is_available():
-            self.skipTest("таблица условий Перечня не сгенерирована")
+            self.fail("таблица условий Перечня недоступна — это дефект выкатки, "
+                      "сторожа HIGH не должны молча исчезать")
 
     def test_over_long_but_resolvable_key_survives(self):
         for q, want in (("какие условия по ТН ВЭД 2101 121", "2101 121"),

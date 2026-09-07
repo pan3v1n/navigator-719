@@ -203,11 +203,20 @@ def _has_routing_topic(q: str) -> bool:
     # ВРЕМЕНИ ИМПОРТА: `topics.classify` безусловно делает `from app.rag.retriever import
     # asks_document_list` (topics.py), а `retriever` тянет `embeddings` → `sentence_transformers`.
     # Замерено: после `import app.rag.topics, app.rag.procedural` модуля в `sys.modules` НЕТ,
-    # после ОДНОГО `classify()` он ТАМ ЕСТЬ. Снятие лени здесь верно по другой причине (привязка
-    # модульная и уже на импорте), но фраза выдавала лицензию поднять этот импорт на уровень
-    # файла — а `procedural` тянут `pipeline`, `admin_stats`, десяток тестов и проверки выкатки,
-    # и тогда `torch` приезжал бы на импорте. ⚠ Отложенный `from app.rag import topics` по той же
-    # причине СОЗНАТЕЛЬНО оставлен в `pipeline.py` и `followup.py` — «убрать везде» здесь неверно.
+    # после ОДНОГО `classify()` он ТАМ ЕСТЬ.
+    # ⚠⚠⚠ А ВОТ ЗАМЕНА ЭТОГО ДОВОДА БЫЛА ЛОЖНОЙ САМА (находка 14 одиннадцатого раунда) — третий
+    # раз подряд обоснование в этом месте переживает свой факт. Здесь стояло: «`procedural` тянут
+    # `pipeline`, `admin_stats`, десяток тестов, и тогда `torch` приезжал бы на импорте», плюс
+    # «отложенный `from app.rag import topics` по той же причине СОЗНАТЕЛЬНО оставлен в
+    # `pipeline.py`». Обе половины опровергнуты исполнением:
+    #   * `procedural.py:29` УЖЕ делает `from app.rag import topics` на уровне файла, и после
+    #     `import app.rag.procedural` в `sys.modules` нет ни `torch`, ни `sentence_transformers`
+    #     (замерено 07.09) — то есть поднимать сюда нечего, лень уже снята и ничего не стоила;
+    #   * `import app.rag.pipeline` даёт `torch = True` НЕЗАВИСИМО от этого импорта: `pipeline`
+    #     тянет `embeddings` и `retriever` на уровне файла, так что отложенность там `torch`
+    #     ни от чего не спасает и «сознательным решением» ради него не является.
+    # ⚠ Настоящая причина держать привязку МОДУЛЬНОЙ — тесты: локальный импорт затенял бы
+    # `procedural.topics`, и патч в тестах молча не действовал бы. Она и записана выше.
 
     topic = topics.classify(q)
     if topic is None or topic == topics.DOCUMENTS:

@@ -39,7 +39,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import sys
 import unittest
 from pathlib import Path
@@ -51,7 +53,8 @@ if str(ROOT) not in sys.path:
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
-from app.rag import okpd2_ref, procedural, st1_ref  # noqa: E402
+from app.rag import okpd2_ref, procedural, st1_ref, topics  # noqa: E402
+from tests._source_tools import code_only  # noqa: E402
 from app.rag.okpd2_ref import extract_tnved_position, normalize_tnved  # noqa: E402
 from app.tools.navigator import extract_okpd2  # noqa: E402
 
@@ -64,13 +67,51 @@ TABLE = ROOT / "knowledge_base" / "classifiers" / "tnved_st1_conditions.json"
 COUNTERS = ("позиций", "единиц", "шт")
 
 
+def _split_alternation(pattern: str) -> list[str]:
+    """Альтернативы шаблона ВЕРХНЕГО уровня: «a|b(?:c|d)|e» → ['a', 'b(?:c|d)', 'e'].
+
+    ⚠ Наивный `split("|")` разрезал бы вложенные группы и дал куски, которых в коде нет, —
+    сторож полноты стал бы считать мусор. Глубина считается по скобкам, экранированные символы
+    и классы `[...]` пропускаются."""
+    out, depth, buf, i = [], 0, [], 0
+    in_class = False
+    while i < len(pattern):
+        ch = pattern[i]
+        if ch == "\\":
+            buf.append(pattern[i:i + 2]); i += 2; continue
+        if in_class:
+            in_class = ch != "]"
+        elif ch == "[":
+            in_class = True
+        elif ch == "(":
+            depth += 1
+        elif ch == ")":
+            depth -= 1
+        elif ch == "|" and depth == 0:
+            out.append("".join(buf)); buf = []; i += 1; continue
+        buf.append(ch); i += 1
+    out.append("".join(buf))
+    return [a for a in out if a]
+
+
 def _digits(s: str | None) -> str:
     return "".join(c for c in (s or "") if c.isdigit())
 
 
 def _rows(t: unittest.TestCase) -> list[dict]:
+    """⚠⚠⚠ ОТСУТСТВИЕ ТАБЛИЦЫ — ПРОВАЛ, А НЕ ПРОПУСК (находка 9 одиннадцатого раунда).
+
+    Здесь стоял `skipTest`, и он снимал ШЕСТЬ сторожей разом — все три проверки
+    `TestNineDigitCodeSurvivesEveryGrouping` (регрессия HIGH раунда 10), сверку
+    `_TNVED_KEY_LENGTHS` с первоисточником и свип счётчика, — печатая при этом
+    «OK (skipped=6)» и код возврата 0. То есть ровно в том случае, ради которого
+    `st1_ref.is_available()` и заводился («файл не доехал в архив, как уже было с
+    `classifiers/*.tsv` в T9»), батарея говорила «всё хорошо».
+    ⚠ Файл КОММИТИТСЯ в репозиторий (`git ls-files knowledge_base/classifiers/`), значит его
+    отсутствие — дефект выкатки или обрезанного клона, а не законное состояние среды."""
     if not TABLE.exists():
-        t.skipTest("таблица условий Перечня не сгенерирована")
+        t.fail(f"нет {TABLE.relative_to(ROOT)} — файл коммитится в репозиторий, "
+               "его отсутствие это дефект выкатки, а не повод пропустить сторожей")
     return json.loads(TABLE.read_text(encoding="utf-8"))["rows"]
 
 
@@ -184,7 +225,8 @@ class TestNoImpossibleKeyEverReachesTheLookup(unittest.TestCase):
         именно оно опровергает посылку «ключ недопустимой длины не обозначает НИЧЕГО», из-за
         которой гейт и поставили на обычный путь."""
         if not st1_ref.is_available():
-            self.skipTest("таблица условий Перечня не сгенерирована")
+            self.fail("таблица условий Перечня недоступна — файл коммитится в репозиторий, "
+                      "его отсутствие это дефект выкатки (находка 9 одиннадцатого раунда)")
         for key in ("8403 10 1", "8403 10 00 00 00"):
             with self.subTest(key=key):
                 self.assertNotIn(len(_digits(key)), okpd2_ref._TNVED_KEY_LENGTHS,
@@ -199,7 +241,8 @@ class TestNoImpossibleKeyEverReachesTheLookup(unittest.TestCase):
         Считаем ЦЕНУ, а не форму: сколько кодов Перечня с лишним знаком перестанут отвечать.
         Без этого «гейта здесь нет» — утверждение о тексте, а не о поведении."""
         if not st1_ref.is_available():
-            self.skipTest("таблица условий Перечня не сгенерирована")
+            self.fail("таблица условий Перечня недоступна — файл коммитится в репозиторий, "
+                      "его отсутствие это дефект выкатки (находка 9 одиннадцатого раунда)")
         codes = sorted({_digits(r["code"]) for r in _rows(self)
                         if r.get("code") and not r.get("code_to")
                         and len(_digits(r["code"])) >= 6})[:40]
@@ -306,7 +349,8 @@ class TestParentClimbCostIsRecorded(unittest.TestCase):
     def test_climb_happens_only_to_a_parent_that_exists(self):
         """Ядро правки раунда 11: подъём разрешён к записи, отказ — к пустоте."""
         if not st1_ref.is_available():
-            self.skipTest("таблица условий Перечня не сгенерирована")
+            self.fail("таблица условий Перечня недоступна — файл коммитится в репозиторий, "
+                      "его отсутствие это дефект выкатки (находка 9 одиннадцатого раунда)")
         self.assertTrue(st1_ref.conditions_for("8403")["matched"],
                         "пример протух: 8403 обязан быть в Перечне")
         self.assertFalse(st1_ref.conditions_for("2101")["matched"],
@@ -325,7 +369,8 @@ class TestParentClimbCostIsRecorded(unittest.TestCase):
         ⚠ Проверяется ПОСЛЕДСТВИЕ, а не наличие вызова: сторож, считающий имя функции, зеленеет
         на верном коде и краснеет на комментарии (урок находок 4 и 13 десятого раунда)."""
         if not st1_ref.is_available():
-            self.skipTest("таблица условий Перечня не сгенерирована")
+            self.fail("таблица условий Перечня недоступна — файл коммитится в репозиторий, "
+                      "его отсутствие это дефект выкатки (находка 9 одиннадцатого раунда)")
         with mock.patch.object(okpd2_ref, "_climb_resolves", return_value=True):
             key = extract_tnved_position("ТН ВЭД 2101 12 шт")
         self.assertEqual(key, "2101", "без проверки подъём обязан вернуться")
@@ -370,9 +415,15 @@ class TestParentIntroNeverTakesAnAmbiguousParent(unittest.TestCase):
         keys = collections.Counter(
             (r.get("doc_type"), r.get("section_roman"), r.get("point")) for r in recs)
         dup = {k for k, n in keys.items() if n > 1}
-        # Коллизии сегодня ЕСТЬ — это факт корпуса, а не брак. Утверждается не их отсутствие,
-        # а то, что ни одна не отдала подпункту чужую вводную.
-        self.assertTrue(dup, "коллизий не стало — проверьте, что сторож ещё что-то охраняет")
+        # ⚠⚠⚠ ТРЕБОВАНИЕ «КОЛЛИЗИИ ОБЯЗАНЫ БЫТЬ» СНЯТО (находка 8 одиннадцатого раунда).
+        # Здесь стояло `assertTrue(dup)` с доводом «иначе сторож ничего не охраняет». Это
+        # закрепляло ДЕФЕКТ ДАННЫХ как контракт: ближайшая работа `K16` #48 — полная
+        # переиндексация, и достаточно перенумеровать приложения 4/6/7 Приказа №52 так же, как
+        # MED-4 перенумеровала `_section_records`, чтобы батарея покраснела НА ПОЧИНЕННЫХ ДАННЫХ
+        # с сообщением «коллизий не стало». Сторож, краснеющий от исправления, — тот самый класс,
+        # что дважды останавливал выкатку (18.08 и 26.08).
+        # ⚠ Утверждение о поведении при коллизии живёт в `test_ambiguous_parent_is_skipped…` на
+        # СИНТЕТИКЕ и не зависит от того, есть ли коллизии в сегодняшнем корпусе.
         harmed = []
         for r in recs:
             p = L._parent_point(r.get("point"))
@@ -407,6 +458,28 @@ class TestParentIntroNeverTakesAnAmbiguousParent(unittest.TestCase):
         L.add_index_text(recs)
         self.assertEqual(recs[-1].get("parent_intro"), "единственная вводная")
         self.assertIn("единственная вводная", recs[-1]["index_text"])
+
+    def test_ambiguous_parent_does_not_promote_the_grandparent(self):
+        """Находка 4 одиннадцатого раунда: пропуск родителя не должен подставлять ДЕДА.
+
+        ⚠ На сегодняшнем корпусе этот путь недостижим (записей с неоднозначным непосредственным
+        родителем 0 из 681), поэтому проверка синтетическая — иначе она молча не считала бы
+        ничего. Именно так дефект и дожил до ревью: он латентный, а ближайшая работа `K16` #48 —
+        добавление документов с полной переиндексацией."""
+        import load_rules_kb as L
+        recs = [
+            {"doc_type": "d", "section_roman": "s", "point": "1", "text": "ВВОДНАЯ ДЕДА"},
+            {"doc_type": "d", "section_roman": "s", "point": "1.1", "text": "первая одноимённая"},
+            {"doc_type": "d", "section_roman": "s", "point": "1.1", "text": "вторая одноимённая"},
+            {"doc_type": "d", "section_roman": "s", "point": "1.1.1", "text": "подпункт"},
+        ]
+        L.add_index_text(recs)
+        child = recs[-1]
+        self.assertIsNone(child.get("parent_intro"),
+                          "вводная деда уехала в поле, которое печатается как вводная РОДИТЕЛЯ")
+        self.assertNotIn("ВВОДНАЯ ДЕДА", child["index_text"],
+                         "дед подставлен вместо пропущенного родителя — подъём обязан обрываться")
+        self.assertEqual(child["index_text"], "подпункт")
 
 
 class TestAsymmetryIsNotInertForTopic(unittest.TestCase):
@@ -495,14 +568,40 @@ class TestSharedFragmentsAreEnumerated(unittest.TestCase):
 
     @staticmethod
     def _sources():
-        return ((ROOT / "app" / "rag" / "topics.py").read_text(encoding="utf-8"),
-                (ROOT / "app" / "rag" / "retriever.py").read_text(encoding="utf-8"))
+        # ⚠⚠⚠ КОД, А НЕ СЫРОЙ ТЕКСТ ФАЙЛА (находка 7 одиннадцатого раунда). Здесь стоял
+        # `read_text`, и сторож считал вхождения ВМЕСТЕ С КОММЕНТАРИЯМИ — в двадцати строках от
+        # стриппера, заведённого ровно против этого. Цена измерена: `кумулятивн` и `адвалорн`
+        # давали raw 3 / code 2, и третье вхождение добавил комментарий ТОГО ЖЕ коммита, то есть
+        # удаление ОБОИХ настоящих определений оставляло сторож зелёным.
+        # ⚠ Обратная беда та же: `assertNotIn` краснел бы, стоит `retriever.py` упомянуть имя в
+        # комментарии, ОБЪЯСНЯЮЩЕМ, почему фрагмент не общий, — дословно то, что 18.08 остановило
+        # ВЕРНУЮ выкатку.
+        return (code_only(ROOT / "app" / "rag" / "topics.py"),
+                code_only(ROOT / "app" / "rag" / "retriever.py"))
 
     def test_named_table_exists(self):
         _, retr = self._sources()
         self.assertIn("_RULES_TOPIC", retr)
         self.assertNotIn("_DOC_HINTS", retr,
                          "таблица переименована — поправьте комментарий у ST1_COMPANION")
+
+    def test_the_enumeration_is_complete_not_merely_correct(self):
+        """⚠⚠ Находка 7: перечисление проверялось на ВЕРНОСТЬ, но не на ПОЛНОТУ.
+
+        `topics.py` ссылается на этот список со словами «память комментария устаревает молча,
+        тест краснеет». Без проверки полноты обещание не обеспечено: добавить общий фрагмент в
+        `ST1_COMPANION` можно было, оставив батарею зелёной, — и комментарий начинал врать
+        ровно тем способом, против которого заводился."""
+        _, retr = self._sources()
+        listed = set(self.SHARED) | set(self.NOT_SHARED)
+        alts = _split_alternation(topics.ST1_COMPANION)
+        self.assertGreaterEqual(len(alts), 7, "разбор альтернатив выродился — проверьте сплиттер")
+        shared_now = {a for a in alts if a in retr}
+        self.assertTrue(shared_now, "ни одна альтернатива не найдена в retriever — сторож ослеп")
+        missing = sorted(shared_now - listed)
+        self.assertEqual(missing, [],
+                         f"общий с ретривером фрагмент не перечислен: {missing} — "
+                         "перечисление отстало от кода, поправьте SHARED")
 
     def test_every_listed_fragment_is_really_in_both_files(self):
         top, retr = self._sources()
@@ -534,29 +633,53 @@ class TestOffDomainSetPopulationIsPinned(unittest.TestCase):
     def _data(self):
         return json.loads(self.SET.read_text(encoding="utf-8"))
 
+    # ⚠⚠ ХЕШ ТЕКСТОВ, А НЕ СПИСОК НОМЕРОВ (находка 10 одиннадцатого раунда). `expected_leaks_before`
+    # описывает ФОРМУЛИРОВКИ двенадцати исторических вопросов, а сторож проверял только их
+    # идентификаторы: замена всех двенадцати `query` на одну повторённую строку оставляла батарею
+    # зелёной, и набор переставал мерить таможенный класс молча. Хеш — ОДНО значение, а не вторая
+    # копия текстов: копия разошлась бы с файлом ровно так, как разошёлся замороженный кортеж
+    # `OFF_DOMAIN`, который находка 11 десятого раунда из этого же файла и убрала.
+    HIST_SHA256 = "c55336bb9d48da7568ef09212fd86125e50ac6e184e00d27e0aebd2aac59cd3c"
+
+    def _historical(self):
+        # ⚠ `isinstance` обязателен: `c["id"] < 100` падал бы TypeError на строковом id.
+        hist = [c for c in self._data()["cases"]
+                if isinstance(c.get("id"), int) and c["id"] < 100]
+        return sorted(hist, key=lambda c: c["id"])
+
     def test_historical_population_is_intact(self):
-        j = self._data()
-        hist = [c["id"] for c in j["cases"] if c["id"] < 100]
-        self.assertEqual(hist, list(range(1, 13)),
-                         "историческая популяция изменилась — expected_leaks_before больше "
+        """Замеренная популяция цела ПО ТЕКСТУ — иначе `expected_leaks_before` ни к чему не относится.
+
+        ⚠ Рост набора НЕ запрещён: новые кейсы получают свои номера и в эту проверку не входят.
+        Прежняя редакция требовала ровно `[1..12]`, то есть тринадцатый таможенный кейс с
+        естественным номером 13 ронял её при ЦЕЛОЙ исторической популяции."""
+        hist = self._historical()
+        self.assertEqual([c["id"] for c in hist], list(range(1, 13)),
+                         "исторические номера изменились — expected_leaks_before больше "
                          "не относится к этому набору")
+        got = hashlib.sha256("\n".join(c["query"] for c in hist).encode("utf-8")).hexdigest()
+        self.assertEqual(got, self.HIST_SHA256,
+                         "формулировки исторических вопросов изменились — величина "
+                         "expected_leaks_before снята на ДРУГОМ тексте, её надо перемерить")
 
-    def test_slicing_by_position_would_be_wrong(self):
-        """Отрицательный контроль: срез по позиции ОБЯЗАН расходиться с популяцией.
+    def test_note_names_a_test_that_exists(self):
+        """Находка 12 одиннадцатого раунда: заметка проверяется на СОДЕРЖАНИЕ, а не на фразу.
 
-        Если однажды совпадёт — значит порядок файла изменился, и оговорка в `_meta` перестала
-        описывать действительность."""
-        j = self._data()
-        by_pos = [c["id"] for c in j["cases"][:12]]
-        self.assertNotEqual(by_pos, list(range(1, 13)),
-                            "срез совпал с популяцией — обновите _meta, оговорка устарела")
-
-    def test_note_does_not_promise_an_unread_check(self):
-        j = self._data()
-        note = j["_meta"]["expected_leaks_before_note"]
-        self.assertNotIn("Проверяется тестом", note,
-                         "заметка снова обещает проверку — назовите проверяющий тест поимённо")
-        self.assertIn("101", note, "популяция не названа поимённо")
+        ⚠⚠ Прежняя редакция запрещала подстроку «Проверяется тестом» с сообщением «назовите
+        проверяющий тест поимённо» — то есть КРАСНЕЛА РОВНО НА ТОМ, ЧЕГО ТРЕБОВАЛА: стоило
+        выполнить её же указание, и тест падал. Плюс `assertIn("101", note)` удовлетворялся
+        любым вхождением трёх цифр и ломался при перенумерации пробников.
+        Проверяется то, ради чего заметка существует: популяция названа ПОИМЁННО, и если заметка
+        ссылается на тест — такой тест в репозитории есть."""
+        note = self._data()["_meta"]["expected_leaks_before_note"]
+        for cid in (c["id"] for c in self._historical()):
+            self.assertRegex(note, rf"\b{cid}\b",
+                             f"кейс {cid} не назван в заметке — популяция описана не поимённо")
+        for name in re.findall(r"\b(test_[A-Za-z0-9_]+)\b", note):
+            with self.subTest(named=name):
+                found = any(name in p.read_text(encoding="utf-8")
+                            for p in (ROOT / "tests").glob("test_*.py"))
+                self.assertTrue(found, f"заметка ссылается на несуществующий тест {name}")
 
 
 if __name__ == "__main__":

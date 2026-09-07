@@ -37,6 +37,7 @@ import re
 import sys
 import tokenize
 import unittest
+from unittest import mock
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -45,6 +46,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from app.rag import procedural, topics                      # noqa: E402
 from app.rag.okpd2_ref import extract_tnved_position        # noqa: E402
 from app.tools.navigator import extract_okpd2               # noqa: E402
+from tests._source_tools import strip_comments              # noqa: E402
 
 
 def route(q: str) -> bool:
@@ -59,10 +61,24 @@ def route(q: str) -> bool:
 # остался двенадцатистрочным — то есть у обоих пробников не было НИ ОДНОГО сторожа уровня
 # МАРШРУТА (в `test_k14_round8_relevance_gate` проверяется только тема). Класс «две таблицы про
 # одно» — ровно тот, из-за которого раунд 6 получил находку, а раунд 8 — HIGH-2.
-OFF_DOMAIN = tuple(
-    c["query"] for c in json.loads(
-        (ROOT / "scripts" / "eval_offdomain_tnved.json").read_text(encoding="utf-8"))["cases"]
-)
+_OFF_DOMAIN_SET = ROOT / "scripts" / "eval_offdomain_tnved.json"
+
+
+def off_domain(t: unittest.TestCase) -> tuple[str, ...]:
+    """Вопросы набора — ЛЕНИВО и с внятным провалом (находка 13 одиннадцатого раунда).
+
+    ⚠⚠ Здесь стоял `OFF_DOMAIN = tuple(json.loads(...))` НА УРОВНЕ МОДУЛЯ. Битый или
+    отсутствующий файл ронял ИМПОРТ, а с ним исчезали все сторожа файла разом — включая те,
+    что этот же раунд и заводил, — и наружу выходила ошибка JSON, не называющая, ЧТО перестало
+    охраняться. Сравните `st1_ref._data()`, который на порченом файле осознанно ДЕГРАДИРУЕТ.
+    ⚠ Провал (а не пропуск) выбран намеренно: файл коммитится в репозиторий, его отсутствие —
+    дефект выкатки. Разница с прежним поведением в том, что провал ИМЕНОВАННЫЙ и локальный."""
+    try:
+        cases = json.loads(_OFF_DOMAIN_SET.read_text(encoding="utf-8"))["cases"]
+    except (OSError, ValueError, KeyError) as e:
+        t.fail(f"не читается {_OFF_DOMAIN_SET.name} ({e.__class__.__name__}: {e}) — "
+               "класс «таможня + ТН ВЭД» перестал охраняться целиком")
+    return tuple(c["query"] for c in cases)
 # Вопросы СТ-1: обязаны остаться на процедурной ветке. Без них тест прошёл бы и на
 # ПОЛНОСТЬЮ УДАЛЁННОМ втором ключе — «ничего не маршрутизируется» тоже даёт ноль утечек.
 ST1_ALIVE = (
@@ -81,11 +97,11 @@ class TestOffDomainCustomsStaysOut(unittest.TestCase):
     """Находки 1-2: таможенный вопрос не уходит на процедурную ветку и не берёт тему СТ-1."""
 
     def test_no_off_domain_leak_into_procedural(self):
-        leaked = [q for q in OFF_DOMAIN if route(q)]
+        leaked = [q for q in off_domain(self) if route(q)]
         self.assertEqual(leaked, [], f"таможенный вопрос ушёл процедурной веткой: {leaked}")
 
     def test_no_off_domain_leak_into_st1_topic(self):
-        wrong = [q for q in OFF_DOMAIN if topics.classify(q) == topics.ST1_ORIGIN]
+        wrong = [q for q in off_domain(self) if topics.classify(q) == topics.ST1_ORIGIN]
         self.assertEqual(wrong, [], f"таможенному вопросу назначена тема СТ-1: {wrong}")
 
     def test_positive_control_st1_still_routes(self):
@@ -126,25 +142,13 @@ class TestCompanionVocabularyHasOneDefinition(unittest.TestCase):
 
     @staticmethod
     def _strip_comments(src: str) -> str:
-        """Исходник БЕЗ комментариев — по ТОКЕНАМ, а не по началу строки.
+        """Исходник БЕЗ комментариев. ⚠ Определение ОДНО — в `tests/_source_tools`.
 
-        ⚠⚠ Считать сырые вхождения текста нельзя, и это купленный урок (18.08): `grep` по имени
-        удалённой константы поймал её В КОММЕНТАРИИ, ОБЪЯСНЯЮЩЕМ УДАЛЕНИЕ, и остановил ВЕРНУЮ
-        выкатку. Здесь тот же класс: сторож считал вхождения в файле целиком и падал, стоило
-        комментарию НАЗВАТЬ фрагмент — то есть наказывал за объяснение. Предохранитель, бьющий по
-        верному коду, дороже отсутствующего: он заставляет усомниться в правке.
-        Инвариант — про ОПРЕДЕЛЕНИЯ, поэтому комментарии из счёта исключены.
-
-        ⚠ ПРЕЖНЯЯ РЕДАКЦИЯ СНИМАЛА ТОЛЬКО ЦЕЛЫЕ СТРОКИ-КОММЕНТАРИИ (находка 13 десятого раунда):
-        `X = ...  # ср. перечн…` оставался в счёте и ронял сторож на верном коде — ровно тот
-        класс, который сторож и заводился предотвращать. Токенизатор снимает и хвостовые, и при
-        этом не трогает строковые литералы (наивный срез по «#» порезал бы сам шаблон)."""
-        lines = src.splitlines(keepends=True)
-        for tok in tokenize.generate_tokens(io.StringIO(src).readline):
-            if tok.type == tokenize.COMMENT:
-                row = tok.start[0] - 1
-                lines[row] = lines[row][:tok.start[1]] + lines[row][tok.end[1]:]
-        return "".join(lines)
+        Раньше стриппер жил здесь, а соседний сторож раунда 10 считал СЫРОЙ текст (находка 7
+        одиннадцатого раунда). Копировать его туда было нельзя — «две копии про одно» это класс
+        HIGH-2 восьмого раунда, — поэтому определение вынесено, а метод оставлен точкой входа
+        для тестов ниже."""
+        return strip_comments(src)
 
     @classmethod
     def _code_only(cls, path) -> str:
@@ -176,6 +180,34 @@ class TestCompanionVocabularyHasOneDefinition(unittest.TestCase):
         self.assertNotIn("целая строка", stripped, "строка-комментарий не снята")
         self.assertIn("решётка # внутри литерала", stripped,
                       "стриппер порезал строковый литерал по знаку решётки")
+
+    def test_stripper_survives_non_newline_line_breaks(self):
+        """Находка 15 одиннадцатого раунда: модель строк обязана совпадать с моделью `tokenize`.
+
+        `splitlines()` режет по `\\x0c`, `\\x0b`, `\\x85`, ` `; `tokenize` — только по `\\n`.
+        Один такой знак ВЫШЕ по файлу сдвигал номера строк, и срез уезжал на чужую строку:
+        хвостовой комментарий оставался в счёте (дефект находки 13 возвращался), а соседняя
+        строка калечилась до неразбираемой — молча, без исключения.
+        ⚠ Проверяется КАЖДЫЙ знак-разделитель `splitlines`, а не только форм-фид: иначе сторож
+        охранял бы один символ из шести."""
+        import ast
+        for ch, name in (("\x0c", "form feed"), ("\x0b", "vertical tab"),
+                         ("\x85", "NEL"), (" ", "line separator"),
+                         (" ", "paragraph separator"), ("\x1c", "file separator")):
+            with self.subTest(sep=name):
+                fixture = (
+                    f"# разрыв: {ch} конец\n"
+                    'X = r"' + self.FRAGMENT + '"  # хвостовой: ' + self.FRAGMENT + "\n"
+                    "Z = 1\n"
+                )
+                self.assertEqual(len(fixture.splitlines()), 4,
+                                 f"{name} перестал быть разделителем для splitlines — "
+                                 "пример выродился")
+                stripped = self._strip_comments(fixture)
+                self.assertEqual(stripped.count(self.FRAGMENT), 1,
+                                 f"{name} сдвинул номера строк: хвостовой комментарий уцелел")
+                self.assertNotIn("хвостовой", stripped)
+                ast.parse(stripped)  # срез не уехал на чужую строку
 
     def test_procedural_has_no_own_copy(self):
         proc = self._code_only(ROOT / "app" / "rag" / "procedural.py")
@@ -258,16 +290,30 @@ class TestTopicVocabularyIsWiderByConstruction(unittest.TestCase):
 
         from app.rag import procedural as P
 
-        names = P._has_routing_topic.__code__.co_names
-        self.assertIn("classify", names,
-                      "гейт больше не спрашивает тему — перепроверьте обоснование асимметрии")
-        self.assertIn("topics", names, "тема берётся не из `topics` — обоснование пересмотреть")
-        # Отрицательный контроль К СПОСОБУ СЧЁТА: в функции ЕСТЬ проза с этим именем, и она
-        # обязана НЕ попадать в счёт. Иначе сторож снова заложник формулировки комментария.
-        self.assertIn("topics.classify", inspect.getsource(P._has_routing_topic),
-                      "прозы с этим именем в функции нет — контроль ниже ничего не проверяет")
-        self.assertNotIn("topics.classify", names,
-                         "в co_names попал текст комментария — счёт идёт не по коду")
+        # ⚠⚠⚠ ТРЕТЬЯ РЕДАКЦИЯ: СЧЁТ ИМЁН УБРАН СОВСЕМ (находка 6 одиннадцатого раунда).
+        # `co_names` — кортеж ГОЛЫХ идентификаторов, точки в них не бывает НИКОГДА, поэтому
+        # `assertNotIn("topics.classify", names)` истинно для любой функции, какая только может
+        # существовать: «отрицательный контроль к способу счёта» не мог покраснеть ни при какой
+        # мутации. Это ровно тот класс «предохранитель, который не может сработать», который
+        # нашёл раунд 7 и который вернулся в правке, сделанной ПО находке о нём же.
+        # ⚠⚠ И у счёта имён была вторая беда — ложное срабатывание на ЗАКОННОМ рефакторинге:
+        # `from app.rag.topics import classify` убирает `topics` из `co_names`, `assertIn`
+        # краснеет на работающем гейте; вызов внутри генератора обнуляет `co_names` целиком.
+        # Проверяется МЕХАНИЗМ, а не написание: подменяем тему и смотрим, меняется ли маршрут.
+        # Проза, рефакторинг импорта и переносы вызова на это влиять не могут по построению.
+        anchored = "как получить сертификат СТ-1 по 719"
+        self.assertTrue(_ANCHORED_TOPIC_IS_REACHABLE := bool(P._ANCHOR_RE.search(anchored)),
+                        "пример потерял 719-якорь — тема до гейта не доедет, проверка выродится")
+        with mock.patch.object(P.topics, "classify", return_value=P.topics.ST1_ORIGIN):
+            self.assertTrue(P._has_routing_topic(anchored),
+                            "гейт больше не спрашивает тему — перепроверьте обоснование асимметрии")
+        with mock.patch.object(P.topics, "classify", return_value=None):
+            self.assertFalse(P._has_routing_topic(anchored),
+                             "гейт не реагирует на отсутствие темы — тема выпала из механизма")
+        with mock.patch.object(P.topics, "classify", return_value=P.topics.DOCUMENTS):
+            self.assertFalse(P._has_routing_topic(anchored),
+                             "оговорка про `documents` исчезла — смешанный вопрос уедет "
+                             "процедурной веткой и потеряет требования продукции (`K12`)")
         self.assertIn("_has_routing_topic", inspect.getsource(P.is_procedural),
                       "тема выпала из гейта — обоснование асимметрии надо пересматривать")
 
