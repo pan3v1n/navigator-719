@@ -48,14 +48,65 @@ class TestFiltersAreRespectedByTheTopUps(unittest.TestCase):
     В `search_rules` их два: тематический документ и раздел 4 Приказа №52. Оба ходят в Qdrant
     ОТДЕЛЬНЫМИ запросами со своим фильтром, то есть мимо основного."""
 
-    def test_source_guards_both_top_ups(self):
-        import inspect
+    def test_top_ups_never_query_a_filtered_out_document(self):
+        """⚠⚠⚠ ПРОВЕРЯЕТСЯ ПОВЕДЕНИЕ, А НЕ ТЕКСТ ИСХОДНИКА (раунд 12).
 
-        src = inspect.getsource(retriever.search_rules)
-        self.assertIn("if primary and primary not in only_docs", src,
-                      "добор тематического документа игнорирует фильтр")
-        self.assertIn('asks_document_list(query) and (not only_docs or "tpp_order_52" in only_docs)',
-                      src, "добор раздела 4 игнорирует фильтр")
+        Прежняя редакция утверждала наличие ДОСЛОВНОЙ строки
+        `asks_document_list(query) and (not only_docs or "tpp_order_52" in only_docs)` — и
+        покраснела на ВЕРНОМ коде, когда добор перечня стал документ-зависимым (`K16`: раздел 4
+        есть и у Положения №49). Инвариант при этом не менялся ни на знак. Сторож, привязанный к
+        написанию, краснеет от законного рефакторинга и молчит при подмене смысла — за эту
+        сессию ровно этот класс нашёлся четырежды.
+        Здесь перехватывается `_hybrid` и проверяется, ЧТО именно доборы спрашивают у Qdrant."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        asked: list[list[str]] = []
+
+        def _point(i):
+            # ⚠ Пул ОБЯЗАН быть непустым: `search_rules` возвращается сразу на пустом пуле, и
+            # доборы до вызова не доходят. Первая редакция этого теста мокала `_hybrid` на `[]`
+            # — и была ЗЕЛЁНОЙ на мутанте со снятым фильтром, потому что проверяемый код просто
+            # не исполнялся. Поймано мутацией, а не рассуждением.
+            return SimpleNamespace(id=i, score=1.0 - i / 100, payload={
+                "doc_type": "rules_registry", "section_roman": "II", "section_title": "т",
+                "point": f"{i}", "text": "текст пункта достаточной длины для фильтра пустышек",
+                "source_anchor": f"Правила, п. {i}"})
+
+        def fake_hybrid(query, limit, collection=None, qvec=None, qfilter=None):
+            vals = []
+            for c in (getattr(qfilter, "must", None) or []):
+                m = getattr(c, "match", None)
+                if getattr(c, "key", "") == "doc_type" and m is not None:
+                    vals.append(getattr(m, "value", None))
+            asked.append(vals)
+            return [_point(i) for i in range(8)]
+
+        with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid), \
+                mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
+            # ⚠ Вопрос подобран так, чтобы ОБА добора были достижимы: `asks_document_list`
+            # истинно, а тема — ничья, поэтому `primary` не отсекается раньше времени.
+            retriever.search_rules("какие документы нужны для реестровой записи", limit=6,
+                                   primary_docs=("rules_registry",),
+                                   only_docs=("rules_registry",))
+
+        queried = {d for call in asked for d in call if d}
+        self.assertEqual(queried - {"rules_registry"}, set(),
+                         f"добор спросил документ, исключённый фильтром: {sorted(queried)}")
+
+        # ⚠⚠ ПОЛОЖИТЕЛЬНЫЙ КОНТРОЛЬ ДОСТИЖИМОСТИ. Без него утверждение выше истинно и тогда,
+        # когда добор не исполняется ВООБЩЕ, — то есть «фильтр соблюдён» неотличимо от «код не
+        # работал». Тот же запрос при разрешающем фильтре обязан дать ВТОРОЙ запрос к Qdrant.
+        asked.clear()
+        with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid), \
+                mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
+            retriever.search_rules("какие документы нужны для реестровой записи", limit=6,
+                                   primary_docs=("rules_registry",),
+                                   only_docs=("rules_registry", "tpp_order_52"))
+        self.assertGreater(len(asked), 1,
+                           "добор не исполнился и при разрешающем фильтре — проверка выродилась")
+        self.assertIn("tpp_order_52", {d for call in asked for d in call if d},
+                      "разрешённый добор перечня не ушёл в Qdrant")
 
 
 class TestProductPathAsksForWhatSurvivesTheFilter(unittest.TestCase):
