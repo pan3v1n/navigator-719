@@ -1,4 +1,7 @@
 {% extends "base.html" %}
+{# ⚠ Чат гасит общий маркер намеренно: метка версии стоит ВНУТРИ дисклеймера под полем ввода
+   (см. `composer-version` ниже), а не второй надписью в углу. Источник строки тот же. #}
+{% block release_marker %}{% endblock %}
 {% block title %}Чат — {{ app_title }}{% endblock %}
 {% block body %}
 <div class="app" id="app">

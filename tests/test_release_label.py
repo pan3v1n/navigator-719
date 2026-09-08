@@ -76,6 +76,48 @@ class TestLabelReachesTheUser(unittest.TestCase):
         src = (ROOT / "main.py").read_text(encoding="utf-8")
         self.assertIn('"release": release_label()', src)
 
+    def test_every_page_shows_it_exactly_once(self):
+        """⚠⚠ РЕНДЕРОМ, А НЕ ГРЕПОМ ПО ШАБЛОНУ. Требование владельца — «на всех страницах», и
+        проверять его надо на том, что видит пользователь: блок `release_marker` живёт в
+        `base.html`, а чат его ГАСИТ и печатает свою строку внутри дисклеймера под полем ввода.
+        Греп по одному файлу этого не увидит — ни отсутствия на чате, ни задвоения на прочих.
+
+        Считаем ровно один носитель на страницу: ноль — метки нет там, где обещана; два — две
+        надписи об одном, и они разъедутся при первой правке.
+        """
+        from app.api.web import templates
+        from app.core import release as rel
+
+        rel.release_label.cache_clear()
+        self.addCleanup(rel.release_label.cache_clear)
+        user = {"login": "e", "username": "e", "role": "admin", "full_name": "Э", "id": 1,
+                "region": "Курская область", "email": "", "phone": "", "org": "",
+                "position": "", "consent": True}
+        ctx = dict(request=None, app_title="Навигатор", org="Курская ТПП",
+                   corpus_edition="ред. от 22.07.2026", release_label=rel.release_label())
+        pages = (("login.html", {"error": None}),
+                 ("profile.html", {"user": user, "error": None, "saved": False, "regions": []}),
+                 ("terms.html", {}),
+                 ("chat.html", {"user": user, "kontur_719_url": "#", "input_hint": ""}))
+        for name, extra in pages:
+            with self.subTest(page=name):
+                html = templates.get_template(name).render(**ctx, **extra)
+                carriers = html.count('"release-marker"') + html.count('"composer-version"')
+                self.assertEqual(carriers, 1,
+                                 f"{name}: носителей метки {carriers}, ожидался ровно один")
+                self.assertIn(ctx["release_label"], html, f"{name}: сама метка не напечаталась")
+
+    def test_chat_suppresses_the_shared_marker(self):
+        """Отрицательный контроль к предыдущему: чат гасит общий блок ОСОЗНАННО, а не случайно.
+
+        Без этого утверждения «ровно один носитель» на чате выполнялось бы и в том случае, если
+        общий маркер пропал бы у ВСЕХ страниц, а чат просто печатал свою строку.
+        """
+        chat = (ROOT / "app" / "web" / "templates" / "chat.html").read_text(encoding="utf-8")
+        base = (ROOT / "app" / "web" / "templates" / "base.html").read_text(encoding="utf-8")
+        self.assertIn("{% block release_marker %}{% endblock %}", chat)
+        self.assertIn("release-marker", base, "общий маркер пропал из base.html")
+
 
 class TestDeployWritesTheLabel(unittest.TestCase):
     SH = (ROOT / "scripts" / "deploy" / "deploy.sh").read_text(encoding="utf-8")
