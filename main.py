@@ -10,6 +10,7 @@ from app.api.chat import router as chat_router
 from app.api.routes import router as navigate_router
 from app.api.web import router as web_router
 from app.core.config import settings
+from app.core.release import release_label
 from app.db.engine import init_db
 
 
@@ -66,7 +67,11 @@ app.mount(
 
 @app.get("/ping")
 async def ping():
-    return {"status": "ok", "app": settings.APP_TITLE, "version": settings.APP_VERSION}
+    # ⚠ `release` рядом с `version` намеренно: без него пометку версии во фронте нечем
+    # проверить с самой VM — только глазами в браузере. Релизная проверка выкатки читает её
+    # отсюда и сверяет с тегом профиля.
+    return {"status": "ok", "app": settings.APP_TITLE, "version": settings.APP_VERSION,
+            "release": release_label()}
 
 
 if __name__ == "__main__":

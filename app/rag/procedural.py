@@ -319,8 +319,6 @@ def is_procedural(query: str, has_code: bool = False) -> bool:
     if _SECOND_KEY_RE.search(q) and not _has_mixed_product_signal(q):
         return not _CHAMBER_MEMBERSHIP_RE.search(q)
     return not (_PRODUCT_HINT_RE.search(q) or _CHAMBER_MEMBERSHIP_RE.search(q))
-
-
 # --- Сообщения фолбэка (без пометки эксперта — её добавляет pipeline, как в др. ранних ответах). --
 #
 # ВАЖНО про формулировки. Раньше здесь было одно сообщение, утверждавшее, что «процедурный

@@ -29,6 +29,7 @@ from app.api.auth import (
 from app.api.admin_stats import build_admin_view, system_health
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
+from app.core.release import release_label
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
 from app.rag import followup
@@ -47,8 +48,11 @@ templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " "
 def _ctx(request: Request, **kw) -> dict:
     # E1: редакция корпуса — во ВСЕ страницы. Выводится из самого текста постановления
     # (app/rag/edition.py), поэтому не может разойтись с базой молча.
+    # Метка релиза — по той же причине, что и редакция корпуса: одно определение на все
+    # страницы. `APP_VERSION` для этого не годится (держится на 0.5.0 до приёмки), см.
+    # `app/core/release.py`.
     return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
-            "corpus_edition": corpus_edition(), **kw}
+            "corpus_edition": corpus_edition(), "release_label": release_label(), **kw}
 
 
 def _parse_date(s: str):
