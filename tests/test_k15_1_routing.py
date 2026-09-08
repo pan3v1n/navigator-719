@@ -267,9 +267,18 @@ class TestRoutingSweepPinsTheNumbers(unittest.TestCase):
         Поэтому область счёта сужена явно, а остаток нового набора закреплён СВОИМ сторожем —
         `tests/test_k14_route.py::test_notes_are_the_contract`, и он строже: называет, КАКИЕ
         именно три кейса, а не сколько их.
+
+        ⚠⚠ 08.09.2026 ТО ЖЕ САМОЕ ПОВТОРИЛОСЬ С `route_gaps` (`P3-1` #131): в свип добавились три
+        вопроса, которые релизная проверка печатает как «ЗАРЕГИСТРИРОВАННЫЙ ПРОБЕЛ» и которых свип
+        не видел вовсе, — и храповик снова ударил, 11 → 14. Снова ВЕРНО: сам гейт `is_procedural`
+        правкой `P3-1` не тронут, выросла ПОПУЛЯЦИЯ. Сужаем тем же способом, а не поднимаем порог.
+        ⚠ И отдельно: это число — про ГЕЙТ. Добор `P3-1` живёт в `pipeline._plan_answer`, требует
+        живого Qdrant и здесь не считается по построению; эффективный маршрут меряет
+        `scripts/eval_routing.py --with-fallback` (пропуски 18 → 9). Число ниже НЕ утверждает,
+        сколько вопросов останется без процедурного ответа у пользователя.
         """
         miss = [r for r in self.rows if r["class"] == "процедурный" and not r["procedural"]
-                and r["set"] != "st1_route"]
+                and r["set"] not in ("st1_route", "route_gaps")]
         self.assertLessEqual(len(miss), 11,
                              f"пропусков стало больше: {[(r['set'], r['id']) for r in miss]}")
 
@@ -283,6 +292,20 @@ class TestRoutingSweepPinsTheNumbers(unittest.TestCase):
         st1 = [r for r in self.rows if r["set"] == "st1_route"]
         # 21 → 24: пробник на экспортную формулировку, встроенный раундом 8 (см. test_k14_route).
         self.assertEqual(len(st1), 24, "набор второго ключа выпал из свипа")
+
+    def test_registered_gap_set_has_its_own_pin(self):
+        """⚠ Положительный контроль на ВТОРОЕ сужение (`route_gaps`, `P3-1` #131).
+
+        Без него `not in (…, "route_gaps")` читалось бы как «этой популяции нет», и удаление
+        набора из `SETS` прошло бы молча — сужение области счёта стало бы способом спрятать
+        класс целиком. Ровно то, ради чего набор и заводился: до 08.09.2026 эти три вопроса жили
+        только в каталоге релизной проверки, и свип по ним печатал не «чисто», а «не считаю».
+        Поимённый сторож — `tests/test_p3_1_rules_fallback.py::test_registered_gaps_are_in_the_population`.
+        """
+        gaps = [r for r in self.rows if r["set"] == "route_gaps"]
+        self.assertEqual(len(gaps), 3, "набор зарегистрированных пробелов выпал из свипа")
+        self.assertTrue(all(r["class"] == "процедурный" for r in gaps),
+                        "пробелы перестали считаться процедурными — тогда они не пропуски")
 
 
 class TestConclusionIsADocumentNotAnAct(unittest.TestCase):
