@@ -61,6 +61,14 @@ class TestFiltersAreRespectedByTheTopUps(unittest.TestCase):
         from types import SimpleNamespace
         from unittest import mock
 
+        # ⚠⚠⚠ ТЕСТ ОБЯЗАН БЫТЬ ОФЛАЙНОВЫМ (`O3` #104). Первая редакция мокала только `_hybrid` и
+        # `embed_query`, а `search_rules` СНАЧАЛА зовёт `_client().collection_exists(...)` — и в
+        # CI, где Qdrant нет, вылетала в `except`, возвращала `[]` и не делала НИ ОДНОГО вызова.
+        # Локально Qdrant поднят, поэтому тест был зелёным у меня и КРАСНЫМ в CI: ровно тот класс,
+        # из-за которого `O3` #104 шесть прогонов держал батарею красной, а пакет уехал на бой.
+        fake_client = mock.Mock()
+        fake_client.collection_exists.return_value = True
+
         asked: list[list[str]] = []
 
         def _point(i):
@@ -83,6 +91,7 @@ class TestFiltersAreRespectedByTheTopUps(unittest.TestCase):
             return [_point(i) for i in range(8)]
 
         with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid), \
+                mock.patch.object(retriever, "_client", return_value=fake_client), \
                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
             # ⚠ Вопрос подобран так, чтобы ОБА добора были достижимы: `asks_document_list`
             # истинно, а тема — ничья, поэтому `primary` не отсекается раньше времени.
@@ -99,6 +108,7 @@ class TestFiltersAreRespectedByTheTopUps(unittest.TestCase):
         # работал». Тот же запрос при разрешающем фильтре обязан дать ВТОРОЙ запрос к Qdrant.
         asked.clear()
         with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid), \
+                mock.patch.object(retriever, "_client", return_value=fake_client), \
                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
             retriever.search_rules("какие документы нужны для реестровой записи", limit=6,
                                    primary_docs=("rules_registry",),
