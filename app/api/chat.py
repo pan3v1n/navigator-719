@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import uuid
 from datetime import datetime
+from functools import lru_cache
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -130,22 +131,65 @@ def _sources_from_hits(hits) -> list[SourceItem]:
 # Адрес документа 719 берётся ПО РЕДАКЦИИ КОРПУСА (`app/rag/edition.py`), а не константой: у Контура
 # у каждой редакции свой documentId, и захардкоженный адрес молча уводил эксперта на недействующий
 # текст, пока корпус уходил вперёд.
-_DOC_NAMES = {
+# ⚠ Резервные имена — на случай недоступного манифеста. Основной источник имён — САМ МАНИФЕСТ
+# (`K8`: состав корпуса не живёт в коде), см. `_doc_names`.
+_DOC_NAMES_FALLBACK = {
     "tpp_order_52": "Приказ ТПП РФ №52",
     "rules_registry": "Правила ведения реестра",
     "decree_body": "Тело ПП №719",
 }
 
 
+@lru_cache(maxsize=1)
+def _doc_names() -> dict[str, str]:
+    """Подписи документов — ИЗ МАНИФЕСТА, а не из словаря в коде (`K16` #48).
+
+    ⚠⚠⚠ ЗАЧЕМ ПРАВКА. Словарь знал ТРИ `doc_type` из девяти, а `.get(doc_type, "Правила ведения
+    реестра")` подставлял остальным ЧУЖОЕ ИМЯ. Эксперт видел «Приказ ТПП РФ №14, прил. 3 —
+    Правила ведения реестра» и «FAQ ГИСП, вопрос 1 (не норма) — Правила ведения реестра», а клик
+    вёл в текст ПП №719. Это МИСАТРИБУЦИЯ В ПОДПИСИ ИСТОЧНИКА — самый дорогой класс дефекта в
+    проекте («правильный текст, привязанный не к тому месту»), и он ЖИВЁТ НА БОЮ с `test23`:
+    Приказ №14 и Соглашение СНГ приехали туда без своих имён.
+    ⚠ Фолбэк по умолчанию был не нейтральным, а УТВЕРДИТЕЛЬНЫМ — он не «не знал» имени, он
+    называл ЧУЖОЕ. Теперь незнакомый документ получает свой `doc_type`, а не имя соседа."""
+    try:
+        from app.core.manifest import load_manifest
+
+        names = {d["doc_type"]: (d.get("short") or d.get("title") or d["doc_type"])
+                 for d in load_manifest()["documents"]}
+        return {**_DOC_NAMES_FALLBACK, **names}
+    except Exception:                      # манифест недоступен — подписи не должны ронять ответ
+        return dict(_DOC_NAMES_FALLBACK)
+
+
+# Первоисточники документов, у которых он ИЗВЕСТЕН и стабилен. ⚠ Ключ отсутствует → ссылки НЕТ:
+# ссылка на ЧУЖОЙ документ хуже отсутствующей, потому что эксперт по ней цитирует.
+_DOC_URLS = {
+    "gisp_faq": "https://gisp.gov.ru/mainpage/faq/24920/",
+    "polozhenie49_tpp": "https://tpprf.ru/ru/legal_provision/ved/certificates/",
+    "prikaz14_tpp": "https://tpprf.ru/ru/legal_provision/ved/certificates/",
+}
+# Документы, которые ЯВЛЯЮТСЯ частями ПП №719 — только им законен фолбэк на текст 719.
+_PART_OF_719 = frozenset({"decree_body", "rules_registry", "appendix_footnotes"})
+
+
 def _rule_url(doc_type: str, text: str) -> str:
     """Ссылка на первоисточник пункта + текст-фрагмент (`:~:text=`) для точной прокрутки браузером.
-    Приказ №52 — отдельный документ; Правила — раздел документа 719 (якорь h14240); тело — сам 719."""
+
+    ⚠⚠ ФОЛБЭК НА ТЕКСТ 719 ЗАКОНЕН ТОЛЬКО ДЛЯ ЧАСТЕЙ 719 (`K16` #48). Прежде сюда попадал ЛЮБОЙ
+    незнакомый документ, и клик по источнику «Соглашение СНГ, п. 2.1» открывал постановление
+    Правительства РФ — другой документ другого уровня. Незнакомому документу ссылка не выдаётся
+    вовсе: отсутствие ссылки видно, чужая ссылка — нет."""
     if doc_type == "tpp_order_52":
         base, anchor = KONTUR_PRIKAZ_52_URL, ""
     elif doc_type == "rules_registry":
         base, anchor = kontur_719_url(), RULES_ANCHOR
-    else:  # decree_body и фолбэк
+    elif doc_type in _DOC_URLS:
+        return _DOC_URLS[doc_type]          # страница документа; текст-фрагмент к PDF неприменим
+    elif doc_type in _PART_OF_719:
         base, anchor = kontur_719_url(), ""
+    else:
+        return ""                           # первоисточник неизвестен — ссылки не даём
     snippet = " ".join((text or "").split()[:8]).strip()  # первые ~8 слов пункта — цель прокрутки
     if not snippet:
         return base + anchor
@@ -160,7 +204,7 @@ def _sources_from_rules(rules) -> list[SourceItem]:
     for r in rules:
         anchor = (r.get("source_anchor") or "").strip()
         doc_type = r.get("doc_type") or ""
-        doc_name = _DOC_NAMES.get(doc_type, "Правила ведения реестра")
+        doc_name = _doc_names().get(doc_type) or doc_type or "документ корпуса"
         out.append(SourceItem(
             section=doc_name,
             product_name=anchor or doc_name,

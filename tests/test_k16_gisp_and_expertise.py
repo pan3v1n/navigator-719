@@ -263,6 +263,57 @@ class TestTopicQuotaKnowsTheNewDocuments(unittest.TestCase):
                          "над нормой; если это осознано, перепишите этот тест и объясните")
 
 
+class TestSourceLabelsDoNotBorrowAForeignName(unittest.TestCase):
+    """⚠⚠⚠ ПОДПИСЬ ИСТОЧНИКА — ЭТО ТО, ПО ЧЕМУ ЭКСПЕРТ ЦИТИРУЕТ.
+
+    `_DOC_NAMES` знал ТРИ `doc_type` из девяти, а фолбэк подставлял остальным «Правила ведения
+    реестра» — не «неизвестно», а ЧУЖОЕ ИМЯ. Эксперт видел «Приказ ТПП РФ №14, прил. 3 — Правила
+    ведения реестра», клик вёл в текст ПП №719. Дефект ЖИВЁТ НА БОЮ с `test23` (Приказ №14 и
+    Соглашение СНГ уехали туда без своих имён) и `K16` добавила бы к ним ещё два документа."""
+
+    @classmethod
+    def setUpClass(cls):
+        from app.api import chat as C
+        cls.C = C
+        cls.man = kb_manifest.load_manifest()
+
+    def test_every_procedural_document_has_its_own_name(self):
+        names = self.C._doc_names()
+        for d in self.man["documents"]:
+            if d.get("collection") != "pp719_rules":
+                continue
+            with self.subTest(doc=d["doc_type"]):
+                got = names.get(d["doc_type"])
+                self.assertTrue(got, f"{d['doc_type']} без подписи")
+                self.assertEqual(got, d.get("short") or d.get("title"),
+                                 "подпись разошлась с манифестом")
+
+    def test_unknown_document_does_not_get_a_foreign_name(self):
+        """Отрицательный контроль: незнакомый документ получает СВОЙ идентификатор, а не соседа."""
+        rows = [{"doc_type": "totally_new_doc", "source_anchor": "Новый документ, п. 1",
+                 "text": "текст пункта нового документа"}]
+        item = self.C._sources_from_rules(rows)[0]
+        self.assertNotIn("Правила ведения реестра", item.section or "",
+                         "незнакомый документ снова назван чужим именем")
+        self.assertIn("totally_new_doc", item.section or "")
+
+    def test_a_link_is_never_to_the_wrong_document(self):
+        """⚠⚠ Ссылка на ЧУЖОЙ документ хуже отсутствующей: по ней цитируют.
+
+        Фолбэк на текст ПП №719 законен ТОЛЬКО для частей 719."""
+        for dt in ("sng_origin_rules", "metodrek_tpp", "totally_new_doc"):
+            with self.subTest(doc=dt):
+                url = self.C._rule_url(dt, "какой-то текст пункта")
+                self.assertEqual(url, "", f"{dt} получил ссылку на чужой документ: {url}")
+        for dt in self.C._PART_OF_719:
+            with self.subTest(doc=dt):
+                self.assertTrue(self.C._rule_url(dt, "текст"), "часть 719 потеряла ссылку")
+
+    def test_new_documents_link_to_their_own_source(self):
+        self.assertIn("gisp.gov.ru", self.C._rule_url("gisp_faq", "текст"))
+        self.assertIn("tpprf.ru", self.C._rule_url("polozhenie49_tpp", "текст"))
+
+
 class TestCorpusGrewByBothDocuments(unittest.TestCase):
 
     def test_record_count(self):
