@@ -68,6 +68,11 @@ SETS: tuple[tuple[str, str, str], ...] = (
     # каталоге релизной проверки: свип их не видел, то есть по этому классу печатал не «чисто»,
     # а «не считаю» — и правку маршрута на них нельзя было ни подтвердить, ни опровергнуть.
     ("eval_route_gaps.json", "cases", "процедурный"),     # 3: пробелы гейта, видимые на бою
+    # ⚠⚠⚠ ВНЕ СФЕРЫ С ПРОЦЕДУРНО ЗВУЧАЩИМИ СЛОВАМИ (находка HIGH ревью, 08.09.2026). Класса не
+    # было ни в одном наборе: «вне сферы 0» у первой редакции `P3-1` означало не «чисто», а «не
+    # считаю» — в негативах нет ни «срока», ни «компонента», ни «отгрузки», на которых построена
+    # таблица тем корпуса. Живой прогон дал 5 утечек из 6, включая именной контроль проекта.
+    ("eval_offdomain_procedural_words.json", "cases", "вне сферы"),  # 14
 )
 
 
@@ -105,50 +110,20 @@ def _class_of(case: dict, default: str) -> str:
     return "товарный" if case.get("expect") is None else "процедурный"
 
 
-def _fallback_route(q: str) -> bool:
-    """`P3-1` #131: забрал бы вопрос ДОБОР процедурной ветки. Требует ЖИВОГО Qdrant.
-
-    ⚠⚠ ЗАЧЕМ ЭТО ЗДЕСЬ, А НЕ ОСТАВЛЕНО ГЕЙТУ. Добор стоит в `pipeline._plan_answer` ПОСЛЕ поиска,
-    и `is_procedural` о нём ничего не знает. Свип, считающий только гейт, после правки `P3-1`
-    напечатал бы прежние «пропусков 15» — то есть метрика мерила бы не продукт, а одну его
-    половину, и правка выглядела бы пустой. Это ровно класс дефекта, который проект уже ловил
-    (`eval_rules` дёргала `search_rules` мимо гейта, и «атрибуция@1 0.96» была утверждением о
-    поиске В корпусе, а не о попадании в него).
-    """
-    from app.rag import pipeline
-    from app.rag.embeddings import embed_query
-    from app.rag.retriever import search
-
-    if not procedural.rules_fallback_applies(q):
-        return False
-    qvec = embed_query(q)
-    hits = search(q, okpd2=None, limit=8, qvec=qvec)
-    from app.rag.retriever import search_cases
-    cases = search_cases(q, limit=3, qvec=qvec,
-                         sections={h.section_roman for h in hits if h.section_roman},
-                         codes=[c for h in hits for c in (h.okpd2_codes or [])])
-    return pipeline.product_low_relevance(q, qvec, hits, cases, None)
-
-
-def collect(with_fallback: bool = False) -> list[dict]:
+def collect() -> list[dict]:
     rows: list[dict] = []
     for name, key, default in SETS:
         data = json.loads((ROOT / "scripts" / name).read_text(encoding="utf-8"))
         for c in data[key]:
             q = c["query"]
             proc = procedural.is_procedural(q, has_code=False)
-            by_fallback = False
-            if not proc and with_fallback:
-                by_fallback = _fallback_route(q)
-                proc = by_fallback
             rows.append({
                 "set": name.replace("eval_", "").replace(".json", ""),
                 "id": c["id"],
                 "class": _class_of(c, default),
                 "query": q,
                 "procedural": proc,
-                "by_fallback": by_fallback,
-                "why": ("ДОБОР P3-1" if by_fallback else _why(q)) if proc else "",
+                "why": _why(q) if proc else "",
                 "topic": topics.classify(q),
             })
     return rows
@@ -180,15 +155,8 @@ def _why(q: str) -> str:
 
 def summarize(rows: list[dict]) -> list[str]:
     classes = ("товарный", "документный", "процедурный", "вне сферы")
-    # ⚠⚠ РЕЖИМ ПЕЧАТАЕТСЯ ПЕРВОЙ СТРОКОЙ, И ЭТО ПРЕДОХРАНИТЕЛЬ, А НЕ УКРАШЕНИЕ. Без добора свип
-    # считает ОДИН ИЗ ДВУХ механизмов маршрутизации, и его «пропусков N» — утверждение о гейте,
-    # а не о том, что получит пользователь. Оператор читает число, а не ключи запуска.
-    with_fb = any(r.get("by_fallback") for r in rows)
-    mode = ("ЭФФЕКТИВНЫЙ маршрут: гейт + добор `P3-1`" if with_fb else
-            "ТОЛЬКО ГЕЙТ `is_procedural` — добор `P3-1` НЕ УЧТЁН (нужен --with-fallback и Qdrant)")
     L = ["=" * 78,
          f"МАРШРУТ ВОПРОСА — {len(rows)} вопросов из {len(SETS)} наборов",
-         f"РЕЖИМ: {mode}",
          "=" * 78, ""]
     for cls in classes:
         sub = [r for r in rows if r["class"] == cls]
@@ -244,14 +212,12 @@ def summarize(rows: list[dict]) -> list[str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Свип маршрута вопроса (K15-1 #120)")
+    ap = argparse.ArgumentParser(description="Свип маршрута вопроса (K15-1 #120), офлайн")
     ap.add_argument("--report", type=Path)
     ap.add_argument("--json", action="store_true", help="печатать строки JSON — для diff до/после")
-    ap.add_argument("--with-fallback", action="store_true",
-                    help="считать ЭФФЕКТИВНЫЙ маршрут (гейт + добор `P3-1`); требует живого Qdrant")
     args = ap.parse_args()
 
-    rows = collect(with_fallback=args.with_fallback)
+    rows = collect()
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1, sort_keys=True))
         return 0

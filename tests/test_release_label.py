@@ -51,6 +51,27 @@ class TestReleaseLabel(unittest.TestCase):
         self.assertIn(settings.APP_VERSION, label)
         self.assertNotIn("test", label, "в метке появился тег, которого никто не сообщал")
 
+    def test_unreadable_file_never_raises(self):
+        """⚠⚠ НАХОДКА РЕВЬЮ 08.09.2026. `/ping` — это HEALTHCHECK контейнера (Dockerfile), и метка
+        зовётся оттуда же, откуда рендерится каждая страница (`_ctx`). Первая редакция ловила
+        `OSError` и `IndexError`, мимо `UnicodeDecodeError` (это `ValueError`): файл с не-UTF-8
+        байтами — оборванная запись, правка в чужой кодировке — ронял бы КАЖДЫЙ рендер и
+        healthcheck, то есть пометка версии переводила бы исправный сервис в «unhealthy».
+        `lru_cache` исключения не кэширует, так что падало бы на каждом запросе.
+        """
+        for exc in (UnicodeDecodeError("utf-8", b"\xff", 0, 1, "bad"),
+                    PermissionError("нет прав"),
+                    IsADirectoryError("это каталог")):
+            with self.subTest(exc=type(exc).__name__):
+                release.release_label.cache_clear()
+
+                def _raise(*a, _e=exc, **k):
+                    raise _e
+
+                with unittest.mock.patch.object(settings, "RELEASE_TAG", ""), \
+                     unittest.mock.patch.object(Path, "read_text", _raise):
+                    self.assertIn(release.UNTAGGED, release.release_label())
+
     def test_blank_file_is_treated_as_unknown(self):
         """Пустой `RELEASE` (обрыв записи) — это «не знаю», а не пустая метка."""
         with unittest.mock.patch.object(settings, "RELEASE_TAG", ""), \

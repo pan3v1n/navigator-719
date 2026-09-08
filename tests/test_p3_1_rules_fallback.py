@@ -1,25 +1,31 @@
-"""`P3-1` #131 — добор процедурной ветки при низкой релевантности товарной выдачи. Офлайн.
+"""`P3-1` #131 — добор процедурной ветки: ЗАМЕРЕН И ОТКАЧЕН. Отрицательный результат, исполняемо.
 
-ЗАЧЕМ. `P3` #121 снизила пропуски гейта `is_procedural`, но остаток вынесла сознательно:
-утвердительные формулировки без процедурного глагола и без темы регулярками не берутся
-(«какие сведения о производителе указываются в заявке»). Структурный ответ был назван при
-закрытии `P3` и здесь исполнен: сначала спрашиваем товарный корпус, и только если он ответить
-не может — пробуем корпус норм.
+ЧТО ПРЕДЛАГАЛОСЬ. При закрытии `P3` #121 остаток гейта `is_procedural` был вынесен сознательно:
+14 из 15 пропусков — утвердительные формулировки без процедурного глагола и без темы, регулярками
+их не взять. Структурный ответ: если товарная выдача не дала уверенного совпадения, попробовать
+корпус норм, прежде чем отвечать «подходящей позиции не нашёл».
 
-⚠⚠⚠ ЧТО ЗДЕСЬ ЗАКРЕПЛЯЕТСЯ ИСПОЛНЯЕМО, ПОМИМО САМОЙ ПРАВКИ, — ОТРИЦАТЕЛЬНЫЙ РЕЗУЛЬТАТ.
-Разрешать добор ПОРОГОМ сходства по корпусу норм замерено и НЕ ГОДИТСЯ: полосы у целевых
-вопросов (0.8230-0.9057) и у вне-сферы (0.7348-0.8660) сходятся вплотную, при нуле утечек
-порог ловит 4 пропуска из 15 с запасом **0.0021** — то есть запоминает один вопрос, а не
-разделяет классы. Это третий раз, когда порог по этому корпусу не разделяет (03.09 — гейт
-вне-сферы процедурной ветки, заведён и откачен тем же днём). Без исполняемой записи следующий
-раунд заведёт его заново, поэтому `TestThresholdWasMeasuredAndRejected` утверждает ОТСУТСТВИЕ
-порога в предикате.
+ПОЧЕМУ НЕ ЖИВЁТ — ЗАМЕРОМ, А НЕ РАССУЖДЕНИЕМ (08.09.2026, свод 254 вопроса):
 
-Замер (свод 240 вопросов, `scripts/eval_routing.py --with-fallback`):
-    пропуски 18 → 9   ложных на товарных 1 → 1   вне сферы 0   документные `K12` целы
-    ось `K9` (`eval_golden_rules`): пропусков 10 → 4
+  * флаг низкой релевантности поднимается на **51 вопросе вне сферы из 53** — сам по себе он не
+    отделяет ничего, и весь вопрос во втором сомножителе;
+  * ПОРОГ сходства по корпусу норм: 4 целевых из 15 при запасе **0.0021** — запоминание одного
+    вопроса, а не разделение классов. Третий отказ порога в проекте после 03.09;
+  * ТАБЛИЦА ТЕМ корпуса без якоря: 8 целевых, но живой прогон дал утечки на **5 вопросах из 6**,
+    включая «как получить загранпаспорт и какие сроки». `_RULES_TOPIC` собрана из широких стеблей
+    и строилась РАНЖИРОВАТЬ документы для вопросов, уже дошедших до ветки;
+  * ТАБЛИЦА ТЕМ + 719-якорь: утечек 0, но целевых **один**, и ни одного из трёх живых пробелов
+    релизной проверки;
+  * безъякорные кандидаты + порог 0.8362: 9 целевых из 10, запас 0.0197 — **не внедрено**:
+    единственная популяция, на которой такой порог калибруется, построена в тот же день под эту
+    же правку.
 
-Запуск:  .venv\\Scripts\\python -m unittest discover -s tests
+⚠⚠⚠ ЗАЧЕМ ЭТОТ ФАЙЛ. Без исполняемой записи следующий раунд заведёт добор заново — так уже было
+с гейтом вне-сферы (03.09: заведён и откачен тем же днём, отрицательный результат закреплён
+тестами). Здесь утверждается ОТСУТСТВИЕ добора в горячем пути и СОХРАННОСТЬ того, что от работы
+осталось полезного: вынесенный флаг и два набора вопросов, которых свип раньше не видел.
+
+Разбор — docs/eval_runs/2026-09-08_p3_1_rules_fallback.md
 """
 
 from __future__ import annotations
@@ -34,25 +40,8 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from app.rag import procedural  # noqa: E402
-from app.rag.retriever import Hit, rules_topic  # noqa: E402
-
-
-# Вопросы, которые добор ОБЯЗАН пускать: у каждого своя тема в таблице корпуса норм и нет
-# ни процедурного маркера, ни темы `topics` — то есть гейт их не берёт по построению.
-TARGETS = (
-    "сроки проведения экспертизы происхождения",          # polozhenie49_tpp — приехал с K16
-    "какие сведения о производителе указываются в заявке",  # tpp_order_52
-    "как подтвердить производство компонентов",             # tpp_order_52
-)
-
-# ⚠⚠ РОВНО ЭТИ ДВА ВОПРОСА ВНЕ СФЕРЫ ПОЛУЧАЮТ ТЕМУ КОРПУСА — замерено на своде, а не придумано.
-# Таблица тем видит «перечень документов» и не видит предмета вопроса. Без дисквалификатора
-# членства добор дал бы 2 утечки вне сферы при требовании РОВНО НОЛЬ.
-CHAMBER_LEAKS = (
-    "какие документы нужны для вступления в ТПП",
-    "какой перечень документов нужен для членства в ТПП",
-)
+from app.rag import pipeline, procedural  # noqa: E402
+from app.rag.retriever import Hit  # noqa: E402
 
 
 def _hit(match: bool = False) -> Hit:
@@ -61,123 +50,54 @@ def _hit(match: bool = False) -> Hit:
                source_anchor="прил., п. 1", okpd2_match=match)
 
 
-class TestFallbackPredicate(unittest.TestCase):
-    """Предикат `rules_fallback_applies` — чистая функция, Qdrant не нужен."""
+class TestFallbackIsNotInTheHotPath(unittest.TestCase):
+    """Добор замерен и откачен — в горячем пути его быть не должно."""
 
-    def test_targets_are_admitted(self):
-        for q in TARGETS:
-            with self.subTest(q=q[:40]):
-                self.assertFalse(procedural.is_procedural(q),
-                                 "вопрос перестал быть пропуском гейта — набор устарел")
-                self.assertTrue(procedural.rules_fallback_applies(q))
+    def test_predicate_is_gone(self):
+        self.assertFalse(hasattr(procedural, "rules_fallback_applies"),
+                         "предикат добора вернулся — он замерен и отвергнут, см. шапку модуля")
 
-    def test_chamber_membership_is_refused(self):
-        """⚠ Несущий предохранитель: снятие строки про членство даёт 2 утечки вне сферы."""
-        for q in CHAMBER_LEAKS:
-            with self.subTest(q=q[:40]):
-                self.assertIsNotNone(rules_topic(q),
-                                     "вопрос перестал получать тему корпуса — риск изменился, "
-                                     "перемерить свип, а не править тест")
-                self.assertFalse(procedural.rules_fallback_applies(q))
+    def test_pipeline_does_not_consult_the_corpus_topic_table_for_routing(self):
+        # ⚠ ПО `co_names` КОД-ОБЪЕКТА, А НЕ ПО ТЕКСТУ ФУНКЦИИ: урок раунда 10 — сторож, считавший
+        # имя по телу функции, покраснел на верном коде, потому что имя встретилось в
+        # комментарии. Здесь комментарий как раз ОБЪЯСНЯЕТ откат и называет `rules_topic`.
+        self.assertNotIn("rules_topic", pipeline._plan_answer.__code__.co_names)
 
-    def test_question_without_a_corpus_topic_is_refused(self):
-        """Отрицательный контроль: нет темы корпуса — нет добора."""
-        for q in ("посоветуй хороший рецепт борща",
-                  "какая завтра погода в Курске",
-                  "до какого числа подавать отчёт о произведённой продукции"):
-            with self.subTest(q=q[:40]):
-                self.assertIsNone(rules_topic(q))
-                self.assertFalse(procedural.rules_fallback_applies(q))
-
-
-class TestThresholdWasMeasuredAndRejected(unittest.TestCase):
-    """Отрицательный результат закрепляется исполняемо — иначе его заведут заново.
-
-    ⚠⚠ Порог сходства по корпусу норм в предикате быть НЕ ДОЛЖЕН. Замер 08.09.2026: при нуле
-    утечек он берёт 4 пропуска из 15 с запасом 0.0021, тогда как таблица тем берёт 8 при том же
-    нуле. Полосы см. в шапке модуля. То же заключение получено 03.09 с другой стороны
-    (`docs/eval_runs/2026-09-03_rules_relevance_gate.md`).
-    """
-
-    def test_predicate_does_not_consult_a_similarity_threshold(self):
-        names = procedural.rules_fallback_applies.__code__.co_names
-        # ⚠ ПО `co_names`, А НЕ ПО ТЕКСТУ ФУНКЦИИ. Урок раунда 10: сторож, считавший имя по ТЕЛУ
-        # функции, покраснел на верном коде, потому что имя встретилось в комментарии. В имена
-        # код-объекта проза не попадает по построению.
-        for forbidden in ("dense_top1", "RELEVANCE_SOFT", "SOFT", "cosine"):
-            self.assertNotIn(forbidden, names,
-                             f"в предикат вернулся порог сходства ({forbidden}) — он замерен "
-                             "и отвергнут, см. шапку модуля")
-
-    def test_admission_is_decided_by_the_corpus_topic_table(self):
-        """Положительная половина: предикат обязан СПРАШИВАТЬ таблицу тем, а не игнорировать её."""
-        self.assertIn("rules_topic", procedural.rules_fallback_applies.__code__.co_names)
-
-
-class TestFallbackWiring(unittest.TestCase):
-    """Провод в `_plan_answer`: добор срабатывает ровно при низкой релевантности. На заглушках."""
-
-    def _run(self, query: str, *, okpd2_match: bool, dense: float, enabled: bool = True,
-             cases: list | None = None, scope_out: bool = True):
-        from app.core.config import settings
-        from app.rag import pipeline
-
+    def test_weak_product_retrieval_still_answers_from_the_product_branch(self):
+        """Поведенческая половина: слабая товарная выдача НЕ уводит вопрос на процедурную ветку."""
         called: list[str] = []
-        saved = settings.PROCEDURAL_DEFLECT_ENABLED
-        settings.PROCEDURAL_DEFLECT_ENABLED = enabled
-        try:
-            with unittest.mock.patch.object(pipeline, "embed_query", lambda *a, **k: [0.0] * 8), \
-                 unittest.mock.patch.object(pipeline, "search",
-                                            lambda *a, **k: [_hit(okpd2_match)]), \
-                 unittest.mock.patch.object(pipeline, "search_cases",
-                                            lambda *a, **k: list(cases or [])), \
-                 unittest.mock.patch("app.rag.scope.out_of_scope_by_classifier",
-                                     lambda *a, **k: scope_out), \
-                 unittest.mock.patch.object(pipeline, "dense_top1", lambda *a, **k: dense), \
-                 unittest.mock.patch.object(pipeline, "_answer_procedural",
-                                            lambda *a, **k: called.append("проц") or "PROC"), \
-                 unittest.mock.patch.object(pipeline.settings, "RERANK_ENABLED", False):
-                pipeline._plan_answer(query)
-        finally:
-            settings.PROCEDURAL_DEFLECT_ENABLED = saved
-        return called
-
-    def test_weak_product_retrieval_falls_back(self):
-        # dense ниже RELEVANCE_SOFT, совпадения по коду нет → флаг поднят, тема корпуса есть.
-        self.assertEqual(self._run(TARGETS[0], okpd2_match=False, dense=0.70), ["проц"])
-
-    def test_confident_product_retrieval_is_left_alone(self):
-        """⚠⚠ НЕСУЩИЙ ОТРИЦАТЕЛЬНЫЙ КОНТРОЛЬ — ради него добор стоит ПОСЛЕ поиска, а не в гейте.
-
-        Тот же признак триггером `is_procedural` замерен и отвергнут: он забирает три вопроса,
-        называющих ПРОДУКЦИЮ (`golden#19`, и оба смешанных документных `K12` — `golden#48`,
-        `#49`), которые обязаны остаться товарными. Гейт стоит ДО поиска и о силе товарной
-        выдачи не знает. Если этот тест зеленеет при переносе признака в гейт — он слеп.
-
-        ⚠ ТРИ ПУТИ УВЕРЕННОСТИ, А НЕ ОДИН, И ЭТО НАШЁЛ САМ ТЕСТ. Первая редакция считала «высокого
-        косинуса достаточно» и покраснела на ВЕРНОМ коде: у этого вопроса флаг поднимает ВТОРОЙ
-        сигнал — классификатор ОКПД2 «вне покрытия 719», — а он смотрит на `confident`, а не на
-        косинус. Проверяем все три: совпадение по коду, подтверждённый кейс, высокий косинус при
-        молчащем классификаторе.
-        """
-        self.assertEqual(self._run(TARGETS[0], okpd2_match=True, dense=0.70), [],
-                         "совпадение по коду ОКПД2 — уверенность, добора быть не должно")
-        self.assertEqual(self._run(TARGETS[0], okpd2_match=False, dense=0.70,
-                                   cases=[{"query": "к", "answer": "о", "_score": 0.9}]), [],
-                         "подтверждённый кейс — уверенность, добора быть не должно")
-        self.assertEqual(self._run(TARGETS[0], okpd2_match=False, dense=0.99, scope_out=False), [],
-                         "высокий косинус при молчащем классификаторе — флаг не поднят")
-
-    def test_disabled_procedural_branch_disables_the_fallback(self):
-        """Настройка выключает ветку целиком — добор обязан выключаться вместе с ней."""
-        self.assertEqual(self._run(TARGETS[0], okpd2_match=False, dense=0.70, enabled=False), [])
+        with unittest.mock.patch.object(pipeline, "embed_query", lambda *a, **k: [0.0] * 8), \
+             unittest.mock.patch.object(pipeline, "search", lambda *a, **k: [_hit(False)]), \
+             unittest.mock.patch.object(pipeline, "search_cases", lambda *a, **k: []), \
+             unittest.mock.patch.object(pipeline, "dense_top1", lambda *a, **k: 0.70), \
+             unittest.mock.patch.object(pipeline, "_answer_procedural",
+                                        lambda *a, **k: called.append("проц")), \
+             unittest.mock.patch.object(pipeline.settings, "RERANK_ENABLED", False):
+            plan = pipeline._plan_answer("какие сведения о производителе указываются в заявке")
+        self.assertEqual(called, [], "добор вернулся в горячий путь")
+        self.assertTrue(getattr(plan, "low_relevance", False),
+                        "флаг низкой релевантности перестал подниматься — замер опирался на него")
 
 
-class TestSweepSeesTheEffectiveRoute(unittest.TestCase):
-    """Инструмент замера — сам объект проверки (предупреждение из постановки #131)."""
+class TestWhatSurvivedIsKept(unittest.TestCase):
+    """Полезное из работы: вынесенный флаг и два набора, которых инструмент раньше не видел."""
+
+    def test_low_relevance_decision_is_callable(self):
+        """⚠ Вынесено из `_plan_answer` без изменения поведения: пока решение жило двумя строками
+        внутри, замерить его можно было только повторив в скрипте — оракулом, повторяющим модель
+        кода. Он ловит опечатку, но не ошибку модели."""
+        # ⚠ На заглушках: `dense_top1` ходит в Qdrant, а сторож обязан быть офлайновым — иначе он
+        # зелен у меня и красен в CI (урок `EV18`, 08.09.2026, в тот же день).
+        self.assertTrue(callable(pipeline.product_low_relevance))
+        with unittest.mock.patch.object(pipeline, "dense_top1", lambda *a, **k: 0.70), \
+             unittest.mock.patch("app.rag.scope.out_of_scope_by_classifier", lambda *a, **k: False):
+            self.assertTrue(pipeline.product_low_relevance("q", None, [_hit(False)], [], None),
+                            "слабая выдача перестала поднимать флаг")
+            self.assertFalse(pipeline.product_low_relevance("q", None, [_hit(True)], [], None),
+                             "совпадение по коду перестало быть сигналом уверенности")
 
     def test_registered_gaps_are_in_the_population(self):
-        """⚠⚠ Три вопроса релизной проверки жили ТОЛЬКО в каталоге релиза: свип по этому классу
+        """Три вопроса релизной проверки жили ТОЛЬКО в каталоге релиза: свип по этому классу
         печатал не «чисто», а «не считаю»."""
         data = json.loads((ROOT / "scripts" / "eval_route_gaps.json").read_text(encoding="utf-8"))
         got = {c["query"] for c in data["cases"]}
@@ -185,57 +105,26 @@ class TestSweepSeesTheEffectiveRoute(unittest.TestCase):
                   "включает ли стоимость реализации НДС",
                   "сроки проведения экспертизы происхождения"):
             self.assertIn(q, got)
-        sets = __import__("importlib").import_module("scripts.eval_routing") \
-            if "scripts" in sys.modules else None
-        del sets  # импорт скрипта как пакета не нужен — состав наборов проверяем ниже текстом
         src = (ROOT / "scripts" / "eval_routing.py").read_text(encoding="utf-8")
         self.assertIn("eval_route_gaps.json", src, "набор не подключён к своду")
 
-    def test_predicate_admits_targets_and_leaks_nothing_out_of_scope(self):
-        """⚠⚠ ХРАПОВИК НА ОБЕ СТОРОНЫ ЗАМЕРА, И ОН ОФЛАЙНОВЫЙ.
+    def test_offdomain_procedural_words_set_is_wired(self):
+        """⚠⚠ ГЛАВНЫЙ ВЫЖИВШИЙ АРТЕФАКТ. Этот набор нашёл и находку HIGH о доборе, и ДВА дефекта
+        самого гейта, старше её. Без него «вне сферы 0» означало «не считаю»."""
+        data = json.loads((ROOT / "scripts" / "eval_offdomain_procedural_words.json")
+                          .read_text(encoding="utf-8"))
+        self.assertEqual(len(data["cases"]), 14)
+        self.assertIn("как получить загранпаспорт и какие сроки",
+                      {c["query"] for c in data["cases"]},
+                      "именной контроль вне-сферы этого проекта выпал из набора")
+        src = (ROOT / "scripts" / "eval_routing.py").read_text(encoding="utf-8")
+        self.assertIn("eval_offdomain_procedural_words.json", src, "набор не подключён к своду")
 
-        Считает по всему своду, скольких пропусков гейта предикат касается. Это НЕОБХОДИМОЕ
-        условие добора (достаточное — низкая релевантность товарной выдачи, её без Qdrant не
-        посчитать), поэтому числа здесь — верхняя граница, а не эффективный маршрут.
-
-        ⚠ Сегодняшний урок `EV18`: тест, которому понадобился Qdrant, зелен у меня и красен в CI.
-        Предикат и `collect()` — чистые, поэтому сторож остаётся в батарее, а живая половина
-        меряется свипом.
-        """
-        sys.path.insert(0, str(ROOT / "scripts"))
-        try:
-            import eval_routing
-        finally:
-            sys.path.pop(0)
-        rows = eval_routing.collect()  # без --with-fallback: Qdrant не нужен
-        missed = [r for r in rows if not r["procedural"]]
-        admitted = [r for r in missed if procedural.rules_fallback_applies(r["query"])]
-
-        leaks = [r for r in admitted if r["class"] == "вне сферы"]
-        self.assertEqual([(r["set"], r["id"]) for r in leaks], [],
-                         "добор касается вопроса ВНЕ СФЕРЫ — требование #131 «ровно 0»")
-
-        targets = [r for r in admitted if r["class"] == "процедурный"]
-        # Замерено 08.09.2026: 11 пропусков гейта проходят предикат, из них 8 доезжают до добора
-        # (у трёх товарная выдача уверенная). Число может только РАСТИ — иначе правка что-то
-        # потеряла и это надо увидеть, а не узнать через релиз.
-        self.assertGreaterEqual(len(targets), 11,
-                                f"предикат стал пускать меньше целевых: {len(targets)}")
-
-    def test_sweep_declares_which_route_it_counted(self):
-        """⚠⚠ Свип считает ГЕЙТ; добор живёт в пайплайне. Без строки режима «пропусков N» читается
-        как утверждение о продукте, хотя это утверждение об одной из двух половин маршрута."""
-        sys.path.insert(0, str(ROOT / "scripts"))
-        try:
-            import eval_routing
-        finally:
-            sys.path.pop(0)
-        rows = [{"set": "s", "id": 1, "class": "товарный", "query": "q",
-                 "procedural": False, "by_fallback": False, "why": "", "topic": None}]
-        out = "\n".join(eval_routing.summarize(rows))
-        self.assertIn("НЕ УЧТЁН", out)
-        rows[0].update(procedural=True, by_fallback=True)
-        self.assertIn("ЭФФЕКТИВНЫЙ маршрут", "\n".join(eval_routing.summarize(rows)))
+    def test_the_rejection_is_written_where_the_code_was(self):
+        """⚠ Отрицательный результат обязан жить В ТОМ МЕСТЕ, куда правку захотят вернуть."""
+        src = (ROOT / "app" / "rag" / "pipeline.py").read_text(encoding="utf-8")
+        self.assertIn("ЗАМЕРЕН И ОТКАЧЕН", src)
+        self.assertIn("0.0021", src, "цена порога не названа числом — вернут не глядя")
 
 
 if __name__ == "__main__":

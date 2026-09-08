@@ -47,6 +47,15 @@ def release_label() -> str:
     if not tag:
         try:
             tag = _RELEASE_FILE.read_text(encoding="utf-8").strip().splitlines()[0].strip()
-        except (OSError, IndexError):
+        except Exception:  # noqa: BLE001 — см. ниже: молчать здесь безопаснее, чем падать
+            # ⚠⚠ ЛОВИМ ШИРОКО, И ЭТО ОСОЗНАННО (находка ревью 08.09.2026). Первая редакция ловила
+            # `OSError` и `IndexError` — мимо `UnicodeDecodeError` (это `ValueError`), который
+            # даёт файл с не-UTF-8 байтами: оборванная запись, ручная правка в чужой кодировке.
+            # `lru_cache` исключения НЕ кэширует, поэтому падало бы на КАЖДОМ рендере страницы
+            # через `_ctx` и на `/ping` — а `/ping` это healthcheck контейнера, то есть метка
+            # версии роняла бы сервис в «unhealthy».
+            # ⚠ Широкий except уместен ровно потому, что у функции есть честный третий исход:
+            # не сумев прочитать тег, она говорит «не знаю», а не выдумывает и не падает. Это
+            # тот же принцип, что у пробников выкатки.
             tag = ""
     return tag or f"{settings.APP_VERSION} · {UNTAGGED}"
