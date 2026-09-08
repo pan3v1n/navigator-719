@@ -353,13 +353,17 @@ class TestParentClimbCostIsRecorded(unittest.TestCase):
                       "его отсутствие это дефект выкатки (находка 9 одиннадцатого раунда)")
         self.assertTrue(st1_ref.conditions_for("8403")["matched"],
                         "пример протух: 8403 обязан быть в Перечне")
-        self.assertFalse(st1_ref.conditions_for("2101")["matched"],
-                         "пример протух: 2101 обязан ОТСУТСТВОВАТЬ в Перечне")
+        # ⚠ Пример «отсутствующего родителя» ЗАМЕНЁН после находки раунда 12: у 2101 три записи
+        # `narrower`, лукап о нём ЗНАЕТ и печатает полезную оговорку с кодом пользователя.
+        # Настоящее «родителя нет» — ни `exact`, ни `narrower`.
+        cond = st1_ref.conditions_for("7326 90")
+        self.assertFalse(cond["matched"] or cond["narrower"],
+                         "пример протух: 7326 90 обязан ОТСУТСТВОВАТЬ в Перечне целиком")
         self.assertEqual(extract_tnved_position("ТН ВЭД 8403 12 шт"), "8403",
                          "родитель В Перечне — подъём обязан состояться")
-        self.assertIsNone(extract_tnved_position("ТН ВЭД 2101 12 шт"),
-                          "родителя в Перечне НЕТ — вместо уверенного «НЕ включён» обязан "
-                          "быть отказ (находки 1 и 6 одиннадцатого раунда)")
+        self.assertIsNone(extract_tnved_position("ТН ВЭД 7326 90 9 позиций"),
+                          "о родителе Перечень не знает НИЧЕГО — вместо уверенного «НЕ включён» "
+                          "обязан быть отказ (находки 1 и 6 раунда 11, уточнено раундом 12)")
         self.assertEqual(extract_tnved_position("ТН ВЭД 2101 12"), "2101 12",
                          "без слова-счётчика шестизначный код обязан уцелеть")
 
@@ -372,8 +376,8 @@ class TestParentClimbCostIsRecorded(unittest.TestCase):
             self.fail("таблица условий Перечня недоступна — файл коммитится в репозиторий, "
                       "его отсутствие это дефект выкатки (находка 9 одиннадцатого раунда)")
         with mock.patch.object(okpd2_ref, "_climb_resolves", return_value=True):
-            key = extract_tnved_position("ТН ВЭД 2101 12 шт")
-        self.assertEqual(key, "2101", "без проверки подъём обязан вернуться")
+            key = extract_tnved_position("ТН ВЭД 7326 90 9 позиций")
+        self.assertEqual(key, "7326 90", "без проверки подъём обязан вернуться")
         self.assertFalse(st1_ref.conditions_for(key)["matched"],
                          "и обязан дать именно тот вердикт, ради которого правка сделана")
 

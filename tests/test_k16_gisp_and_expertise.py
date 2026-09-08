@@ -208,8 +208,13 @@ class TestPassportsAndEdition(unittest.TestCase):
 class TestTopicQuotaKnowsTheNewDocuments(unittest.TestCase):
     """Квота окна: у экспертизы ПРОИСХОЖДЕНИЯ свой документ, а не раздел Приказа №52.
 
-    ⚠ Проверяется ТАБЛИЦА ТЕМ (офлайн, без Qdrant), а не порядок выдачи: порядок зависит от
-    индекса, а таблица — это решение о том, чей предмет вопрос затрагивает."""
+    ⚠ Проверяется ТАБЛИЦА ТЕМ и СПИСОК ON_DEMAND (офлайн, без Qdrant), а не порядок выдачи:
+    порядок зависит от индекса, а эти две таблицы — решения о том, чей предмет затрагивает вопрос
+    и кто резервирует место."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.man = kb_manifest.load_manifest()
 
     @staticmethod
     def _scores(q: str) -> dict[str, int]:
@@ -250,17 +255,50 @@ class TestTopicQuotaKnowsTheNewDocuments(unittest.TestCase):
                 self.assertNotEqual(s["polozhenie49_tpp"], s["tpp_order_52"],
                                     "ничья: главу окна отдали ранжированию")
 
-    def test_gisp_is_not_forced_to_lead(self):
-        """⚠⚠ FAQ НАРОЧНО НЕ ПОЛУЧАЕТ СВОЕЙ СТРОКИ В ТАБЛИЦЕ, и это решение, а не упущение.
+    def test_new_documents_reserve_no_seat_by_default(self):
+        """⚠⚠⚠ ГАРАНТИРОВАННОЕ МЕСТО РЕШАЕТСЯ НЕ ЗДЕСЬ — ЭТО HIGH РАУНДА 12.
 
-        Он `legal_force: 5` — слабейший источник корпуса. Критерий приёмки issue #48 требует
-        «источник и пометку не норма», а НЕ первого места; поставить практику во главу окна над
-        нормой значило бы перевернуть иерархию, на которой стоит `K13`. Достаточно, что документ
-        В ОКНЕ, — это проверяется живым прогоном, а здесь фиксируется само решение."""
+        Прежняя редакция этого теста утверждала «у FAQ нет строки в `_RULES_TOPIC`, значит он не
+        возглавит окно» — и смотрела НЕ ТУДА. Место в окне резервирует `_quota_of`: документ, не
+        попавший в `RULES_QUOTA_ON_DEMAND`, получает `RULES_QUOTA_MIN` = 1 ПО УМОЛЧАНИЮ, в обход
+        таблицы тем. `K16` добавила два документа и в ON_DEMAND их не внесла: документов вне
+        списка стало 5 при окне 6, и первый круг round-robin съедал 5 мест из 6.
+        Замер на живом индексе: новый документ занимал место в **6 вопросах из 6**, ни один из
+        которых не про ГИСП и не про экспертизу происхождения. Профиль релиза при этом утверждал
+        обратное — «строки квоты НЕ получил НАМЕРЕННО».
+        Инвариант, который держится на самом деле: **оба новых документа в ON_DEMAND**."""
         from app.rag import retriever as R
-        self.assertNotIn("gisp_faq", [dt for dt, _ in R._RULES_TOPIC],
-                         "у FAQ появилась строка квоты — практика начнёт возглавлять окно "
-                         "над нормой; если это осознано, перепишите этот тест и объясните")
+        for dt in ("gisp_faq", "polozhenie49_tpp"):
+            with self.subTest(doc=dt):
+                self.assertIn(dt, R.RULES_QUOTA_ON_DEMAND,
+                              f"{dt} резервирует место в КАЖДОМ процедурном окне")
+
+    def test_on_demand_pairing_keeps_the_document_in_its_own_windows(self):
+        """⚠⚠ Правка ПАРНАЯ, и без второй половины она ломает то, ради чего документ заводился.
+
+        В ON_DEMAND квота равна нулю везде; чтобы Положение не выпало из СВОИХ окон, оно обязано
+        быть в `topics._DOC_TYPES[ST1_ORIGIN]` — там тема даёт ему квоту. У FAQ такой пары нет
+        НАМЕРЕННО: он `legal_force: 5`, слабейший источник, и входит в окно общим рангом."""
+        from app.rag import topics
+        self.assertIn("polozhenie49_tpp", topics.doc_types(topics.ST1_ORIGIN),
+                      "Положение в ON_DEMAND и без темы — квота 0 везде, документ недостижим")
+        self.assertNotIn("gisp_faq", topics.doc_types(topics.ST1_ORIGIN),
+                         "практике дали квоту темы — она начнёт вытеснять норму")
+
+    def test_documents_outside_on_demand_fit_the_window(self):
+        """Структурный контроль: гарантированные места не должны съедать окно целиком.
+
+        ⚠ Считается ОТНОШЕНИЕ, а не список: следующий документ корпуса попадёт под ту же проверку,
+        и она покраснеет ДО того, как он начнёт вытеснять норму на каждом вопросе."""
+        from app.rag import retriever as R
+        from app.rag.pipeline import RULES_TOP_K
+        procedural_docs = {d["doc_type"] for d in self.man["documents"]
+                           if d.get("collection") == "pp719_rules"
+                           and d.get("status") == kb_manifest.ACTIVE}
+        guaranteed = procedural_docs - set(R.RULES_QUOTA_ON_DEMAND)
+        self.assertLessEqual(len(guaranteed) * R.RULES_QUOTA_MIN, RULES_TOP_K - R.RULES_QUOTA_PRIMARY,
+                             f"гарантированные места ({sorted(guaranteed)}) не оставляют "
+                             f"теме её {R.RULES_QUOTA_PRIMARY} мест в окне {RULES_TOP_K}")
 
 
 class TestSourceLabelsDoNotBorrowAForeignName(unittest.TestCase):

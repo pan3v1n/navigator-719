@@ -95,19 +95,37 @@ class TestClimbAsksTheTableNotTheShape(unittest.TestCase):
         self.assertEqual(extract_tnved_position("ТН ВЭД 8403 12 шт"), "8403")
 
     def test_parent_absent_refuses_instead_of_asserting(self):
-        self.assertFalse(st1_ref.conditions_for("2101")["matched"], "пример протух")
-        self.assertIsNone(extract_tnved_position("ТН ВЭД 2101 12 шт"))
+        """⚠⚠⚠ ПРИМЕР ЗАМЕНЁН ПОСЛЕ НАХОДКИ РАУНДА 12: 2101 НЕ подходит, он покрыт `narrower`.
+
+        Первая редакция брала 2101 «отсутствующим родителем», потому что `matched` там False.
+        Но у него ТРИ записи `narrower`, и лукап о нём знает: прежний ответ печатал общее правило
+        И оговорку «отдельные условия установлены для более узких кодов: 21011100; 210112;
+        210130910», то есть называл пользователю ровно тот код, который он написал. Отказ здесь
+        был потерей, а не починкой. Настоящий «родителя нет» — это ни `exact`, ни `narrower`."""
+        cond = st1_ref.conditions_for("7326 90")
+        self.assertFalse(cond["matched"], "пример протух")
+        self.assertFalse(cond["narrower"], "пример протух: у 7326 90 появились узкие записи")
+        self.assertIsNone(extract_tnved_position("ТН ВЭД 7326 90 9 позиций"))
+
+    def test_parent_known_only_by_narrower_still_answers(self):
+        """Обратная половина: покрытый `narrower` родитель обязан ДОЕХАТЬ, а не быть отброшенным."""
+        self.assertTrue(st1_ref.conditions_for("2101")["narrower"], "пример протух")
+        self.assertEqual(extract_tnved_position("ТН ВЭД 2101 12 шт"), "2101")
+        self.assertIn("более узких", st1_ref.format_for_context("2101"),
+                      "оговорка `narrower` пропала — подъём к такому родителю потерял смысл")
 
     def test_the_refusal_is_what_prevents_a_false_negative(self):
         """⚠ Проверяем ПОСЛЕДСТВИЕ отказа, а не факт отказа.
 
         Без этого тест утверждал бы «здесь None», не сказав, почему None лучше кода."""
         with mock.patch.object(okpd2_ref, "_climb_resolves", return_value=True):
-            key = extract_tnved_position("ТН ВЭД 2101 12 шт")
-        self.assertEqual(key, "2101")
+            key = extract_tnved_position("ТН ВЭД 7326 90 9 позиций")
+        self.assertEqual(key, "7326 90")
         rendered = st1_ref.format_for_context(key)
         self.assertIn("НЕ включён", rendered,
                       "без проверки подъём печатал бы именно этот уверенный вердикт")
+        self.assertNotIn("более узких", rendered,
+                         "у этого родителя нет узких записей — сказать нечего, и это весь довод")
 
     def test_missing_table_degrades_to_the_old_behaviour(self):
         """⚠⚠ «Таблицы нет» ≠ «кода нет»: дефект выкатки не должен выключать ВСЕ подъёмы.

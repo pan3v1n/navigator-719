@@ -258,6 +258,43 @@ def parse_decree_body(path: Path, doc: dict | None = None) -> list[dict]:
 # («4.3.6 Продукция…»); ссылка в прозе не делает ни того, ни другого.
 _P49_POINT_RE = re.compile(r"^(\d+(?:\.\d+)+)(?:\.\s+\S|\s+[А-ЯЁA-Z«])")
 
+# ⚠⚠⚠ ЗАГОЛОВОК РАЗДЕЛА БЫВАЕТ ПЕРЕНЕСЁН, И ОБРЫВОК УЕЗЖАЕТ В ЦИТАТУ (находка раунда 12).
+# `_SECTION52_RE` берёт ОДНУ физическую строку. У Приказа №52 заголовки однострочные, поэтому
+# дефект дремал; у Положения №49 два заголовка из шести перенесены, и в `source_anchor` — то, что
+# сервис печатает эксперту как ссылку, — уходило «Раздел 4. Перечень документов и сведений,
+# представляемых для» и «Раздел 5. Представление документов и сведений для проведения». Оба
+# обрываются на предлоге, а отброшены ровно различающие слова: «проведения экспертизы
+# происхождения». 25 записей из 67 несли такой якорь.
+# ⚠ Признак взят у самого заголовка, а не у длины: строка присоединяется, только если title
+# КОНЧАЕТСЯ служебным словом или запятой — то есть сам требует продолжения. Любой пункт, раздел,
+# приложение или пустая строка обрывают сборку: заголовок не имеет права съесть норму.
+_TITLE_WANTS_MORE_RE = re.compile(
+    r"(?:,|\b(?:для|и|или|по|на|в|во|с|со|о|об|от|при|из|к|за|над|под|про))\s*$", re.I)
+_TITLE_MAX_TAIL = 2          # предохранитель: заголовок не длиннее трёх строк
+
+
+def _join_wrapped_title(title: str, lines: list[str], i: int,
+                        point_re: re.Pattern[str]) -> tuple[str, int]:
+    """Полный заголовок раздела и индекс ПОСЛЕДНЕЙ его строки."""
+    j = i + 1
+    while j < len(lines) and j - i <= _TITLE_MAX_TAIL:
+        nxt = lines[j].strip()
+        if (not nxt or point_re.match(lines[j]) or _SECTION52_RE.match(lines[j])
+                or _APPX52_RE.match(lines[j]) or title.rstrip().endswith(".")):
+            break
+        # ДВА признака переноса, и оба про сам заголовок, а не про длину:
+        #   1) он кончается служебным словом или запятой — то есть требует продолжения;
+        #   2) следующая строка начинается СО СТРОЧНОЙ — типографский признак переноса. Новый
+        #      заголовок, пункт или предложение нормы начинаются с прописной либо с цифры.
+        # ⚠ Второй признак нужен там, где первый молчит: «Раздел 5. Представление документов и
+        # сведений для проведения» кончается СУЩЕСТВИТЕЛЬНЫМ, а продолжение («экспертизы
+        # происхождения») — как раз то, что отличает его от раздела 4.
+        if not (_TITLE_WANTS_MORE_RE.search(title) or nxt[:1].islower()):
+            break
+        title = f"{title} {nxt}"
+        j += 1
+    return title, j - 1
+
 
 def _parse_sectioned_order(path: Path, *, doc_type: str, anchor_prefix: str,
                            point_re: re.Pattern[str] | None = None) -> list[dict]:
@@ -292,21 +329,52 @@ def _parse_sectioned_order(path: Path, *, doc_type: str, anchor_prefix: str,
             "point": cur, "text": text,
             "source_anchor": f"{anchor_prefix}, п. {cur}" + (f" ({loc})" if loc else "")})
 
-    for ln in lines:
+    # ⚠⚠⚠ РАЗДЕЛ БЕЗ НУМЕРОВАННЫХ ПУНКТОВ ТЕРЯЛСЯ ЦЕЛИКОМ (находка раунда 12). Текст копился
+    # только при открытом пункте, поэтому «Раздел 2. Термины и определения» Положения №49 —
+    # 5 423 знака, пятнадцать определений — не попадал в индекс НИ ОДНОЙ записью. У Приказа №52
+    # такого раздела нет, и дефект дремал до `K16`.
+    # ⚠⚠ ЦЕНА БЫЛА НЕ В ПРОПУСКЕ, А В КОМБИНАЦИИ: новая строка `_RULES_TOPIC` направляет вопросы
+    # об определениях ИМЕННО СЮДА (`rules_topic('что такое непроисходящие материалы')` =
+    # `polozhenie49_tpp`), то есть документ выигрывал тему и три места в окне для вопроса, ответ
+    # на который не был проиндексирован, — а Соглашение СНГ, где эти термины определены и которое
+    # РАТИФИЦИРОВАНО (legal_force 0), оставалось с квотой 0.
+    # ⚠ Механизм не новый: `_section_records` заведён ровно для этого у документов `K14`, и его
+    # докстринг называет тот же класс дословно. Здесь он ПЕРЕИСПОЛЬЗУЕТСЯ, а не повторяется.
+    sec_lines: list[str] = []          # тело текущего раздела ДО первого его пункта
+    sec_has_points = False
+
+    def _flush_section():
+        nonlocal sec_lines, sec_has_points
+        if not sec_has_points and sec_lines and _is_section_num(sec_num):
+            loc = f"Раздел {sec_num}. {sec_title}"
+            records.extend(_section_records(
+                {"doc_type": doc_type, "section_roman": sec_num, "section_title": sec_title},
+                sec_lines, f"{anchor_prefix}, {loc}"))
+        sec_lines, sec_has_points = [], False
+
+    skip_until = -1
+    for i, ln in enumerate(lines):
+        if i <= skip_until:
+            continue               # строка уже поглощена перенесённым заголовком
         msec = _SECTION52_RE.match(ln)
         mappx = _APPX52_RE.match(ln)
         mp = pt_re.match(ln)
         if msec:
-            _flush(); cur, started = None, True
-            sec_num, sec_title = msec.group(1), msec.group(2).strip()
+            _flush(); _flush_section(); cur, started = None, True
+            sec_num = msec.group(1)
+            sec_title, skip_until = _join_wrapped_title(msec.group(2).strip(), lines, i, pt_re)
         elif mappx:
-            _flush(); cur, started = None, True
+            _flush(); _flush_section(); cur, started = None, True
             sec_num, sec_title = f"прил.{mappx.group(1)}", f"Приложение {mappx.group(1)} к Положению"
         elif started and mp:
             _flush(); cur, buf = mp.group(1), [ln]
+            sec_has_points = True
         elif cur:
             buf.append(ln)
+        elif started and ln.strip():
+            sec_lines.append(ln)       # текст раздела до первого пункта — на случай, что его нет
     _flush()
+    _flush_section()
     return records
 
 
