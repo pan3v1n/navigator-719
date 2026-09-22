@@ -55,9 +55,35 @@ yc compute instance create `
 > Для 5-дневного теста сразу **зарезервируй статический публичный IP** (иначе при stop/start
 > адрес сменится и ссылка у экспертов протухнет).
 
-## 4. Открыть порты 22 и 80
+## 4. Открыть порты 22, 80 и 443
 В security group подсети/VM (консоль → Virtual Private Cloud → Security groups, или дефолтная SG)
-разрешить входящие: TCP **22** (SSH) и TCP **80** (демо). Без правила на 80 сайт не откроется.
+разрешить входящие: TCP **22** (SSH), TCP **80** (http → редирект на https и проверка ACME) и
+TCP **443** (HTTPS). Без 80 Let's Encrypt не выпустит сертификат, без 443 сайт не откроется.
+
+## 4а. Домен и HTTPS (с 22.09.2026)
+Публичный адрес VM **статический** (сделан в консоли: VPC → IP-адреса → «Сделать статическим»),
+домен **`719-навигатор.рф`** (Timeweb). Снаружи слушает только контейнер **caddy**:
+
+| Имя | Что отдаёт |
+|---|---|
+| `719-навигатор.рф` | лендинг `landing/index.html`, кнопка «Открыть сервис» → `app.` |
+| `app.719-навигатор.рф` | приложение (reverse proxy на контейнер `app:8000`) |
+
+1. В DNS-панели регистратора две записи типа **A** на IP VM: `@` и `app`.
+2. В `.env` на VM: `PUBLIC_DOMAIN=xn--719--83dani8b8bqyy.xn--p1ai` (⚠ **punycode**, не кириллица;
+   посчитать: `python3 -c "print('719-навигатор.рф'.encode('idna').decode())"`) и
+   `COOKIE_SECURE=true` (куки только по https).
+3. `docker compose up -d app caddy`. Caddy сам выпустит сертификаты Let's Encrypt для обоих имён
+   (запасной ЦС — ZeroSSL) и будет продлевать их; ключи — в томе `caddy_data`. **SSL у
+   регистратора не покупать.** Первый выпуск занимает до минуты после того, как DNS разъехался
+   (проверить: `dig +short app.xn--719--83dani8b8bqyy.xn--p1ai`).
+4. Проверка: `curl -sI https://app.xn--719--83dani8b8bqyy.xn--p1ai/login | head -1` → `200`;
+   `https://719-навигатор.рф` открывает лендинг. Голый `http://IP` теперь не обслуживается —
+   ссылки экспертам давать только доменные.
+
+Приложение публикует порт **только на петле VM** (`127.0.0.1:8000`) — для скрипта выкатки и
+ручных проверок с самой машины (`curl http://127.0.0.1:8000/ping`). uvicorn запущен с
+`--proxy-headers`, поэтому троттлинг входа видит реальный IP клиента, а не адрес caddy.
 
 ---
 
@@ -187,7 +213,9 @@ for f in ./navigator-backups/*.db; do python scripts/backup_db.py --verify "$f" 
 | Симптом | Решение |
 |---|---|
 | `load_kb` рвётся на скачивании e5 (`IncompleteRead`/`Timeout`) | В `.env` добавить `HF_ENDPOINT=https://hf-mirror.com`, повторить `docker compose run --rm app python scripts/load_kb.py`. `hf_xet` (чанковая докачка) уже в образе. |
-| Сайт не открывается по `http://VM_IP` | Не открыт порт 80 в security group; либо `docker compose ps` показывает app не Up — смотреть `docker compose logs app`. |
+| Сайт не открывается по домену | Не открыты 80/443 в security group; DNS ещё не разъехался (`dig`); `PUBLIC_DOMAIN` в `.env` не в punycode; сертификат не выпустился — `docker compose logs caddy`. Голый `http://VM_IP` с 22.09 не обслуживается. |
+| Приложение не отвечает на `127.0.0.1:8000` | `docker compose ps` показывает app не Up — смотреть `docker compose logs app`. |
+| После входа сразу выбрасывает на /login | `COOKIE_SECURE=true`, а сайт открыт по http — кука не отправляется. По домену ходить только https; для проверки по петле временно `COOKIE_SECURE=false`. |
 | app падает с ошибкой Qdrant | Qdrant не поднят/не проиндексирован: `docker compose up -d qdrant`, затем `load_kb`. |
 | «Сервис временно недоступен» в чате | Нет/неверный `DEEPSEEK_API_KEY` в `.env` или нет исходящей сети к api.deepseek.com. `docker compose logs app`. |
 | Долгий первый ответ | Первый запрос грузит e5 в память (разово). Дальше быстро. |

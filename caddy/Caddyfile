@@ -1,0 +1,30 @@
+# Caddy перед Навигатором ПП №719. Два имени на одном адресе VM:
+#   {$PUBLIC_DOMAIN}      — лендинг (статика из ./landing), кнопка «Открыть сервис» → app.
+#   app.{$PUBLIC_DOMAIN}  — само приложение (FastAPI в контейнере app, порт 8000).
+# PUBLIC_DOMAIN приходит из docker-compose (из .env) и ОБЯЗАН быть в punycode:
+# 719-навигатор.рф → xn--719--83dani8b8bqyy.xn--p1ai. HTTPS автоматический: Caddy выпускает
+# сертификаты Let's Encrypt (запасной ЦС — ZeroSSL) и редиректит http → https сам; для
+# `localhost` (локальная проверка) — самоподписанный. Ничего покупать у регистратора не нужно.
+
+{$PUBLIC_DOMAIN} {
+	root * /srv/landing
+	file_server
+	encode gzip
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}
+
+app.{$PUBLIC_DOMAIN} {
+	encode gzip
+	# Стриминг ответа (SSE /api/chat/stream): без flush_interval -1 прокси копил бы буфер,
+	# и ответ приходил бы одним куском в конце, а не по мере генерации.
+	reverse_proxy app:8000 {
+		flush_interval -1
+	}
+	header {
+		X-Content-Type-Options nosniff
+		Referrer-Policy strict-origin-when-cross-origin
+	}
+}

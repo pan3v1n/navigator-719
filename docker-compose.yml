@@ -1,6 +1,31 @@
-# Навигатор ПП РФ №719 — деплой одной VM: app (FastAPI+e5) + Qdrant.
+# Навигатор ПП РФ №719 — деплой одной VM: caddy (HTTPS, лендинг) + app (FastAPI+e5) + Qdrant.
 # Порядок первого запуска — в docs/DEPLOY.md (индексация load_kb делается разово).
+#
+# Снаружи слушает ТОЛЬКО caddy (80/443). Он держит два имени: `PUBLIC_DOMAIN` → статический
+# лендинг из ./landing, `app.PUBLIC_DOMAIN` → приложение. Сертификаты Let's Encrypt выпускает
+# и продлевает сам (том caddy_data), для этого в security group VM должен быть открыт 443.
+# `PUBLIC_DOMAIN` берётся из .env рядом с этим файлом (punycode!); без него — localhost с
+# самоподписанным сертификатом, что годится для локальной проверки.
 services:
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    depends_on:
+      - app
+    environment:
+      PUBLIC_DOMAIN: ${PUBLIC_DOMAIN:-localhost}
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./landing:/srv/landing:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "5" }
+
   qdrant:
     image: qdrant/qdrant:latest
     restart: unless-stopped
@@ -36,8 +61,9 @@ services:
       - models:/models
       - appdata:/data
     ports:
-      # Демо по http на 80-м порту VM. Не забудь открыть 80 в security group.
-      - "80:8000"
+      # ТОЛЬКО петля VM: для скрипта выкатки и проверок с самой машины (curl 127.0.0.1:8000).
+      # Наружу приложение не торчит — публичный вход через caddy. Раньше здесь было "80:8000".
+      - "127.0.0.1:8000:8000"
     logging:
       driver: json-file
       options: { max-size: "10m", max-file: "5" }  # ограничить docker-логи, чтобы не распухли за тест
@@ -46,3 +72,5 @@ volumes:
   qdrant_storage:
   models:
   appdata:
+  caddy_data:    # сертификаты и ключи ACME — терять нельзя (лимиты выпуска Let's Encrypt)
+  caddy_config:
