@@ -29,4 +29,8 @@ EXPOSE 8000
 HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8000/ping || exit 1
 
-CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Порт 8000 наружу НЕ публикуется (docker-compose отдаёт его только Caddy и петле VM), поэтому
+# заголовкам X-Forwarded-For / X-Forwarded-Proto можно верить от любого адреса: без них
+# троттлинг входа по IP видел бы адрес прокси, а редиректы шли бы на http.
+CMD ["python", "-m", "uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", \
+     "--proxy-headers", "--forwarded-allow-ips", "*"]

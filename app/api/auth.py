@@ -39,7 +39,8 @@ def uid_from_remember(request: Request) -> int | None:
 
 def set_remember_cookie(response: Response, user_id: int) -> None:
     response.set_cookie(REMEMBER_COOKIE, make_remember_token(user_id),
-                        max_age=REMEMBER_MAX_AGE, httponly=True, samesite="lax")
+                        max_age=REMEMBER_MAX_AGE, httponly=True, samesite="lax",
+                        secure=settings.COOKIE_SECURE)
 
 
 def clear_remember_cookie(response: Response) -> None:

@@ -79,3 +79,7 @@ dump_tables.json
 
 # Кэш сходств замера релевантности (scripts/eval_rules_relevance.py) — воспроизводим, не артефакт
 scripts/_rules_relevance.json
+
+# Метка выкаченного релиза — артефакт ВЫКАТКИ, не исходник (app/core/release.py).
+# В git её быть не должно: иначе `git archive` понесёт чужой тег в пакет следующего релиза.
+/RELEASE

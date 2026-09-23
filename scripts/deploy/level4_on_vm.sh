@@ -24,7 +24,7 @@
 set -u
 
 OUT=${OUT:-/tmp/level4}
-BASE=${BASE:-http://127.0.0.1}
+BASE=${BASE:-http://127.0.0.1:8000}  # с 22.09 приложение на петле VM, 80/443 у caddy
 PY=${PY:-python3}
 ACCOUNTS=${ACCOUNTS:-}
 N_SINGLE=${N_SINGLE:-30}

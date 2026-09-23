@@ -55,7 +55,7 @@ DeepSeek в 127.0.0.1. `DEEPSEEK_BASE_URL` менять нельзя без пе
 Скрипт это увидит (класс не изменился) и скажет «не воспроизведено» — а не запишет «пройдено».
 
 ЗАПУСК (на боевой машине, из каталога с `docker-compose.yml`):
-    python3 scripts/eval_chaos.py --accounts 'lt.load1:PASS' --base-url http://127.0.0.1 \
+    python3 scripts/eval_chaos.py --accounts 'lt.load1:PASS' --base-url http://127.0.0.1:8000 \
         --json /tmp/level4_chaos.json
     # только один сценарий:
     python3 scripts/eval_chaos.py --only qdrant --accounts '...'
@@ -462,7 +462,7 @@ def run_scenario(sc: Chaos, base: str, cookie: str, question: str, timeout: floa
 
 def main() -> int:
     ap = argparse.ArgumentParser(description="Хаос уровня 4 (EV22 #130)")
-    ap.add_argument("--base-url", default="http://127.0.0.1")
+    ap.add_argument("--base-url", default="http://127.0.0.1:8000")
     ap.add_argument("--accounts", required=True, help="'логин:пароль' — достаточно одного")
     ap.add_argument("--compose-dir", default=".", help="каталог с docker-compose.yml")
     ap.add_argument("--docker", default="sudo -n docker", help="как звать docker")

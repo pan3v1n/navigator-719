@@ -10,6 +10,7 @@ from app.api.chat import router as chat_router
 from app.api.routes import router as navigate_router
 from app.api.web import router as web_router
 from app.core.config import settings
+from app.core.release import release_label
 from app.db.engine import init_db
 
 
@@ -27,6 +28,11 @@ async def lifespan(app: FastAPI):
             logger.warning(msg + ". Для прод-деплоя ОБЯЗАТЕЛЬНО задайте случайный SESSION_SECRET.")
         else:
             raise RuntimeError(msg + f". Задайте случайный SESSION_SECRET (APP_ENV={settings.APP_ENV}).")
+    if settings.APP_ENV != "development" and not settings.COOKIE_SECURE:
+        # Не останавливаем: до появления домена бой законно жил по http. Но молчать нельзя —
+        # без флага кука уйдёт по http, если кто-то откроет сервис по голому адресу.
+        logger.warning("COOKIE_SECURE=false при APP_ENV=%s: куки сессии могут уйти по http. "
+                       "За HTTPS-прокси (Caddy) задайте COOKIE_SECURE=true." % settings.APP_ENV)
     if settings.LOG_FILE:  # персистентный файловый лог (на VM — на томе, переживает редеплой)
         logger.add(settings.LOG_FILE, rotation="10 MB", retention="14 days",
                    encoding="utf-8", enqueue=True, level=settings.LOG_LEVEL)
@@ -41,14 +47,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
-# Сессии-куки для auth веб-UI (подпись SESSION_SECRET). Для демо по http: https_only=False.
+# Сессии-куки для auth веб-UI (подпись SESSION_SECRET). `https_only` — из COOKIE_SECURE: локально
+# и на демо по http выключен, за Caddy с HTTPS включается в .env (см. app/core/config.py).
 # max_age=None → session-only cookie (умирает при закрытии браузера): логин требуется при каждом
 # открытии сайта. Персистентный автовход — через cookie «запомнить меня» (app/api/auth.py).
 app.add_middleware(
     SessionMiddleware,
     secret_key=settings.SESSION_SECRET,
     same_site="lax",
-    https_only=False,
+    https_only=settings.COOKIE_SECURE,
     max_age=None,
 )
 
@@ -66,7 +73,11 @@ app.mount(
 
 @app.get("/ping")
 async def ping():
-    return {"status": "ok", "app": settings.APP_TITLE, "version": settings.APP_VERSION}
+    # ⚠ `release` рядом с `version` намеренно: без него пометку версии во фронте нечем
+    # проверить с самой VM — только глазами в браузере. Релизная проверка выкатки читает её
+    # отсюда и сверяет с тегом профиля.
+    return {"status": "ok", "app": settings.APP_TITLE, "version": settings.APP_VERSION,
+            "release": release_label()}
 
 
 if __name__ == "__main__":

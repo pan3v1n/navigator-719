@@ -24,3 +24,7 @@ uploads
 docs
 tests
 frontend
+
+# Прокси и лендинг живут в контейнере caddy, в образ приложения не нужны
+caddy
+landing
