@@ -5,8 +5,9 @@
   своим кодом в auth.py и молча осталась бы без флага, если бы менялся только SessionMiddleware;
 * приложение больше не публикует порт наружу: снаружи слушает только caddy, иначе домен и HTTPS
   обходятся голым `http://IP:8000`;
-* Caddyfile держит оба имени и не буферизует стриминг;
-* лендинг ведёт на поддомен `app.`, а не на голый адрес;
+* Caddyfile держит оба имени (метка поддомена — из окружения, у владельца «сервис») и не
+  буферизует стриминг;
+* лендинг ведёт на поддомен «сервис.», а не на голый адрес;
 * скрипт выкатки проверяет приложение по ПЕТЛЕ (порт 8000), а не через прокси — через
   `http://127.0.0.1` без порта у caddy нет сайта, и «/ping не ответил» ударил бы по верному коду.
 """
@@ -49,6 +50,8 @@ class TestCookieSecureFlag(unittest.TestCase):
         from app.core.config import Settings
         self.assertIn("COOKIE_SECURE", Settings.model_fields)
         self.assertIn("PUBLIC_DOMAIN", Settings.model_fields)
+        self.assertEqual(Settings.model_fields["APP_SUBDOMAIN"].default, "xn--b1afk4ade",
+                         "punycode метки «сервис» — кириллицу Caddy не кодирует")
         self.assertFalse(Settings.model_fields["COOKIE_SECURE"].default,
                          "локальный дефолт — без флага: иначе вход по http не работает у разработчика")
 
@@ -73,6 +76,7 @@ class TestComposeTopology(unittest.TestCase):
 
     def test_domain_comes_from_env_with_local_fallback(self):
         self.assertIn("${PUBLIC_DOMAIN:-localhost}", self.src)
+        self.assertIn("${APP_SUBDOMAIN:-xn--b1afk4ade}", self.src)
 
 
 class TestCaddyfile(unittest.TestCase):
@@ -81,7 +85,8 @@ class TestCaddyfile(unittest.TestCase):
 
     def test_two_sites(self):
         self.assertRegex(self.src, r"(?m)^\{\$PUBLIC_DOMAIN\} \{", "корень → лендинг")
-        self.assertRegex(self.src, r"(?m)^app\.\{\$PUBLIC_DOMAIN\} \{", "app. → сервис")
+        self.assertRegex(self.src, r"(?m)^\{\$APP_SUBDOMAIN\}\.\{\$PUBLIC_DOMAIN\} \{",
+                         "поддомен из окружения → сервис")
         self.assertIn("root * /srv/landing", self.src)
         self.assertIn("reverse_proxy app:8000", self.src)
 
@@ -89,7 +94,9 @@ class TestCaddyfile(unittest.TestCase):
         self.assertIn("flush_interval -1", self.src)
 
     def test_no_hardcoded_domain_or_ip(self):
-        self.assertNotIn("xn--", self.src.split("\n\n", 1)[1], "домен — из окружения, не в конфиге")
+        body = self.src.split("\n\n", 1)[1]
+        self.assertNotIn("xn--", body, "домен — из окружения, не в конфиге")
+        self.assertNotIn("сервис", body, "метка — из окружения, не в конфиге")
         self.assertEqual(re.findall(r"\b\d{1,3}(?:\.\d{1,3}){3}\b", self.src), [])
 
 
@@ -100,16 +107,17 @@ class TestLanding(unittest.TestCase):
     def test_button_leads_to_app_subdomain(self):
         m = re.search(r'id="open-app" href="([^"]+)"', self.src)
         self.assertIsNotNone(m)
-        self.assertTrue(m.group(1).startswith("https://app."), m.group(1))
+        self.assertTrue(m.group(1).startswith("https://сервис."), m.group(1))
         # и скрипт строит адрес от имени лендинга, чтобы страница не зависела от punycode/кириллицы
-        self.assertIn("'//app.' + h", self.src)
+        self.assertIn("var SUB = 'сервис'", self.src)
+        self.assertIn("'//' + SUB + '.' + h", self.src)
 
     def test_disclaimer_present(self):
         self.assertIn("эксперт ТПП", self.src)
 
     def test_legal_links_point_to_app(self):
         for path in ("/help", "/terms", "/privacy"):
-            self.assertRegex(self.src, r'href="https://app\.[^"]+' + path + '"')
+            self.assertRegex(self.src, r'href="https://сервис\.[^"]+' + path + '"')
 
 
 class TestDeployChecksGoThroughLoopbackPort(unittest.TestCase):

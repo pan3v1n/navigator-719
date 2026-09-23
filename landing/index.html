@@ -43,8 +43,8 @@
     <p class="lead">Ассистент эксперта ТПП: какие требования предъявляются к продукции, сколько
       баллов локализации нужно набрать и как подтвердить производство на территории России.</p>
 
-    <a class="cta" id="open-app" href="https://app.719-навигатор.рф/">Открыть сервис</a>
-    <p class="cta-note">Доступ по логину, выданному ТПП. Вход — на поддомене <code>app.</code></p>
+    <a class="cta" id="open-app" href="https://сервис.719-навигатор.рф/">Открыть сервис</a>
+    <p class="cta-note">Доступ по логину, выданному ТПП. Вход — на поддомене <code>сервис.</code></p>
 
     <section class="grid">
       <div class="card">
@@ -66,17 +66,19 @@
 
     <footer>
       <span>© Курская ТПП</span>
-      <a id="lnk-help" href="https://app.719-навигатор.рф/help">Справка</a>
-      <a id="lnk-terms" href="https://app.719-навигатор.рф/terms">Условия использования</a>
-      <a id="lnk-privacy" href="https://app.719-навигатор.рф/privacy">Политика конфиденциальности</a>
+      <a id="lnk-help" href="https://сервис.719-навигатор.рф/help">Справка</a>
+      <a id="lnk-terms" href="https://сервис.719-навигатор.рф/terms">Условия использования</a>
+      <a id="lnk-privacy" href="https://сервис.719-навигатор.рф/privacy">Политика конфиденциальности</a>
     </footer>
   </main>
   <script>
-    // Ссылки на сервис строятся от ИМЕНИ ЛЕНДИНГА: поддомен app. у того же домена. Так страница
-    // не зависит от того, каким именем её открыли (кириллица, punycode, localhost).
+    // Ссылки на сервис строятся от ИМЕНИ ЛЕНДИНГА: поддомен «сервис.» у того же домена. Так
+    // страница не зависит от того, каким именем её открыли (кириллица, punycode, localhost).
+    // Кириллическую метку браузер сам кодирует в punycode при переходе.
     (function () {
+      var SUB = 'сервис';
       var h = location.hostname; if (!h) return;
-      var base = location.protocol + '//app.' + h + (location.port ? ':' + location.port : '');
+      var base = location.protocol + '//' + SUB + '.' + h + (location.port ? ':' + location.port : '');
       document.getElementById('open-app').href = base + '/';
       document.getElementById('lnk-help').href = base + '/help';
       document.getElementById('lnk-terms').href = base + '/terms';
