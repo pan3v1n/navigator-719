@@ -1,5 +1,5 @@
 # Caddy перед Навигатором ПП №719. Два имени на одном адресе VM:
-#   {$PUBLIC_DOMAIN}      — лендинг (статика из ./landing), кнопка «Открыть сервис» → app.
+#   {$PUBLIC_DOMAIN}      — лендинг (статика из ./landing), кнопка «Открыть сервис» → сервис.
 #   {$APP_SUBDOMAIN}.{$PUBLIC_DOMAIN} — само приложение (FastAPI в контейнере app, порт 8000);
 #                           метка «сервис» приходит в punycode (xn--b1afk4ade): `caddy adapt`
 #                           кириллицу НЕ кодирует, а браузер шлёт Host в punycode.

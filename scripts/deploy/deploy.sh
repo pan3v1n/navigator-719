@@ -429,6 +429,23 @@ fi
 cd "$PKG" || { say "нет каталога пакета: $PKG"; exit 1; }
 sha256sum -c SHA256SUMS.txt || { say "контрольная сумма НЕ сошлась — выхожу"; exit 1; }
 
+# --- домен в .env ДО того, как что-либо тронуто (ревью PR #140, 23.09.2026) -----------------
+# С `test26` порт 80 принадлежит caddy, а имена сайтов он берёт из PUBLIC_DOMAIN в `.env` VM.
+# `.env` выкатка не трогает принципиально — значит, обязана убедиться, что оператор его дописал:
+# без PUBLIC_DOMAIN compose подставит `localhost`, публичный вход окажется пустым, а все
+# проверки ниже идут по петле 127.0.0.1:8000 и отчитались бы «все проверки прошли».
+# ⚠ Стоп здесь, а не `fail` в конце: бэкап ещё не снят, код не распакован — цена ошибки ноль.
+PUBLIC_DOMAIN_ENV="$(grep -E '^PUBLIC_DOMAIN=' "$APP/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]"')"
+APP_SUBDOMAIN_ENV="$(grep -E '^APP_SUBDOMAIN=' "$APP/.env" 2>/dev/null | tail -1 | cut -d= -f2- | tr -d '[:space:]"')"
+if [ "${REQUIRE_PUBLIC_DOMAIN:-1}" = "1" ] && [ -z "$PUBLIC_DOMAIN_ENV" ]; then
+  say "❌ В $APP/.env НЕ ЗАДАН PUBLIC_DOMAIN — caddy поднялся бы на localhost, публичный вход был бы"
+  say "   пуст при зелёном вердикте. Допишите PUBLIC_DOMAIN (punycode), APP_SUBDOMAIN, COOKIE_SECURE=true"
+  say "   (docs/DEPLOY.md §4а). Осознанный обход для локального стенда: REQUIRE_PUBLIC_DOMAIN=0"
+  exit 2
+fi
+[ -n "$APP_SUBDOMAIN_ENV" ] || APP_SUBDOMAIN_ENV="xn--b1afk4ade"
+say "домен: ${PUBLIC_DOMAIN_ENV:-<не задан>}  сервис: $APP_SUBDOMAIN_ENV.${PUBLIC_DOMAIN_ENV:-<не задан>}"
+
 # --- B. бэкап боевой БД ДО всего ----------------------------------------------------------
 say "--- бэкап боевой БД ДО всего ---"
 if ! run_step 3 $DOCKER compose -f "$APP/docker-compose.yml" exec -T app \
@@ -538,7 +555,14 @@ say "--- рестарт приложения ---"
 # публикуется лишь на петле VM (127.0.0.1:8000) — по ней и идут проверки ниже. `up -d` для
 # уже поднятого caddy ничего не делает; на первой выкатке с доменом — поднимет.
 $DOCKER compose up -d app caddy
-sleep 12
+# ⚠ Caddyfile и лендинг примонтированы с диска, а не запечены в образ: `up -d` НЕ перечитает
+# изменившийся Caddyfile у уже работающего caddy (ревью PR #140 — этот же PR правил его в
+# `9b3d93f`). Reload идёт после старта; на первой выкатке caddy только что поднят и reload
+# просто повторит его конфиг.
+sleep 5
+$DOCKER compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
+  && say "  caddy: конфиг перечитан" || say "  ⚠ caddy reload не прошёл — смотреть compose logs caddy"
+sleep 8
 $DOCKER compose ps --format "  {{.Name}} {{.Status}}"
 
 # --- переиндексация ПО ДОКУМЕНТАМ (K11 #41) ------------------------------------------------
@@ -659,6 +683,33 @@ for p in / /help /terms /privacy; do
     *) fail "страница $p отдала $code" ;;
   esac
 done
+
+# --- ПУБЛИЧНЫЙ ВХОД через caddy (ревью PR #140) ---------------------------------------------
+# Петля выше проверяет СЕРВИС; здесь — то, что видит пользователь: оба имени через caddy на
+# этой же машине (`--resolve`, чтобы не зависеть от DNS и от рваного канала). Сертификат
+# Let's Encrypt выпускается асинхронно после старта — ждём до ~2 минут, потом провал.
+if [ -n "$PUBLIC_DOMAIN_ENV" ]; then
+  say "--- публичный вход через caddy ($PUBLIC_DOMAIN_ENV) ---"
+  for host in "$PUBLIC_DOMAIN_ENV" "$APP_SUBDOMAIN_ENV.$PUBLIC_DOMAIN_ENV"; do
+    path="/"; [ "$host" = "$PUBLIC_DOMAIN_ENV" ] || path="/login"
+    code=000; n=0
+    while [ $n -lt 12 ]; do
+      code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+             --resolve "$host:443:127.0.0.1" "https://$host$path" 2>/dev/null || echo 000)
+      case "$code" in 2??|3??) break ;; esac
+      n=$((n + 1)); sleep 10
+    done
+    echo "   https://$host$path → $code (попыток $((n + 1)))"
+    case "$code" in
+      2??|3??) ;;
+      *) fail "публичный вход https://$host$path отдал $code — сертификат/caddy (compose logs caddy)" ;;
+    esac
+  done
+  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+         --resolve "$PUBLIC_DOMAIN_ENV:80:127.0.0.1" "http://$PUBLIC_DOMAIN_ENV/" 2>/dev/null || echo 000)
+  echo "   http://$PUBLIC_DOMAIN_ENV/ → $code (ожидается редирект на https)"
+  case "$code" in 3??) ;; *) fail "http → https редирект не работает ($code)" ;; esac
+fi
 df -h / | tail -1
 
 # --- D. итог зависит от проверок, а не от того, что скрипт дошёл до конца ------------------

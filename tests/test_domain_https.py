@@ -138,3 +138,30 @@ class TestDeployChecksGoThroughLoopbackPort(unittest.TestCase):
         src = _read(".dockerignore")
         self.assertIn("\ncaddy\n", src)
         self.assertIn("\nlanding\n", src)
+
+
+class TestDeployGuardsFromReview140(unittest.TestCase):
+    """Ревью PR #140 (23.09.2026): три находки в пути выкатки, каждая закреплена сторожем."""
+
+    def setUp(self):
+        src = _read("scripts/deploy/deploy.sh")
+        self.code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+
+    def test_missing_public_domain_stops_before_backup(self):
+        # стоп стоит ДО шага бэкапа: цена ошибки ноль, бой не тронут
+        stop = self.code.index('НЕ ЗАДАН PUBLIC_DOMAIN')
+        backup = self.code.index('бэкап боевой БД ДО всего')
+        self.assertLess(stop, backup)
+        self.assertIn("REQUIRE_PUBLIC_DOMAIN", self.code, "осознанный обход для локального стенда")
+
+    def test_caddy_reload_after_up(self):
+        up = self.code.index("compose up -d app caddy")
+        self.assertIn("caddy reload --config /etc/caddy/Caddyfile", self.code[up:])
+
+    def test_public_entry_probed_through_caddy(self):
+        self.assertIn('--resolve "$host:443:127.0.0.1"', self.code)
+        self.assertIn("http → https редирект", self.code)
+
+    def test_docs_name_the_real_subdomain(self):
+        for rel in (".env.example", "app/core/config.py", "caddy/Caddyfile"):
+            self.assertNotRegex(_read(rel), r"app\.(<домен>|`|PUBLIC)", rel)
