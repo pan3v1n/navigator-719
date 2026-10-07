@@ -76,12 +76,16 @@ def _unit_header_table(lines: list[str], i: int, note_no: str, section: str | No
         if _NOTE_INTRO_RE.match(lines[j]) or j - i > 4:
             return None, i
         j += 1
+    # ⚠ Шапка 17(3) — пять физических строк; ограничение не даёт склеить шапку любого «Код по…»
+    # с остатком файла, когда закрывающей «|» нет (ревью PR #156).
     head, k = [], j
-    while k < n:
+    while k < n and k - j < 8:
         head.append(lines[k])
         if lines[k].rstrip().endswith("|"):
             break
         k += 1
+    else:
+        return None, i
     hcells = [re.sub(r"\s+", " ", c.replace("\xa0", " ")).strip() for c in "\n".join(head).split("|")]
     labels = [_UNIT_LABEL_RE.match(c) for c in hcells[2:] if c]
     if len(labels) < 2 or not all(labels):
@@ -106,10 +110,17 @@ def _unit_header_table(lines: list[str], i: int, note_no: str, section: str | No
             prev = [""] * len(years)               # объединение не пересекает заголовок группы
             continue
         vals = [c.strip() for c in cells[2:2 + len(years)]]
-        vals = [v if v else p for v, p in zip(vals, prev)]
-        prev = vals
+        # ⚠ Объединённой считается только строка, у которой пусты ВСЕ ячейки значений (ревью
+        # PR #156). Покадровое заполнение превратило бы пустую ячейку ОДНОГО года («за этот год
+        # требования ещё нет») в число соседней строки со ссылкой на 17(3). На ред. 29.09.2026
+        # частично пустых строк в таблице 0 (272 полных, 4 пустых целиком — все ROWSPAN по HTML),
+        # то есть правило меняет только будущие редакции, и в сторону «не показать».
+        if not any(vals):
+            vals = prev
         if not all(_BARE_NUMBER_RE.match(v) for v in vals):
+            prev = [""] * len(years)               # от отвергнутой строки наследовать нечего
             continue                               # не та строка — молча не выдумываем порог
+        prev = vals
         names, cur = [], []
         for part in cells[1].split("\n"):
             part = part.strip()
@@ -471,9 +482,19 @@ def _codes_before_quote(line: str) -> list[str]:
     return [c for c in _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", body)) if "." in c]
 _AMEND_STRIP_RE = re.compile(r"\s*\(в ред\.(?:[^()]|\([^()]*\))*\)")
 
+def _drop_dangling_quote(s: str) -> str:
+    """Срезать НЕПАРНУЮ закрывающую кавычку: «…не менее 3300 баллов"».
+
+    Сводный текст ред. 29.09.2026 сохранил хвост цитаты изменяющего акта (N 1002 излагал строку
+    прим. 17 «в следующей редакции: "…"»), и кавычка уезжала в строку «Порог:» (ревью PR #156).
+    Парную не трогаем — в пороге законно бывает имя в кавычках."""
+    return s[:-1].rstrip() if s.endswith('"') and s.count('"') % 2 else s
+
+
 def _clean_step(line: str) -> str:
     """Строка-ступень без ссылки на редакцию и без нулевой ширины пробелов."""
-    return _ZERO_WIDTH_RE.sub("", _AMEND_STRIP_RE.sub("", line)).strip().rstrip(";. ").strip()
+    step = _ZERO_WIDTH_RE.sub("", _AMEND_STRIP_RE.sub("", line)).strip().rstrip(";. ").strip()
+    return _drop_dangling_quote(step)
 
 
 # --- ⚠ ТРЕТЬЯ ФОРМА ПРИМЕЧАНИЯ: КОДЫ ВО ВВОДНОЙ, СТУПЕНИ ПРОЗОЙ (A1 #56, остаток K2 #47) ------
@@ -651,6 +672,7 @@ def _flat_thresholds() -> list[dict]:
                 j = sep + 1 if sep > 0 else ln.find("не менее")
                 left = ln[:ln.find("не менее")]
                 thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip(" -—").rstrip(";. ").strip()
+                thr = _drop_dangling_quote(thr)
                 codes = _codes_before_quote(ln)
                 thr, exc = _split_exception(thr)
                 if codes and thr:
@@ -953,22 +975,42 @@ def _list_items(product_name: str | None) -> list[str]:
     return [_norm(_strip_fn(p).strip(" ;")) for p in parts if p.strip(" ;")]
 
 
-def _list_items_verdict(table: dict, product_name: str | None):
+def _rows_by_name(table: dict) -> dict:
+    """Наименование → строка таблицы; строка-перечень индексируется и по КАЖДОМУ виду.
+
+    ⚠ Строка таблицы тоже бывает перечнем («Иллюминаторы; крышки люков») — без индекса по видам
+    вид позиции с таким перечнем не совпадает дословно ни с чем, конфликт не виден, и правило
+    «≥2 общих слова» отдаёт график соседней строки (так было у позиции «Иллюминаторы; крышки
+    люков; трубы вентиляционные; …»: 65/70/75 против 25/30/35).
+    ⚠ ОДИН индекс на рантайм и классификатор (ревью PR #156): копия в
+    `classify_missing_thresholds` строила его в другом порядке, и вид, совпавший с полным именем
+    другой строки, разрешался в разные строки. Кэшируется на самой таблице (`_tables` — кэш на
+    процесс), а не пересобирается на каждом вызове `lookup_threshold`."""
+    idx = table.get("_by_name")
+    if idx is None:
+        idx = {}
+        for r in table["rows"]:
+            for nm in [_norm(_strip_fn(r["name"]))] + _list_items(r["name"]):
+                idx.setdefault(nm, r)
+        table["_by_name"] = idx
+    return idx
+
+
+def _list_items_verdict(table: dict, product_name: str | None, codes: list[str]):
     """Для позиции из ≥2 наименований: строка таблицы с общим для них порогом, "conflict" или None.
 
-    None — правило неприменимо (наименование одно или дословно в таблице нашлось меньше двух)."""
+    None — правило неприменимо (наименование одно или дословно в таблице нашлось меньше двух).
+    ⚠ Строка засчитывается, только если её код покрывает код позиции (тем же `_code_applies`, что
+    ветка 1б, в которой вердикт и спрашивается; ревью PR #156). Таблицы без раздела проходят
+    фильтр раздела у позиций ЛЮБОГО раздела, и одного общего имени вида в следующей редакции
+    хватило бы, чтобы отдать порог позиции с чужим кодом. На ред. 29.09.2026 у всех 52 совпадений
+    по имени код тоже совпадал — радиус правки 0."""
     items = _list_items(product_name)
     if len(items) < 2:
         return None
-    # ⚠ Строка таблицы тоже бывает перечнем («Иллюминаторы; крышки люков») — индексируем её по
-    # КАЖДОМУ виду, иначе вид позиции с таким перечнем не совпадает дословно ни с чем, конфликт
-    # не виден, и правило «≥2 общих слова» отдаёт график соседней строки (так было у позиции
-    # «Иллюминаторы; крышки люков; трубы вентиляционные; …»: 65/70/75 против 25/30/35).
-    rows_by_name = {}
-    for r in table["rows"]:
-        for nm in [_norm(_strip_fn(r["name"]))] + _list_items(r["name"]):
-            rows_by_name.setdefault(nm, r)
-    hits = [rows_by_name[it] for it in items if it in rows_by_name]
+    by_name = _rows_by_name(table)
+    hits = [by_name[it] for it in items if it in by_name
+            and any(_code_applies(rc, c) for c in codes for rc in by_name[it]["codes"])]
     if len(hits) < 2:
         return None
     if len({tuple(r["by_year"].items()) for r in hits}) > 1:
@@ -1140,7 +1182,8 @@ def _fmt_flat(r: dict, group: bool = False, product_name: str = "") -> str:
         # ⚠ Приписка идёт К ОБЩЕМУ ГРАФИКУ и ДО оговорки (ревью 20.08.2026): раньше она
         # добавлялась в самый конец, то есть после перевода строки, и оговорка получала
         # предупреждение о группе, а строка «Порог:» оставалась без него вовсе.
-        out += (f" — порог задан для группы кодов {', '.join(r['codes'])}; "
+        # Коды без повторов: строка прим. 17 называет «из 30.11.33.190 "…"» четыре раза подряд.
+        out += (f" — порог задан для группы кодов {', '.join(dict.fromkeys(r['codes']))}; "
                 f"проверьте применимость к вашей позиции по первоисточнику")
     if r.get("exception"):
         # Отдельной строкой и ВСЕГДА с условием: график без своего условия и есть неверный ответ
@@ -1243,7 +1286,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # у кранов — четыре разных графика. Правило «≥2 общих слова» ниже отдавало позиции
             # график ОДНОГО вида. Здесь: наименования перечня, найденные в таблице дословно, дают
             # одинаковые значения → порог общий; разные → порога у позиции нет, и мы не гадаем.
-            verdict = _list_items_verdict(t, product_name)
+            verdict = _list_items_verdict(t, product_name, codes)
             if verdict == "conflict":
                 return None
             if isinstance(verdict, dict):

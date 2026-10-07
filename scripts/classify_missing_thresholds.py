@@ -82,6 +82,7 @@ from app.rag.thresholds import (  # noqa: E402
     _names_this_position,
     _flat_thresholds,
     _norm,
+    _rows_by_name,
     _strip_fn,
     _tables,
     note_scope,
@@ -204,16 +205,19 @@ def classify(rec: dict, rows: list[dict]) -> dict:
     # скопировано (`_list_items_verdict`). Без этой ветки строка таблицы с покрывающим кодом
     # находилась ниже, и позиция уходила в `defect_unattached` — гейт `attachment_defects == 0`
     # краснел на верном состоянии, то есть проверка была строже защищаемого ею кода.
-    if value is None:
+    # ⚠ ФИЛЬТРЫ — ТЕ ЖЕ, ЧТО У РАНТАЙМА (ревью PR #156): только таблицы ОБЩЕГО порога, только при
+    # наличии кодов, раздел — как в ветке 1б `_lookup`. Иначе конфликт в закупочной таблице
+    # (прим. 40, раздел III) или у позиции без кода назывался «рантайм верно молчит», хотя рантайм
+    # эту таблицу для общего порога не смотрел вовсе, — и настоящий пробел уходил из гейта.
+    if value is None and codes:
         sec = rec.get("section_roman")
         for t in _tables():
-            if t.get("section") and sec and t["section"] != sec:
+            if note_scope(t["note"]) != "general":
                 continue
-            if _list_items_verdict(t, name) == "conflict":
-                by = {_norm(_strip_fn(r["name"])): r for r in t["rows"]}
-                for r in t["rows"]:
-                    for it in _list_items(r["name"]):
-                        by.setdefault(it, r)
+            if sec and t.get("section") and t["section"] != sec:
+                continue
+            if _list_items_verdict(t, name, codes) == "conflict":
+                by = _rows_by_name(t)
                 parts = [f"{it}: {'/'.join(re.sub(r'[^0-9]', '', v) for v in by[it]['by_year'].values())}"
                          for it in _list_items(name) if it in by]
                 return {"class": "list_mixed",
