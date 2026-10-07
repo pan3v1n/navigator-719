@@ -228,6 +228,11 @@ class TestLandingGuards(unittest.TestCase):
     def test_no_placeholder_prices(self):
         self.assertNotIn("0 000 ₽", self.text)
 
+    def test_tab_title_is_short(self):
+        # решение владельца 07.10: во вкладке браузера — только имя сервиса, без «ИИ-помощник
+        # Курской ТПП» (текст на странице и описание для поисковиков не тронуты)
+        self.assertEqual(re.findall(r"<title>([^<]*)</title>", self.html), ["Навигатор ПП 719"])
+
     def test_plan_volumes_from_design(self):
         # Объёмы тарифов — из макета, решение владельца 07.10. ⚠ Сервис их НЕ считает и не
         # ограничивает (квоты по пользователю нет) — разница тарифов пока держится договором.
