@@ -3,87 +3,276 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Навигатор ПП РФ №719 — Курская ТПП</title>
-  <meta name="description" content="Ассистент эксперта ТПП по Постановлению Правительства РФ №719: требования к продукции, баллы локализации, порядок подтверждения производства в РФ.">
+  <title>Навигатор ПП 719 — ИИ-помощник Курской ТПП</title>
+  <meta name="description" content="ИИ-помощник Курской ТПП по Постановлению Правительства РФ № 719: требования к продукции, порядок подтверждения производства и внесения в реестр — ответы со ссылками на пункты документов.">
   <link rel="icon" type="image/svg+xml" href="/favicon.svg">
-  <style>
-    :root { --text:#0d0d0d; --muted:#6b6b6b; --border:#e6e6e6; --accent:#0d0d0d;
-            --font:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif; }
-    * { box-sizing:border-box; }
-    body { margin:0; font-family:var(--font); color:var(--text); font-size:16px; line-height:1.55;
-           background:radial-gradient(1100px 460px at 50% -8%,#f2f3f5,#fff) no-repeat #fff;
-           -webkit-font-smoothing:antialiased; }
-    a { color:inherit; }
-    .wrap { max-width:760px; margin:0 auto; padding:56px 22px 40px; }
-    .brand { display:flex; align-items:center; gap:10px; font-weight:600; font-size:15px; }
-    .logo { display:inline-flex; align-items:center; justify-content:center; width:34px; height:34px;
-            background:var(--accent); color:#fff; border-radius:10px; font-size:12px; font-weight:700; }
-    h1 { font-size:34px; line-height:1.2; margin:40px 0 14px; font-weight:650; letter-spacing:-.01em; }
-    .lead { font-size:18px; color:#333; margin:0 0 28px; max-width:620px; }
-    .cta { display:inline-block; padding:14px 26px; border-radius:12px; background:var(--accent);
-           color:#fff; text-decoration:none; font-size:16px; font-weight:500; }
-    .cta:hover { opacity:.88; }
-    .cta-note { margin:12px 0 0; font-size:13px; color:var(--muted); }
-    .grid { display:grid; grid-template-columns:repeat(auto-fit,minmax(210px,1fr)); gap:14px; margin:44px 0 0; }
-    .card { border:1px solid var(--border); border-radius:14px; padding:18px; background:#fff; }
-    .card h3 { margin:0 0 6px; font-size:15px; }
-    .card p { margin:0; font-size:14px; color:#444; }
-    .disclaimer { margin:40px 0 0; padding:14px 16px; border-left:3px solid #c9c9c9; background:#f7f7f7;
-                  border-radius:0 10px 10px 0; font-size:14px; color:#333; }
-    footer { margin-top:44px; padding-top:18px; border-top:1px solid var(--border); font-size:13px;
-             color:var(--muted); display:flex; flex-wrap:wrap; gap:8px 18px; }
-    footer a { color:var(--muted); }
-  </style>
+  <link rel="preload" href="fonts/inter-tight-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="fonts/inter-tight-latin.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <main class="wrap">
-    <div class="brand"><span class="logo">719</span> Курская торгово-промышленная палата</div>
+<div class="wrap">
 
-    <h1>Навигатор по Постановлению Правительства&nbsp;РФ №719</h1>
-    <p class="lead">Ассистент эксперта ТПП: какие требования предъявляются к продукции, сколько
-      баллов локализации нужно набрать и как подтвердить производство на территории России.</p>
+  <header class="hdr" id="hdr">
+    <div class="hdr-in">
+      <a class="brand" href="#top" aria-label="Навигатор ПП 719 — в начало">
+        <svg viewBox="0 0 100 100" fill="none" aria-hidden="true"><g fill="currentColor"><rect x="45.5" y="14" width="9" height="31" rx="4.5"/><rect x="45.5" y="3" width="9" height="42" rx="4.5" transform="rotate(45 50 50)"/><rect x="45.5" y="14" width="9" height="31" rx="4.5" transform="rotate(90 50 50)"/><rect x="45.5" y="14" width="9" height="31" rx="4.5" transform="rotate(135 50 50)"/><rect x="45.5" y="14" width="9" height="31" rx="4.5" transform="rotate(180 50 50)"/><rect x="45.5" y="14" width="9" height="31" rx="4.5" transform="rotate(225 50 50)"/><rect x="45.5" y="14" width="9" height="31" rx="4.5" transform="rotate(270 50 50)"/><rect x="45.5" y="14" width="9" height="31" rx="4.5" transform="rotate(315 50 50)"/></g></svg>
+        <span>Навигатор ПП&nbsp;719</span>
+      </a>
+      <nav class="nav" aria-label="Разделы страницы">
+        <a href="#pricing">Тарифы</a><a href="#audience">Кому и зачем</a><a href="#form">Заявка</a><a href="#faq">Вопросы</a>
+      </nav>
+      <a class="btn btn-sm" id="open-app" href="https://сервис.719-навигатор.рф/">Перейти в сервис</a>
+    </div>
+  </header>
 
-    <a class="cta" id="open-app" href="https://сервис.719-навигатор.рф/">Открыть сервис</a>
-    <p class="cta-note">Доступ по логину, выданному ТПП. Вход — на поддомене <code>сервис.</code></p>
-
-    <section class="grid">
-      <div class="card">
-        <h3>Требования по коду ОКПД2</h3>
-        <p>Условия и баллы для конкретной позиции приложения к ПП №719, с указанием пункта и примечания.</p>
-      </div>
-      <div class="card">
-        <h3>Порядок подтверждения</h3>
-        <p>Реестр промышленной продукции, ГИСП, сертификат СТ-1, роль ТПП — по правилам ведения реестра.</p>
-      </div>
-      <div class="card">
-        <h3>Только по документам</h3>
-        <p>Ответ строится на тексте постановления и правил в действующей редакции, каждое число — с источником.</p>
+  <main id="top">
+    <section class="hero" aria-labelledby="hero-h">
+      <div class="hero-in">
+        <div class="hero-copy">
+          <h1 id="hero-h">ИИ-помощник<br>по ПП&nbsp;719</h1>
+          <p class="hero-lead">Сервис для работы с Постановлением Правительства РФ № 719 — ответы со ссылками на конкретные пункты документов</p>
+          <div class="hero-cta">
+            <a class="btn btn-primary" href="#form">Оставить заявку <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></a>
+            <a class="btn" href="#pricing">Тарифы</a>
+          </div>
+        </div>
+        <div class="demo" aria-label="Пример работы сервиса">
+          <div class="demo-top">
+            <div class="demo-title">Навигатор ПП 719</div>
+            <div class="dots" id="demo-dots"><span class="on"></span><span></span><span></span><span></span></div>
+          </div>
+          <div class="bubble" id="demo-q">Какие документы нужны для внесения продукции в реестр российской промышленной продукции?</div>
+          <div class="demo-label" id="demo-label">Навигатор ПП 719</div>
+          <p class="demo-a" id="demo-a">Заявка на включение сведений в реестр подаётся через ГИСП и рассматривается ТПП. К ней прилагают конструкторскую и технологическую документацию, копии лицензий и сертификатов соответствия, а также документы под выбранный критерий ПП № 719.</p>
+          <div class="refs" id="demo-refs"><span class="ref">Приказ ТПП РФ № 52, п. 4.1</span><span class="ref">Правила ведения реестра, п. 7</span></div>
+          <div class="demo-foot">Постановление Правительства РФ от 17.07.2015 № 719, ред. от 29.09.2026 № 1254</div>
+        </div>
       </div>
     </section>
 
-    <p class="disclaimer">Ответ сервиса — предварительный анализ на основе искусственного интеллекта.
-      Итоговый вердикт по каждому обращению выносит уполномоченный эксперт ТПП.</p>
+    <section class="sec" aria-labelledby="help-h">
+      <h2 id="help-h">Помогает разобраться<br>в требованиях ПП&nbsp;719</h2>
+      <div class="cards3">
+        <div class="fcard"><div class="fcard-t">Отвечает</div><div class="fcard-d">на вопросы о подтверждении производства промышленной продукции в РФ</div></div>
+        <div class="fcard"><div class="fcard-t">Ссылается</div><div class="fcard-d">на конкретный пункт постановления, приложения к нему и приказов ТПП РФ</div></div>
+        <div class="fcard"><div class="fcard-t">Учитывает</div><div class="fcard-d">действующую редакцию документа и указывает её дату</div></div>
+      </div>
+    </section>
 
-    <footer>
-      <span>© Курская ТПП</span>
-      <a id="lnk-help" href="https://сервис.719-навигатор.рф/help">Справка</a>
-      <a id="lnk-terms" href="https://сервис.719-навигатор.рф/terms">Условия использования</a>
-      <a id="lnk-privacy" href="https://сервис.719-навигатор.рф/privacy">Политика конфиденциальности</a>
-    </footer>
+    <section class="sec" id="pricing" aria-labelledby="pricing-h">
+      <div class="sec-head">
+        <h2 id="pricing-h">Подключить Навигатор ПП 719</h2>
+        <div class="sub">За 1 пользователя</div>
+      </div>
+      <div class="plans">
+        <div class="plan">
+          <div class="plan-head"><div class="plan-name">Старт</div></div>
+          <div class="plan-desc">Для редких обращений и знакомства с сервисом</div>
+          <div class="plan-price"><div class="price">По запросу</div></div>
+          <button class="btn btn-sm btn-secondary btn-block" type="button" data-pick="Старт">Подключить</button>
+        </div>
+        <div class="plan featured">
+          <div class="plan-head"><div class="plan-name">Стандарт</div><span class="badge">Рекомендуем</span></div>
+          <div class="plan-desc">Для регулярной работы с постановлением</div>
+          <div class="plan-price"><div class="price">По запросу</div></div>
+          <button class="btn btn-sm btn-primary btn-block" type="button" data-pick="Стандарт">Подключить</button>
+        </div>
+        <div class="plan">
+          <div class="plan-head"><div class="plan-name">Профи</div></div>
+          <div class="plan-desc">Для ежедневной работы эксперта</div>
+          <div class="plan-price"><div class="price">По запросу</div></div>
+          <button class="btn btn-sm btn-secondary btn-block" type="button" data-pick="Профи">Подключить</button>
+        </div>
+        <div class="plan org">
+          <div class="plan-head"><div class="plan-name">Для организаций</div></div>
+          <div class="plan-desc">Подключение группы сотрудников, экспертных подразделений ТПП и закупочных служб</div>
+          <div class="org-list">
+            <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Лицензии на группу</div>
+            <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Индивидуальные условия подключения</div>
+            <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M6 3.5 10.5 8 6 12.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Работа в контуре организации</div>
+          </div>
+          <button class="btn btn-sm btn-block" type="button" data-pick="Для организаций">Оставить заявку</button>
+        </div>
+      </div>
+      <div class="fine">Стоимость подключения сообщит специалист Курской ТПП после заявки. Лицензия предоставляется для 1 пользователя. Стоимость не включает проведение экспертизы ТПП и оформление акта экспертизы.</div>
+    </section>
+
+    <section class="sec" id="audience" aria-labelledby="aud-h">
+      <div class="sec-head" style="gap:32px">
+        <h2 id="aud-h">Кому и зачем</h2>
+        <div class="seg" role="tablist" aria-label="Для кого">
+          <button type="button" role="tab" id="tab-0" aria-selected="true" aria-controls="aud-panel">Производитель</button>
+          <button type="button" role="tab" id="tab-1" aria-selected="false" aria-controls="aud-panel" tabindex="-1">Эксперт ТПП</button>
+          <button type="button" role="tab" id="tab-2" aria-selected="false" aria-controls="aud-panel" tabindex="-1">Закупщик</button>
+        </div>
+      </div>
+      <div class="aud" id="aud-panel" role="tabpanel" aria-labelledby="tab-0" aria-live="polite">
+        <div class="aud-left">
+          <div>
+            <div class="aud-intro">
+              <div class="aud-title" id="aud-title">Производителю</div>
+              <div class="aud-lead" id="aud-lead">Подготовка к подтверждению производства без ручного поиска по тексту постановления и приложений.</div>
+            </div>
+            <div class="acts" id="aud-acts">
+              <div class="act"><div class="act-n">01</div><div class="act-t">Определить, какие требования приложения применяются к вашей продукции</div></div>
+              <div class="act"><div class="act-n">02</div><div class="act-t">Узнать порядок внесения продукции в реестр и перечень документов</div></div>
+              <div class="act"><div class="act-n">03</div><div class="act-t">Подготовиться к экспертизе ТПП и проверить сведения заранее</div></div>
+            </div>
+          </div>
+          <div class="aud-nav">
+            <button class="ibtn" type="button" id="aud-prev" aria-label="Предыдущая роль"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <button class="ibtn dark" type="button" id="aud-next" aria-label="Следующая роль"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+            <div class="counter" id="aud-counter">01 / 03</div>
+          </div>
+        </div>
+        <div class="chat">
+          <div class="chat-top"><div class="demo-title">Навигатор ПП 719</div><div class="chat-ed">ред. от 29.09.2026</div></div>
+          <div class="chat-body">
+            <div class="bubble" id="aud-q">Какие требования применяются к металлообрабатывающим станкам?</div>
+            <p class="chat-a"><span id="aud-a">Станки входят в раздел I приложения — «Продукция станкоинструментальной промышленности». Требования балльные: например, управляющий программно-аппаратный комплекс российского производства даёт 25 баллов.</span> <span class="chip" id="aud-ref">Приложение, разд. I</span></p>
+            <div class="quote"><div class="quote-h" id="aud-ref-full">ПРИЛОЖЕНИЕ К ПОСТАНОВЛЕНИЮ № 719, РАЗДЕЛ I, ПОЗИЦИЯ 13</div><div class="quote-t">Фрагмент пункта в точной редакции документа — открывается по клику на ссылку в ответе.</div></div>
+            <div class="chat-note">Ответ носит справочный характер и не заменяет экспертизу ТПП.</div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" id="form" aria-labelledby="form-h">
+      <div class="sec-head">
+        <h2 id="form-h">Оставить заявку</h2>
+        <div class="sub">Специалист Курской ТПП свяжется с вами в течение одного рабочего дня и подготовит договор</div>
+      </div>
+      <div class="formbox">
+        <form class="form" id="lead-form" novalidate>
+          <div class="tariff">
+            <div class="fl" id="tariff-l">Тариф</div>
+            <div class="chips" role="group" aria-labelledby="tariff-l" id="tariff-chips">
+              <button type="button" aria-pressed="false">Старт</button>
+              <button type="button" aria-pressed="true">Стандарт</button>
+              <button type="button" aria-pressed="false">Профи</button>
+              <button type="button" aria-pressed="false">Для организаций</button>
+            </div>
+          </div>
+          <div class="fields">
+            <label class="field" data-f="name"><span class="fl">Имя</span><input name="name" type="text" placeholder="Иван Иванов" autocomplete="name" maxlength="200"><span class="ferr"></span></label>
+            <label class="field" data-f="org"><span class="fl">Организация</span><input name="org" type="text" placeholder="ООО «Предприятие»" autocomplete="organization" maxlength="300"><span class="ferr"></span></label>
+            <label class="field" data-f="inn"><span class="fl">ИНН</span><input name="inn" type="text" inputmode="numeric" placeholder="10 или 12 цифр" maxlength="12"><span class="ferr"></span></label>
+            <label class="field" data-f="email"><span class="fl">Email</span><input name="email" type="email" inputmode="email" placeholder="name@company.ru" autocomplete="email" maxlength="255"><span class="ferr"></span></label>
+            <label class="field" data-f="phone"><span class="fl">Телефон</span><input name="phone" type="tel" inputmode="tel" placeholder="+7 (XXX) XXX-XX-XX" autocomplete="tel"><span class="ferr"></span></label>
+            <label class="field" data-f="promo"><span class="fl">Промокод</span><input name="promo" type="text" placeholder="Если есть" maxlength="64"><span class="ferr"></span></label>
+          </div>
+          <div class="hp" aria-hidden="true"><label>Оставьте это поле пустым <input name="nav719_hp" type="text" tabindex="-1" autocomplete="off"></label></div>
+          <div class="form-foot">
+            <div class="consent-wrap">
+              <label class="consent" id="consent-l">
+                <input type="checkbox" name="consent" id="consent">
+                <span class="box"><svg viewBox="0 0 12 10" fill="none" aria-hidden="true"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.6"/></svg></span>
+                <span class="consent-t">Даю согласие на обработку персональных данных в соответствии с <a id="lnk-privacy-form" href="https://сервис.719-навигатор.рф/privacy" target="_blank" rel="noopener">политикой обработки персональных данных</a></span>
+              </label>
+              <span class="ferr" id="consent-err"></span>
+            </div>
+            <button class="btn btn-primary" type="submit" id="lead-submit">Отправить заявку <svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M10 4v12M4 10h12" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button>
+          </div>
+          <div class="form-err" id="form-err" role="alert"></div>
+        </form>
+        <div class="sent" id="lead-sent" hidden>
+          <div class="sent-t">Заявка отправлена</div>
+          <div class="sent-d" id="sent-d">Специалист свяжется с вами в течение одного рабочего дня.</div>
+          <button class="linkbtn" type="button" id="lead-again">Отправить ещё одну заявку</button>
+        </div>
+      </div>
+    </section>
+
+    <section class="sec" aria-labelledby="rev-h">
+      <div class="rev-head">
+        <h2 id="rev-h">Отзывы экспертов</h2>
+        <div class="rev-nav">
+          <button class="ibtn gray" type="button" id="rev-prev" aria-label="Предыдущий отзыв"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <button class="ibtn gray" type="button" id="rev-next" aria-label="Следующий отзыв"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+        </div>
+      </div>
+      <div class="revs" id="revs">
+        <article class="rev">
+          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Эксперт ТПП, должность</div></div></div>
+          <div class="rev-text">Текст отзыва эксперта о работе с сервисом: какую задачу решал, сколько времени сэкономил, насколько точны ссылки на пункты.</div>
+          <div class="rev-meta"><div>Роль: эксперт ТПП</div><div>Задача: подготовка акта экспертизы</div></div>
+          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
+        </article>
+        <article class="rev">
+          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Должность, предприятие</div></div></div>
+          <div class="rev-text">Текст отзыва представителя производителя о подготовке к экспертизе и внесении продукции в реестр.</div>
+          <div class="rev-meta"><div>Роль: производитель</div><div>Задача: подготовка документов</div></div>
+          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
+        </article>
+        <article class="rev">
+          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Специалист по закупкам, организация</div></div></div>
+          <div class="rev-text">Текст отзыва специалиста по закупкам о проверке происхождения продукции участников.</div>
+          <div class="rev-meta"><div>Роль: закупщик</div><div>Задача: проверка участников закупки</div></div>
+          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
+        </article>
+        <article class="rev">
+          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Эксперт ТПП, должность</div></div></div>
+          <div class="rev-text">Текст отзыва эксперта о сверке формулировок с действующей редакцией постановления.</div>
+          <div class="rev-meta"><div>Роль: эксперт ТПП</div><div>Задача: сверка редакции</div></div>
+          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
+        </article>
+      </div>
+    </section>
+
+    <section class="sec sec-faq" id="faq" aria-labelledby="faq-h">
+      <h2 id="faq-h" style="text-align:center">Часто задаваемые вопросы</h2>
+      <div class="faq" id="faq-list">
+        <div class="qa">
+          <button class="qa-q" type="button" aria-expanded="true" aria-controls="qa-0">Что такое Навигатор ПП 719?<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4.5 7.5 10 13l5.5-5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="qa-a" id="qa-0">ИИ-помощник Курской ТПП, который отвечает на вопросы по Постановлению Правительства РФ от 17.07.2015 № 719 «О подтверждении производства российской промышленной продукции». Каждый ответ сопровождается ссылкой на конкретный пункт документа или приложения.</div>
+        </div>
+        <div class="qa">
+          <button class="qa-q" type="button" aria-expanded="false" aria-controls="qa-1">Заменяет ли сервис экспертизу ТПП?<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4.5 7.5 10 13l5.5-5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="qa-a" id="qa-1" hidden>Нет. Ответы сервиса носят справочный характер и не являются актом экспертизы. Акт экспертизы оформляет Торгово-промышленная палата по результатам экспертизы, итоговое решение принимает уполномоченный эксперт ТПП; сервис помогает подготовиться и быстрее найти нужную норму.</div>
+        </div>
+        <div class="qa">
+          <button class="qa-q" type="button" aria-expanded="false" aria-controls="qa-2">На каких источниках работает сервис?<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4.5 7.5 10 13l5.5-5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="qa-a" id="qa-2" hidden>На официальных текстах: Постановление Правительства РФ № 719 с приложением и Правилами ведения реестра российской промышленной продукции, приказы ТПП РФ № 52, № 14 и № 49, Соглашение СНГ о правилах определения страны происхождения товаров, методические рекомендации ТПП РФ. Разъяснения ГИСП используются с пометкой, что это не норма. Каждый ответ содержит ссылку на пункт, на котором он основан, — формулировку можно проверить в первоисточнике.</div>
+        </div>
+        <div class="qa">
+          <button class="qa-q" type="button" aria-expanded="false" aria-controls="qa-3">Как поддерживается актуальность редакции?<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4.5 7.5 10 13l5.5-5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="qa-a" id="qa-3" hidden>Текст постановления обновляется при внесении изменений. Действующая редакция указана в интерфейсе сервиса и в каждой выгрузке ответа; сейчас это редакция от 29.09.2026 № 1254.</div>
+        </div>
+        <div class="qa">
+          <button class="qa-q" type="button" aria-expanded="false" aria-controls="qa-4">Как обеспечивается хранение данных?<svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M4.5 7.5 10 13l5.5-5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+          <div class="qa-a" id="qa-4" hidden>Данные заявок и запросов обрабатываются в соответствии с Федеральным законом № 152-ФЗ «О персональных данных» и хранятся на серверах, расположенных на территории Российской Федерации.</div>
+        </div>
+      </div>
+    </section>
   </main>
-  <script>
-    // Ссылки на сервис строятся от ИМЕНИ ЛЕНДИНГА: поддомен «сервис.» у того же домена. Так
-    // страница не зависит от того, каким именем её открыли (кириллица, punycode, localhost).
-    // Кириллическую метку браузер сам кодирует в punycode при переходе.
-    (function () {
-      var SUB = 'сервис';
-      var h = location.hostname; if (!h) return;
-      var base = location.protocol + '//' + SUB + '.' + h + (location.port ? ':' + location.port : '');
-      document.getElementById('open-app').href = base + '/';
-      document.getElementById('lnk-help').href = base + '/help';
-      document.getElementById('lnk-terms').href = base + '/terms';
-      document.getElementById('lnk-privacy').href = base + '/privacy';
-    })();
-  </script>
+
+  <footer class="foot" id="contacts">
+    <p class="disclaimer">Ответ сервиса — предварительный анализ на основе искусственного интеллекта. Итоговый вердикт по каждому обращению выносит уполномоченный эксперт ТПП.</p>
+    <div class="foot-links">
+      <span>© 2026 Курская торгово-промышленная палата</span>
+      <a id="lnk-help" href="https://сервис.719-навигатор.рф/help">Справка</a>
+      <a id="lnk-terms" href="https://сервис.719-навигатор.рф/terms">Условия использования сервиса</a>
+      <a id="lnk-privacy" href="https://сервис.719-навигатор.рф/privacy">Политика обработки персональных данных</a>
+    </div>
+  </footer>
+</div>
+
+<script>
+  // Ссылки на сервис строятся от ИМЕНИ ЛЕНДИНГА: поддомен «сервис.» у того же домена. Так
+  // страница не зависит от того, каким именем её открыли (кириллица, punycode, localhost).
+  // Кириллическую метку браузер сам кодирует в punycode при переходе.
+  (function () {
+    var SUB = 'сервис';
+    var h = location.hostname; if (!h) return;
+    var base = location.protocol + '//' + SUB + '.' + h + (location.port ? ':' + location.port : '');
+    document.getElementById('open-app').href = base + '/';
+    document.getElementById('lnk-help').href = base + '/help';
+    document.getElementById('lnk-terms').href = base + '/terms';
+    document.getElementById('lnk-privacy').href = base + '/privacy';
+    document.getElementById('lnk-privacy-form').href = base + '/privacy';
+  })();
+</script>
+<script src="app.js" defer></script>
 </body>
 </html>

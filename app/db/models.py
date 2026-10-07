@@ -89,3 +89,24 @@ class Feedback(Base):
     correction: Mapped[str | None] = mapped_column(Text, nullable=True)  # исправление критич. ошибки (к ответу)
 
     user: Mapped["User"] = relationship(back_populates="feedback")
+
+
+class Lead(Base):
+    """Заявка на подключение с лендинга 719-навигатор.рф (форма «Оставить заявку»).
+
+    ⚠ ПДн (152-ФЗ): имя, email, телефон, ИНН (у ИП — персональный). Хранятся только поля формы и
+    момент согласия; IP-адрес в базу НЕ пишется — он нужен лишь ограничителю частоты в памяти.
+    Видит только admin (`/admin`, вкладка «Заявки»); в языковую модель не передаётся никогда."""
+
+    __tablename__ = "leads"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
+    tariff: Mapped[str] = mapped_column(String(32))
+    name: Mapped[str] = mapped_column(Text)
+    org: Mapped[str] = mapped_column(Text)
+    inn: Mapped[str] = mapped_column(String(12))
+    email: Mapped[str] = mapped_column(String(255))
+    phone: Mapped[str] = mapped_column(String(32))
+    promo: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    consent_at: Mapped[datetime] = mapped_column(DateTime)  # согласие обязательно — без него заявки нет

@@ -7,6 +7,7 @@ from loguru import logger
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.chat import router as chat_router
+from app.api.leads import router as leads_router
 from app.api.routes import router as navigate_router
 from app.api.web import router as web_router
 from app.core.config import settings
@@ -40,11 +41,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def api_docs_kwargs(app_env: str) -> dict:
+    """Адреса автодокументации FastAPI: локально — дефолтные, вне `development` — выключены (`O9` #145).
+
+    Дефолт FastAPI публикует `/docs`, `/redoc` и `/openapi.json`, то есть карту эндпоинтов вместе
+    с `/api/admin/export`. За 08–22.09.2026 сканеры получили её 11 раз; авторизация держала (перебор
+    14.09 → 401), но раздавать карту незачем. Условие то же, что у гарда секрета: всё, что не
+    `development`, считается боем."""
+    if app_env == "development":
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
 app = FastAPI(
     title=settings.APP_TITLE,
     version=settings.APP_VERSION,
     description="Навигатор по ПП РФ №719 для Курской ТПП",
     lifespan=lifespan,
+    **api_docs_kwargs(settings.APP_ENV),
 )
 
 # Сессии-куки для auth веб-UI (подпись SESSION_SECRET). `https_only` — из COOKIE_SECURE: локально
@@ -62,6 +76,7 @@ app.add_middleware(
 app.include_router(navigate_router, tags=["navigator"])
 app.include_router(chat_router, tags=["chat"])
 app.include_router(web_router, tags=["web"])
+app.include_router(leads_router, tags=["leads"])  # форма заявки лендинга (caddy проксирует /api/leads корня)
 
 # Статика веб-фронта (css/js)
 app.mount(
