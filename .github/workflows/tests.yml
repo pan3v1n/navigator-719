@@ -24,6 +24,12 @@ jobs:
 
     steps:
       - uses: actions/checkout@v4
+        with:
+          # ⚠ Полная история С ТЕГАМИ. Три теста гейта CI в `test_deploy_script.py` берут профиль
+          # релиза с СУЩЕСТВУЮЩИМ тегом; в неглубоком checkout тегов нет, и до 07.10.2026 они
+          # уходили в `skipTest` — CI отчитывался «OK (skipped=3)», пока локально те же тесты были
+          # красными на фикстуре, затенявшей файл маркера.
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:

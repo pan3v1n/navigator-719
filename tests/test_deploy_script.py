@@ -601,6 +601,15 @@ class TestCiGateIsReachableWithAPackageNearby(unittest.TestCase):
     # отдавала скрипту windows-пути: `tar -xzf` на них спотыкался, скрипт честно говорил «архив
     # не распаковался» и уходил в ДРУГУЮ ветку — то есть тест зеленел бы мимо проверяемой
     # развилки. Ровно «заглушка, обрывающая проверяемый путь», третий раз за неделю.
+    #
+    # ⚠⚠ ЗАГЛУШКА ПАКЕТА НЕ ИМЕЕТ ПРАВА ЛЕЖАТЬ ПО ПУТИ ФАЙЛА МАРКЕРА (07.10.2026). Сухой прогон ищет
+    # файл маркера СНАЧАЛА в пакете, потом в рабочей копии (`MARKER_ROOTS`), поэтому заглушка
+    # затеняет настоящий файл. До 07.10 заглушкой был `app/core/config.py` = «x», и все три теста
+    # красились, как только самым новым профилем С ТЕГОМ стал `v0.5.0-test26` — первый, у кого
+    # маркер на `config.py`: прогон вставал на «НЕ ДОЕХАЛО» раньше гейта. В CI это было не видно —
+    # там checkout без тегов, и тесты уходили в `skipTest` («OK (skipped=3)»). Стоп-кран —
+    # `test_package_stub_never_shadows_a_marker_file`.
+    PKG_STUB = "app/core/.pkg_stub"
     MARKER_FILES_RE = re.compile(r'"([^"|]+)\|([^"|]+)\|')
 
     SETUP = r"""
@@ -609,7 +618,7 @@ mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
-echo x > "$TD/src/app/core/config.py"
+echo x > "$TD/src/app/core/.pkg_stub"
 tar -czf "$TD/pkg/navigator-719-$3.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
 APP_DIR="$4"; [ "$APP_DIR" = "__none__" ] && APP_DIR="$TD/nope"
 PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry-run
@@ -647,6 +656,21 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry
                       f"ветка «пакет рядом» не сработала, проверяется НЕ та развилка:\n{r.stdout}")
         return r
 
+    def test_package_stub_never_shadows_a_marker_file(self):
+        """Заглушка в подставном пакете не совпадает ни с одним файлом маркера НИ ОДНОГО профиля.
+
+        Иначе сухой прогон сверяет маркер с заглушкой, встаёт до гейта, и три теста ниже либо
+        красятся на верном коде, либо (если кто-то «починит» их ослаблением) ничего не проверяют.
+        Профиль заводится каждый релиз, поэтому проверяется вся папка, а не самый новый."""
+        self.assertIn(self.PKG_STUB, self.SETUP, "заглушка в SETUP и PKG_STUB разошлись")
+        self.assertIn(self.PKG_STUB, TestCiGateRefusesTheWrongCommit.SETUP)
+        self.assertNotIn("/app/core/config.py", self.SETUP + self.SETUP_NO_REPO
+                         + TestCiGateRefusesTheWrongCommit.SETUP)
+        clashes = [prof.name for prof in RELEASES.glob("*.env")
+                   if self.PKG_STUB in {m[0] for m in self.MARKER_FILES_RE.findall(
+                       prof.read_text(encoding="utf-8"))}]
+        self.assertFalse(clashes, f"маркер на файле заглушки — смените PKG_STUB: {clashes}")
+
     def test_gate_speaks_when_the_package_is_nearby(self):
         """Главная половина: в этом сценарии гейт обязан ВЫСКАЗАТЬСЯ, а не промолчать."""
         r = self._dry_run(str(ROOT))
@@ -669,7 +693,7 @@ mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/tree" "$TD/app"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
-echo x > "$TD/src/app/core/config.py"
+echo x > "$TD/src/app/core/.pkg_stub"
 for rel in "$@"; do
   mkdir -p "$TD/app/$(dirname "$rel")"
   cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
@@ -685,8 +709,11 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.
 
         Тихий пропуск неотличим от зелёного — ровно то, чем дефект и был."""
         profile, tag = self._profile_with_an_existing_tag()
+        # ⚠ «Это путь» решает ФАКТ — файл есть в репозитории, а не форма. Прежний признак
+        # `"/" in m[0]` отбрасывал файлы КОРНЯ: у `test26` маркеры на `main.py` и
+        # `docker-compose.yml`, их не копировали, и прогон вставал на «НЕ ДОЕХАЛО» до гейта.
         files = sorted({m[0] for m in self.MARKER_FILES_RE.findall(
-            profile.read_text(encoding="utf-8")) if "/" in m[0]})
+            profile.read_text(encoding="utf-8")) if (ROOT / m[0]).is_file()})
         env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
         r = subprocess.run(
             [shutil.which("bash"), "-c", self.SETUP_NO_REPO, "_", str(profile), str(ROOT),
@@ -794,7 +821,7 @@ mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/app" "$TD/tree"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
-echo x > "$TD/src/app/core/config.py"
+echo x > "$TD/src/app/core/.pkg_stub"
 for rel in "$@"; do
   mkdir -p "$TD/app/$(dirname "$rel")"
   cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
@@ -809,7 +836,7 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.
     def test_repo_without_the_release_tag_is_not_accepted_as_a_source(self):
         profile, tag = TestCiGateIsReachableWithAPackageNearby._profile_with_an_existing_tag(self)
         files = sorted({m[0] for m in TestReleaseProfiles.MARKER_RE.findall(
-            profile.read_text(encoding="utf-8")) if "/" in m[0]})
+            profile.read_text(encoding="utf-8")) if (ROOT / m[0]).is_file()})  # не "/" — см. выше
         env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
         r = subprocess.run(
             [shutil.which("bash"), "-c", self.SETUP, "_", str(profile), str(ROOT),
