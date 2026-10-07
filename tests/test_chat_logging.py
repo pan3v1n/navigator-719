@@ -75,6 +75,7 @@ class TestQuestionSurvivesEngineFailure(unittest.TestCase):
             prompt_tokens = 10
             completion_tokens = 5
             input_hint = ""  # U5
+            metered = True  # #160
 
         chat_mod.answer = lambda *a, **k: _Ans()
         req = chat_mod.ChatRequest(message="Вопрос", session_id="s2")
@@ -97,6 +98,7 @@ class TestQuestionSurvivesEngineFailure(unittest.TestCase):
             prompt_tokens = 0
             completion_tokens = 0
             input_hint = ""  # U5
+            metered = True  # #160
 
         def spy(msg, okpd2=None, history=None):
             seen["history"] = list(history or [])

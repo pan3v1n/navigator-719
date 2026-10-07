@@ -15,6 +15,7 @@
     <button class="tab" data-tab="bad">Плохие ответы<span class="tab-badge {{ 'warn' if stats.bad_count else '' }}">{{ stats.bad_count }}</span></button>
     <button class="tab" data-tab="logs">Логи</button>
     <button class="tab" data-tab="leads">Заявки<span class="tab-badge">{{ leads_total }}</span></button>
+    <button class="tab" data-tab="plans">Тарифы</button>
   </div>
 
   <!-- Панель фильтров: единый срез для всех вкладок (изоляция когорты, сравнение регионов). -->
@@ -321,6 +322,33 @@
             <form method="post" action="/api/admin/leads/{{ l.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить заявку {{ l.id }}? Это необратимо.')"><button type="submit" class="link">Удалить</button></form></span>
         </div>
         {% else %}<p class="empty">Заявок пока нет.</p>{% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== ТАРИФЫ (#160): назначение и расход текущего периода ===== -->
+  <section id="tab-plans" class="tab-panel hidden">
+    <div class="card">
+      <h3>Тарифы пользователей</h3>
+      <p class="muted">Период — месяц от даты подключения (с 00:00 МСК). Считаются ответы сервиса на вопросы;
+        приветствия и сбои не считаются. По исчерпании вопросы блокируются до начала нового периода.
+        Без тарифа — без ограничения; у admin лимита нет никогда.</p>
+      <div class="feed">
+        {% for r in plan_rows %}
+        <div class="feed-row">
+          <span class="feed-q"><b>{{ r.username }}</b> · {{ r.role }}{% if r.who %} · {{ r.who }}{% endif %}
+            {% if r.state %} · <b>{{ r.state.used }} из {{ r.state.limit }}</b> за {{ r.period }}{% if r.state.exhausted %} · <span class="warn">исчерпан</span>{% endif %}{% endif %}</span>
+          <span class="feed-meta">
+            <form method="post" action="/api/admin/users/{{ r.id }}/plan" style="display:inline">
+              <select name="plan" aria-label="Тариф {{ r.username }}">
+                <option value="" {% if not r.plan %}selected{% endif %}>без тарифа</option>
+                {% for p in plan_names %}<option value="{{ p }}" {% if p == r.plan %}selected{% endif %}>{{ p }}</option>{% endfor %}
+              </select>
+              с <input type="date" name="started" value="{{ r.started or today }}" max="{{ today }}" aria-label="Дата подключения {{ r.username }}">
+              <button type="submit" class="link">Сохранить</button>
+            </form></span>
+        </div>
+        {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
       </div>
     </div>
   </section>

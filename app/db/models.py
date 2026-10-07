@@ -37,6 +37,9 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(Text, nullable=True)            # ФИО
     region: Mapped[str | None] = mapped_column(String(128), nullable=True)
     telegram: Mapped[str | None] = mapped_column(String(128), nullable=True)      # ник в Telegram
+    # Тариф (#160): None — без лимита. Лимиты и период — `app/core/plans.py`; назначает admin.
+    plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    plan_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # дата подключения
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -44,6 +47,7 @@ class User(Base):
     feedback: Mapped[list["Feedback"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
+    usage: Mapped[list["AnswerUsage"]] = relationship(cascade="all, delete-orphan")
 
 
 class Message(Base):
@@ -89,6 +93,20 @@ class Feedback(Base):
     correction: Mapped[str | None] = mapped_column(Text, nullable=True)  # исправление критич. ошибки (к ответу)
 
     user: Mapped["User"] = relationship(back_populates="feedback")
+
+
+class AnswerUsage(Base):
+    """Одна единица расхода тарифа (#160) — ответ движка пользователю.
+
+    ⚠ Отдельно от `messages`, а не счётом по ним: беседы пользователь удаляет сам
+    (`delete_session`), и расход обнулялся бы удалением истории. Здесь только кто и когда —
+    ни вопроса, ни ответа."""
+
+    __tablename__ = "answer_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 
 class Lead(Base):

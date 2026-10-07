@@ -12,7 +12,7 @@ from datetime import timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import Feedback, Lead, Message, User, _utcnow
+from app.db.models import AnswerUsage, Feedback, Lead, Message, User, _utcnow
 
 
 # --- users ---------------------------------------------------------------
@@ -53,6 +53,32 @@ def update_profile(
 
 def list_users(db: Session) -> list[User]:
     return list(db.execute(select(User).order_by(User.id)).scalars())
+
+
+# --- тарифы и расход (#160) -----------------------------------------------
+def set_user_plan(db: Session, user_id: int, plan: str | None, started_at=None) -> User | None:
+    """Назначить тариф (None — снять лимит) и дату подключения. Возвращает User или None."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.plan = plan
+    u.plan_started_at = started_at if plan else None
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def record_answer_usage(db: Session, user_id: int) -> None:
+    db.add(AnswerUsage(user_id=user_id))
+    db.commit()
+
+
+def count_answer_usage(db: Session, user_id: int, start, end) -> int:
+    """Списанные ответы за [start, end) — время в наивном UTC, как хранит SQLite."""
+    return db.execute(
+        select(func.count(AnswerUsage.id)).where(
+            AnswerUsage.user_id == user_id, AnswerUsage.ts >= start, AnswerUsage.ts < end)
+    ).scalar_one()
 
 
 # --- messages (лог диалога) ----------------------------------------------

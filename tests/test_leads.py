@@ -234,11 +234,14 @@ class TestLandingGuards(unittest.TestCase):
         self.assertEqual(re.findall(r"<title>([^<]*)</title>", self.html), ["Навигатор ПП 719"])
 
     def test_plan_volumes_from_design(self):
-        # Объёмы тарифов — из макета, решение владельца 07.10. ⚠ Сервис их НЕ считает и не
-        # ограничивает (квоты по пользователю нет) — разница тарифов пока держится договором.
+        # Объёмы тарифов — из макета, решение владельца 07.10. Обещание лендинга и лимит, который
+        # исполняет сервис (#160), — две таблицы про одно: держим их равными.
+        from app.core.plans import PLAN_LIMITS
+
         vols = re.findall(r'class="plan-name">([^<]+)</div>.*?class="plan-desc">До (\d+) запросов',
                           self.html, re.S)
         self.assertEqual(vols, [("Старт", "100"), ("Стандарт", "200"), ("Профи", "400")])
+        self.assertEqual({name: int(n) for name, n in vols}, PLAN_LIMITS)
 
     def test_nothing_loads_from_outside(self):
         """Шрифты и скрипты — только свои: внешние CDN из РФ грузятся ненадёжно."""

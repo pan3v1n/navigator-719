@@ -7,12 +7,13 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from loguru import logger
 from pydantic import BaseModel
 
 from app.api.auth import (
@@ -26,9 +27,12 @@ from app.api.auth import (
     require_user_profiled,
     set_remember_cookie,
 )
+from app.api import quota
 from app.api.admin_stats import build_admin_view, system_health
 from app.api.ratelimit import SlidingWindow, client_ip
+from app.core import plans
 from app.core.config import settings
+from app.core.plans import PLAN_LIMITS
 from app.core.release import release_label
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
@@ -190,11 +194,15 @@ def profile_page(request: Request):
     if not user:
         return RedirectResponse("/login", status_code=302)
     prefill = user.region or region_from_username(user.username)
+    with get_session() as db:
+        st = quota.quota_state(db, user)
+    plan_line = (f"Тариф «{st.plan}»: использовано {st.used} из {st.limit} запросов, новый период "
+                 f"начнётся {plans.msk_date(st.end):%d.%m.%Y}.") if st else ""
     return templates.TemplateResponse(
         "profile.html",
         _ctx(request, user=user, error=None, regions=REGIONS, prefill_region=prefill,
              full_name=user.full_name or "", telegram=user.telegram or "",
-             consent=bool(user.consent)),
+             consent=bool(user.consent), plan_line=plan_line),
     )
 
 
@@ -246,12 +254,55 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
         q.purge_old_leads(db)
         leads = q.list_leads(db, limit=LEADS_ON_PAGE)
         leads_total = q.count_leads(db)
+        plan_rows = _plan_rows(db)
     return templates.TemplateResponse(
         "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads,
-                           leads_total=leads_total, **view))
+                           leads_total=leads_total, plan_rows=plan_rows,
+                           plan_names=list(PLAN_LIMITS), today=plans.msk_today().isoformat(), **view))
 
 
 LEADS_ON_PAGE = 200
+
+
+def _plan_rows(db) -> list[dict]:
+    """Вкладка «Тарифы» (#160): тариф, дата подключения и расход текущего периода по каждому."""
+    rows = []
+    for u in q.list_users(db):
+        st = quota.quota_state(db, u)
+        rows.append({
+            "id": u.id, "username": u.username, "role": u.role,
+            "who": " · ".join(x for x in (u.full_name, u.region) if x),
+            "plan": u.plan or "",
+            "started": plans.msk_date(u.plan_started_at).isoformat() if u.plan_started_at else "",
+            "state": st,
+            "period": (f"{plans.msk_date(st.start):%d.%m.%Y} – "
+                       f"{plans.msk_date(st.end - timedelta(seconds=1)):%d.%m.%Y}") if st else "",
+        })
+    return rows
+
+
+@router.post("/api/admin/users/{user_id}/plan")
+def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Form(default=""),
+                   admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Назначить тариф и дату подключения (#160). Пустой тариф — снять лимит. Дата по умолчанию —
+    сегодня по Москве; в будущем нельзя: период, которого ещё нет, пользователь не увидит."""
+    plan = plan.strip()
+    if plan and plan not in PLAN_LIMITS:
+        raise HTTPException(status_code=422, detail=f"Неизвестный тариф «{plan}»")
+    started_at = None
+    if plan:
+        day = _parse_date(started.strip()) if started.strip() else plans.msk_today()
+        if day is None:
+            raise HTTPException(status_code=422, detail="Дата подключения — в формате ГГГГ-ММ-ДД")
+        if day > plans.msk_today():
+            raise HTTPException(status_code=422, detail="Дата подключения не может быть в будущем")
+        started_at = plans.anchor_from_date(day)
+    with get_session() as db:
+        if q.set_user_plan(db, user_id, plan or None, started_at) is None:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+    logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
+                f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else ""))
+    return RedirectResponse("/admin", status_code=303)
 
 
 @router.post("/api/admin/leads/{lead_id}/delete")

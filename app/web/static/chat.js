@@ -656,8 +656,11 @@ function genId() {
 
 // Сервер отклонил вопрос по содержимому (422). Возвращаем текст в поле ввода и показываем причину:
 // человеку нужно отредактировать вопрос, а не потерять его.
+// 402 — исчерпан лимит тарифа (#160): та же обработка, причина — из ответа сервера.
 async function handleRejected(r, text, pending) {
-  let msg = "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
+  let msg = r.status === 402
+    ? "Лимит запросов по тарифу исчерпан."
+    : "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
   try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
   if (pending) pending.remove();
   setHint(hintBeforeAsk);   // вопрос не ушёл — подсказка снова актуальна
@@ -683,7 +686,7 @@ async function ask(text) {
   try {
     // T18: сперва пробуем стриминг (постепенный вывод, как Claude/ChatGPT). Если он не стартовал
     // или оборвался до финала — фолбэк на обычный /api/chat (рваная РФ-сеть → длинный SSE хрупок).
-    const streamed = await askStream(text, pending, bubble);
+    const streamed = await askStream(text, pending, bubble, isNew);
     if (!streamed) await askFallback(text, pending, bubble, isNew);
   } finally {
     send.disabled = false;
@@ -693,7 +696,7 @@ async function ask(text) {
 
 // Стриминг: fetch SSE-поток → дописываем delta в пузырь → на done навешиваем источники+оценку.
 // Возврат: true = завершилось финалом (done / редирект на login|profile); false = нужен фолбэк.
-async function askStream(text, pending, bubble) {
+async function askStream(text, pending, bubble, isNew) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);
   let acc = "";
@@ -709,7 +712,13 @@ async function askStream(text, pending, bubble) {
     if (r.status === 403) { window.location = "/profile"; return true; }  // профиль/согласие не заполнены
     // 422 — сервер нашёл в вопросе то, чего нельзя отправлять. Фолбэк бессмысленен: там та же
     // проверка. Возвращаем вопрос в поле, чтобы человек его отредактировал, а не набирал заново.
-    if (r.status === 422) { await handleRejected(r, text, pending); return true; }
+    // 402 — исчерпан лимит тарифа (#160): фолбэк бессмысленен по той же причине.
+    // Новую беседу, на которую сервер отказал, убираем из истории — как в фолбэке.
+    if (r.status === 422 || r.status === 402) {
+      await handleRejected(r, text, pending);
+      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      return true;
+    }
     if (!r.ok || !r.body) return false;  // не стартовал → фолбэк
     const reader = r.body.getReader();
     const dec = new TextDecoder();
@@ -767,7 +776,7 @@ async function askFallback(text, pending, bubble, isNew) {
     });
     if (r.status === 401) { window.location = "/login"; return; }
     if (r.status === 403) { window.location = "/profile"; return; }  // профиль/согласие не заполнены
-    if (r.status === 422) {
+    if (r.status === 422 || r.status === 402) {
       await handleRejected(r, text, pending);
       if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
       return;

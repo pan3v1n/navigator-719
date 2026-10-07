@@ -44,6 +44,8 @@ def _ensure_columns() -> None:
             ("full_name", "TEXT"),
             ("region", "VARCHAR(128)"),
             ("telegram", "VARCHAR(128)"),
+            ("plan", "VARCHAR(32)"),          # тариф (#160); у старых строк NULL — без лимита
+            ("plan_started_at", "DATETIME"),
         ],
     }
     with engine.begin() as conn:

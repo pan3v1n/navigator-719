@@ -91,6 +91,10 @@ class Answer:
     phantom_documents: list[str] = field(default_factory=list)
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
+    # Списывается ли ответ с лимита тарифа (#160). Бесплатны только заготовки meta (приветствие,
+    # «спасибо», «что умеешь») — решает ПАЙПЛАЙН, а не эндпоинт: второе место, решающее «meta
+    # ли это», разошлось бы с первым молча.
+    metered: bool = True
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
     # для кликабельных источников. Товарный путь их не заполняет (там источники строятся из hits).
     rule_sources: list[dict] = field(default_factory=list)
@@ -1318,7 +1322,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import followup, meta, topics
     if meta.is_meta(query):
-        return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product())
+        return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product(),
+                      metered=False)
 
     # T9: прямой запрос на ПЕРЕВОД кода ТН ВЭД↔ОКПД2 — отвечаем детерминированно из справочника
     # переходных ключей (без LLM: навигатор строго по 719 и на такой вопрос раньше отказывал).
