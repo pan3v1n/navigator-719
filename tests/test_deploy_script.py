@@ -880,5 +880,74 @@ class TestCorpusCheckHasAPositiveControl(unittest.TestCase):
                              "проверка напечатала бодрое OK, ничего не посмотрев")
 
 
+@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
+class TestReindexFullNamesItsCollection(unittest.TestCase):
+    """`REINDEX_FULL` — СПИСОК КОЛЛЕКЦИЙ, у каждой свой загрузчик (test27, 07.10.2026).
+
+    ⚠⚠ ЧТО БЫЛО. Значение переменной только печаталось, а звался ВСЕГДА `load_rules_kb.py`:
+    шаг заводился под процедурный корпус (K15), товарный с тех пор не переиндексировался ни
+    разу. Первый же релиз с новой редакцией ПП 719 (`test27`) пересоздал бы процедурный корпус и
+    оставил товарный на прошлой редакции — заметил бы только счётчик коллекций, ПОСЛЕ окна.
+    ⚠ Второе: проверка «оба способа сразу» стояла ПОСЛЕ цикла `REINDEX_DOCS` — противоречивый
+    профиль успевал переиндексировать документы и останавливался посреди выкатки.
+
+    Тесты — ПОВЕДЕНЧЕСКИЕ (сухой прогон на временном профиле), а не поиск строки: строковые
+    сторожа этого шага были зелёными всё время, пока он звал не тот загрузчик.
+    """
+
+    def _dry_run(self, extra: str):
+        with tempfile.TemporaryDirectory() as td:
+            profile = Path(td) / "v0.0.0-reindex-probe.env"
+            profile.write_text('TAG="v0.0.0-reindex-probe"\n'
+                               "EXPECT=([pp719]=1 [pp719_rules]=1 [verified_cases]=1)\n"
+                               + extra + "\n", encoding="utf-8", newline="\n")
+            env = {**os.environ, "SKIP_CI_GATE": "1"}
+            return subprocess.run(
+                [shutil.which("bash"), str(DEPLOY_SH), "--release", str(profile), "--dry-run"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(ROOT), env=env)
+
+    def test_product_corpus_goes_to_its_own_loader(self):
+        r = self._dry_run('REINDEX_FULL="pp719"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ПОЛНАЯ переиндексация pp719 (scripts/load_kb.py)", r.stdout)
+        self.assertIn("ТОВАРНАЯ ветка будет пустой", r.stdout,
+                      "цена окна названа не той веткой")
+        self.assertNotIn("load_rules_kb.py", r.stdout,
+                         "товарный корпус ушёл в загрузчик процедурного")
+
+    def test_both_corpora_each_with_its_own_loader_and_cost(self):
+        r = self._dry_run('REINDEX_FULL="pp719 pp719_rules"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("pp719 (scripts/load_kb.py)", r.stdout)
+        self.assertIn("pp719_rules (scripts/load_rules_kb.py)", r.stdout)
+        self.assertIn("ТОВАРНАЯ ветка будет пустой", r.stdout)
+        self.assertIn("процедурная ветка будет пустой", r.stdout)
+
+    def test_unknown_collection_stops_before_anything(self):
+        """Опечатка в имени — противоречие профиля: код 2 ДО сухого прогона, а не молчаливый
+        пропуск (пустой загрузчик) и не «загрузим что-нибудь»."""
+        r = self._dry_run('REINDEX_FULL="pp719_rulez"')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("ПРОФИЛЬ ПРОТИВОРЕЧИВ", r.stdout)
+        self.assertNotIn("СУХОЙ ПРОГОН", r.stdout, "противоречие поймано не до прогона")
+
+    def test_full_and_per_document_are_rejected_before_anything(self):
+        r = self._dry_run('REINDEX_FULL="pp719_rules"\nREINDEX_DOCS="gisp_faq"')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("заданы и REINDEX_FULL, и REINDEX_DOCS", r.stdout)
+        self.assertNotIn("СУХОЙ ПРОГОН", r.stdout, "противоречие поймано не до прогона")
+
+    def test_real_deploy_calls_the_loader_by_collection(self):
+        """Шаг выкатки зовёт `reindex_loader`, а не зашитый `load_rules_kb.py`: сухой прогон
+        выше проверяет ТАБЛИЦУ, этот — что реальная выкатка ею пользуется."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        step = code.split("ПОЛНАЯ ПЕРЕИНДЕКСАЦИЯ: $c", 1)
+        self.assertEqual(len(step), 2, "шаг полной переиндексации не идёт по коллекциям")
+        self.assertIn('python "$(reindex_loader "$c")"', step[1].split("fi", 1)[0])
+        self.assertNotIn("python scripts/load_rules_kb.py \\", code,
+                         "полная переиндексация снова зашита на процедурный загрузчик")
+
+
 if __name__ == "__main__":
     unittest.main()
