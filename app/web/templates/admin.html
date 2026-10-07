@@ -14,6 +14,7 @@
     <button class="tab active" data-tab="dash">Обзор</button>
     <button class="tab" data-tab="bad">Плохие ответы<span class="tab-badge {{ 'warn' if stats.bad_count else '' }}">{{ stats.bad_count }}</span></button>
     <button class="tab" data-tab="logs">Логи</button>
+    <button class="tab" data-tab="leads">Заявки<span class="tab-badge">{{ leads|length }}</span></button>
   </div>
 
   <!-- Панель фильтров: единый срез для всех вкладок (изоляция когорты, сравнение регионов). -->
@@ -305,6 +306,21 @@
       </div>
     </details>
     {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
+  </section>
+
+  <!-- ===== ЗАЯВКИ С ЛЕНДИНГА (ПДн: только admin; фильтры периода сюда не применяются) ===== -->
+  <section id="tab-leads" class="tab-panel hidden">
+    <div class="card">
+      <h3>Заявки с сайта 719-навигатор.рф · {{ leads|length }}</h3>
+      <div class="feed">
+        {% for l in leads %}
+        <div class="feed-row">
+          <span class="feed-q"><b>{{ l.name }}</b> · {{ l.org }} · ИНН {{ l.inn }} · тариф «{{ l.tariff }}»{% if l.promo %} · промокод {{ l.promo }}{% endif %}</span>
+          <span class="feed-meta"><a href="mailto:{{ l.email }}">{{ l.email }}</a> · {{ l.phone }} · {{ l.created_at.strftime('%d.%m.%Y %H:%M') }} UTC · согласие на ПДн получено</span>
+        </div>
+        {% else %}<p class="empty">Заявок пока нет.</p>{% endfor %}
+      </div>
+    </div>
   </section>
 </main>
 

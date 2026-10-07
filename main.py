@@ -7,6 +7,7 @@ from loguru import logger
 from starlette.middleware.sessions import SessionMiddleware
 
 from app.api.chat import router as chat_router
+from app.api.leads import router as leads_router
 from app.api.routes import router as navigate_router
 from app.api.web import router as web_router
 from app.core.config import settings
@@ -75,6 +76,7 @@ app.add_middleware(
 app.include_router(navigate_router, tags=["navigator"])
 app.include_router(chat_router, tags=["chat"])
 app.include_router(web_router, tags=["web"])
+app.include_router(leads_router, tags=["leads"])  # форма заявки лендинга (caddy проксирует /api/leads корня)
 
 # Статика веб-фронта (css/js)
 app.mount(

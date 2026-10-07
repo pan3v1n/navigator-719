@@ -242,8 +242,9 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
             db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
             region=region, role=role,
         )
+        leads = q.list_leads(db)  # заявки с лендинга — ПДн, поэтому только здесь, за ролью admin
     return templates.TemplateResponse(
-        "admin.html", _ctx(request, admin=user, health=system_health(), **view))
+        "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads, **view))
 
 
 @router.get("/api/admin/export")

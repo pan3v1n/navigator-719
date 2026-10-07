@@ -11,7 +11,7 @@ import json
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models import Feedback, Message, User, _utcnow
+from app.db.models import Feedback, Lead, Message, User, _utcnow
 
 
 # --- users ---------------------------------------------------------------
@@ -208,3 +208,23 @@ def get_feedback_for_user(db: Session, user_id: int) -> list[Feedback]:
 
 def get_all_feedback(db: Session) -> list[Feedback]:
     return list(db.execute(select(Feedback).order_by(Feedback.ts)).scalars())
+
+
+# --- заявки с лендинга (ПДн: видит только admin) -------------------------------
+def create_lead(
+    db: Session, *, tariff: str, name: str, org: str, inn: str, email: str, phone: str,
+    promo: str | None = None,
+) -> Lead:
+    """Сохранить заявку. Момент согласия ставится здесь: эндпоинт зовёт функцию только после того,
+    как согласие проверено, — отдельного поля «согласен» в строке нет, есть время согласия."""
+    lead = Lead(tariff=tariff, name=name, org=org, inn=inn, email=email, phone=phone,
+                promo=promo or None, consent_at=_utcnow())
+    db.add(lead)
+    db.commit()
+    db.refresh(lead)
+    return lead
+
+
+def list_leads(db: Session) -> list[Lead]:
+    """Все заявки, свежие сверху."""
+    return list(db.execute(select(Lead).order_by(Lead.created_at.desc(), Lead.id.desc())).scalars())
