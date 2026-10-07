@@ -238,7 +238,8 @@ class TestLandingGuards(unittest.TestCase):
         # исполняет сервис (#160), — две таблицы про одно: держим их равными.
         from app.core.plans import PLAN_LIMITS
 
-        vols = re.findall(r'class="plan-name">([^<]+)</div>.*?class="plan-desc">До (\d+) запросов',
+        # «в месяц» — период лимита (#160: месяц от даты подключения), решение владельца 07.10
+        vols = re.findall(r'class="plan-name">([^<]+)</div>.*?class="plan-desc">До (\d+) запросов в месяц ',
                           self.html, re.S)
         self.assertEqual(vols, [("Старт", "100"), ("Стандарт", "200"), ("Профи", "400")])
         self.assertEqual({name: int(n) for name, n in vols}, PLAN_LIMITS)
