@@ -53,7 +53,7 @@ documents:
     valid_to: null
     status: действует
     supersedes: null
-    edition_expected: "ред. от 22.07.2026 N 923"
+    edition_expected: "ред. от 29.09.2026 N 1254"
     sources:
       - pp719/chunks/01_postanovlenie.txt
     # Критерии подтверждения (п. 1 «а»–«г»), включая путь через СТ-1 для продукции,
@@ -115,7 +115,7 @@ documents:
     valid_to: null
     status: действует
     supersedes: null
-    edition_expected: "ред. от 22.07.2026 N 923"
+    edition_expected: "ред. от 29.09.2026 N 1254"
     sources:
       - pp719/chunks/131_SNOSKI_prilozheniya.txt
     # Ссылок на сноски в требованиях сотни, а до D3 их определения не были доступны поиску вовсе.
@@ -324,7 +324,7 @@ documents:
     valid_to: null
     status: действует
     supersedes: null
-    edition_expected: "ред. от 22.07.2026 N 923"
+    edition_expected: "ред. от 29.09.2026 N 1254"
     # ⚠ ШАБЛОН, А НЕ СПИСОК ИЗ 29 ИМЁН — осознанно. Файлы разделов ГЕНЕРИРУЮТСЯ
     # (`structure_kb.py`), и перечисление завело бы второй список, расходящийся с каталогом
     # молча. У процедурного корпуса наоборот: пять разнородных файлов перечислены поимённо,

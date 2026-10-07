@@ -818,10 +818,18 @@ class TestContextAndDisclaimer(unittest.TestCase):
             inheritance._key("XVIII", "Оборудование системы опознавания судов <9>;\nкодирующее"),
             inheritance._key("XVIII", "Оборудование системы опознавания судов"),
         )
-        # позиция из группы «опознавания судов» действительно наследует требования
-        parent = inheritance.lookup("XVIII", "судовая система охранного оповещения <9>;\nсудовая земная")
-        self.assertIsNotNone(parent, "восстановленная позиция XVIII осталась без требований группы")
-        self.assertTrue(parent["operations"], "у родителя пустой список требований")
+        # ⚠ Ред. 29.09.2026 (N 1002) изложила раздел XVIII заново: сноска <9> ушла из каждого
+        # наименования в заголовок раздела, и класса D6 в данных больше НЕТ (проверено: ни одного
+        # родителя карты с «<N>;» в конце имени). «Судовая система охранного оповещения», ради
+        # которой писалась вторая половина теста, стала САМОСТОЯТЕЛЬНОЙ позицией со своими
+        # требованиями — наследовать ей нечего. Правило ключа держит первая половина.
+        recs = json.loads((Path(__file__).resolve().parents[1] / "knowledge_base" / "pp719" /
+                           "structured" / "XVIII_sudostroenie.json").read_text(encoding="utf-8"))
+        own = [r for r in recs if r["product_name"] == "Судовая система охранного оповещения"]
+        self.assertEqual(len(own), 1, "позиция ред. 29.09 не найдена — проверь, не сменилась ли редакция")
+        self.assertTrue(any(b.get("operations") for b in own[0]["requirement_blocks"]),
+                        "у самостоятельной позиции нет своих требований")
+        self.assertIsNone(inheritance.lookup("XVIII", "Судовая система охранного оповещения"))
 
     def test_inheritance_map_keys_are_normalised(self):
         """Инвариант формата карты: ключ не заканчивается пунктуацией — иначе рантайм промахнётся."""
@@ -843,6 +851,46 @@ class TestContextAndDisclaimer(unittest.TestCase):
             (None, None),
         ):
             self.assertEqual(_map_key(section, name), inheritance._key(section, name))
+
+    def test_map_builder_finds_parent_by_full_list_name(self):
+        """Ред. 29.09.2026: LLM-разбор кладёт имя-перечень то с переводами строк, то через «; ».
+
+        Ключ по первой строке (`_map_key`) у склеенного имени — вся строка, и родитель «не
+        находился в базе»: четыре новые системы пожаротушения XVIII теряли требования группы
+        «Система тушения инертными газами; система паротушения; …». Вторая попытка — полное имя."""
+        from scripts.diag_orphan_requirements import _full_key, _map_key
+
+        multiline = "Система тушения инертными газами <9>;\nсистема паротушения;\nсистема объемного"
+        joined = "Система тушения инертными газами; система паротушения; система объемного"
+        self.assertEqual(_full_key("XVIII", multiline), _full_key("XVIII", joined))
+        self.assertNotEqual(_map_key("XVIII", multiline), _map_key("XVIII", joined),
+                            "если первые строки совпали, вторая попытка не нужна — тест устарел")
+        self.assertNotEqual(_full_key("XVIII", joined), _full_key("XIX", joined), "раздел в ключе обязателен")
+
+    def test_full_name_index_refuses_ambiguous_keys(self):
+        """Два одноимённых родителя в разделе — индекс не выбирает ни одного (лучше отказ, чем чужое)."""
+        from scripts.diag_orphan_requirements import _full_key, _unique_index
+
+        recs = [{"section_roman": "XVIII", "product_name": "А; Б"},
+                {"section_roman": "XVIII", "product_name": "А;\nБ"},
+                {"section_roman": "XVIII", "product_name": "В; Г"}]
+        idx = _unique_index(recs, _full_key)
+        self.assertNotIn(_full_key("XVIII", "А; Б"), idx)
+        self.assertIs(idx[_full_key("XVIII", "В; Г")], recs[2])
+
+    def test_new_fire_suppression_positions_inherit_group_requirements(self):
+        """Ред. 29.09.2026 (N 1002): у «из 26.30.50.120 Система тушения инертными газами…» ячейка
+        требований объединена на 5 строк — по закону её требования действуют и для 26.30.50.124–127."""
+        from app.rag import inheritance
+
+        for name in ("Стационарные системы пожаротушения пеной",
+                     "Установки порошкового пожаротушения автоматические",
+                     "Стационарные аэрозольные системы пожаротушения",
+                     "Углекислотные системы пожаротушения"):
+            parent = inheritance.lookup("XVIII", name)
+            self.assertIsNotNone(parent, f"«{name}» осталась без требований группы")
+            self.assertIn("26.30.50.120", parent["okpd2_codes"])
+            self.assertTrue(parent["operations"])
 
     def test_fragmented_positions_excluded_from_inheritance(self):
         """R29 и R6 не должны конфликтовать: у позиции с расколотой ячейкой родитель — оборванная

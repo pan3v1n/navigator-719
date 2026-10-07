@@ -63,7 +63,7 @@ class TestPassport(unittest.TestCase):
         «версия» встретится в его тексте."""
         m = _loader()
         cases = {
-            "knowledge_base/pp719/chunks/01_postanovlenie.txt": "ред. от 22.07.2026 N 923",
+            "knowledge_base/pp719/chunks/01_postanovlenie.txt": "ред. от 29.09.2026 N 1254",  # актуализация 07.10
             "knowledge_base/pp719/prikaz52_tpp_full.txt": "ред. от 29.10.2025 N 70",
         }
         for rel, expected in cases.items():
