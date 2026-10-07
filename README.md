@@ -6,12 +6,12 @@
 «О подтверждении производства российской промышленной продукции»
 
 ![Версия](https://img.shields.io/badge/версия-0.5.0-success)
-![На бою](https://img.shields.io/badge/на%20бою-v0.5.0--test24-blueviolet)
+![На бою](https://img.shields.io/badge/на%20бою-v0.5.0--test26-blueviolet)
 ![Python](https://img.shields.io/badge/Python-3.12-blue)
 ![FastAPI](https://img.shields.io/badge/FastAPI-0.115-009688)
 ![Qdrant](https://img.shields.io/badge/Qdrant-hybrid%20search-dc244c)
 ![LLM](https://img.shields.io/badge/LLM-DeepSeek%20V3-orange)
-![Тесты](https://img.shields.io/badge/тесты-1317%20offline-brightgreen)
+![Тесты](https://img.shields.io/badge/тесты-1337%20offline-brightgreen)
 ![RF-first](https://img.shields.io/badge/стек-RF--first%20%C2%B7%20self--hosted-informational)
 
 </div>
@@ -22,6 +22,9 @@
 приложения к ПП №719, показывает требования к локализации, операции с баллами и порог **дословно
 из первоисточника**, формирует перечень подтверждающих документов и отвечает на процедурные
 вопросы о реестре, ГИСП и сертификате СТ-1. Всё — со ссылками на раздел, пункт и документ.
+
+**Сервис:** https://сервис.719-навигатор.рф · **о сервисе:** https://719-навигатор.рф
+(доступ — по учётным записям, которые выдаёт организатор).
 
 Заказчик — **Курская торгово-промышленная палата**. Цель — снять с экспертов рутинный поиск по
 нормативному тексту и ускорить прохождение процедуры для предприятий.
@@ -149,7 +152,8 @@ RAG собран **вручную**, без фреймворка: `qdrant_client
 ≥ 70 %**. Причина диагностирована: потолок задавала полнота данных, а не пайплайн — позиций без
 требований было 26 % корпуса, стало 0.8 %; расхождений баллов с первоисточником 7 → 0. Повторный
 замер — по протоколу [docs/WAVE3_PROTOCOL.md](docs/WAVE3_PROTOCOL.md). Отчёты заказчику —
-[REPORT_JULY_2026.md](docs/REPORT_JULY_2026.md), [REPORT_AUGUST_2026.md](docs/REPORT_AUGUST_2026.md).
+[REPORT_JULY_2026.md](docs/REPORT_JULY_2026.md), [REPORT_AUGUST_2026.md](docs/REPORT_AUGUST_2026.md),
+состояние боя на 22.09 — [REPORT_PROD_2026-09-22.md](docs/REPORT_PROD_2026-09-22.md).
 
 ---
 
@@ -256,7 +260,9 @@ navigator-719/
 │   ├── convert_*.py        первоисточники → текст корпуса
 │   ├── eval_*.py           замеры по EVAL_GUIDE (ретрив, ответ, маршрут, детерминизм, хаос …)
 │   └── deploy/             эталонная выкатка: deploy.sh · releases/<тег>.env · checks/
-├── tests/                  1317 офлайн-тестов
+├── caddy/                  Caddyfile: HTTPS-вход, лендинг на корне домена, сервис на «сервис.»
+├── landing/                статический лендинг 719-навигатор.рф
+├── tests/                  1337 офлайн-тестов
 ├── docs/                   спецификация, задачник, отчёты замеров и заказчику
 ├── Dockerfile · docker-compose.yml
 └── CLAUDE.md · EVAL_GUIDE.md · ROADMAP.md · SETUP.md
@@ -267,7 +273,7 @@ navigator-719/
 ## Тесты и замеры
 
 ```bash
-python -m unittest discover -s tests      # 1317 тестов, офлайн, без Qdrant и без ключа
+python -m unittest discover -s tests      # 1337 тестов, офлайн, без Qdrant и без ключа
 ```
 
 CI (GitHub Actions) гоняет батарею на каждый push и PR; тест, которому понадобились Qdrant или
@@ -282,8 +288,9 @@ CI (GitHub Actions) гоняет батарею на каждый push и PR; т
 
 ## Выкатка
 
-Одна VM, `docker compose`: контейнер приложения (FastAPI + e5) и контейнер Qdrant, тома для
-модели, БД и коллекций. Выкатка — эталонным скриптом
+Одна VM в Yandex Cloud (статический IP), `docker compose`: **caddy** — единственный вход снаружи
+(80/443, сертификат Let's Encrypt выпускается и продлевается сам), контейнер приложения
+(FastAPI + e5, только на петле VM) и контейнер Qdrant; тома для модели, БД и коллекций. Выкатка — эталонным скриптом
 [`scripts/deploy/deploy.sh`](scripts/deploy/README.md) с профилем релиза: бэкап БД до всего,
 сверка маркеров пакета, гейт CI, общие проверки рантайма на каждом релизе и релизные проверки,
 сухой прогон без касания боя. Переиндексация корпуса при добавлении документа — **полная**
@@ -303,6 +310,8 @@ CI (GitHub Actions) гоняет батарею на каждый push и PR; т
 | [docs/RAG_EXPLAINED.md](docs/RAG_EXPLAINED.md) | Разбор RAG-архитектуры и границ гарда |
 | [docs/CONCEPT.md](docs/CONCEPT.md) | Концепция и функциональные требования по версиям |
 | [docs/BACKLOG.md](docs/BACKLOG.md) | Задачник: открытые задачи в порядке исполнения |
+| [docs/KB_EXPANSION_TZ.md](docs/KB_EXPANSION_TZ.md) | ТЗ расширения базы знаний `K1`–`K17`: что лежит в корпусе |
+| [docs/DUAL_CORPUS_TZ.md](docs/DUAL_CORPUS_TZ.md) | ТЗ продуктовой оси `L1`–`L8`: явный выбор корпуса, правила как данные, второй корпус |
 | [docs/NEXT_SESSION.md](docs/NEXT_SESSION.md) | Оперативное «где остановились и что дальше» |
 | [EVAL_GUIDE.md](EVAL_GUIDE.md) | Протокол замеров качества |
 | [docs/TESTING.md](docs/TESTING.md) | Протокол приёмки с экспертом ТПП |

@@ -450,6 +450,32 @@ def _map_key(section: str | None, name: str | None) -> str:
     return f"{section or '?'}|{first.lower()}"
 
 
+def _full_key(section: str | None, name: str | None) -> str:
+    """Ключ по ПОЛНОМУ имени-перечню: перевод строки и «; » — один и тот же разделитель.
+
+    ⚠ ЗАЧЕМ (актуализация под ред. 29.09.2026). Имя-перечень в ячейке таблицы пишется в
+    несколько строк («Система тушения инертными газами;\\nсистема паротушения;\\n…»), а LLM-разбор
+    кладёт его в запись базы КАК ПОЛУЧИТСЯ: то с переводами строк, то склеенным через «; ».
+    `_map_key` берёт первую строку, поэтому у склеенного имени ключ — вся строка, и родитель
+    «не находился в базе». Это не отказ по существу, а дефект ФОРМЫ: перегенерация XVIII дала
+    50 склеенных имён против 25 до неё, и отказов стало 8 вместо 3 — четыре новые системы
+    пожаротушения и карданные шарниры теряли требования группы.
+
+    Используется ТОЛЬКО как вторая попытка поиска родителя при сборке карты и ТОЛЬКО при
+    однозначном совпадении. Рантайм этот ключ не видит: требования родителя лежат в карте
+    копией, а ключи потомков остаются `_map_key`."""
+    parts = re.split(r"\s*;\s*\n\s*|\s*\n\s*|\s*;\s+", (name or "").strip())
+    items = [_map_key(None, p).split("|", 1)[1] for p in parts]
+    return f"{section or '?'}|" + "; ".join(i for i in items if i)
+
+
+def _unique_index(recs: list[dict], keyfn) -> dict[str, dict]:
+    """Индекс записей по ключу — БЕЗ неоднозначных ключей: молча взять одного из двух
+    одноимённых родителей хуже, чем отказать."""
+    counts = Counter(keyfn(r.get("section_roman"), r.get("product_name")) for r in recs)
+    return {k: r for r in recs if counts[k := keyfn(r.get("section_roman"), r.get("product_name"))] == 1}
+
+
 def build_inheritance_map(recs: list[dict], chunks: dict[str, list[Row]], out: Path) -> None:
     """Строит карту «позиция без требований → требования родителя её группы».
 
@@ -462,6 +488,8 @@ def build_inheritance_map(recs: list[dict], chunks: dict[str, list[Row]], out: P
     from app.rag import fragments  # локальный импорт: скрипт работает и без поднятого приложения
 
     by_key = {_map_key(r.get("section_roman"), r.get("product_name")): r for r in recs}
+    # Вторая попытка — полное имя-перечень (см. `_full_key`), только однозначные ключи.
+    by_full = _unique_index(recs, _full_key)
     ops_by_name: dict[str, int] = {}
     for r in recs:
         k = _norm(r.get("product_name"))
@@ -470,6 +498,7 @@ def build_inheritance_map(recs: list[dict], chunks: dict[str, list[Row]], out: P
     parents: dict[str, dict] = {}
     children: dict[str, str] = {}
     skipped: Counter = Counter()
+    found_by_full = 0
 
     for rec in [r for r in recs if n_operations(r) == 0]:
         sec = rec.get("section_roman")
@@ -485,6 +514,10 @@ def build_inheritance_map(recs: list[dict], chunks: dict[str, list[Row]], out: P
             skipped["R29: расколотая ячейка"] += 1
             continue
         p_rec = by_key.get(_map_key(sec, f.parent["name"]))
+        if p_rec is None:
+            p_rec = by_full.get(_full_key(sec, f.parent["name"]))
+            if p_rec is not None:
+                found_by_full += 1
         if p_rec is None:
             skipped["родитель не найден в базе"] += 1
             continue
@@ -514,6 +547,7 @@ def build_inheritance_map(recs: list[dict], chunks: dict[str, list[Row]], out: P
     print(f"  позиций-наследников: {len(children)}")
     print(f"  различных родителей: {len(parents)}")
     print(f"  требований у родителей суммарно: {sum(len(p['operations']) for p in parents.values())}")
+    print(f"  родитель найден по полному имени-перечню (вторая попытка, `_full_key`): {found_by_full}")
     print("\n  ОТКАЗЫ (осознанные):")
     for k, v in skipped.most_common():
         print(f"    {v:>4}  {k}")

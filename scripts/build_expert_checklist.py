@@ -95,6 +95,12 @@ def walk_inheritance(recs, chunks, keyfn):
     from app.rag import fragments
 
     by_key = {keyfn(r.get("section_roman"), r.get("product_name")): r for r in recs}
+    # ⚠⚠ ТА ЖЕ ВТОРАЯ ПОПЫТКА, ЧТО В `build_inheritance_map` (ред. 29.09.2026). Без неё копия
+    # обхода разошлась с оригиналом: карта давала четырём новым системам пожаротушения и
+    # карданным шарнирам требования группы, а лист сверки называл эти пять позиций эксперту
+    # «родитель не найден в базе». Функции — сборщика карты, не копии; историческое сравнение
+    # «старым ключом» (`_old_map_key`) идёт без неё, как шло.
+    by_full = diag._unique_index(recs, diag._full_key) if keyfn is diag._map_key else {}
     ops_by_name: dict[str, int] = {}
     for r in recs:
         k = diag._norm(r.get("product_name"))
@@ -113,7 +119,7 @@ def walk_inheritance(recs, chunks, keyfn):
             continue
         if fragments.is_fragmented(rec.get("product_name")) or fragments.is_fragmented(f.parent["name"]):
             continue
-        p_rec = by_key.get(keyfn(sec, f.parent["name"]))
+        p_rec = by_key.get(keyfn(sec, f.parent["name"])) or by_full.get(diag._full_key(sec, f.parent["name"]))
         if p_rec is None:
             refused.append({"rec": rec, "reason": "родитель не найден в базе",
                             "parent_name": f.parent["name"]})

@@ -601,6 +601,15 @@ class TestCiGateIsReachableWithAPackageNearby(unittest.TestCase):
     # отдавала скрипту windows-пути: `tar -xzf` на них спотыкался, скрипт честно говорил «архив
     # не распаковался» и уходил в ДРУГУЮ ветку — то есть тест зеленел бы мимо проверяемой
     # развилки. Ровно «заглушка, обрывающая проверяемый путь», третий раз за неделю.
+    #
+    # ⚠⚠ ЗАГЛУШКА ПАКЕТА НЕ ИМЕЕТ ПРАВА ЛЕЖАТЬ ПО ПУТИ ФАЙЛА МАРКЕРА (07.10.2026). Сухой прогон ищет
+    # файл маркера СНАЧАЛА в пакете, потом в рабочей копии (`MARKER_ROOTS`), поэтому заглушка
+    # затеняет настоящий файл. До 07.10 заглушкой был `app/core/config.py` = «x», и все три теста
+    # красились, как только самым новым профилем С ТЕГОМ стал `v0.5.0-test26` — первый, у кого
+    # маркер на `config.py`: прогон вставал на «НЕ ДОЕХАЛО» раньше гейта. В CI это было не видно —
+    # там checkout без тегов, и тесты уходили в `skipTest` («OK (skipped=3)»). Стоп-кран —
+    # `test_package_stub_never_shadows_a_marker_file`.
+    PKG_STUB = "app/core/.pkg_stub"
     MARKER_FILES_RE = re.compile(r'"([^"|]+)\|([^"|]+)\|')
 
     SETUP = r"""
@@ -609,7 +618,7 @@ mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
-echo x > "$TD/src/app/core/config.py"
+echo x > "$TD/src/app/core/.pkg_stub"
 tar -czf "$TD/pkg/navigator-719-$3.tar.gz" -C "$TD/src" . || { echo "TAR-FAILED"; exit 3; }
 APP_DIR="$4"; [ "$APP_DIR" = "__none__" ] && APP_DIR="$TD/nope"
 PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry-run
@@ -647,6 +656,21 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$APP_DIR" bash "$1" --release "$2" --dry
                       f"ветка «пакет рядом» не сработала, проверяется НЕ та развилка:\n{r.stdout}")
         return r
 
+    def test_package_stub_never_shadows_a_marker_file(self):
+        """Заглушка в подставном пакете не совпадает ни с одним файлом маркера НИ ОДНОГО профиля.
+
+        Иначе сухой прогон сверяет маркер с заглушкой, встаёт до гейта, и три теста ниже либо
+        красятся на верном коде, либо (если кто-то «починит» их ослаблением) ничего не проверяют.
+        Профиль заводится каждый релиз, поэтому проверяется вся папка, а не самый новый."""
+        self.assertIn(self.PKG_STUB, self.SETUP, "заглушка в SETUP и PKG_STUB разошлись")
+        self.assertIn(self.PKG_STUB, TestCiGateRefusesTheWrongCommit.SETUP)
+        self.assertNotIn("/app/core/config.py", self.SETUP + self.SETUP_NO_REPO
+                         + TestCiGateRefusesTheWrongCommit.SETUP)
+        clashes = [prof.name for prof in RELEASES.glob("*.env")
+                   if self.PKG_STUB in {m[0] for m in self.MARKER_FILES_RE.findall(
+                       prof.read_text(encoding="utf-8"))}]
+        self.assertFalse(clashes, f"маркер на файле заглушки — смените PKG_STUB: {clashes}")
+
     def test_gate_speaks_when_the_package_is_nearby(self):
         """Главная половина: в этом сценарии гейт обязан ВЫСКАЗАТЬСЯ, а не промолчать."""
         r = self._dry_run(str(ROOT))
@@ -669,7 +693,7 @@ mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/tree" "$TD/app"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
-echo x > "$TD/src/app/core/config.py"
+echo x > "$TD/src/app/core/.pkg_stub"
 for rel in "$@"; do
   mkdir -p "$TD/app/$(dirname "$rel")"
   cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
@@ -685,8 +709,11 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.
 
         Тихий пропуск неотличим от зелёного — ровно то, чем дефект и был."""
         profile, tag = self._profile_with_an_existing_tag()
+        # ⚠ «Это путь» решает ФАКТ — файл есть в репозитории, а не форма. Прежний признак
+        # `"/" in m[0]` отбрасывал файлы КОРНЯ: у `test26` маркеры на `main.py` и
+        # `docker-compose.yml`, их не копировали, и прогон вставал на «НЕ ДОЕХАЛО» до гейта.
         files = sorted({m[0] for m in self.MARKER_FILES_RE.findall(
-            profile.read_text(encoding="utf-8")) if "/" in m[0]})
+            profile.read_text(encoding="utf-8")) if (ROOT / m[0]).is_file()})
         env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
         r = subprocess.run(
             [shutil.which("bash"), "-c", self.SETUP_NO_REPO, "_", str(profile), str(ROOT),
@@ -794,7 +821,7 @@ mkdir -p "$TD/pkg" "$TD/bin" "$TD/src/app/core" "$TD/app" "$TD/tree"
 printf '#!/bin/sh
 echo success
 ' > "$TD/bin/gh"; chmod +x "$TD/bin/gh"
-echo x > "$TD/src/app/core/config.py"
+echo x > "$TD/src/app/core/.pkg_stub"
 for rel in "$@"; do
   mkdir -p "$TD/app/$(dirname "$rel")"
   cp "$ROOT/$rel" "$TD/app/$rel" || { echo "COPY-FAILED $rel"; exit 3; }
@@ -809,7 +836,7 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.
     def test_repo_without_the_release_tag_is_not_accepted_as_a_source(self):
         profile, tag = TestCiGateIsReachableWithAPackageNearby._profile_with_an_existing_tag(self)
         files = sorted({m[0] for m in TestReleaseProfiles.MARKER_RE.findall(
-            profile.read_text(encoding="utf-8")) if "/" in m[0]})
+            profile.read_text(encoding="utf-8")) if (ROOT / m[0]).is_file()})  # не "/" — см. выше
         env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
         r = subprocess.run(
             [shutil.which("bash"), "-c", self.SETUP, "_", str(profile), str(ROOT),
@@ -851,6 +878,75 @@ class TestCorpusCheckHasAPositiveControl(unittest.TestCase):
                                 f"проверка отчиталась на пустом корпусе:\n{r.stdout}")
             self.assertNotIn("склеек 0, все известные", r.stdout,
                              "проверка напечатала бодрое OK, ничего не посмотрев")
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
+class TestReindexFullNamesItsCollection(unittest.TestCase):
+    """`REINDEX_FULL` — СПИСОК КОЛЛЕКЦИЙ, у каждой свой загрузчик (test27, 07.10.2026).
+
+    ⚠⚠ ЧТО БЫЛО. Значение переменной только печаталось, а звался ВСЕГДА `load_rules_kb.py`:
+    шаг заводился под процедурный корпус (K15), товарный с тех пор не переиндексировался ни
+    разу. Первый же релиз с новой редакцией ПП 719 (`test27`) пересоздал бы процедурный корпус и
+    оставил товарный на прошлой редакции — заметил бы только счётчик коллекций, ПОСЛЕ окна.
+    ⚠ Второе: проверка «оба способа сразу» стояла ПОСЛЕ цикла `REINDEX_DOCS` — противоречивый
+    профиль успевал переиндексировать документы и останавливался посреди выкатки.
+
+    Тесты — ПОВЕДЕНЧЕСКИЕ (сухой прогон на временном профиле), а не поиск строки: строковые
+    сторожа этого шага были зелёными всё время, пока он звал не тот загрузчик.
+    """
+
+    def _dry_run(self, extra: str):
+        with tempfile.TemporaryDirectory() as td:
+            profile = Path(td) / "v0.0.0-reindex-probe.env"
+            profile.write_text('TAG="v0.0.0-reindex-probe"\n'
+                               "EXPECT=([pp719]=1 [pp719_rules]=1 [verified_cases]=1)\n"
+                               + extra + "\n", encoding="utf-8", newline="\n")
+            env = {**os.environ, "SKIP_CI_GATE": "1"}
+            return subprocess.run(
+                [shutil.which("bash"), str(DEPLOY_SH), "--release", str(profile), "--dry-run"],
+                capture_output=True, text=True, encoding="utf-8", errors="replace",
+                cwd=str(ROOT), env=env)
+
+    def test_product_corpus_goes_to_its_own_loader(self):
+        r = self._dry_run('REINDEX_FULL="pp719"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("ПОЛНАЯ переиндексация pp719 (scripts/load_kb.py)", r.stdout)
+        self.assertIn("ТОВАРНАЯ ветка будет пустой", r.stdout,
+                      "цена окна названа не той веткой")
+        self.assertNotIn("load_rules_kb.py", r.stdout,
+                         "товарный корпус ушёл в загрузчик процедурного")
+
+    def test_both_corpora_each_with_its_own_loader_and_cost(self):
+        r = self._dry_run('REINDEX_FULL="pp719 pp719_rules"')
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("pp719 (scripts/load_kb.py)", r.stdout)
+        self.assertIn("pp719_rules (scripts/load_rules_kb.py)", r.stdout)
+        self.assertIn("ТОВАРНАЯ ветка будет пустой", r.stdout)
+        self.assertIn("процедурная ветка будет пустой", r.stdout)
+
+    def test_unknown_collection_stops_before_anything(self):
+        """Опечатка в имени — противоречие профиля: код 2 ДО сухого прогона, а не молчаливый
+        пропуск (пустой загрузчик) и не «загрузим что-нибудь»."""
+        r = self._dry_run('REINDEX_FULL="pp719_rulez"')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("ПРОФИЛЬ ПРОТИВОРЕЧИВ", r.stdout)
+        self.assertNotIn("СУХОЙ ПРОГОН", r.stdout, "противоречие поймано не до прогона")
+
+    def test_full_and_per_document_are_rejected_before_anything(self):
+        r = self._dry_run('REINDEX_FULL="pp719_rules"\nREINDEX_DOCS="gisp_faq"')
+        self.assertEqual(r.returncode, 2, r.stdout + r.stderr)
+        self.assertIn("заданы и REINDEX_FULL, и REINDEX_DOCS", r.stdout)
+        self.assertNotIn("СУХОЙ ПРОГОН", r.stdout, "противоречие поймано не до прогона")
+
+    def test_real_deploy_calls_the_loader_by_collection(self):
+        """Шаг выкатки зовёт `reindex_loader`, а не зашитый `load_rules_kb.py`: сухой прогон
+        выше проверяет ТАБЛИЦУ, этот — что реальная выкатка ею пользуется."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        step = code.split("ПОЛНАЯ ПЕРЕИНДЕКСАЦИЯ: $c", 1)
+        self.assertEqual(len(step), 2, "шаг полной переиндексации не идёт по коллекциям")
+        self.assertIn('python "$(reindex_loader "$c")"', step[1].split("fi", 1)[0])
+        self.assertNotIn("python scripts/load_rules_kb.py \\", code,
+                         "полная переиндексация снова зашита на процедурный загрузчик")
 
 
 if __name__ == "__main__":

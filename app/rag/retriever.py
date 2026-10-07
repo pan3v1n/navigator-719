@@ -19,6 +19,7 @@ from app.core.config import settings
 from app.rag.embeddings import embed_query
 from app.rag import okpd2_ref
 from app.rag.sparse import query_vector
+from app.rag.topics import FOOTNOTE_MARK  # форма маркера сноски — одна на три места (#155)
 
 DENSE = "dense"
 SPARSE = "bm25"
@@ -511,7 +512,7 @@ _RULES_TOPIC: tuple[tuple[str, tuple[re.Pattern, ...]], ...] = (
     )),
     # Сноски приложения: «что означает <44>», «сноска 6 к требованию» (D3)
     ("appendix_footnotes", (
-        re.compile(r"сноск|<\s*\d{1,2}(?:\.\d)?\s*>", re.I),
+        re.compile(r"сноск|" + FOOTNOTE_MARK, re.I),
         re.compile(r"что\s+(означа|значит)\w*\s+(значок|обозначени|отсылк)", re.I),
     )),
 )
