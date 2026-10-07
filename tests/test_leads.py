@@ -225,9 +225,15 @@ class TestLandingGuards(unittest.TestCase):
                     "получения заключения", "разд. II"):
             self.assertNotIn(bad, self.text, f"на лендинге «{bad}» — утратившая силу норма или неверный раздел")
 
-    def test_no_placeholder_prices_or_quotas(self):
+    def test_no_placeholder_prices(self):
         self.assertNotIn("0 000 ₽", self.text)
-        self.assertNotRegex(self.text, r"[Дд]о \d+ запросов", "лимитов запросов в сервисе нет")
+
+    def test_plan_volumes_from_design(self):
+        # Объёмы тарифов — из макета, решение владельца 07.10. ⚠ Сервис их НЕ считает и не
+        # ограничивает (квоты по пользователю нет) — разница тарифов пока держится договором.
+        vols = re.findall(r'class="plan-name">([^<]+)</div>.*?class="plan-desc">До (\d+) запросов',
+                          self.html, re.S)
+        self.assertEqual(vols, [("Старт", "100"), ("Стандарт", "200"), ("Профи", "400")])
 
     def test_nothing_loads_from_outside(self):
         """Шрифты и скрипты — только свои: внешние CDN из РФ грузятся ненадёжно."""
