@@ -40,11 +40,24 @@ async def lifespan(app: FastAPI):
     yield
 
 
+def api_docs_kwargs(app_env: str) -> dict:
+    """Адреса автодокументации FastAPI: локально — дефолтные, вне `development` — выключены (`O9` #145).
+
+    Дефолт FastAPI публикует `/docs`, `/redoc` и `/openapi.json`, то есть карту эндпоинтов вместе
+    с `/api/admin/export`. За 08–22.09.2026 сканеры получили её 11 раз; авторизация держала (перебор
+    14.09 → 401), но раздавать карту незачем. Условие то же, что у гарда секрета: всё, что не
+    `development`, считается боем."""
+    if app_env == "development":
+        return {}
+    return {"docs_url": None, "redoc_url": None, "openapi_url": None}
+
+
 app = FastAPI(
     title=settings.APP_TITLE,
     version=settings.APP_VERSION,
     description="Навигатор по ПП РФ №719 для Курской ТПП",
     lifespan=lifespan,
+    **api_docs_kwargs(settings.APP_ENV),
 )
 
 # Сессии-куки для auth веб-UI (подпись SESSION_SECRET). `https_only` — из COOKIE_SECURE: локально
