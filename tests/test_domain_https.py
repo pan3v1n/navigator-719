@@ -14,7 +14,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
+import shutil
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -70,7 +74,11 @@ class TestComposeTopology(unittest.TestCase):
         caddy_block = self.src[self.src.index("  caddy:"):self.src.index("  app:")]
         for port in ('"80:80"', '"443:443"'):
             self.assertIn(port, caddy_block)
-        self.assertIn("./caddy/Caddyfile:/etc/caddy/Caddyfile", caddy_block)
+        # каталогом, а не одним файлом: одиночный bind-mount держит прежний inode, и после
+        # распаковки выкатки caddy reload перечитывал СТАРЫЙ конфиг (выкатка test28)
+        self.assertIn("- ./caddy:/etc/caddy:ro", caddy_block)
+        mounts = [ln for ln in caddy_block.splitlines() if not ln.strip().startswith("#")]
+        self.assertFalse([ln for ln in mounts if "./caddy/Caddyfile:" in ln], "одиночный файл вернулся")
         self.assertIn("./landing:/srv/landing", caddy_block)
         self.assertIn("caddy_data:/data", caddy_block, "без тома ключи ACME теряются при пересоздании")
 
@@ -158,6 +166,14 @@ class TestDeployGuardsFromReview140(unittest.TestCase):
         up = self.code.index("compose up -d app caddy")
         self.assertIn("caddy reload --config /etc/caddy/Caddyfile", self.code[up:])
 
+    def test_stale_caddy_config_is_recreated_then_failed(self):
+        # «reload прошёл» не значит «конфиг новый» (test28): после reload сверяется ФАКТ, при
+        # расхождении caddy пересоздаётся, а не сошлось и после этого — провал выкатки
+        up = self.code.index("compose up -d app caddy")
+        check = self.code.index("if caddy_conf_matches; then", up)
+        recreate = self.code.index("compose up -d --force-recreate caddy", check)
+        self.code.index('|| fail "caddy работает не с тем Caddyfile', recreate)
+
     def test_public_entry_probed_through_caddy(self):
         self.assertIn('--resolve "$host:443:127.0.0.1"', self.code)
         self.assertIn("http → https редирект", self.code)
@@ -165,6 +181,40 @@ class TestDeployGuardsFromReview140(unittest.TestCase):
     def test_docs_name_the_real_subdomain(self):
         for rel in (".env.example", "app/core/config.py", "caddy/Caddyfile"):
             self.assertNotRegex(_read(rel), r"app\.(<домен>|`|PUBLIC)", rel)
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
+class TestCaddyConfMatches(unittest.TestCase):
+    """Сверка Caddyfile в контейнере с диском — по ПОВЕДЕНИЮ функции из deploy.sh, с подставным
+    `docker`: строковый сторож выше подтвердит вызов и при функции, всегда отвечающей «совпадает»."""
+
+    CONF = b"example.ru {\n  file_server\n}\n"
+
+    def _run(self, box: str | None, write_disk: bool = True) -> int:
+        src = _read("scripts/deploy/deploy.sh")
+        fn = re.search(r"^caddy_conf_matches\(\) \{.*?^\}", src, re.S | re.M).group(0)
+        reply = "return 1" if box is None else f'echo "{box}  /etc/caddy/Caddyfile"'
+        script = f"fake_docker() {{ {reply}; }}\nDOCKER=fake_docker\n{fn}\ncaddy_conf_matches"
+        with tempfile.TemporaryDirectory() as tmp:
+            if write_disk:
+                Path(tmp, "caddy").mkdir()
+                Path(tmp, "caddy", "Caddyfile").write_bytes(self.CONF)
+            return subprocess.run([shutil.which("bash"), "-c", script], cwd=tmp,
+                                  capture_output=True).returncode
+
+    def test_same_hash_matches(self):
+        self.assertEqual(self._run(hashlib.sha256(self.CONF).hexdigest()), 0)
+
+    def test_stale_config_in_container_mismatches(self):
+        self.assertNotEqual(self._run(hashlib.sha256(b"old").hexdigest()), 0)
+
+    def test_exec_failure_is_not_a_match(self):
+        # caddy не поднят / exec упал: пустой ответ — не «совпадает»
+        self.assertNotEqual(self._run(None), 0)
+
+    def test_missing_disk_file_is_not_a_match(self):
+        # не тот каталог и упавший exec: пустое против пустого — не «совпадает»
+        self.assertNotEqual(self._run(None, write_disk=False), 0)
 
 
 class TestLeadFormRouteIsCheckedOnDeploy(unittest.TestCase):

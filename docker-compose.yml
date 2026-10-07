@@ -19,7 +19,10 @@ services:
       - "80:80"
       - "443:443"
     volumes:
-      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      # ⚠ КАТАЛОГ, а не один файл (выкатка test28): tar выкатки кладёт Caddyfile НОВЫМ inode,
+      # а bind-mount одного файла держит прежний — caddy reload перечитывал СТАРЫЙ конфиг, и
+      # форма лендинга на бою отдавала 404. Каталог видит подменённый файл.
+      - ./caddy:/etc/caddy:ro
       - ./landing:/srv/landing:ro
       - caddy_data:/data
       - caddy_config:/config
