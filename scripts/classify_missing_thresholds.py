@@ -46,6 +46,9 @@ r"""Классификация позиций БЕЗ порога в балла�
   narrower_note       в примечаниях есть порог для БОЛЕЕ УЗКОГО кода, чем код позиции. Улика
                       слабая: порог написан для части того, что покрывает позиция, и переносить
                       его вверх по иерархии нельзя — решает эксперт.
+  list_mixed          позиция-перечень («Швартовные лебедки; траловые лебедки; …»), чьи виды
+                      таблица примечания задаёт с РАЗНЫМИ порогами. Общего порога у позиции нет —
+                      рантайм верно молчит; эксперту — пороги по видам (ред. 29.09.2026, прим. 17(3)).
   no_source           улик нет: ни в примечаниях, ни внутри записи. Порога нет в первоисточнике
                       → эксперту (#95).
 
@@ -73,6 +76,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
+    _list_items,
+    _list_items_verdict,
     _name_overlap,
     _names_this_position,
     _flat_thresholds,
@@ -110,6 +115,7 @@ CLASSES = (
     "own_non_ball",
     "note_non_ball",
     "procurement_only",
+    "list_mixed",
     "no_source",
 )
 DEFECT_CLASSES = ("defect_unattached", "defect_name_match", "inline_in_record")
@@ -192,6 +198,28 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         return {"class": "procurement_only",
                 "evidence": "единственный порог — закупочный, общего нет",
                 "note": None, "quote": None}
+
+    # Позиция-перечень, виды которой таблица задаёт с РАЗНЫМИ порогами (ред. 29.09.2026, прим.
+    # 17(3)). Рантайм отказывается ВЕРНО — тем же решением, что импортировано отсюда, а не
+    # скопировано (`_list_items_verdict`). Без этой ветки строка таблицы с покрывающим кодом
+    # находилась ниже, и позиция уходила в `defect_unattached` — гейт `attachment_defects == 0`
+    # краснел на верном состоянии, то есть проверка была строже защищаемого ею кода.
+    if value is None:
+        sec = rec.get("section_roman")
+        for t in _tables():
+            if t.get("section") and sec and t["section"] != sec:
+                continue
+            if _list_items_verdict(t, name) == "conflict":
+                by = {_norm(_strip_fn(r["name"])): r for r in t["rows"]}
+                for r in t["rows"]:
+                    for it in _list_items(r["name"]):
+                        by.setdefault(it, r)
+                parts = [f"{it}: {'/'.join(re.sub(r'[^0-9]', '', v) for v in by[it]['by_year'].values())}"
+                         for it in _list_items(name) if it in by]
+                return {"class": "list_mixed",
+                        "evidence": f"прим. {t['note']}: виды позиции-перечня заданы с РАЗНЫМИ "
+                                    f"порогами — " + "; ".join(parts[:6]),
+                        "note": t["note"], "quote": None}
 
     # Улики в примечаниях. Направление то же, что у рантайма: код примечания — предок или равен.
     # ⚠⚠ СОБИРАЕМ ВСЕ ПОКРЫВАЮЩИЕ СТРОКИ, А НЕ ПЕРВУЮ (ревью захода 3, 26.08.2026).

@@ -47,6 +47,89 @@ _CODE_RE = re.compile(r"\d{2}\.\d{2}(?:\.\d+)*")
 _ROW_START_RE = re.compile(r"(?:из\s+)?\d{2}\.\d{2}(?:\.\d+)*\s*\|")
 
 
+# --- Таблица с ЕДИНИЦЕЙ В ШАПКЕ (прим. 17(3), ред. 29.09.2026 N 1002) -----------------------
+# Подпись колонки несёт единицу («до 1 января 2029 г.,\nне менее баллов»), ячейка — голое число.
+# Подпись — до запятой, единица уходит в значение: «до 1 января 2029 г. — не менее 35 баллов».
+_UNIT_LABEL_RE = re.compile(r"^((?:до|с)\s+\d{1,2}\s+\S+\s+\d{4}\s*г\.)\s*,?\s*не\s+менее\s+баллов$")
+_BARE_NUMBER_RE = re.compile(r"^\d+$")
+
+
+def _unit_header_table(lines: list[str], i: int, note_no: str, section: str | None):
+    """Таблица прим. 17(3): `(таблица, индекс конца)` либо `(None, i)` — форма не та.
+
+    ⚠⚠ ПОЧЕМУ ОТДЕЛЬНАЯ ВЕТКА, А НЕ ПРАВКА ОБЩЕЙ. Общий разбор этой таблицы не видит трижды:
+    шапка разорвана на ПЯТЬ физических строк (он нашёл бы одну колонку из трёх); ячейки кодов и
+    имён многострочные, и строка «22.19.60.191|Жилеты спасательные» без значений принималась бы
+    за продолжение кода; значения — голые числа. Править общий разбор ради одной формы — радиус
+    на все 30 таблиц; ветка срабатывает ТОЛЬКО на шапке, где КАЖДАЯ подпись несёт «не менее
+    баллов», и такая шапка в чанке одна (проверено на ред. 29.09.2026).
+
+    ⚠⚠ ПУСТАЯ ЯЧЕЙКА ЗНАЧЕНИЯ = ЗНАЧЕНИЕ СТРОКИ ВЫШЕ. В первоисточнике у части строк ячейки
+    значений объединены на две строки (ROWSPAN): «Шлюпки спасательные» 105/115/125 накрывают
+    «… танкерного типа», «… свободнопадающие» и «Дежурные шлюпки». RTF → текст оставляет на месте
+    объединённой ячейки пустоту, и без этого правила три вида шлюпок «не имели бы порога». Правило
+    проверено ВТОРЫМ свидетелем: эталон из HTML Контура (структура с ROWSPAN) даёт значения у
+    всех 295 имён таблицы, пустых «по существу» нет. Вне этой формы правило не действует —
+    в общих таблицах пустая ячейка значит «за этот год значения нет» (ревью 20.08.2026)."""
+    j, n = i + 1, len(lines)
+    while j < n and not lines[j].replace("\xa0", " ").lstrip().startswith("Код по"):
+        if _NOTE_INTRO_RE.match(lines[j]) or j - i > 4:
+            return None, i
+        j += 1
+    head, k = [], j
+    while k < n:
+        head.append(lines[k])
+        if lines[k].rstrip().endswith("|"):
+            break
+        k += 1
+    hcells = [re.sub(r"\s+", " ", c.replace("\xa0", " ")).strip() for c in "\n".join(head).split("|")]
+    labels = [_UNIT_LABEL_RE.match(c) for c in hcells[2:] if c]
+    if len(labels) < 2 or not all(labels):
+        return None, i
+    years = [m.group(1) for m in labels]
+
+    rows: list[dict] = []
+    prev: list[str] = [""] * len(years)
+    buf: list[str] = []
+    k += 1
+    while k < n:
+        raw = lines[k]
+        if not raw.strip() or _NOTE_INTRO_RE.match(raw):
+            break
+        buf.append(raw)
+        k += 1
+        if not raw.rstrip().endswith("|"):
+            continue
+        cells = "\n".join(buf).split("|")
+        buf = []
+        if len(cells) < 2 + len(years):           # строка-группа: «Спасательные средства и оборудование|»
+            prev = [""] * len(years)               # объединение не пересекает заголовок группы
+            continue
+        vals = [c.strip() for c in cells[2:2 + len(years)]]
+        vals = [v if v else p for v, p in zip(vals, prev)]
+        prev = vals
+        if not all(_BARE_NUMBER_RE.match(v) for v in vals):
+            continue                               # не та строка — молча не выдумываем порог
+        names, cur = [], []
+        for part in cells[1].split("\n"):
+            part = part.strip()
+            if not part:
+                continue
+            cur.append(part)
+            if not part.endswith(";"):             # «;» в конце строки — имя-перечень продолжается
+                names.append(" ".join(cur))
+                cur = []
+        if cur:
+            names.append(" ".join(cur))
+        codes = _CODE_RE.findall(cells[0])
+        by_year = {years[x]: f"не менее {vals[x]} баллов" for x in range(len(years))}
+        for nm in names:
+            rows.append({"codes": codes, "name": nm, "by_year": by_year})
+    if not rows:
+        return None, i
+    return {"note": note_no, "section": section, "years": years, "rows": rows}, k
+
+
 @lru_cache(maxsize=1)
 def _tables() -> list[dict]:
     """Парсит все таблицы-пороги из чанка примечаний. Кэш на процесс."""
@@ -76,6 +159,11 @@ def _tables() -> list[dict]:
         # «…применяется… с учетом следующих коэффициентов:» (прим. 79 и 80).
         if _is_coefficient_note(lines[i]):
             i += 1
+            continue
+        unit_table, end = _unit_header_table(lines, i, note_no, section)
+        if unit_table is not None:
+            tables.append(unit_table)
+            i = end
             continue
         # Заголовок таблицы: строка с разделителями «|» и минимум двумя годами.
         j, header = i + 1, None
@@ -859,6 +947,52 @@ def _code_applies(note_code: str, pos_code: str) -> bool:
     return bool(n) and len(n) <= len(p) and p[:len(n)] == n
 
 
+def _list_items(product_name: str | None) -> list[str]:
+    """Наименования позиции-перечня: строки ячейки и части через «; » — по отдельности."""
+    parts = re.split(r"\s*;\s*\n\s*|\s*\n\s*|\s*;\s+", (product_name or "").strip())
+    return [_norm(_strip_fn(p).strip(" ;")) for p in parts if p.strip(" ;")]
+
+
+def _list_items_verdict(table: dict, product_name: str | None):
+    """Для позиции из ≥2 наименований: строка таблицы с общим для них порогом, "conflict" или None.
+
+    None — правило неприменимо (наименование одно или дословно в таблице нашлось меньше двух)."""
+    items = _list_items(product_name)
+    if len(items) < 2:
+        return None
+    # ⚠ Строка таблицы тоже бывает перечнем («Иллюминаторы; крышки люков») — индексируем её по
+    # КАЖДОМУ виду, иначе вид позиции с таким перечнем не совпадает дословно ни с чем, конфликт
+    # не виден, и правило «≥2 общих слова» отдаёт график соседней строки (так было у позиции
+    # «Иллюминаторы; крышки люков; трубы вентиляционные; …»: 65/70/75 против 25/30/35).
+    rows_by_name = {}
+    for r in table["rows"]:
+        for nm in [_norm(_strip_fn(r["name"]))] + _list_items(r["name"]):
+            rows_by_name.setdefault(nm, r)
+    hits = [rows_by_name[it] for it in items if it in rows_by_name]
+    if len(hits) < 2:
+        return None
+    if len({tuple(r["by_year"].items()) for r in hits}) > 1:
+        return "conflict"
+    return hits[0] if len(hits) == len(items) else None
+
+
+def _subcode_of_group(note_code: str, pos_code: str) -> bool:
+    """Код позиции — подкатегория той категории «…0», которую называет примечание.
+
+    ⚠⚠ ЗАЧЕМ (ред. 29.09.2026, N 1002). Акт дал судам новые девятизначные коды в разделе XVIII
+    (30.11.33.191 «Суда промерные» … 30.11.33.197 «Суда снабжения»), а строки порогов прим. 17,
+    правленные ТЕМ ЖЕ актом, оставили прежнее «из 30.11.33.190 "Суда промерные"». Посегментно
+    `_code_applies` видит в 30.11.33.190 и 30.11.33.191 соседей, а не группу и подкод, и семь
+    новых типов судов теряли порог, написанный прямо для них. Класс тот же, что `D14` #141
+    («н-бутан» 20.14.11.112 → группа 20.14.11.110), но здесь он закрывается ТОЛЬКО в связке с
+    дословным совпадением имени (см. вызов) — общий подъём к группе остаётся задачей `D14`.
+
+    В ОКПД2 код «XX.XX.XX.YZ0» — категория, «XX.XX.XX.YZ1…9» — её подкатегории."""
+    n, p = _segs(note_code), _segs(pos_code)
+    return (len(n) == len(p) == 4 and n[:3] == p[:3] and len(n[3]) == len(p[3]) == 3
+            and n[3].endswith("0") and n[3][:2] == p[3][:2] and n[3] != p[3])
+
+
 # ⚠⚠ У СТРОК `strict_name` ИМЯ И ЕСТЬ КЛЮЧ — ЗНАЧИТ СОВПАДЕНИЕ ДОСЛОВНОЕ (`K2-2` #128,
 # переписано по ревью PR #133, раунд 2).
 #
@@ -1094,6 +1228,26 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
         for t in _tables():
             if note_scope(t["note"]) != scope:
                 continue
+            # ⚠⚠ ТАБЛИЦА, НАЗВАВШАЯ РАЗДЕЛ, К ЧУЖОМУ РАЗДЕЛУ НЕ ОТНОСИТСЯ (ред. 29.09.2026).
+            # Эта ветка — для таблиц БЕЗ раздела (прим. 38/81/28/33). Первая же таблица большого
+            # раздела с кодами чужих отраслей (прим. 17(3) к разд. XVIII: судовые выключатели
+            # 27.12.10.110, средства связи 26.30.11) раздала пороги судостроения разделам V и IX
+            # по коду и сняла порог прим. 33 у раздела VII, сделав его неоднозначным. Замер
+            # радиуса: 53 сменили порог, 1 потерял — все из-за этого.
+            if section and t["section"] and t["section"] != section:
+                continue
+            # ⚠⚠ ПОЗИЦИЯ-ПЕРЕЧЕНЬ, ЧЬИ НАИМЕНОВАНИЯ СТОЯТ В ТАБЛИЦЕ С РАЗНЫМИ ЗНАЧЕНИЯМИ, ОБЩЕГО
+            # ПОРОГА НЕ ИМЕЕТ (ред. 29.09.2026). Строка раздела XVIII «Швартовные лебедки; траловые
+            # лебедки; …» — одна позиция с одной ячейкой требований, а таблица прим. 17(3) делит её
+            # виды на строки с РАЗНЫМИ порогами (швартовные 65/75/80, траловые и прочие 65/70/75);
+            # у кранов — четыре разных графика. Правило «≥2 общих слова» ниже отдавало позиции
+            # график ОДНОГО вида. Здесь: наименования перечня, найденные в таблице дословно, дают
+            # одинаковые значения → порог общий; разные → порога у позиции нет, и мы не гадаем.
+            verdict = _list_items_verdict(t, product_name)
+            if verdict == "conflict":
+                return None
+            if isinstance(verdict, dict):
+                return _fmt(verdict, t["note"], t["section"])
             for r in t["rows"]:
                 exact = None
                 for c in codes:
@@ -1138,7 +1292,14 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                     if _code_applies(rc, c):
                         exact = bool(exact) or (_segs(rc) == _segs(c))
             if exact is None:
-                continue
+                # Подкод категории «…0» — ТОЛЬКО при дословном совпадении имени (см. `_subcode_of_group`):
+                # без имени это общий подъём к группе, а его радиус не мерили (`D14` #141).
+                if (any(_subcode_of_group(rc, c) for c in codes for rc in r["codes"])
+                        and any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
+                                for nm in r.get("names") or [])):
+                    exact = False
+                else:
+                    continue
             # ⚠ «ИЗ 27.12 "Выключатель автоматический…"» ЧИТАЕТСЯ КАК «ЧАСТЬ КОДА, А ИМЕННО ЭТО
             # ИЗДЕЛИЕ». Без проверки имени график выключателей уходил ОДИННАДЦАТИ чужим позициям
             # группы 27.12 — «Реле управления», «Зажимы и блоки зажимов наборные»,
