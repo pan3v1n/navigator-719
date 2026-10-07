@@ -158,6 +158,28 @@ class TestAppendixFootnotes(unittest.TestCase):
         self.assertEqual(r["source_anchor"], "Приложение к ПП №719, сноска <44>")
         self.assertIn("акт", r["text"].lower())
 
+    def test_parenthesised_footnotes_are_records_of_their_own(self):
+        """«<12(1)>», «<40(1)>», «<40(2)>», «<9(1)>» — отдельные записи, а не хвост соседней.
+
+        До 07.10.2026 шаблон знал «<44>» и «<38.1>», и определение «<12(1)>» (65 ссылок в тексте
+        приложения) молча дописывалось в запись «<12>»; ред. 29.09.2026 добавила «<9(1)>» и
+        вклеила его в «<9>». Оракул — сам чанк: каждая строка, начинающаяся маркером со скобкой,
+        обязана стать записью, иначе тест сам себя не проверяет."""
+        import re
+
+        from scripts.load_rules_kb import FOOTNOTES_PATH, parse_footnotes
+
+        if not FOOTNOTES_PATH.exists():
+            self.skipTest("чанк сносок отсутствует")
+        heads = re.findall(r"(?m)^(<\d+\(\d+\)>)\s", FOOTNOTES_PATH.read_text(encoding="utf-8"))
+        self.assertGreaterEqual(len(heads), 3, "в чанке нет сносок со скобкой — оракул пуст")
+        by_point = {r["point"]: r["text"] for r in parse_footnotes(FOOTNOTES_PATH)}
+        for h in heads:
+            self.assertIn(h, by_point, f"сноска {h} не стала записью")
+            self.assertTrue(by_point[h].startswith(h), f"запись {h} начинается не со своего маркера")
+        for parent, child in (("<12>", "<12(1)>"), ("<40>", "<40(1)>")):
+            self.assertNotIn(child, by_point.get(parent, ""), f"{child} снова вклеена в {parent}")
+
     def test_excluded_footnotes_are_dropped(self):
         """«<7> Сноска исключена» отвечать нечем — в корпус не идёт."""
         from scripts.load_rules_kb import FOOTNOTES_PATH, parse_footnotes

@@ -291,7 +291,8 @@ from app.rag.okpd2_ref import has_okpd2_code  # разбор кода — одн
 # отвечала бы из собственных знаний — ровно та незаземлённость, что чинилась в P1.
 # ⚠ Узко намеренно: нужен НОМЕР сноски. Код ОКПД2 в запросе отменяет правило — «требования к
 # 28.22.14 и что значит сноска 6» это товарный вопрос, там сноска идёт довеском к позиции.
-_FOOTNOTE_REF_RE = re.compile(r"сноск\w*\s*(?:N\s*)?\d{1,2}\b|<\s*\d{1,2}(?:\.\d)?\s*>", re.IGNORECASE)
+# ⚠ Форма маркера — `topics.FOOTNOTE_MARK`, одна на три места (#155): «<12(1)>», «<38.12>».
+_FOOTNOTE_REF_RE = re.compile(r"сноск\w*\s*(?:N\s*)?\d{1,2}\b|" + topics.FOOTNOTE_MARK, re.IGNORECASE)
 
 
 def is_procedural(query: str, has_code: bool = False) -> bool:
