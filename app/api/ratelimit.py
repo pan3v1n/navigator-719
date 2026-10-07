@@ -72,3 +72,11 @@ class SlidingWindow:
                 self._hits.clear()
             else:
                 self._hits.pop(key, None)
+
+
+def client_ip(request) -> str:
+    """Адрес клиента — ключ ограничителей. ОДНО место для входа и для заявок лендинга (ревью
+    PR #158): правка вывода адреса (например, доверие только X-Forwarded-For от caddy) обязана
+    менять оба ограничителя сразу, иначе их ключи разойдутся. За caddy адрес берётся из
+    X-Forwarded-For: uvicorn запущен с --proxy-headers."""
+    return (request.client.host if request.client else "") or "unknown"

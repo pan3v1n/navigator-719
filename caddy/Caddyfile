@@ -9,9 +9,16 @@
 # `localhost` (локальная проверка) — самоподписанный. Ничего покупать у регистратора не нужно.
 
 {$PUBLIC_DOMAIN} {
-	root * /srv/landing
-	file_server
 	encode gzip
+	# Форма «Оставить заявку» лендинга шлёт POST на ТОТ ЖЕ адрес, что и страница: без CORS и без
+	# кук приложения. Только этот путь уходит в приложение — остальное по-прежнему статика.
+	handle /api/leads {
+		reverse_proxy app:8000
+	}
+	handle {
+		root * /srv/landing
+		file_server
+	}
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin

@@ -27,7 +27,7 @@ from app.api.auth import (
     set_remember_cookie,
 )
 from app.api.admin_stats import build_admin_view, system_health
-from app.api.ratelimit import SlidingWindow
+from app.api.ratelimit import SlidingWindow, client_ip
 from app.core.config import settings
 from app.core.release import release_label
 from app.core.prompts import EXPERT_DISCLAIMER
@@ -131,8 +131,7 @@ def help_page(request: Request):
 _login_limit = SlidingWindow(settings.RATE_LIMIT_LOGIN_PER_MIN, window=60.0)
 
 
-def _client_ip(request: Request) -> str:
-    return (request.client.host if request.client else "") or "unknown"
+_client_ip = client_ip  # одно определение с ограничителем заявок (app/api/ratelimit.py)
 
 
 @router.post("/login", response_class=HTMLResponse)
@@ -242,8 +241,25 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
             db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
             region=region, role=role,
         )
+        # Заявки с лендинга — ПДн, поэтому только здесь, за ролью admin. Просроченные (срок из
+        # политики ПДн) удаляются при каждом открытии; на страницу — не больше LEADS_ON_PAGE.
+        q.purge_old_leads(db)
+        leads = q.list_leads(db, limit=LEADS_ON_PAGE)
+        leads_total = q.count_leads(db)
     return templates.TemplateResponse(
-        "admin.html", _ctx(request, admin=user, health=system_health(), **view))
+        "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads,
+                           leads_total=leads_total, **view))
+
+
+LEADS_ON_PAGE = 200
+
+
+@router.post("/api/admin/leads/{lead_id}/delete")
+def admin_delete_lead(lead_id: int, admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Удалить заявку — по отзыву согласия или требованию субъекта ПДн (политика, раздел 9)."""
+    with get_session() as db:
+        q.delete_lead(db, lead_id)
+    return RedirectResponse("/admin", status_code=303)
 
 
 @router.get("/api/admin/export")

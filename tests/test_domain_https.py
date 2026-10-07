@@ -165,3 +165,20 @@ class TestDeployGuardsFromReview140(unittest.TestCase):
     def test_docs_name_the_real_subdomain(self):
         for rel in (".env.example", "app/core/config.py", "caddy/Caddyfile"):
             self.assertNotRegex(_read(rel), r"app\.(<домен>|`|PUBLIC)", rel)
+
+
+class TestLeadFormRouteIsCheckedOnDeploy(unittest.TestCase):
+    """test28: форма лендинга шлёт POST на корневой домен — выкатка обязана проверить, что он доходит
+    до приложения, а не уходит статике (тогда форма на бою молча не работает)."""
+
+    def test_empty_form_through_caddy_expects_422(self):
+        src = _read("scripts/deploy/deploy.sh")
+        code = "\n".join(l for l in src.splitlines() if not l.lstrip().startswith("#"))
+        i = code.index('"https://$PUBLIC_DOMAIN_ENV/api/leads"')
+        block = code[i - 300:i + 400]
+        self.assertIn("-X POST", block)
+        self.assertIn("--resolve", block, "проверка обязана идти через caddy на самой VM")
+        # ⚠ Голого 422 мало (ревью PR #158): такой же даёт разбор тела в FastAPI, не дойдя до
+        # проверок формы. Требуется ключ ошибки НАШЕЙ проверки.
+        self.assertIn("""422:*'"consent"'*) ;;""", block)
+        self.assertNotRegex(block, r'case "\$code" in 422\) ;;', "проверка снова принимает любой 422")
