@@ -273,6 +273,8 @@ def _plan_rows(db) -> list[dict]:
             "id": u.id, "username": u.username, "role": u.role,
             "who": " · ".join(x for x in (u.full_name, u.region) if x),
             "plan": u.plan or "",
+            # название не из PLAN_LIMITS молча снимает лимит (ревью PR #161, LOW-3) — показываем
+            "unknown": bool(u.plan) and u.plan not in PLAN_LIMITS,
             "started": plans.msk_date(u.plan_started_at).isoformat() if u.plan_started_at else "",
             "state": st,
             "period": (f"{plans.msk_date(st.start):%d.%m.%Y} – "

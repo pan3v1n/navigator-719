@@ -73,6 +73,26 @@ def record_answer_usage(db: Session, user_id: int) -> None:
     db.commit()
 
 
+def is_answered_repeat(db: Session, user_id: int, session_id: str, content: str, since) -> bool:
+    """Тот же вопрос в той же беседе после `since` уже получил ответ (#160, ревью PR #161).
+
+    Так выглядит переход фронта со стрима на фолбэк, когда стрим дошёл до конца на сервере, а
+    клиент финала не получил: ответ уже списан, повтор списываться и блокироваться не должен.
+    Признак берётся из беседы на сервере, а не из ключа от клиента: ключ можно подсунуть, а
+    бесплатным здесь выходит только ответ, который уже получен."""
+    first = db.execute(
+        select(func.min(Message.id)).where(
+            Message.user_id == user_id, Message.session_id == session_id, Message.role == "user",
+            Message.content == content, Message.ts >= since)
+    ).scalar()
+    if first is None:
+        return False
+    return db.execute(
+        select(Message.id).where(Message.user_id == user_id, Message.session_id == session_id,
+                                 Message.role == "assistant", Message.id > first).limit(1)
+    ).first() is not None
+
+
 def count_answer_usage(db: Session, user_id: int, start, end) -> int:
     """Списанные ответы за [start, end) — время в наивном UTC, как хранит SQLite."""
     return db.execute(

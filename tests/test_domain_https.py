@@ -184,6 +184,43 @@ class TestDeployGuardsFromReview140(unittest.TestCase):
 
 
 @unittest.skipUnless(shutil.which("bash"), "bash недоступен")
+class TestCaddyValidateAndReload(unittest.TestCase):
+    """Ревью PR #161, MED-3: сверка хеша проверяет ФАЙЛ, а не загруженный конфиг — невалидный
+    Caddyfile проходил бы её (reload падает, caddy на старом конфиге, хеш совпадает). Шаг гоняется
+    ПО ПОВЕДЕНИЮ: фрагмент deploy.sh с подставным docker, у которого validate/reload падают."""
+
+    def _run(self, validate_rc: int, reload_fails: int) -> tuple[int, str]:
+        src = _read("scripts/deploy/deploy.sh")
+        frag = re.search(r"^if \$DOCKER compose exec -T caddy caddy validate .*?"
+                         r"caddy reload не прошёл и с повтором \(compose logs caddy\)\"\nfi\n", src, re.S | re.M).group(0)
+        script = (f"FAILED=0; n=0; sleep() {{ :; }}; say() {{ echo \"$*\"; }}; fail() {{ FAILED=1; echo \"FAIL $*\"; }}\n"
+                  f"fake_docker() {{ case \"$*\" in *validate*) return {validate_rc};; "
+                  f"*reload*) n=$((n+1)); [ $n -le {reload_fails} ] && return 1; return 0;; esac; }}\n"
+                  f"DOCKER=fake_docker\n{frag}echo \"FAILED=$FAILED\"\n")
+        r = subprocess.run([shutil.which("bash"), "-c", script], capture_output=True, text=True, encoding="utf-8")
+        return int(re.search(r"FAILED=(\d)", r.stdout).group(1)), r.stdout
+
+    def test_clean_config_passes(self):
+        self.assertEqual(self._run(0, 0)[0], 0)
+
+    def test_invalid_config_fails_the_deploy(self):
+        failed, out = self._run(1, 0)
+        self.assertEqual(failed, 1, out)
+        self.assertIn("caddy validate", out)
+
+    def test_reload_retried_once(self):
+        self.assertEqual(self._run(0, 1)[0], 0, "один сбой reload — повтор проходит")
+        self.assertEqual(self._run(0, 2)[0], 1, "два сбоя reload — провал, а не предупреждение")
+
+    def test_validate_runs_before_reload_and_hash_check(self):
+        src = _read("scripts/deploy/deploy.sh")
+        up = src.index("compose up -d app caddy")
+        v = src.index("caddy validate --config /etc/caddy/Caddyfile", up)
+        self.assertLess(v, src.index("if caddy_reload ||", up))
+        self.assertLess(v, src.index("if caddy_conf_matches; then", up))
+
+
+@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
 class TestCaddyConfMatches(unittest.TestCase):
     """Сверка Caddyfile в контейнере с диском — по ПОВЕДЕНИЮ функции из deploy.sh, с подставным
     `docker`: строковый сторож выше подтвердит вызов и при функции, всегда отвечающей «совпадает»."""

@@ -605,8 +605,21 @@ $DOCKER compose up -d app caddy
 # `9b3d93f`). Reload идёт после старта; на первой выкатке caddy только что поднят и reload
 # просто повторит его конфиг.
 sleep 5
-$DOCKER compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1 \
-  && say "  caddy: reload прошёл" || say "  ⚠ caddy reload не прошёл — смотреть compose logs caddy"
+# ⚠ Сверка хеша ниже проверяет ФАЙЛ, а не загруженный конфиг (ревью PR #161, MED-3): при
+# невалидном Caddyfile reload падает, caddy остаётся на СТАРОМ конфиге, а хеш файла совпадает —
+# и проверки публичного входа проходят на старом. А при следующем рестарте VM caddy не поднялся
+# бы вовсе, положив и лендинг, и сервис. Поэтому синтаксис — до reload, и провал reload — провал.
+if $DOCKER compose exec -T caddy caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile >/dev/null 2>&1; then
+  say "  caddy: Caddyfile валиден"
+else
+  fail "Caddyfile не проходит caddy validate — caddy на прежнем конфиге, рестарт VM его не поднимет"
+fi
+caddy_reload() { $DOCKER compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile >/dev/null 2>&1; }
+if caddy_reload || { sleep 3; caddy_reload; }; then
+  say "  caddy: reload прошёл"
+else
+  fail "caddy reload не прошёл и с повтором (compose logs caddy)"
+fi
 # ⚠ «reload прошёл» НЕ значит «конфиг новый» (выкатка test28): пока Caddyfile монтировался
 # одним файлом, контейнер держал прежний inode, reload успешно перечитывал СТАРЫЙ конфиг, и
 # форма лендинга на бою отдавала 404. Сверяем факт — хеш файла в контейнере против хеша на

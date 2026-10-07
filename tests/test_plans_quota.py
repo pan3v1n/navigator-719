@@ -158,7 +158,7 @@ class TestQuotaInChat(unittest.TestCase):
         self._ask(u)
         self.assertEqual(self._used(u), 100, "ответ на последней единице обязан списаться")
         with self.assertRaises(HTTPException) as cm:
-            self._ask(u)
+            self._ask(u, sid="s2")   # новый вопрос (повтор в той же беседе — бесплатен, MED-1)
         self.assertEqual(cm.exception.status_code, 402)
         self.assertIn("«Старт»", cm.exception.detail)
         self.assertIn("100 из 100", cm.exception.detail)
@@ -220,11 +220,64 @@ class TestQuotaInChat(unittest.TestCase):
             q.delete_session(db, u.id, "del")
         self.assertEqual(self._used(u), 1)
 
-    def test_admin_and_no_plan_are_never_blocked(self):
+    def test_admin_and_no_plan_are_never_blocked_nor_metered(self):
         for u in (self._user(role="admin"), self._user(plan=None)):
             self._spend(u, 500)
             self._ask(u)
+            self.assertEqual(self._used(u), 500, "без лимита расход не ведётся (ревью PR #161, LOW-1)")
         self.assertEqual(self.calls, 2)
+
+    def test_usage_before_plan_assignment_does_not_count(self):
+        # подключение задним числом (дата договора) не засчитывает вопросы, заданные без тарифа
+        u = self._user(plan=None)
+        self._ask(u)
+        with self.Session() as db:
+            q.set_user_plan(db, u.id, "Старт", plans.anchor_from_date(self.NOW_DAY - timedelta(days=3)))
+            st = quota.quota_state(db, q.get_user(db, u.id))
+        self.assertEqual(st.used, 0)
+
+    # --- MED-1 ревью PR #161: повтор после стрима, дошедшего до конца на сервере ---
+    def test_repeat_of_an_answered_question_is_neither_charged_nor_blocked(self):
+        u = self._user()
+        self._spend(u, 99)
+        self._ask(u, sid="r")                       # последняя единица — списана
+        self.assertEqual(self._used(u), 100)
+        self._ask(u, sid="r")                       # фолбэк переспросил то же — не 402, не списано
+        self.assertEqual((self._used(u), self.calls), (100, 2))
+        with self.assertRaises(HTTPException) as cm:   # другой вопрос — уже по лимиту
+            with mock.patch.object(chat_mod, "answer", self._engine()):
+                chat_mod.chat(chat_mod.ChatRequest(message="Другой вопрос", session_id="r"), user=u)
+        self.assertEqual(cm.exception.status_code, 402)
+
+    def test_question_answered_in_another_session_is_not_a_repeat(self):
+        # беседа A: вопрос отвечен; беседа Б: позже отвечено другое. Тот же вопрос в Б — новый.
+        u = self._user()
+        self._spend(u, 100)
+        with self.Session() as db:
+            for sid, text in (("A", "Требования к станкам?"), ("B", "Другое")):
+                q.log_message(db, user_id=u.id, session_id=sid, role="user", content=text)
+                q.log_message(db, user_id=u.id, session_id=sid, role="assistant", content="ответ")
+        with self.assertRaises(HTTPException) as cm:
+            self._ask(u, sid="B")
+        self.assertEqual(cm.exception.status_code, 402)
+
+    def test_repeat_needs_a_recorded_answer_same_session_and_fresh_window(self):
+        u = self._user()
+        self._spend(u, 100)
+        old = plans.naive_utc(datetime.now()) - timedelta(minutes=10)  # заведомо за окном
+        with self.Session() as db:
+            q.log_message(db, user_id=u.id, session_id="old", role="user", content="Требования к станкам?")
+            q.log_message(db, user_id=u.id, session_id="old", role="assistant", content="ответ")
+            q.log_message(db, user_id=u.id, session_id="noans", role="user", content="Требования к станкам?")
+            for m in q.get_messages_for_user(db, u.id):
+                if m.session_id == "old":
+                    m.ts = old - timedelta(hours=10)
+            db.commit()
+        for sid in ("old", "noans", "elsewhere", None):
+            with self.subTest(sid=sid), self.assertRaises(HTTPException) as cm:
+                self._ask(u, sid=sid)
+            self.assertEqual(cm.exception.status_code, 402)
+        self.assertEqual(self.calls, 0)
 
     def test_counting_failure_does_not_block_the_client(self):
         u = self._user()
@@ -243,6 +296,17 @@ class TestPipelineMarksFreeAnswers(unittest.TestCase):
         self.assertFalse(pipeline.answer("Привет").metered)
         self.assertFalse(pipeline.answer("Спасибо").metered)
         self.assertTrue(pipeline.Answer(text="x", hits=[]).metered, "по умолчанию ответ списывается")
+
+    def test_procedural_deflections_are_free(self):
+        # ревью PR #161, MED-2: «временный сбой, повторите» — не ответ (окно переиндексации ~36 мин)
+        from app.rag import pipeline, procedural
+
+        with mock.patch.object(pipeline.settings, "PROCEDURAL_ANSWER_FROM_RULES", False):
+            a = pipeline._answer_procedural("как внести продукцию в реестр", "как внести продукцию в реестр")
+        self.assertEqual((a.text, a.metered), (procedural.DEFLECTION_DISABLED, False))
+        with mock.patch.object(pipeline.settings, "PROCEDURAL_ANSWER_FROM_RULES", True),              mock.patch.object(pipeline, "plan_procedural", return_value=None):
+            a = pipeline._answer_procedural("как внести продукцию в реестр", "как внести продукцию в реестр")
+        self.assertEqual((a.text, a.metered), (procedural.DEFLECTION, False))
 
 
 class TestChatJsHandles402(unittest.TestCase):
@@ -359,6 +423,14 @@ class TestAdminSetsPlan(unittest.TestCase):
         self.assertIn("Тариф «Старт»: использовано 37 из 100 запросов", page)
         self.assertNotIn("(http)", page, "сервис с test26 на HTTPS — прежняя пометка была ложной")
 
+    def test_unknown_plan_is_flagged_in_admin(self):
+        with self.Session() as db:
+            q.set_user_plan(db, self.uid, "Безлимит", plans.anchor_from_date(plans.msk_today()))
+        admin = mock.Mock(id=99, role="admin", username="adm")
+        with mock.patch.object(self.web, "current_user", return_value=admin),              mock.patch.object(self.web, "system_health", return_value={}):
+            html = self.web.admin_page(self._request("/admin")).body.decode("utf-8")
+        self.assertIn("тариф «Безлимит» неизвестен — лимит не действует", html)
+
     def test_route_requires_admin(self):
         from fastapi.testclient import TestClient
 
@@ -382,11 +454,13 @@ class TestPlanColumnsMigrate(unittest.TestCase):
                 c.exec_driver_sql("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
                 c.exec_driver_sql("CREATE TABLE feedback (id INTEGER PRIMARY KEY)")
             with mock.patch.object(engine_mod, "engine", old):
-                engine_mod._ensure_columns()
+                engine_mod.init_db()                      # как на старте боевого процесса
             with old.connect() as c:
                 cols = {r[1] for r in c.exec_driver_sql("PRAGMA table_info(users)")}
+                tables = {r[0] for r in c.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
             old.dispose()
         self.assertTrue({"plan", "plan_started_at"} <= cols, cols)
+        self.assertIn("answer_usage", tables, "журнал расхода создаётся на старте")
 
 
 if __name__ == "__main__":

@@ -337,6 +337,7 @@
         {% for r in plan_rows %}
         <div class="feed-row">
           <span class="feed-q"><b>{{ r.username }}</b> · {{ r.role }}{% if r.who %} · {{ r.who }}{% endif %}
+            {% if r.unknown %} · <span class="warn">тариф «{{ r.plan }}» неизвестен — лимит не действует</span>{% endif %}
             {% if r.state %} · <b>{{ r.state.used }} из {{ r.state.limit }}</b> за {{ r.period }}{% if r.state.exhausted %} · <span class="warn">исчерпан</span>{% endif %}{% endif %}</span>
           <span class="feed-meta">
             <form method="post" action="/api/admin/users/{{ r.id }}/plan" style="display:inline">
