@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import json
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from functools import lru_cache
 from urllib.parse import quote
 
@@ -27,10 +27,11 @@ from fastapi.responses import Response, StreamingResponse
 from loguru import logger
 from pydantic import BaseModel, Field
 
+from app.api import quota
 from app.api.auth import require_user, require_user_profiled
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
-from app.core import sensitive
+from app.core import plans, sensitive
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.rag.edition import (
     KONTUR_PRIKAZ_52_URL,
@@ -62,6 +63,40 @@ def _enforce_chat_limit(user_id: int) -> None:
             detail=f"Слишком много вопросов подряд. Повторите через {retry} с.",
             headers={"Retry-After": str(retry)},
         )
+
+
+def _enforce_plan_quota(user: User, req: "ChatRequest") -> bool:
+    """#160: лимит тарифа исчерпан → 402 ДО движка и ДО записи вопроса (вопрос, на который сервис
+    отказал по тарифу, в беседу не идёт). Возвращает, СПИСЫВАТЬ ли ответ на этот запрос.
+
+    * Без тарифа и у admin — не списываем вовсе и в БД не ходим (ревью PR #161, LOW-1): расход,
+      записанный до назначения тарифа, засчитался бы при подключении задним числом.
+    * Повтор уже отвеченного вопроса (`queries.is_answered_repeat`, окно `REPEAT_WINDOW`) — не
+      списываем и не блокируем (MED-1): стрим дошёл до конца на сервере, клиент финала не получил
+      и переспросил фолбэком. На бою 8 таких повторов на 707 вопросов (07.10.2026).
+    * Счёт недоступен (сбой БД) → пропускаем: блокировать честного клиента из-за своего сбоя
+      дороже, чем отдать лишний ответ."""
+    if plans.plan_limit(user) is None:
+        return False
+    try:
+        with get_session() as db:
+            if req.session_id and q.is_answered_repeat(
+                    db, user.id, req.session_id, req.message,
+                    since=plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW):
+                logger.info(f"тариф: повтор отвеченного вопроса не списывается, user_id={user.id}")
+                return False
+            st = quota.quota_state(db, user)
+    except Exception:  # noqa: BLE001 — сбой счёта не должен блокировать клиента
+        logger.exception(f"тариф: не удалось посчитать расход (user_id={user.id}), пропускаю")
+        return True
+    if st is not None and st.exhausted:
+        logger.info(f"тариф: лимит исчерпан, user_id={user.id}, {st.used}/{st.limit}")
+        raise HTTPException(status_code=402, detail=quota.exhausted_message(st))
+    return True
+
+
+# Окно, в котором тот же вопрос в той же беседе считается повтором (фолбэк фронта ждёт стрим 120 с).
+REPEAT_WINDOW = timedelta(minutes=5)
 
 
 def _reject_sensitive(text: str, user_id: int) -> None:
@@ -252,6 +287,7 @@ def _log_question(user_id: int, session_id: str, text: str) -> None:
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
     _enforce_chat_limit(user.id)
+    charge = _enforce_plan_quota(user, req)
     _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы беседы (пусто для новой)
@@ -276,6 +312,8 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
                 prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
             )
             message_id = asst.id
+            if charge and ans.metered:  # #160: списание — отдельной таблицей, удаление бесед его не трогает
+                q.record_answer_usage(db, user.id)
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
         logger.exception(f"chat: не удалось записать лог диалога (user_id={user.id})")
 
@@ -307,6 +345,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     появлялся бы дубль вопроса, искажая и историю мультитёрна, и счётчики админки. Так что
     потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
     _enforce_chat_limit(user.id)
+    charge = _enforce_plan_quota(user, req)  # 402 до старта потока: фронт показывает причину
     _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(user.id, session_id)  # мультитёрн: прошлые ходы (пусто для новой беседы)
@@ -333,6 +372,8 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                             prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
                         )
                         message_id = asst.id
+                        if charge and ans.metered:  # #160: списание на финале, как в /api/chat
+                            q.record_answer_usage(db, user.id)
                 except Exception:  # noqa: BLE001 — лог не должен ронять стрим (как в /api/chat)
                     logger.exception(f"chat_stream: не удалось записать лог (user_id={user.id})")
                 yield _sse({

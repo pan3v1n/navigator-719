@@ -6,6 +6,7 @@
     <div class="login-logo">719</div>
     <h1>Профиль участника</h1>
     <p class="sub">Заполните данные о себе — это нужно для доступа к тесту навигатора по ПП №719 · {{ org }}</p>
+    {% if plan_line %}<p class="sub plan-line">{{ plan_line }}</p>{% endif %}
     <form class="login-form" method="post" action="/profile">
       {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
@@ -35,8 +36,8 @@
           <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
           Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
       </label>
-      <p class="consent-note">На время тестирования сервис работает по незащищённому соединению (http) —
-        не вводите данные ограниченного доступа.</p>
+      <p class="consent-note">Не вводите данные ограниченного доступа: вопросы обрабатывает внешняя
+        языковая модель.</p>
 
       <button type="submit">Сохранить и продолжить</button>
     </form>

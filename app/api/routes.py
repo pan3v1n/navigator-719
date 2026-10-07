@@ -8,6 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import require_user
 from app.api.schemas import NavigateRequest, NavigateResponse, SourceItem
+from app.core.plans import plan_limit
 from app.db.models import User
 from app.tools.navigator import navigate
 
@@ -21,7 +22,13 @@ def navigate_endpoint(req: NavigateRequest, user: User = Depends(require_user)) 
 
     Синхронный обработчик: FastAPI выполнит его в пуле потоков, чтобы блокирующий вызов
     DeepSeek и локального эмбеддера не держал event loop.
+
+    ⚠ Пользователю с тарифом (#160) закрыт: эта ручка расход не пишет, и через неё лимит обходился
+    бы целиком. Тарифный клиент работает в чате, где расход считается.
     """
+    if plan_limit(user) is not None:
+        raise HTTPException(status_code=403,
+                            detail="Для подключения по тарифу вопросы задаются в чате сервиса.")
     try:
         nav = navigate(req.query, okpd2=req.okpd2, limit=req.limit)
     except Exception as e:  # noqa: BLE001 — детали логируем, наружу только generic 500

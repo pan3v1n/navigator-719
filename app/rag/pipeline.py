@@ -91,6 +91,10 @@ class Answer:
     phantom_documents: list[str] = field(default_factory=list)
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
+    # Списывается ли ответ с лимита тарифа (#160). Бесплатны заготовки meta (приветствие,
+    # «спасибо», «что умеешь») и деферы процедурной ветки (сбой корпуса / ветка выключена) — решает
+    # ПАЙПЛАЙН, а не эндпоинт: второе место, решающее «бесплатно ли», разошлось бы с первым молча.
+    metered: bool = True
     # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
     # для кликабельных источников. Товарный путь их не заполняет (там источники строятся из hits).
     rule_sources: list[dict] = field(default_factory=list)
@@ -1085,12 +1089,12 @@ def _answer_procedural(query: str, search_query: str,
     # Оба дефера уходят БЕЗ подсказки (`input_hint` пуст): процедурная ветка сейчас не отвечает,
     # и предлагать следующий вопрос по ней — обещать то, чего сервис в этот момент не может.
     if not settings.PROCEDURAL_ANSWER_FROM_RULES:
-        return Answer(text=procedural.DEFLECTION_DISABLED, hits=[])
+        return Answer(text=procedural.DEFLECTION_DISABLED, hits=[], metered=False)  # #160: отказ ветки — не ответ
     # K12: намерение вопроса задаёт и приоритет документов в окне, и оговорки промпта. Тема
     # определяется детерминированно (регулярки), поэтому маршрутизация бесплатна и воспроизводима.
     planned = plan_procedural(query, search_query)
     if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
-        return Answer(text=procedural.DEFLECTION, hits=[])
+        return Answer(text=procedural.DEFLECTION, hits=[], metered=False)  # #160: сбой корпуса не списывается
     topic, rules, ctx, user, grounding = planned
 
     messages = [{"role": "system", "content": PROCEDURAL_SYSTEM_PROMPT}]
@@ -1318,7 +1322,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import followup, meta, topics
     if meta.is_meta(query):
-        return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product())
+        return Answer(text=meta.response(query), hits=[], input_hint=followup.ask_for_product(),
+                      metered=False)
 
     # T9: прямой запрос на ПЕРЕВОД кода ТН ВЭД↔ОКПД2 — отвечаем детерминированно из справочника
     # переходных ключей (без LLM: навигатор строго по 719 и на такой вопрос раньше отказывал).
