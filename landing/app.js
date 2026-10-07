@@ -171,6 +171,12 @@
     });
     consentL.classList.toggle('err', !!e.consent);
     consentErr.textContent = e.consent || '';
+    // Ошибка по полю, у которого нет своего места в форме (например, тариф), не должна пропасть
+    // молча: кнопка снова активна, а пользователь не понимает, что не так (ревью PR #158).
+    var shown = { consent: 1 };
+    form.querySelectorAll('.field').forEach(function (f) { shown[f.getAttribute('data-f')] = 1; });
+    var rest = Object.keys(e).filter(function (k) { return !shown[k]; }).map(function (k) { return e[k]; });
+    formErr.textContent = rest.join('. ');
   }
   function revalidate() { if (tried) showErrors(validate()); }
   function showForm() { if (!sent.hidden) { sent.hidden = true; form.hidden = false; } }
@@ -184,7 +190,7 @@
       var first = form.querySelector('.field.err input') || consent; first.focus();
       return;
     }
-    var payload = { tariff: tariff, consent: true, website: input('website').value };
+    var payload = { tariff: tariff, consent: true, nav719_hp: input('nav719_hp').value };
     ['name', 'org', 'inn', 'email', 'phone', 'promo'].forEach(function (n) { payload[n] = input(n).value.trim(); });
     submitBtn.disabled = true;
     fetch('/api/leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })

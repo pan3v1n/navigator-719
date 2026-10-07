@@ -6,7 +6,9 @@
 
 ⚠ ПДн (152-ФЗ). Проверки ДУБЛИРУЮТ клиентские: браузерной валидации верить нельзя. Без согласия
 заявка не сохраняется. В журнал пишется только номер заявки и тариф — ни имени, ни контактов.
-IP используется ограничителем частоты в памяти и в базу не попадает.
+IP используется ограничителем частоты в памяти и в базу не попадает. Срок хранения, обещанный
+политикой (12 месяцев), исполняется кодом: старые заявки удаляются при каждой новой и при открытии
+админки (`queries.purge_old_leads`).
 """
 
 from __future__ import annotations
@@ -18,7 +20,7 @@ from fastapi.responses import JSONResponse
 from loguru import logger
 from pydantic import BaseModel
 
-from app.api.ratelimit import SlidingWindow
+from app.api.ratelimit import SlidingWindow, client_ip
 from app.db import queries as q
 from app.db.engine import get_session
 
@@ -26,11 +28,19 @@ router = APIRouter()
 
 TARIFFS = ("Старт", "Стандарт", "Профи", "Для организаций")
 # Честная заявка — одна-две с адреса; лимит держит перебор и автозаполнение ботами.
+# ⚠ Списывается ТОЛЬКО за принятую заявку (ревью PR #158): отклонённые проверками попытки и
+# проверка выкатки (пустая форма → 422) квоту не тратят — иначе посетитель, поправивший ошибку
+# в форме, через пять попыток получал бы 429 на верную заявку.
 LEADS_PER_HOUR = 5
 _lead_limit = SlidingWindow(LEADS_PER_HOUR, window=3600.0)
 
+# Имя поля-ловушки — нарочно не «website»/«url»/«company»: такие поля браузеры и менеджеры
+# паролей заполняют сами, и настоящая заявка молча пропадала бы (ревью PR #158, находка 1).
+HONEYPOT = "nav719_hp"
+
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _INN_RE = re.compile(r"^\d{10}(\d{2})?$")
+LIMITS = {"name": 200, "org": 300, "email": 255, "phone": 32, "promo": 64}   # = колонкам `Lead`
 
 
 class LeadIn(BaseModel):
@@ -42,7 +52,7 @@ class LeadIn(BaseModel):
     phone: str = ""
     promo: str = ""
     consent: bool = False
-    website: str = ""  # поле-ловушка: скрыто от людей, заполняют только боты
+    nav719_hp: str = ""  # поле-ловушка: скрыто от людей, заполняют только боты
 
 
 def _digits(s: str) -> str:
@@ -50,21 +60,27 @@ def _digits(s: str) -> str:
 
 
 def validate_lead(f: LeadIn) -> dict[str, str]:
-    """Ошибки по полям — те же формулировки, что показывает форма лендинга."""
+    """Ошибки по полям — те же формулировки, что показывает форма лендинга. Длины — по колонкам
+    таблицы: SQLite их не держит, а PostgreSQL (цель прода) ответил бы 500 вместо 422."""
     e: dict[str, str] = {}
+    name, org, email, phone, promo = (s.strip() for s in (f.name, f.org, f.email, f.phone, f.promo))
     if f.tariff not in TARIFFS:
         e["tariff"] = "Выберите тариф"
-    if not f.name.strip() or len(f.name) > 200:
+    if not name:
         e["name"] = "Укажите имя"
-    if not f.org.strip() or len(f.org) > 300:
+    elif len(name) > LIMITS["name"]:
+        e["name"] = "Слишком длинное имя"
+    if not org:
         e["org"] = "Укажите организацию"
+    elif len(org) > LIMITS["org"]:
+        e["org"] = "Слишком длинное название организации"
     if not _INN_RE.match(f.inn.strip()):
         e["inn"] = "ИНН должен содержать 10 или 12 цифр"
-    if not _EMAIL_RE.match(f.email.strip()) or len(f.email) > 255:
+    if not _EMAIL_RE.match(email) or len(email) > LIMITS["email"]:
         e["email"] = "Проверьте правильность email"
-    if len(_digits(f.phone)) != 11:
+    if len(_digits(phone)) != 11 or len(phone) > LIMITS["phone"]:
         e["phone"] = "Укажите телефон полностью"
-    if len(f.promo) > 64:
+    if len(promo) > LIMITS["promo"]:
         e["promo"] = "Слишком длинный промокод"
     if not f.consent:
         e["consent"] = "Необходимо согласие на обработку данных"
@@ -73,20 +89,22 @@ def validate_lead(f: LeadIn) -> dict[str, str]:
 
 @router.post("/api/leads")
 def submit_lead(lead: LeadIn, request: Request) -> JSONResponse:
-    ip = (request.client.host if request.client else "") or "unknown"
-    if not _lead_limit.check(ip):
-        return JSONResponse({"ok": False, "error": "Слишком много заявок с этого адреса, попробуйте позже"},
-                            status_code=429, headers={"Retry-After": str(_lead_limit.retry_after(ip))})
-    if lead.website.strip():
+    if lead.nav719_hp.strip():
         # Бот: отвечаем как успехом, чтобы не учить его обходу, но ничего не сохраняем.
         logger.info("lead: отброшена заявка с заполненной ловушкой")
         return JSONResponse({"ok": True})
     errors = validate_lead(lead)
     if errors:
         return JSONResponse({"ok": False, "errors": errors}, status_code=422)
+    ip = client_ip(request)
+    if not _lead_limit.check(ip):
+        return JSONResponse({"ok": False, "error": "Слишком много заявок с этого адреса, попробуйте позже"},
+                            status_code=429, headers={"Retry-After": str(_lead_limit.retry_after(ip))})
     with get_session() as db:
         row = q.create_lead(db, tariff=lead.tariff, name=lead.name.strip(), org=lead.org.strip(),
                             inn=lead.inn.strip(), email=lead.email.strip(), phone=lead.phone.strip(),
                             promo=lead.promo.strip())
-    logger.info("lead: сохранена заявка #{} (тариф «{}»)", row.id, row.tariff)
+        purged = q.purge_old_leads(db)
+    logger.info("lead: сохранена заявка #{} (тариф «{}»){}", row.id, row.tariff,
+                f"; удалено просроченных: {purged}" if purged else "")
     return JSONResponse({"ok": True})

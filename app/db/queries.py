@@ -7,8 +7,9 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.db.models import Feedback, Lead, Message, User, _utcnow
@@ -225,6 +226,35 @@ def create_lead(
     return lead
 
 
-def list_leads(db: Session) -> list[Lead]:
-    """Все заявки, свежие сверху."""
-    return list(db.execute(select(Lead).order_by(Lead.created_at.desc(), Lead.id.desc())).scalars())
+def list_leads(db: Session, limit: int | None = None) -> list[Lead]:
+    """Заявки, свежие сверху; `limit` — сколько показать (админка не тянет все ПДн разом)."""
+    stmt = select(Lead).order_by(Lead.created_at.desc(), Lead.id.desc())
+    if limit:
+        stmt = stmt.limit(limit)
+    return list(db.execute(stmt).scalars())
+
+
+def count_leads(db: Session) -> int:
+    return db.execute(select(func.count(Lead.id))).scalar_one()
+
+
+# Срок хранения заявки — обещание политики ПДн (раздел 9: «не дольше 12 месяцев»). Исполняется
+# кодом, а не памятью оператора (ревью PR #158): вызывается при каждой новой заявке и при
+# открытии админки. Резервные копии ротируются за 14 дней — удалённое уходит и из них.
+LEAD_RETENTION_DAYS = 365
+
+
+def purge_old_leads(db: Session, days: int = LEAD_RETENTION_DAYS, now=None) -> int:
+    """Удалить заявки старше срока хранения. Возвращает число удалённых."""
+    edge = (now or _utcnow()) - timedelta(days=days)
+    # SQLite хранит наивное время — сравниваем в той же форме, что пишет `_utcnow` через ORM.
+    res = db.execute(delete(Lead).where(Lead.created_at < edge.replace(tzinfo=None)))
+    db.commit()
+    return res.rowcount or 0
+
+
+def delete_lead(db: Session, lead_id: int) -> bool:
+    """Удалить одну заявку — по отзыву согласия или требованию субъекта ПДн (ст. 21 152-ФЗ)."""
+    res = db.execute(delete(Lead).where(Lead.id == lead_id))
+    db.commit()
+    return bool(res.rowcount)

@@ -88,9 +88,17 @@ class TestLeadEndpoint(_Db):
         self.assertEqual(r.status_code, 200, r.text)
 
     def test_honeypot_answers_ok_but_stores_nothing(self):
-        r = self.client().post("/api/leads", json={**GOOD, "website": "http://spam"})
+        r = self.client().post("/api/leads", json={**GOOD, leads_api.HONEYPOT: "http://spam"})
         self.assertEqual(r.status_code, 200)
         self.assertEqual(self.rows(), [], "заявка бота попала в базу")
+
+    def test_autofilled_website_field_does_not_drop_a_real_lead(self):
+        """Ревью PR #158: ловушка «website» заполнялась автозаполнением браузера, и настоящая заявка
+        пропадала молча. Поле с таким именем больше ничего не значит."""
+        r = self.client().post("/api/leads", json={**GOOD, "website": "https://zavod.ru"})
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(len(self.rows()), 1)
+        self.assertNotIn(leads_api.HONEYPOT.lower(), ("website", "url", "site", "company", "homepage"))
 
     def test_rate_limit_per_address(self):
         c = self.client()
@@ -100,6 +108,21 @@ class TestLeadEndpoint(_Db):
         self.assertEqual(r.status_code, 429)
         self.assertIn("Retry-After", r.headers)
         self.assertEqual(len(self.rows()), leads_api.LEADS_PER_HOUR)
+
+    def test_rejected_attempts_do_not_burn_the_quota(self):
+        """Ревью PR #158: квота списывалась ДО проверок — посетитель, поправлявший форму, и проверка
+        выкатки (пустая форма) съедали лимит, и верная заявка получала 429."""
+        c = self.client()
+        for _ in range(leads_api.LEADS_PER_HOUR * 2):
+            self.assertEqual(c.post("/api/leads", json={}).status_code, 422)
+        self.assertEqual(c.post("/api/leads", json=GOOD).status_code, 200)
+
+    def test_lengths_are_bounded_like_the_columns(self):
+        r = self.client().post("/api/leads", json={**GOOD, "phone": "+7" + " " * 500 + "9123456789",
+                                                   "name": "Я" * 201})
+        self.assertEqual(r.status_code, 422)
+        self.assertEqual(r.json()["errors"]["name"], "Слишком длинное имя")
+        self.assertIn("phone", r.json()["errors"])
 
     def test_no_personal_data_in_the_log(self):
         from loguru import logger
@@ -115,6 +138,53 @@ class TestLeadEndpoint(_Db):
         for pd in (GOOD["email"], GOOD["inn"], "Иванов", "912"):
             self.assertNotIn(pd, joined, f"в журнал попали ПДн: {pd}")
 
+
+class TestLeadRetention(unittest.TestCase):
+    """Политика обещает «не дольше 12 месяцев» — обещание исполняет код, а не память оператора."""
+
+    def setUp(self):
+        from datetime import datetime, timedelta
+
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        self.now = datetime(2027, 10, 7)
+        with self.Session() as db:
+            for days in (400, 366, 364, 1):
+                db.add(Lead(created_at=self.now - timedelta(days=days), tariff="Старт", name="x", org="y",
+                            inn="4632000000", email="a@b.ru", phone="+7", consent_at=self.now))
+            db.commit()
+
+    def test_purge_removes_only_expired(self):
+        with self.Session() as db:
+            self.assertEqual(q.purge_old_leads(db, now=self.now), 2)
+            self.assertEqual(q.count_leads(db), 2)
+
+    def test_policy_and_code_name_the_same_term(self):
+        privacy = (ROOT / "app" / "web" / "templates" / "privacy.html").read_text(encoding="utf-8")
+        self.assertIn("не дольше 12 месяцев", privacy)
+        self.assertEqual(q.LEAD_RETENTION_DAYS, 365, "срок в коде разошёлся с политикой")
+
+    def test_purge_runs_on_new_lead_and_on_admin(self):
+        import ast
+
+        for rel, fn in (("app/api/leads.py", "submit_lead"), ("app/api/web.py", "admin_page")):
+            tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
+            node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn)
+            calls = {c.attr for c in ast.walk(node) if isinstance(c, ast.Attribute)}
+            self.assertIn("purge_old_leads", calls, f"{fn} не удаляет просроченные заявки")
+
+    def test_single_lead_can_be_deleted_only_by_admin(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        r = TestClient(app).post("/api/admin/leads/1/delete", follow_redirects=False)
+        self.assertIn(r.status_code, (401, 403), "удаление заявки доступно без входа")
+        with self.Session() as db:
+            first = q.list_leads(db)[0]
+            self.assertTrue(q.delete_lead(db, first.id))
+            self.assertFalse(q.delete_lead(db, first.id))
 
 class TestLeadsInAdminOnly(unittest.TestCase):
     """Заявки читает только страница `/admin` (за ролью admin); выгрузка скоркарда их не несёт."""

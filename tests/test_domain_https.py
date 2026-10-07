@@ -178,4 +178,7 @@ class TestLeadFormRouteIsCheckedOnDeploy(unittest.TestCase):
         block = code[i - 300:i + 400]
         self.assertIn("-X POST", block)
         self.assertIn("--resolve", block, "проверка обязана идти через caddy на самой VM")
-        self.assertRegex(block, r'case "\$code" in 422\) ;; \*\) fail ')
+        # ⚠ Голого 422 мало (ревью PR #158): такой же даёт разбор тела в FastAPI, не дойдя до
+        # проверок формы. Требуется ключ ошибки НАШЕЙ проверки.
+        self.assertIn("""422:*'"consent"'*) ;;""", block)
+        self.assertNotRegex(block, r'case "\$code" in 422\) ;;', "проверка снова принимает любой 422")

@@ -764,13 +764,19 @@ if [ -n "$PUBLIC_DOMAIN_ENV" ]; then
   echo "   http://$PUBLIC_DOMAIN_ENV/ → $code (ожидается редирект на https)"
   case "$code" in 3??) ;; *) fail "http → https редирект не работает ($code)" ;; esac
   # ⚠ Форма заявки лендинга (test28): caddy проксирует /api/leads КОРНЕВОГО домена в приложение.
-  # Пустая форма обязана вернуть 422 — запрос дошёл до приложения, проверки его отклонили, в базу
-  # ничего не записано. 404/405 значит, что caddy отдал запрос статике: форма на бою молча не работает.
-  code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 -X POST -H "Content-Type: application/json" \
+  # Пустая форма обязана вернуть 422 с ошибками НАШИХ проверок (ключ "consent") — запрос дошёл до
+  # приложения, проверки его отклонили, в базу ничего не записано, квота заявок не списана.
+  # Голого 422 мало (ревью PR #158): такой же даёт разбор тела в FastAPI, не дойдя до проверок.
+  # 404/405 значит, что caddy отдал запрос статике: форма на бою молча не работает.
+  resp=$(curl -s --max-time 15 -X POST -H "Content-Type: application/json" -w '\n%{http_code}' \
          --data '{}' --resolve "$PUBLIC_DOMAIN_ENV:443:127.0.0.1" "https://$PUBLIC_DOMAIN_ENV/api/leads" \
          2>/dev/null || echo 000)
-  echo "   POST https://$PUBLIC_DOMAIN_ENV/api/leads (пустая форма) → $code (ожидается 422)"
-  case "$code" in 422) ;; *) fail "форма заявки лендинга не доходит до приложения ($code)" ;; esac
+  code="${resp##*$'\n'}"
+  echo "   POST https://$PUBLIC_DOMAIN_ENV/api/leads (пустая форма) → $code (ожидается 422 с ошибками полей)"
+  case "$code:$resp" in
+    422:*'"consent"'*) ;;
+    *) fail "форма заявки лендинга не доходит до проверок приложения ($code)" ;;
+  esac
 fi
 df -h / | tail -1
 
