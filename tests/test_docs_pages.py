@@ -468,6 +468,29 @@ class TestOnboardingTour(unittest.TestCase):
         self.assertIn("transition: top", self.css)
 
 
+class TestNewTabLinks(unittest.TestCase):
+    """«Текст постановления» открылся у владельца в той же вкладке при `target="_blank"` (08.10, test32):
+    новая вкладка открывается явно, обычная ссылка — запасной путь."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
+        cls.html = (WEB / "templates" / "chat.html").read_text(encoding="utf-8")
+
+    def test_regulation_link_is_marked_for_new_tab(self):
+        line = [l for l in self.html.splitlines() if 'class="side-link" href="{{ kontur_719_url }}"' in l][0]
+        self.assertIn('target="_blank"', line)
+
+    def test_new_tab_is_opened_explicitly_with_fallback(self):
+        body = self.js.split("// --- Ссылки «в новой вкладке»")[1].split("\n});")[0]
+        self.assertIn('closest(\'a[target="_blank"]\')', body)
+        self.assertIn('window.open(a.href, "_blank")', body)
+        # обычная ссылка остаётся запасным путём: отменяем её только когда вкладка открылась
+        self.assertLess(body.index("if (!w) return;"), body.index("e.preventDefault()"))
+        for mod in ("e.ctrlKey", "e.metaKey", "e.shiftKey", "e.button !== 0"):
+            self.assertIn(mod, body, "клик с модификатором должен остаться за браузером")
+
+
 class TestHelpMenuLayout(unittest.TestCase):
     """Подменю «Справка» — последний пункт у нижнего края сайдбара."""
 
