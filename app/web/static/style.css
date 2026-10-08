@@ -163,9 +163,9 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 .side-group { display: flex; flex-direction: column; gap: 2px; min-height: 0; }
 .side-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 0 4px 6px 12px;
   font: 500 12px/1.25 var(--font); color: var(--ink-40); }
-.side-head-btn { width: 28px; height: 28px; border: 0; border-radius: 6px; background: none; cursor: pointer; color: var(--ink-60);
-  display: flex; align-items: center; justify-content: center; }
-.side-head-btn:hover { background: #fff; color: var(--ink); }
+.side-head-link { border: 0; background: none; padding: 2px 0; cursor: pointer;
+  font: 500 12px/1.25 var(--font); color: var(--ink-60); transition: color .15s; }
+.side-head-link:hover, .side-head-link.active { color: var(--blue); }
 .history { display: flex; flex-direction: column; gap: 2px; }
 .history-item { display: flex; align-items: center; gap: 4px; padding: 10px 6px 10px 12px; border-radius: 8px;
   font: 400 14px/1.3 var(--font); cursor: pointer; color: var(--ink-80); transition: background .15s, color .15s; }
@@ -177,10 +177,7 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 .hi-export { font-size: 18px; font-weight: 700; }
 .history-item:hover .hi-del, .history-item:hover .hi-export, .history-item.active .hi-export { opacity: 1; }
 .hi-del:hover, .hi-export:hover { background: var(--gray); color: var(--ink); }
-.search-box { padding: 0 0 8px; }
-.search-box input { width: 100%; height: 40px; padding: 0 12px; border: 0; border-radius: 4px; background: #fff;
-  box-shadow: inset 0 0 0 1px var(--line); font: 400 14px var(--font); color: var(--ink); }
-.search-box input:focus { outline: none; box-shadow: inset 0 0 0 1px var(--blue); }
+.history-item.extra { display: none; }
 
 /* Б4: карточка «Запросы по тарифу» */
 .quota-card { margin: 0 12px 8px; background: #fff; border-radius: 12px; box-shadow: var(--ring); padding: 16px;
@@ -367,6 +364,45 @@ a.head-avatar:hover { opacity: .9; }
 .main.empty .composer-bar { justify-content: flex-end; }
 .main.empty .composer-notice { margin-top: -16px; }
 .main:not(.empty) .hero { display: none; }
+
+/* ---------- Б3: страница «История запросов» (макет) ---------- */
+.main.history-mode .chat-scroll, .main.history-mode .composer-area { display: none; }
+.history-page { flex: 1; min-height: 0; overflow-y: auto; }
+.hp-col { max-width: 1000px; margin: 0 auto; padding: 56px 32px 80px; display: flex; flex-direction: column; gap: 32px; }
+.hp-head { display: flex; flex-direction: column; gap: 8px; }
+.hp-head h1 { margin: 0; font: 500 40px/1.2 var(--font); color: var(--ink); }
+.hp-head p { margin: 0; font: 400 16px/1.4 var(--font); color: var(--ink-60); }
+.hp-tools { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; }
+.hp-search { flex: 1 1 320px; display: flex; align-items: center; gap: 12px; height: 56px; padding: 0 18px;
+  border-radius: 4px; background: #fff; box-shadow: inset 0 0 0 1px var(--line); color: var(--ink-60); }
+.hp-search:focus-within { box-shadow: inset 0 0 0 1px var(--blue); }
+.hp-search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
+  font: 500 16px/1.3 var(--font); color: var(--ink); }
+.hp-filters { display: flex; flex-wrap: wrap; gap: 4px; background: var(--gray); border-radius: 8px; padding: 4px; }
+.hp-filter { border: 0; background: none; cursor: pointer; padding: 12px 18px; border-radius: 6px;
+  font: 600 14px/1.1 var(--font); color: var(--ink-60); transition: color .15s; }
+.hp-filter:hover { color: var(--ink); }
+.hp-filter.on { background: var(--grad-btn); color: #fff; }
+.hp-list { display: flex; flex-direction: column; gap: 24px; }
+.hp-group { display: flex; flex-direction: column; }
+.hp-group-label { font: 500 14px/1.3 var(--font); color: var(--ink-60); padding-bottom: 8px; }
+.hp-item { display: flex; flex-wrap: wrap; align-items: center; gap: 12px 24px; padding: 20px 16px; margin: 0 -16px;
+  border: 0; border-radius: 12px; background: none; cursor: pointer; text-align: left; font: inherit;
+  box-shadow: inset 0 -1px 0 var(--line-soft); transition: background .15s; }
+.hp-item:hover { background: var(--gray); }
+.hp-item:focus-visible { outline: 2px solid var(--blue); outline-offset: 2px; }
+.hp-text { flex: 1 1 320px; min-width: 0; display: flex; flex-direction: column; gap: 6px; }
+.hp-q { font: 500 16px/1.35 var(--font); color: var(--ink); }
+.hp-a { font: 400 14px/1.4 var(--font); color: var(--ink-60); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.hp-meta { display: flex; align-items: center; gap: 16px; flex: none; }
+.hp-refs { display: flex; gap: 6px; flex-wrap: wrap; }
+.hp-ref { background: var(--blue-07); color: var(--blue); border-radius: 4px; padding: 6px 8px;
+  font: 500 12px/1.2 var(--font); white-space: nowrap; }
+.hp-time { min-width: 44px; text-align: right; font: 400 14px/1.3 var(--font); color: var(--ink-60); }
+.hp-empty { background: var(--gray); border-radius: 16px; padding: 48px; text-align: center; display: flex;
+  flex-direction: column; gap: 8px; }
+.hp-empty-t { font: 500 20px/1.3 var(--font); color: var(--ink); }
+.hp-empty-s { font: 400 16px/1.4 var(--font); color: var(--ink-60); }
 
 /* ---------- Б1: панель «Источник» ---------- */
 .src-panel { flex: none; width: 400px; max-width: 45%; background: #fff; box-shadow: inset 1px 0 0 rgba(33, 56, 130, .1);
@@ -680,6 +716,10 @@ a.head-avatar:hover { opacity: .9; }
   .main.empty .composer-area { padding: 24px 16px 40px; gap: 22px; }
   .hero h1 { font-size: 28px; }
   .hero p { font-size: 16px; }
+  .hp-col { padding: 28px 16px 48px; gap: 22px; }
+  .hp-head h1 { font-size: 28px; }
+  .hp-filter { padding: 10px 12px; }
+  .hp-meta { width: 100%; justify-content: space-between; }
   .src-panel { position: fixed; top: 0; left: 0; right: 0; bottom: 0; width: auto; max-width: none; z-index: 70; }
   .kpis { grid-template-columns: 1fr 1fr; }
   .admin, .admin-header { padding-left: 12px; padding-right: 12px; }
