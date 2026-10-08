@@ -6,8 +6,10 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from datetime import datetime, timedelta
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
@@ -49,14 +51,36 @@ templates = Jinja2Templates(directory=str(_WEB / "templates"))
 templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " ")
 
 
+@lru_cache(maxsize=1)
+def asset_version() -> str:
+    """Версия статики для ссылок `?v=` — хеш содержимого `style.css` и `chat.js`.
+
+    ⚠ Без неё выкатка переоформления ломала бы интерфейс на часы: у статики нет `Cache-Control`,
+    и браузер кэширует её ЭВРИСТИЧЕСКИ (доля возраста по Last-Modified) — новая разметка чата
+    приходила бы со старыми скриптом и стилями. Замечено 08.10.2026 на локальном прогоне
+    макета: headless Chrome показал новую кнопку в стилях прошлой сборки. Хеш, а не тег релиза:
+    меняется ровно тогда, когда меняются файлы."""
+    h = hashlib.sha1()
+    for name in ("style.css", "chat.js"):
+        try:
+            h.update((_WEB / "static" / name).read_bytes())
+        except OSError:
+            pass
+    return h.hexdigest()[:10]
+
+
 def _ctx(request: Request, **kw) -> dict:
     # E1: редакция корпуса — во ВСЕ страницы. Выводится из самого текста постановления
     # (app/rag/edition.py), поэтому не может разойтись с базой молча.
     # Метка релиза — по той же причине, что и редакция корпуса: одно определение на все
     # страницы. `APP_VERSION` для этого не годится (держится на 0.5.0 до приёмки), см.
     # `app/core/release.py`.
+    # landing_url — адрес лендинга (тарифы, заявка на подключение) из того же PUBLIC_DOMAIN, на котором
+    # caddy его обслуживает; без домена (разработка) ссылки на лендинг не рисуются вовсе.
+    landing = f"https://{settings.PUBLIC_DOMAIN}" if settings.PUBLIC_DOMAIN else ""
     return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
-            "corpus_edition": corpus_edition(), "release_label": release_label(), **kw}
+            "corpus_edition": corpus_edition(), "release_label": release_label(),
+            "landing_url": landing, "asset_v": asset_version(), **kw}
 
 
 def _parse_date(s: str):
@@ -183,9 +207,12 @@ def chat_page(request: Request):
     # редакцию). Отдаём фронту отсюда, чтобы константа была одна и не разъезжалась с базой.
     # input_hint — стартовая подсказка поля ввода (U5). По той же причине отдаётся сервером:
     # дальше её меняет ответ движка, и две копии текста разъехались бы при первой же правке.
+    # quota — расход тарифа (Б4) для первого рендера; дальше его перечитывает фронт (`/api/quota`).
+    with get_session() as db:
+        qv = quota.quota_view(db, user)
     return templates.TemplateResponse(
         "chat.html", _ctx(request, user=user, kontur_719_url=kontur_719_url(),
-                          input_hint=followup.START_HINT))
+                          input_hint=followup.START_HINT, quota=qv))
 
 
 @router.get("/profile", response_class=HTMLResponse)
@@ -196,13 +223,17 @@ def profile_page(request: Request):
     prefill = user.region or region_from_username(user.username)
     with get_session() as db:
         st = quota.quota_state(db, user)
+        qv = quota.quota_view(db, user)
     plan_line = (f"Тариф «{st.plan}»: использовано {st.used} из {st.limit} запросов, новый период "
                  f"начнётся {plans.msk_date(st.end):%d.%m.%Y}.") if st else ""
+    # can_leave — профиль уже заполнен: показываем «Вернуться к сервису». Пока он не заполнен,
+    # уйти некуда — чат вернёт сюда же (гейт `needs_profile`).
     return templates.TemplateResponse(
         "profile.html",
         _ctx(request, user=user, error=None, regions=REGIONS, prefill_region=prefill,
              full_name=user.full_name or "", telegram=user.telegram or "",
-             consent=bool(user.consent), plan_line=plan_line),
+             consent=bool(user.consent), plan_line=plan_line, quota=qv,
+             can_leave=not needs_profile(user)),
     )
 
 

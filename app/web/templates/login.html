@@ -1,23 +1,63 @@
 {% extends "base.html" %}
+{% from "_mark.html" import mark %}
 {% block title %}Вход — {{ app_title }}{% endblock %}
 {% block body %}
-<div class="login-wrap">
-  <div class="login-card">
-    <div class="login-logo">719</div>
-    <h1>{{ app_title }}</h1>
-    <p class="sub">Ассистент эксперта по ПП №719 · {{ org }}</p>
-    <form class="login-form" method="post" action="/login">
-      {% if error %}<div class="error">{{ error }}</div>{% endif %}
-      <input name="username" placeholder="Логин" autocomplete="username" required autofocus>
-      <input name="password" type="password" placeholder="Пароль" autocomplete="current-password" required>
-      <label class="remember"><input type="checkbox" name="remember"> Запомнить меня</label>
-      <button type="submit">Войти</button>
-    </form>
+{# Макет «Navigator 719 Service», экран «Вход» (08.10.2026). Вход — по логину и паролю (решение
+   владельца 08.10: код на почту из макета — следующим этапом, у сервиса нет ни email у учёток,
+   ни отправки писем). #}
+<div class="auth">
+  <div class="auth-main">
+    <div class="auth-top">
+      <div class="auth-brand">{{ mark(36) }}<span>Навигатор ПП&nbsp;719</span></div>
+    </div>
+    <div class="auth-center">
+      <div class="auth-box">
+        <div>
+          <h1>Вход в Навигатор</h1>
+          <p class="auth-lead">Для сотрудников организаций с подключённым тарифом.</p>
+        </div>
+        <form class="auth-form" method="post" action="/login">
+          {% if error %}<div class="error">{{ error }}</div>{% endif %}
+          <label class="field"><span>Логин</span>
+            <input name="username" autocomplete="username" required autofocus>
+          </label>
+          <label class="field"><span>Пароль</span>
+            <input name="password" type="password" autocomplete="current-password" required>
+          </label>
+          <label class="check"><input type="checkbox" name="remember"> Запомнить меня</label>
+          <button class="ds-btn block" type="submit">Войти</button>
+        </form>
+        {% if landing_url %}
+        <div class="auth-alt">
+          <span>Организация ещё не подключена?</span>
+          <a class="ds-link" href="{{ landing_url }}/#form">Оставить заявку на подключение
+            <svg viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M7 17L17 7M9 7h8v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </div>
+        {% endif %}
+      </div>
+    </div>
     {# Ссылки видны ДО входа: правила и политику читают перед тем, как ими пользоваться. #}
-    <p class="login-legal">
+    <div class="auth-legal">
       Входя, вы принимаете <a href="/terms">Условия использования</a>
       и <a href="/privacy">Политику конфиденциальности</a> · <a href="/help">Справка</a>
-    </p>
+    </div>
+  </div>
+  {# Пример ответа — ДОСЛОВНО по п. 7 Правил формирования и ведения реестра (ПП №719). В макете
+     стояло «…или уполномоченная ею территориальная палата»: в п. 7 этих слов нет, а эта страница
+     публичная — пример со ссылкой на пункт обязан совпадать с пунктом. #}
+  <div class="auth-side">
+    <h2>Ответы по ПП&nbsp;719 со&nbsp;ссылкой на&nbsp;пункт</h2>
+    <div class="auth-demo">
+      <div class="auth-demo-q">Кто выдаёт акт экспертизы для подтверждения производства?</div>
+      <p class="auth-demo-a">Заявки для выдачи акта экспертизы рассматривает Торгово-промышленная палата
+        Российской Федерации — в порядке, определённом ею по согласованию с Минпромторгом России.</p>
+      <span class="auth-demo-ref">п. 7 Правил</span>
+    </div>
+    <div class="auth-points">
+      <div>История вопросов и экспорт диалогов</div>
+      <div>Источники ответа — в действующей редакции</div>
+      <div>Доступ для сотрудников организации</div>
+    </div>
   </div>
 </div>
 {% endblock %}

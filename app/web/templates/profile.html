@@ -1,46 +1,83 @@
 {% extends "base.html" %}
+{% from "_mark.html" import mark %}
 {% block title %}Профиль — {{ app_title }}{% endblock %}
 {% block body %}
-<div class="login-wrap">
-  <div class="login-card profile-card">
-    <div class="login-logo">719</div>
-    <h1>Профиль участника</h1>
-    <p class="sub">Заполните данные о себе — это нужно для доступа к тесту навигатора по ПП №719 · {{ org }}</p>
-    {% if plan_line %}<p class="sub plan-line">{{ plan_line }}</p>{% endif %}
-    <form class="login-form" method="post" action="/profile">
-      {% if error %}<div class="error">{{ error }}</div>{% endif %}
+{# Макет «Navigator 719 Service», экран «Личный кабинет» → вкладка «Профиль» (08.10.2026). Поля —
+   наши, а не макетные: ФИО, регион и Telegram обязательны для регионального участника (гейт до чата),
+   согласие на обработку ПДн — явной галочкой (152-ФЗ), а не пассивным «продолжая, вы соглашаетесь».
+   Вкладки «Тариф и оплата» и «Документы» не перенесены — биллинга нет (решение владельца 08.10);
+   расход тарифа показан карточкой справа. #}
+{% set who = (full_name or user.full_name or user.username or "?") %}
+{% set parts = who.split() %}
+{% set initials = (parts[0][0] ~ (parts[1][0] if parts|length > 1 else ""))|upper %}
+<div class="page">
+  <div class="page-top">
+    <a class="auth-brand" href="/chat">{{ mark(30) }}<span>Навигатор ПП&nbsp;719</span></a>
+    {% if can_leave %}<a class="ds-link" href="/chat">Вернуться к сервису</a>{% endif %}
+  </div>
+  <div class="page-body">
+    <div class="who">
+      <span class="avatar">{{ initials }}</span>
+      <div>
+        <h1>{{ who }}</h1>
+        <div class="who-sub">{{ prefill_region or user.region or "Участник" }} · {{ org }}</div>
+      </div>
+    </div>
 
-      <label class="field">ФИО
-        <input name="full_name" value="{{ full_name or '' }}" placeholder="Фамилия Имя Отчество"
-               autocomplete="name" required autofocus>
-      </label>
+    <div class="grid2" style="align-items:start">
+      <form class="panel" method="post" action="/profile">
+        <div>
+          <h2>Данные пользователя</h2>
+          <p class="panel-sub">Заполните данные о себе — это нужно для доступа к навигатору по ПП №719 · {{ org }}</p>
+        </div>
+        {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
-      <label class="field">Регион
-        <select name="region" required>
-          <option value="" disabled {% if not prefill_region %}selected{% endif %}>— выберите регион —</option>
-          {% for r in regions %}
-          <option value="{{ r }}" {% if r == prefill_region %}selected{% endif %}>{{ r }}</option>
-          {% endfor %}
-        </select>
-      </label>
+        <label class="field"><span>ФИО</span>
+          <input name="full_name" value="{{ full_name or '' }}" placeholder="Фамилия Имя Отчество"
+                 autocomplete="name" required autofocus>
+        </label>
 
-      <label class="field">Ник в Telegram
-        <input name="telegram" value="{{ telegram or '' }}" placeholder="@username" required>
-      </label>
+        <label class="field"><span>Регион</span>
+          <select name="region" required>
+            <option value="" disabled {% if not prefill_region %}selected{% endif %}>— выберите регион —</option>
+            {% for r in regions %}
+            <option value="{{ r }}" {% if r == prefill_region %}selected{% endif %}>{{ r }}</option>
+            {% endfor %}
+          </select>
+        </label>
 
-      <label class="consent">
-        <input type="checkbox" name="consent" value="1" {% if consent %}checked{% endif %} required>
-        <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, ник в Telegram,
-          содержание диалогов с сервисом) оператором — {{ org }} — в целях проведения тестирования и
-          улучшения сервиса «Навигатор ПП №719», на условиях
-          <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
-          Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
-      </label>
-      <p class="consent-note">Не вводите данные ограниченного доступа: вопросы обрабатывает внешняя
-        языковая модель.</p>
+        <label class="field"><span>Ник в Telegram</span>
+          <input name="telegram" value="{{ telegram or '' }}" placeholder="@username" required>
+        </label>
 
-      <button type="submit">Сохранить и продолжить</button>
-    </form>
+        <label class="check">
+          <input type="checkbox" name="consent" value="1" {% if consent %}checked{% endif %} required>
+          <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, ник в Telegram,
+            содержание диалогов с сервисом) оператором — {{ org }} — в целях проведения тестирования и
+            улучшения сервиса «Навигатор ПП №719», на условиях
+            <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
+            Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
+        </label>
+        <p class="plan-note" style="margin:0">Не вводите данные ограниченного доступа: вопросы обрабатывает
+          внешняя языковая модель.</p>
+
+        <button class="ds-btn" type="submit" style="align-self:flex-start">Сохранить и продолжить</button>
+      </form>
+
+      {% if quota %}
+      {# Б4: расход тарифа — те же данные, что у карточки в сайдбаре (`quota.quota_view`) #}
+      <div class="plan-card">
+        <div class="plan-head"><span>Текущий тариф</span><span class="tag">Новый период с {{ quota.renews }}</span></div>
+        <div class="plan-name">{{ quota.plan }}</div>
+        <div>
+          <div class="plan-use"><span>Использовано {{ quota.used }} из {{ quota.limit }} запросов</span>
+            <span>{{ ((100 * quota.used / quota.limit) | round | int) if quota.limit else 0 }}%</span></div>
+          <div class="plan-track" style="margin-top:10px"><div style="width:{{ ((100 * quota.used / quota.limit) | round | int) if quota.limit else 0 }}%"></div></div>
+        </div>
+        <div class="plan-note">{{ plan_line }}</div>
+      </div>
+      {% endif %}
+    </div>
   </div>
 </div>
 {% endblock %}

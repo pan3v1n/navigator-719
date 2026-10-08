@@ -7,7 +7,13 @@ const input = document.getElementById("input");
 const send = document.getElementById("send");
 const history = document.getElementById("history");
 const main = document.getElementById("main");
+const chatTitle = document.getElementById("chat-title");
 let sessionId = null;
+
+// Заголовок в шапке — название открытой беседы (макет 08.10.2026); на главной пусто.
+function setTitle(text) {
+  if (chatTitle) chatTitle.textContent = text || "";
+}
 
 // U5: подсказка в поле ввода зависит от СОСТОЯНИЯ беседы. Пустой чат — стартовая инструкция
 // («с чего начать»); начатый разговор — подсказка следующего шага от последнего ответа либо пусто.
@@ -302,22 +308,34 @@ function addUser(text) {
   return wrap;
 }
 
-function addAssistant(text, sources) {
+// Каркас ответа ассистента по макету: подпись «Навигатор ПП 719» с плашкой-аватаром, затем текст.
+function assistantShell() {
   const wrap = el("msg assistant");
+  const head = el("msg-head");
+  head.innerHTML = '<span class="bot-avatar" aria-hidden="true"></span><span>Навигатор ПП 719</span>';
+  wrap.appendChild(head);
+  return wrap;
+}
+
+// Сообщение из истории беседы. `messageId` есть у ответов, у которых он сохранился в журнале, —
+// тогда под ответом доступны оценка и «Сообщить об ошибке», как у свежего.
+function addAssistant(text, sources, messageId) {
+  const wrap = assistantShell();
   const b = el("bubble");
   renderAnswer(wrap, b, text);
   wrap.appendChild(b);
   wrap.dataset.raw = text;  // исходный markdown — его и копируем, а не текст из DOM
   messages.appendChild(wrap);
-  addAnswerTools(wrap);
   if (sources) addSources(wrap, sources);
+  addAnswerTools(wrap);
+  if (messageId) addFeedbackBar(wrap, messageId, sessionId);
   return wrap;
 }
 
 function addPending() {
-  const wrap = el("msg assistant");
+  const wrap = assistantShell();
   const b = el("bubble");
-  b.innerHTML = '<div class="typing"><span></span><span></span><span></span></div>';
+  b.innerHTML = '<div class="thinking">Ищу в тексте постановления<span class="typing"><span></span><span></span><span></span></span></div>';
   wrap.appendChild(b);
   messages.appendChild(wrap);
   scrollDown();
@@ -340,37 +358,185 @@ function konturLink(s) {
   return KONTUR_719 + (anchor ? "#:~:text=" + encodeURIComponent(anchor) : "");
 }
 
+// --- Б1: источники ответа — блок чипов под ответом, «[N]» в тексте и панель «Источник» справа ---
+// Номер [N] в ответе — это N-й источник: модель ссылается на пронумерованные блоки контекста, а
+// источники приходят в том же порядке (`format_context` / `format_rules_context`).
+
+// Подпись источника: позиция приложения — наименованием, пункт документа — его меткой.
+function sourceLabel(s) {
+  const name = (s.product_name || "").trim();
+  return name.length > 70 ? name.slice(0, 68) + "…" : name;
+}
+
+// s.url — прямая ссылка на первоисточник (процедурные: Правила/ПП №719/Приказ №52).
+// Товарные источники приходят без url → строим ссылку по ОКПД2/наименованию в тексте 719.
+function sourceHref(s) {
+  return s.url || konturLink(s);
+}
+
 function addSources(wrap, sources) {
   if (!sources || !sources.length) return;
-  const det = document.createElement("details");
-  det.className = "sources";
-  const sum = document.createElement("summary");
-  sum.textContent = "Источники (" + sources.length + ")";
-  det.appendChild(sum);
-  sources.forEach((s, i) => {
-    // s.url — прямая ссылка на первоисточник (процедурные: Правила/ПП №719/Приказ №52).
-    // Товарные источники приходят без url → строим ссылку по ОКПД2/наименованию в тексте 719.
-    const href = s.url || konturLink(s);
-    // Без адреса рисуем ПОДПИСЬЮ, а не пустой ссылкой: <a href=""> перезагружает страницу и
-    // выглядит как рабочий клик — молчаливая поломка вместо видимой.
-    const a = document.createElement(href ? "a" : "span");
-    a.className = "src-item";
-    if (href) {
-      a.href = href;
-      a.target = "_blank";
-      a.rel = "noopener";
-      a.title = s.url ? "Открыть первоисточник (Контур.Норматив)" : "Открыть в тексте ПП №719 (Контур.Норматив)";
-    }
-    const mark = s.okpd2_match ? " (совпадение по коду)" : "";
-    const codes = (s.okpd2 || []).join(", ");
-    let t = "[" + (i + 1) + "] " + s.product_name + (s.section ? " — " + s.section : "") + mark;
-    if (codes) t += " · ОКПД2 " + codes;
-    if (s.source_anchor) t += " · " + s.source_anchor;
-    a.textContent = t;
-    det.appendChild(a);
-  });
-  wrap.appendChild(det);
+  wrap._sources = sources;
+  const box = el("sources");
+  const head = el("sources-head");
+  head.textContent = "Источники ответа";
+  box.appendChild(head);
+  // «Источники ответа» — это то, на что ответ СОСЛАЛСЯ. Остальное окно поиска (кандидаты, о которых
+  // ответ не говорит) прячем за кнопкой: в прежнем свёрнутом списке их было не видно, а открытыми
+  // чипами «Оборудование для мойки бутылок» читалось бы источником ответа про бульдозеры. Если
+  // ссылок [N] в тексте нет вовсе (старые ответы), показываем всё.
+  const cited = citedSources(wrap.dataset.raw || "", sources.length);
+  const mkChip = (s, i) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "src-chip";
+    b.dataset.src = String(i);
+    b.title = (s.product_name || "") + (s.section ? " — " + s.section : "")
+      + (s.okpd2_match ? " (совпадение по коду)" : "");
+    const n = document.createElement("span");
+    n.className = "src-n";
+    n.textContent = String(i + 1);
+    b.appendChild(n);
+    b.appendChild(document.createTextNode(sourceLabel(s)));
+    b.addEventListener("click", () => openSource(wrap, i));
+    return b;
+  };
+  const chips = el("src-chips");
+  const rest = el("src-chips src-rest hidden");
+  sources.forEach((s, i) => (cited.size === 0 || cited.has(i) ? chips : rest).appendChild(mkChip(s, i)));
+  box.appendChild(chips);
+  if (rest.children.length) {
+    const more = document.createElement("button");
+    more.type = "button";
+    more.className = "src-more";
+    const label = "Ещё " + rest.children.length + " " + plural(rest.children.length, "позиция", "позиции", "позиций")
+      + " из поиска — в ответе не цитируются";
+    more.textContent = label;
+    more.setAttribute("aria-expanded", "false");
+    more.addEventListener("click", () => {
+      const open = rest.classList.toggle("hidden") === false;
+      more.textContent = open ? "Скрыть позиции из поиска" : label;
+      more.setAttribute("aria-expanded", open ? "true" : "false");
+    });
+    box.appendChild(more);
+    box.appendChild(rest);
+  }
+  // Блок источников идёт сразу за текстом и пометкой о числах — перед действиями под ответом.
+  const before = wrap.querySelector(":scope > .msg-actions");
+  wrap.insertBefore(box, before || null);
+  linkRefs(wrap);
 }
+
+// «[3]» или «[1, 2]» в тексте ответа → кнопки источников. Делается ПОСЛЕ финального рендера:
+// источники приходят последним событием стрима, а разметка на каждом фрагменте пересобирается.
+// Номер вне списка источников остаётся текстом — ссылка в никуда хуже отсутствующей.
+const REF_RE = /\[(\d{1,2}(?:\s*[,;]\s*\d{1,2})*)\]/g;
+
+// Индексы источников (с нуля), на которые текст ответа ссылается как [N]; номера вне списка — мимо.
+function citedSources(text, count) {
+  const out = new Set();
+  (text || "").replace(REF_RE, (m, nums) => {
+    nums.split(/[,;]/).forEach((x) => {
+      const n = parseInt(x, 10);
+      if (n >= 1 && n <= count) out.add(n - 1);
+    });
+    return m;
+  });
+  return out;
+}
+
+function linkRefs(wrap) {
+  const sources = wrap._sources || [];
+  const bubble = wrap.querySelector(":scope > .bubble");
+  if (!sources.length || !bubble) return;
+  const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT);
+  const nodes = [];
+  while (walker.nextNode()) {
+    if (/\[\d/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+  }
+  nodes.forEach((node) => {
+    const text = node.nodeValue;
+    const frag = document.createDocumentFragment();
+    let last = 0;
+    let changed = false;
+    text.replace(REF_RE, (m, nums, off) => {
+      const ids = nums.split(/[,;]/).map((x) => parseInt(x, 10));
+      if (!ids.every((n) => n >= 1 && n <= sources.length)) return m;
+      frag.appendChild(document.createTextNode(text.slice(last, off)));
+      ids.forEach((n) => {
+        const b = document.createElement("button");
+        b.type = "button";
+        b.className = "ref-chip";
+        b.dataset.src = String(n - 1);
+        b.textContent = String(n);
+        b.title = sources[n - 1].product_name || "";
+        b.addEventListener("click", () => openSource(wrap, n - 1));
+        frag.appendChild(b);
+      });
+      last = off + m.length;
+      changed = true;
+      return m;
+    });
+    if (!changed) return;
+    frag.appendChild(document.createTextNode(text.slice(last)));
+    node.replaceWith(frag);
+  });
+}
+
+const srcPanel = document.getElementById("src-panel");
+let srcActive = null;   // [wrap, i] — что сейчас открыто в панели
+
+function paintActiveSource() {
+  document.querySelectorAll(".src-chip.on, .ref-chip.on").forEach((x) => x.classList.remove("on"));
+  if (!srcActive) return;
+  const [wrap, i] = srcActive;
+  wrap.querySelectorAll('[data-src="' + i + '"]').forEach((x) => x.classList.add("on"));
+}
+
+function openSource(wrap, i) {
+  const s = (wrap._sources || [])[i];
+  if (!s || !srcPanel) return;
+  const isRule = s.kind === "rule" || (!!s.url && !(s.okpd2 || []).length);
+  document.getElementById("src-doc").textContent = isRule
+    ? (s.section || "Документ корпуса")
+    : "Постановление Правительства РФ от 17.07.2015 № 719 · Приложение";
+  document.getElementById("src-title").textContent = s.product_name || "";
+  const meta = [];
+  if (!isRule) {
+    if (s.source_anchor) meta.push(s.source_anchor.replace(/^Приложение к ПП №719,\s*/, ""));
+    if ((s.okpd2 || []).length) meta.push("ОКПД2 " + s.okpd2.join(", "));
+    if (s.okpd2_match) meta.push("совпадение по коду");
+    if (window.CORPUS_EDITION) meta.push("Редакция: " + window.CORPUS_EDITION);
+  }
+  document.getElementById("src-meta").textContent = meta.join(" · ");
+  const textEl = document.getElementById("src-text");
+  textEl.classList.toggle("missing", !s.text);
+  textEl.textContent = s.text
+    || "Текст этого источника не сохранён вместе с ответом (ответ записан до обновления сервиса). "
+       + "Откройте полный текст документа по ссылке ниже.";
+  const href = sourceHref(s);
+  const open = document.getElementById("src-open");
+  open.classList.toggle("hidden", !href);
+  if (href) open.href = href;
+  srcActive = [wrap, i];
+  paintActiveSource();
+  srcPanel.classList.remove("hidden");
+  document.getElementById("app").classList.add("panel-on");
+  srcPanel.querySelector(".src-panel-body").scrollTop = 0;
+}
+
+function closeSource() {
+  if (!srcPanel) return;
+  srcPanel.classList.add("hidden");
+  document.getElementById("app").classList.remove("panel-on");
+  srcActive = null;
+  paintActiveSource();
+}
+const srcClose = document.getElementById("src-close");
+if (srcClose) srcClose.addEventListener("click", closeSource);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && srcActive && document.getElementById("tour").classList.contains("hidden")) closeSource();
+});
 
 // пометка о незаземлённых числах: faithfulness-guard поймал число баллов/%, которого нет в источнике
 function addUnverifiedFlag(wrap, nums) {
@@ -429,27 +595,29 @@ function copyText(text) {
   });
 }
 
-// Кнопки под ответом: копировать и поделиться. Живут отдельно от панели оценки — та требует
-// message_id, а копировать нужно уметь всегда, даже если запись в лог не удалась.
+// Ряд действий под ответом (макет 08.10.2026): «Копировать», «Уточнить» и — у ответа с id в
+// журнале — «Сообщить об ошибке» и «Оценить ответ» (их добавляет addFeedbackBar). Копирование живёт
+// отдельно от оценки: та требует message_id, а копировать нужно уметь всегда, даже если запись в
+// лог не удалась.
 function addAnswerTools(wrap) {
-  const tools = el("msg-tools");
+  const tools = el("msg-actions");
 
-  const mkTool = (tip, svg, onClick) => {
+  const mkTool = (label, onClick) => {
     const b = document.createElement("button");
     b.type = "button";
-    b.className = "tool-btn";
-    b.dataset.tip = tip;              // подпись показывается по hover/фокусу (CSS ::after)
-    b.setAttribute("aria-label", tip);
-    b.innerHTML = svg;
+    b.className = "act-btn";
+    b.textContent = label;
+    b.dataset.label = label;
     b.addEventListener("click", () => onClick(b));
     return b;
   };
 
-  const done = (btn, tip) => {
-    const prev = btn.dataset.tip;
-    btn.dataset.tip = tip;
-    btn.classList.add("ok");
-    setTimeout(() => { btn.dataset.tip = prev; btn.classList.remove("ok"); }, 1600);
+  // Итог действия показываем на самой кнопке («Скопировано»), как в макете, и возвращаем подпись.
+  const done = (btn, text, ok) => {
+    btn.textContent = text;
+    btn.classList.toggle("ok", ok !== false);
+    clearTimeout(btn._t);
+    btn._t = setTimeout(() => { btn.textContent = btn.dataset.label; btn.classList.remove("ok"); }, 1600);
   };
 
   // Копируем ИСХОДНЫЙ markdown, поэтому свёрнутая таблица (U6) уходит целиком. Запасной путь
@@ -464,30 +632,24 @@ function addAnswerTools(wrap) {
     return text;
   };
 
-  const copySvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
-    + '<rect x="9" y="9" width="11" height="11" rx="2" stroke="currentColor" stroke-width="1.8"/>'
-    + '<path d="M5 15V5a2 2 0 0 1 2-2h8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
-  const shareSvg = '<svg viewBox="0 0 24 24" fill="none" width="17" height="17">'
-    + '<path d="M12 16V4m0 0L8 8m4-4l4 4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>'
-    + '<path d="M5 14v4a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>';
-
-  tools.appendChild(mkTool("Копировать ответ", copySvg, (btn) => {
+  tools.appendChild(mkTool("Копировать", (btn) => {
     copyText(raw() + SHARE_NOTE)
       .then(() => done(btn, "Скопировано"))
-      .catch(() => done(btn, "Не удалось скопировать"));
+      .catch(() => done(btn, "Не удалось скопировать", false));
   }));
 
-  tools.appendChild(mkTool("Поделиться", shareSvg, (btn) => {
-    const text = raw() + SHARE_NOTE;
-    // Системный шаринг там, где он есть (мобильные, часть десктопов); иначе — в буфер обмена:
-    // публичной ссылки на диалог у сервиса нет и быть не должно — переписка персональная.
-    if (navigator.share) {
-      navigator.share({ title: "Навигатор ПП №719", text }).catch(() => {});
-      return;
-    }
-    copyText(text)
-      .then(() => done(btn, "Ответ в буфере — вставьте в письмо"))
-      .catch(() => done(btn, "Не удалось скопировать"));
+  // «Поделиться» — только там, где есть системный шаринг (телефоны): на десктопе он делал бы то же,
+  // что «Копировать». Публичной ссылки на диалог у сервиса нет и быть не должно — переписка личная.
+  if (navigator.share) {
+    tools.appendChild(mkTool("Поделиться", () => {
+      navigator.share({ title: "Навигатор ПП №719", text: raw() + SHARE_NOTE }).catch(() => {});
+    }));
+  }
+
+  // «Уточнить» — продолжить разговор об этом же ответе: мультитёрн держит контекст беседы.
+  tools.appendChild(mkTool("Уточнить", () => {
+    input.focus();
+    scrollDown();
   }));
 
   wrap.appendChild(tools);
@@ -550,16 +712,22 @@ function addFeedbackBar(wrap, messageId, sid) {
   const dlgPanel = mkPanel((w) => addSaveField(w, "Комментарий ко всему диалогу:", "Отправить комментарий",
     (val) => postFeedback({ kind: "dialog", session_id: sid, comment: val })));
 
-  // ссылки-действия: раскрывают ровно одну панель (остальные прячут)
+  // Действия встают в общий ряд под ответом (макет: «Копировать · Уточнить · Сообщить об ошибке»),
+  // каждое раскрывает ровно одну панель под рядом, остальные прячет. «Сообщить об ошибке» — это
+  // исправление к ответу: петля обучения (принцип 2), разбор попадает в проверенные кейсы.
+  // Оценка звёздами остаётся — на ней держится метрика приёмки (гейт 1.0).
   const panels = [ratePanel, errPanel, dlgPanel];
   const only = (p) => { panels.forEach((x) => { if (x !== p) x.hide(); }); p.toggle(); };
-  const actions = el("fb-actions");
+  let row = wrap.querySelector(":scope > .msg-actions");
+  if (!row) { row = el("msg-actions"); wrap.appendChild(row); }
+  const errLink = mkFbLink("Сообщить об ошибке", () => only(errPanel));
+  errLink.className = "act-btn";
+  row.appendChild(errLink);
   const rateLink = mkFbLink("Оценить ответ", () => only(ratePanel));
-  rateLink.classList.add("primary");
-  actions.appendChild(rateLink);
-  actions.appendChild(mkFbLink("отметить ошибку", () => only(errPanel)));
-  actions.appendChild(mkFbLink("комментарий к диалогу", () => only(dlgPanel)));
-  bar.appendChild(actions);
+  rateLink.className = "act-btn act-rate";
+  row.appendChild(rateLink);
+  // комментарий ко всей беседе — из панели оценки: это редкое действие, в общем ряду оно лишнее
+  ratePanel.wrap.appendChild(mkFbLink("Комментарий ко всему диалогу", () => only(dlgPanel)));
   bar.appendChild(ratePanel.wrap); bar.appendChild(errPanel.wrap); bar.appendChild(dlgPanel.wrap);
 
   wrap.appendChild(bar);
@@ -567,9 +735,16 @@ function addFeedbackBar(wrap, messageId, sid) {
 
 // --- история бесед в сайдбаре ---
 function setActive(sid) {
-  history.querySelectorAll(".history-item").forEach((x) =>
-    x.classList.toggle("active", x.dataset.sid === sid)
-  );
+  let title = "";
+  history.querySelectorAll(".history-item").forEach((x) => {
+    const on = x.dataset.sid === sid;
+    x.classList.toggle("active", on);
+    if (on) title = x.title;
+  });
+  setTitle(title);
+  // «Главная» подсвечена, когда открыт пустой экран вопроса
+  const home = document.getElementById("go-home");
+  if (home) home.classList.toggle("active", !sid);
 }
 
 function addHistoryItem(sid, title, prepend) {
@@ -609,6 +784,8 @@ async function deleteConversation(sid, item) {
       sessionId = null;
       main.classList.add("empty");
       setHint("");  // U5: экран снова пустой — стартовая подсказка
+      setActive(null);
+      closeSource();
       updateJumpBtn(); // T16
     }
   } catch (e) { /* сеть */ }
@@ -637,9 +814,10 @@ async function openConversation(sid) {
     // уже найденной позиции: ровно то, из-за чего задача и заведена.
     setHint("");
     sessionId = sid;
+    closeSource();
     data.messages.forEach((m) => {
       if (m.role === "user") addUser(m.content);
-      else addAssistant(m.content, m.sources);
+      else addAssistant(m.content, m.sources, m.message_id);
     });
     setActive(sid);
     scrollDown();
@@ -665,6 +843,7 @@ async function handleRejected(r, text, pending) {
   if (pending) pending.remove();
   setHint(hintBeforeAsk);   // вопрос не ушёл — подсказка снова актуальна
   input.value = text;
+  form.classList.add("ready");
   input.style.height = "auto";
   showInputBlock(msg);
 }
@@ -677,6 +856,7 @@ async function ask(text) {
   if (isNew) {
     // новую беседу заводим СРАЗУ (id на клиенте) и добавляем в историю ДО ответа
     sessionId = genId();
+    closeSource();
     addHistoryItem(sessionId, text, true);
   }
   addUser(text);
@@ -691,8 +871,40 @@ async function ask(text) {
   } finally {
     send.disabled = false;
     autoScroll();  // в конце ответа не выдёргиваем пользователя вниз, если он читает выше
+    refreshQuota();  // Б4: ответ мог списать запрос тарифа (или его не дали — 402)
   }
 }
+
+// --- Б4: расход тарифа — карточка в сайдбаре и строка под полем ввода --------------------------
+// Данные считает сервер (`quota.quota_view`): первый раз — в разметке (window.QUOTA), дальше —
+// `/api/quota` после каждого ответа. У пользователя без тарифа (и у admin) лимита нет — ни карточки,
+// ни строки.
+function renderQuota(qv) {
+  const card = document.getElementById("quota-card");
+  const line = document.getElementById("limit-line");
+  if (!card || !line) return;
+  if (!qv) { card.classList.add("hidden"); line.classList.add("hidden"); return; }
+  const left = qv.remaining;
+  const pct = qv.limit ? Math.max(0, Math.min(100, Math.round(100 * left / qv.limit))) : 0;
+  document.getElementById("quota-fill").style.width = pct + "%";
+  document.getElementById("quota-note").textContent =
+    "Осталось " + left + " из " + qv.limit + " до " + qv.renews + ". Лимиты обновляются каждый месяц.";
+  card.classList.toggle("low", left === 0);
+  card.classList.remove("hidden");
+  line.textContent = "Осталось " + left + " " + plural(left, "запрос", "запроса", "запросов")
+    + " до " + qv.renews + " · ";
+  line.classList.remove("hidden");
+}
+
+async function refreshQuota() {
+  try {
+    const r = await fetch("/api/quota");
+    if (!r.ok) return;
+    const d = await r.json();
+    renderQuota(d.quota);
+  } catch (e) { /* сеть — карточка останется прежней */ }
+}
+renderQuota(window.QUOTA || null);
 
 // Стриминг: fetch SSE-поток → дописываем delta в пузырь → на done навешиваем источники+оценку.
 // Возврат: true = завершилось финалом (done / редирект на login|profile); false = нужен фолбэк.
@@ -750,9 +962,9 @@ async function askStream(text, pending, bubble, isNew) {
     setActive(sessionId);
     renderAnswer(pending, bubble, acc);  // финальный ре-рендер полного текста
     pending.dataset.raw = acc;
-    addAnswerTools(pending);
     addUnverifiedFlag(pending, done.unverified_numbers);
     addSources(pending, done.sources);
+    addAnswerTools(pending);
     addFeedbackBar(pending, done.message_id, sessionId);
     setHint(done.input_hint);  // U5: следующий шаг задаёт ветка, которой отвечено
     return true;
@@ -796,9 +1008,9 @@ async function askFallback(text, pending, bubble, isNew) {
     // пометкой о происхождении. Со свёрнутой таблицей цена ошибки выше: копировать нечего, а в DOM
     // теперь видны не все строки. Порядок — как в стриминге.
     pending.dataset.raw = data.answer;
-    addAnswerTools(pending);
     addUnverifiedFlag(pending, data.unverified_numbers);
     addSources(pending, data.sources);
+    addAnswerTools(pending);
     addFeedbackBar(pending, data.message_id, sessionId);
     setHint(data.input_hint);  // U5: фолбэк ведёт себя так же, как стриминг
   } catch (e) {
@@ -903,7 +1115,9 @@ function showInputBlock(text, onProceed) {
   if (!box) {
     box = el("input-block");
     box.id = "input-block";
-    form.parentNode.insertBefore(box, form);
+    // над рамкой поля, а не внутри неё: рамка — градиентная обводка самого поля ввода
+    const frame = form.closest(".composer-frame") || form;
+    frame.parentNode.insertBefore(box, frame);
   }
   box.className = "input-block" + (onProceed ? " soft" : "");
   box.innerHTML = WARN_SVG + "<span></span>";
@@ -938,6 +1152,7 @@ form.addEventListener("submit", (e) => {
   const proceed = () => {
     hideInputBlock();
     input.value = "";
+    form.classList.remove("ready");
     input.style.height = "auto";
     ask(text);
   };
@@ -958,17 +1173,26 @@ input.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); }
 });
 
-// «Новый диалог» — текущая беседа уже в истории (сохранена в БД); чистим экран, начинаем новую
-const newChat = document.getElementById("new-chat");
-if (newChat) newChat.addEventListener("click", () => {
+// «Новый вопрос» и «Главная» — текущая беседа уже в истории (сохранена в БД); чистим экран, начинаем
+// новую. В макете это две кнопки одного действия: возврат на пустой экран вопроса.
+function goHome() {
   messages.innerHTML = "";
   sessionId = null;
   main.classList.add("empty");
   setHint("");  // U5: пустой чат — снова стартовая подсказка
   setActive(null);
+  closeSource();
   updateJumpBtn(); // T16: скрыть навигатор (пустой чат)
   input.focus();
-});
+}
+const newChat = document.getElementById("new-chat");
+if (newChat) newChat.addEventListener("click", goHome);
+const goHomeBtn = document.getElementById("go-home");
+if (goHomeBtn) goHomeBtn.addEventListener("click", goHome);
+setActive(null);
+
+// Кнопка отправки «загорается», когда в поле есть текст (макет: другой градиент у непустого черновика)
+input.addEventListener("input", () => form.classList.toggle("ready", !!input.value.trim()));
 
 // --- экспорт всех диалогов: окно настроек (формат / период дат / источники) ---
 const exportBtn = document.getElementById("export-btn");
@@ -1057,17 +1281,18 @@ const TOUR_STEPS = [
     text: "Опишите продукцию («требования к чиллерам»), укажите код ОКПД2 или код ТН ВЭД из " +
           "сертификата — его переведу в ОКПД2 по переходному ключу. Код даёт точную привязку к позиции." },
   { sel: "#chat-scroll", title: "Ответ со ссылками на первоисточник", pad: 6,
-    text: "Под ответом — источники: позиция приложения, пункт Правил или Приказа №52. Числа в баллах " +
-          "и сроки проверяются автоматически, неподтверждённые помечаются. Ответ ИИ — предварительный " +
+    text: "Номера в тексте ответа и чипы «Источники ответа» открывают справа текст позиции приложения " +
+          "или пункта документа — сверить можно, не уходя из сервиса. Числа в баллах и сроки " +
+          "проверяются автоматически, неподтверждённые помечаются. Ответ ИИ — предварительный " +
           "ориентир: решение принимает уполномоченный эксперт ТПП." },
-  { sel: "#new-chat", title: "Новый диалог под новую тему",
+  { sel: "#new-chat", title: "Новый вопрос под новую тему",
     text: "Сервис помнит контекст беседы и удерживает код, о котором идёт речь. Для другой продукции " +
-          "начните новый диалог — так контексты не смешаются." },
+          "начните новый вопрос — так контексты не смешаются." },
   { sel: "#history", title: "История и экспорт", pad: 4,
     text: "Диалоги сохраняются: к ним можно вернуться, найти нужный поиском, а по «⋮» — выгрузить " +
           "или удалить. В любой выгрузке остаётся пометка о предварительном характере ответов." },
   { sel: "#fb-open", title: "Оценка — главный способ улучшить сервис",
-    text: "Под каждым ответом есть «Оценить ответ» и «отметить ошибку». Разбор ошибок экспертами " +
+    text: "Под каждым ответом есть «Оценить ответ» и «Сообщить об ошибке». Разбор ошибок экспертами " +
           "попадает в базу проверенных случаев, и сервис начинает отвечать верно — без дообучения модели." },
   { sel: "#help-group", title: "Справка всегда рядом",
     text: "Здесь — знакомство с интерфейсом, справочный центр с частыми вопросами, условия " +
@@ -1078,7 +1303,8 @@ const TOUR_STEPS = [
 // "onboarding719Seen", и все участники июльского теста его уже видели. Оставь мы прежнее имя —
 // обновлённый тур не показался бы ни одному из них: сервис решил бы, что знакомство уже прошло.
 // Правило на будущее: существенно поменяли тур — подняли версию ключа.
-const TOUR_SEEN_KEY = "tour719Seen_v1";
+// v2 — новый интерфейс по макету 08.10.2026: кнопки и источники переехали, тур показываем заново.
+const TOUR_SEEN_KEY = "tour719Seen_v2";
 
 (function initTour() {
   const root = document.getElementById("tour");
@@ -1220,7 +1446,7 @@ const TOUR_SEEN_KEY = "tour719Seen_v1";
   backdrop.addEventListener("click", close);
   sidebar.addEventListener("click", (e) => {   // переход по пункту закрывает шторку на мобиле
     if (window.innerWidth > 760) return;
-    if (e.target.closest("#new-chat, #history, a.nav-item, .logout")) close();
+    if (e.target.closest("#new-chat, #go-home, #history, a.nav-item, .side-link, .logout")) close();
   });
 })();
 

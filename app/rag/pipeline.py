@@ -253,6 +253,55 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     return sorted(ops, key=lambda o: -len(qtok & set(sparse.tokenize(o.get("text", "")))))
 
 
+# Б1 (дизайн 08.10.2026): текст позиции для панели «Источник». Кап — потому что текст уезжает в
+# `sources_json` КАЖДОГО ответа по всему окну хитов, а у мега-позиций сотни операций.
+SOURCE_TEXT_CAP = 6000
+
+
+def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
+    """Требования позиции ЧЕЛОВЕКУ — для панели «Источник» рядом с ответом.
+
+    Те же данные и те же правила, что в блоке контекста (`format_context`): порог позиции либо
+    добранный из примечаний, закупочный порог — отдельной строкой со своим условием, требования
+    группы — с атрибуцией. Без указаний модели: эта строка читается экспертом, а не промптом.
+    Полный перечень без ранжирования по запросу — эксперт сверяет позицию целиком."""
+    mt = h.min_threshold or lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
+    ops = _hit_operations(h, NOTE_CAP_TARGET, mt)
+    lines: list[str] = []
+    if not ops:
+        parent = inheritance.lookup(h.section_roman, h.product_name)
+        if parent and parent.get("operations"):
+            codes = ", ".join(parent.get("okpd2_codes") or [])
+            lines.append(f"Требования группы — приведены у позиции «{parent.get('product_name', '')}»"
+                         + (f" (ОКПД2 {codes})" if codes else "") + ".")
+            ops = list(parent.get("operations") or [])
+            if parent.get("min_threshold") and not mt:
+                mt = f"{parent['min_threshold']} — порог группы"
+    if mt:
+        lines.insert(0, f"Порог: {mt}")
+    proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)
+    if proc:
+        lines.append(f"Порог для целей закупок (не для подтверждения происхождения): {proc}")
+    cur_parent = None
+    for o in ops:
+        op_parent = o.get("_parent")
+        if op_parent and op_parent != cur_parent:
+            lines.append(f"▸ {op_parent}")
+        cur_parent = op_parent
+        pts = o.get("points")
+        lines.append(f"• {(o.get('text') or '').strip()}" + (f" — {pts} балл." if pts is not None else ""))
+    if fragments.is_fragmented(h.product_name):
+        lines.append("Перечень неполный: позиция входит в группу с общими требованиями, остальное "
+                     "значится у соседних позиций — полный перечень в первоисточнике ПП №719.")
+    if fragments.has_incomplete_thresholds(h.section_roman, h.product_name):
+        lines.append("Пороги показаны не полностью: в первоисточнике у позиции несколько порогов "
+                     "(по узлам изделия или видам работ).")
+    text = "\n".join(lines)
+    if len(text) > cap:
+        text = text[:cap].rstrip() + " …(полный перечень — в первоисточнике ПП №719)"
+    return text
+
+
 def format_context(hits: list[Hit], query: str | None = None,
                    code: str | list[str] | None = None) -> str:
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное

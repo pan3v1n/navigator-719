@@ -1,0 +1,9 @@
+{# Знак «Навигатор ПП 719» — восемь лучей, один длиннее: из всех норм выбирается нужный пункт
+   (вариант «1a · Луч-указатель» макета; тот же знак на лендинге). Цвет — currentColor. #}
+{% macro mark(size=30, cls="mark") -%}
+<svg class="{{ cls }}" aria-hidden="true" viewBox="0 0 100 100" width="{{ size }}" height="{{ size }}" fill="none">
+  {%- for a in (0, 45, 90, 135, 180, 225, 270, 315) %}
+  <rect x="45.5" y="{{ 3 if a == 45 else 14 }}" width="9" height="{{ 42 if a == 45 else 31 }}" rx="4.5" fill="currentColor" transform="rotate({{ a }} 50 50)"/>
+  {%- endfor %}
+</svg>
+{%- endmacro %}
