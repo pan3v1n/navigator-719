@@ -546,19 +546,93 @@ def extract_tnved_position(text: str | None) -> str | None:
     return best[1] if best else None
 
 
+# --- ИЕРАРХИЯ ОКПД2 — ЕДИНСТВЕННОЕ место (`D14` #141) ------------------------------------------
+# ⚠⚠ КОД ОКПД2 ИЕРАРХИЧЕН ПОРАЗРЯДНО, А НЕ ПОСЕГМЕНТНО. ОК 034-2014: класс XX · подкласс XX.X ·
+# группа XX.XX · подгруппа XX.XX.X · вид XX.XX.XX · категория XX.XX.XX.Y00 · подкатегория
+# XX.XX.XX.YZ0 · XX.XX.XX.YZW. Нули в хвосте девятизначного сегмента — ЗАПОЛНИТЕЛЬ уровня, а не
+# разряд: «20.14.11.110» — подкатегория «2014111·1», и «20.14.11.112» лежит внутри неё.
+#
+# Прежнее сравнение (`retriever.okpd2_match`) шло по сегментам и для «20.14.11.112» и «20.14.11.110»
+# видело СОСЕДЕЙ. На бою это дало уверенно неверный ответ, подтверждённый двумя экспертами: н-бутан
+# 20.14.11.112 → «требования 20.14.11.110 применять нельзя», хладон 20.14.11.122 → катализаторы.
+# Слепых уровней оказалось три, а не один (замер `scripts/diag_okpd2_climb.py`, 19 200 кодов
+# справочника): подкатегория «…YZ0», подгруппа «XX.XX.X» (в корпусе 29.10.2 — легковые автомобили,
+# 20.60.1 и др.), подкласс «XX.X» (27.3, 27.2, 13.2), плюс вид, записанный как «…000».
+# ⚠ Нули в хвосте снимаются ТОЛЬКО у девятизначного сегмента. У вида «27.12.10» ноль — настоящий
+# номер в подгруппе 27.12.1, и снять его значило бы приравнять вид к подгруппе.
+
+
+def okpd2_key(code: str | None) -> str:
+    """Поразрядный ключ кода: «20.14.11.110» → «20141111», «27.12.31.000» → «271231».
+
+    Код A — предок (или тот же) кода B, если ключ A — префикс ключа B. Пустая строка — не код."""
+    segs = [s for s in str(code or "").strip().replace(" ", "").split(".") if s]
+    if not segs or not all(s.isdigit() for s in segs):
+        return ""
+    if len(segs) == 4 and len(segs[3]) == 3:
+        segs = segs[:3] + [segs[3].rstrip("0")]
+    return "".join(segs)
+
+
+def okpd2_relation(rec_code: str | None, query_code: str | None) -> int | None:
+    """Где код позиции относительно кода вопроса: 0 — тот же код; k > 0 — позиция ПРЕДОК на k
+    разрядов выше (её группировка включает код вопроса); k < 0 — ПОТОМОК; None — разные ветки."""
+    a, b = okpd2_key(rec_code), okpd2_key(query_code)
+    if not a or not b or not (b.startswith(a) or a.startswith(b)):
+        return None
+    return len(b) - len(a)
+
+
+def _dotted(k: str) -> list[str]:
+    """Записи ключа в том виде, в каком коды стоят в корпусе («2014111» → «20.14.11.100»)."""
+    n = len(k)
+    if n <= 2:
+        return [k]
+    if n <= 4:
+        return [f"{k[:2]}.{k[2:]}"]
+    if n <= 6:
+        base = f"{k[:2]}.{k[2:4]}.{k[4:]}"
+        return [base, base + ".000"] if n == 6 else [base]
+    return [f"{k[:2]}.{k[2:4]}.{k[4:6]}.{k[6:].ljust(3, '0')}"]
+
+
+def okpd2_ancestor_forms(code: str | None) -> list[str]:
+    """Все записи кодов-предков (и самого кода), от класса вглубь: для фильтра `okpd2_codes`."""
+    k = okpd2_key(code)
+    return [f for n in range(2, len(k) + 1) for f in _dotted(k[:n])]
+
+
+def okpd2_descendant_forms(code: str | None) -> list[str]:
+    """Значения поля `okpd2_prefixes` (посегментные префиксы кодов позиции, `load_kb`), по которым
+    находятся позиции-потомки кода и сам код. Посегментный префикс — то, что лежит в индексе, а
+    потомок «27.3» — это и «27.3», и «27.31…»: перечисляем, чем может начинаться его код."""
+    k = okpd2_key(code)
+    n = len(k)
+    if n in (2, 4, 6):
+        return _dotted(k)[:1]
+    if n in (3, 5):
+        base = _dotted(k)[0]
+        return [base] + [base + d for d in "0123456789"]
+    if n == 7:
+        head = _dotted(k)[0][:-2]
+        return [head + a + b for a in "0123456789" for b in "0123456789"]
+    if n == 8:
+        head = _dotted(k)[0][:-1]
+        return [head + d for d in "0123456789"]
+    return _dotted(k) if n == 9 else []
+
+
 def okpd2_name(code: str | None) -> str | None:
-    """Наименование по коду ОКПД2. Точного нет → иерархический фолбэк на родителя (28.13.14.190 → 28.13.14)."""
+    """Наименование по коду ОКПД2. Точного нет → ближайший предок по поразрядной иерархии
+    (28.13.14.999 → 28.13.14.990 → 28.13.14.900 → 28.13.14 …)."""
     names = _okpd2_names()
     code = (code or "").strip()
     if not code:
         return None
     if code in names:
         return names[code]
-    parts = code.split(".")
-    while len(parts) > 1:
-        parts = parts[:-1]
-        parent = ".".join(parts)
-        if parent in names:
+    for parent in reversed(okpd2_ancestor_forms(code)):
+        if parent != code and parent in names:
             return names[parent]
     return None
 

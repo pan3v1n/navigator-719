@@ -26,7 +26,8 @@ from app.core.prompts import (
 )
 from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse, st1_ref
 from app.rag.embeddings import embed_query
-from app.rag.retriever import Hit, dense_top1, okpd2_match, search, search_cases, search_rules
+from app.rag.retriever import (Hit, ancestor_code, code_relation, dense_top1, okpd2_match, search,
+                               search_cases, search_rules)
 from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
 
 # Кап операций ЦЕЛЕВОГО хита (вариант A, 2026-07-05): 60, чтобы не резать умеренные продукты
@@ -308,8 +309,39 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
     return text
 
 
+def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]:
+    """Строки «код из вопроса входит в группировку кода этой позиции» для ЦЕЛЕВОЙ позиции (D14).
+
+    ⚠ ЗАЧЕМ. На бою эксперт спросил, применимы ли к н-бутану 20.14.11.112 требования позиции
+    20.14.11.110, и модель ответила «подменять требования нельзя»: в контексте стояли два разных
+    кода и ни слова о том, что второй — группировка первого. Модель сравнивала их поразрядно, как
+    до правки сравнивал и рантайм. Факт иерархии — данные, а не вывод, поэтому он идёт в контекст.
+    Код продукции из ПРОШЛЫХ ходов (`dialog_codes`) учитывается: в том диалоге второй ход называл
+    только код группы. Связь печатается лишь там, где она есть, — чужой код строки не даёт.
+    ⚠ Оговорка про «из» обязательна: у позиции с пометкой «из» (прим. 3 к приложению) требования
+    относятся только к названным в наименовании товарам, и подъём по коду этого не отменяет.
+    ⚠ ТОЛЬКО ФАКТ, БЕЗ ЗАПРЕТА. Первая редакция кончалась фразой «не утверждай, что требования
+    «применять нельзя» из-за несовпадения кодов», и живой прогон 08.10 показал эхо: в одном ответе
+    из двух модель написала пользователю «„нельзя из-за несовпадения кодов“ — это не про ваш
+    случай», хотя он такого не говорил. Запрет в контексте читается как реплика, которую надо
+    опровергнуть; факта иерархии достаточно — оба ответа и без запрета начинались с «да»."""
+    notes = []
+    for c in codes + [d for d in dialog_codes if d not in codes]:
+        rc = ancestor_code(h.okpd2_codes or [], c)
+        if rc is None or code_relation(h.okpd2_codes or [], c) == 0:
+            continue
+        said = "из вопроса" if c in codes else "продукции, названный ранее в диалоге,"
+        notes.append(
+            f"    ⚠ Код {said} {c} ВХОДИТ В ГРУППИРОВКУ ОКПД2 {rc} этой позиции (иерархия кодов "
+            f"ОКПД2): позиция распространяется на этот код, и её требования применяются к продукции "
+            f"с ним, если продукция относится к товарам, названным в наименовании позиции (при пометке "
+            f"«из» — только к ним, прим. 3 к приложению).")
+    return notes
+
+
 def format_context(hits: list[Hit], query: str | None = None,
-                   code: str | list[str] | None = None) -> str:
+                   code: str | list[str] | None = None, *,
+                   dialog_codes: list[str] | None = None) -> str:
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное
     # место, где это решается); прочие кандидаты идут строкой «наименование + код» как материал
     # для уточнения — см. EV7 ниже.
@@ -334,6 +366,8 @@ def format_context(hits: list[Hit], query: str | None = None,
         lines = [head]
         if h.okpd2_codes:
             lines.append(f"    ОКПД2: {', '.join(h.okpd2_codes)}")
+        if is_target:
+            lines += _group_notes(h, _codes(code), _codes(dialog_codes))
         if same_cell:
             lines.append(
                 "    ⚠ ЭТО ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ требований первоисточника (требования одной "
@@ -670,10 +704,19 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
         # ТОЧНО (у одного кода в приложении бывает несколько записей с поделёнными требованиями,
         # напр. 26.11.22.210). Так «сравни по 28.13.14 и по 26.30.50» даёт две опоры (`EV8`), а
         # «требования по 28.13» — по-прежнему одну, хотя под префикс подходят 52 записи.
+        # ⚠ D14 #141: «точное» — тот же код по поразрядному ключу («27.12.31.000» и «27.12.31» — один
+        # вид), а без точного целевой становится БЛИЖАЙШАЯ позиция-предок, а не первая по score.
+        # Прежде первая совпавшая по score: «Н-бутан 20.14.11.112» отдавал целевую «Катализаторам»
+        # с кодом класса «20», хотя в окне была подкатегория 20.14.11.110. Если предков нет (код
+        # вопроса шире позиций, «28.13»), выбор прежний — первая по рангу.
         picked: list[Hit] = []
         for c in _codes(code):
-            exact = [h for h in matched if c in (h.okpd2_codes or [])]
-            chosen = exact or [h for h in matched if okpd2_match(h.okpd2_codes or [], c)][:1]
+            rel = [(h, code_relation(h.okpd2_codes or [], c)) for h in matched]
+            exact = [h for h, r in rel if r == 0]
+            up = [r for _h, r in rel if r is not None and r > 0]
+            chosen = (exact
+                      or [h for h, r in rel if up and r == min(up)][:1]
+                      or [h for h, r in rel if r is not None][:1])
             for h in chosen:
                 h = _content_sibling(h, hits)
                 if not any(h is p for p in picked):
@@ -1285,7 +1328,9 @@ def _add_positions_by_code(codes: list[str], hits: list[Hit], limit: int, *,
     out = list(hits)
     for c in extra:
         # Точные совпадения, уже стоящие в окне, — целевые по построению: помечаем и не трогаем.
-        exact_here = [h for h in out if c in (h.okpd2_codes or [])]
+        # «Точное» — тем же поразрядным ключом, что в `target_hits` (D14): иначе «27.12.31.000»
+        # добирало бы позицию, которая уже стоит в окне под кодом «27.12.31».
+        exact_here = [h for h in out if code_relation(h.okpd2_codes or [], c) == 0]
         if exact_here:
             if mark:
                 for h in exact_here:
@@ -1528,7 +1573,11 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         if sugg:
             okpd2_suggestions = [(c, n) for c, n, _s in sugg]
 
-    ctx = format_context(hits, search_query, all_codes)
+    # D14: код продукции из прошлых ходов — только для строки «входит в группировку» (`_group_notes`);
+    # поиск и выбор целевой он не трогает.
+    hist_code = _anchor_code(history)
+    ctx = format_context(hits, search_query, all_codes,
+                         dialog_codes=[hist_code] if hist_code else None)
     cases_ctx = format_cases(cases) if cases else None
     resolved = search_query if search_query != query else None
     # K12: смешанный вопрос — про продукцию И про состав документов. Бинарный роутер считает такие

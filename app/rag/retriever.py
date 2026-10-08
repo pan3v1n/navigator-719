@@ -37,6 +37,9 @@ class Hit:
     source_anchor: str | None
     okpd2_match: bool = False
     payload: dict = field(default_factory=dict)
+    # D14: ярус совпадения по коду — 0 тот же код, 1 ближайший предок из найденных, 2 прочие
+    # совпавшие (дальние предки, потомки). Решает порядок окна ВНУТРИ совпавших, см. `_order_key`.
+    code_tier: int = 0
 
 
 # --------------------------------------------------------------------------- #
@@ -46,19 +49,38 @@ def _segments(code: str) -> list[str]:
     return [s for s in code.strip().replace(" ", "").split(".") if s]
 
 
+def code_relation(rec_codes: list[str], query_code: str) -> int | None:
+    """Ближайшая связь позиции с кодом вопроса по иерархии ОКПД2 (`okpd2_ref.okpd2_relation`):
+    0 — тот же код, k > 0 — позиция-предок на k разрядов выше, k < 0 — потомок, None — не связаны.
+    Из нескольких кодов позиции берётся ближайший: тот же код, затем ближайший предок, затем потомок."""
+    rels = [r for rc in rec_codes or [] if (r := okpd2_ref.okpd2_relation(rc, query_code)) is not None]
+    if not rels:
+        return None
+    if 0 in rels:
+        return 0
+    up = [r for r in rels if r > 0]
+    return min(up) if up else max(rels)
+
+
+def ancestor_code(rec_codes: list[str], query_code: str) -> str | None:
+    """Код позиции, группировка которого включает код вопроса (ближайший), иначе None.
+    Тот же код предком не считается: это точное совпадение."""
+    best = None
+    for rc in rec_codes or []:
+        r = okpd2_ref.okpd2_relation(rc, query_code)
+        if r is not None and r > 0 and (best is None or r < best[0]):
+            best = (r, rc)
+    return best[1] if best else None
+
+
 def okpd2_match(rec_codes: list[str], query_code: str) -> bool:
-    """True, если код записи и код запроса лежат на одной ветке ОКПД2 (один — префикс
-    другого посегментно). Так «29.20.23.110» матчит группу «29.20.23», а «29.20» —
-    более частную «29.20.23»."""
-    q = _segments(query_code)
-    if not q:
-        return False
-    for rc in rec_codes:
-        r = _segments(rc)
-        n = min(len(q), len(r))
-        if n and q[:n] == r[:n]:
-            return True
-    return False
+    """True, если код записи и код запроса лежат на одной ветке ОКПД2: один — предок другого
+    ПОРАЗРЯДНО (`okpd2_ref.okpd2_key`). Так «29.20.23.110» матчит группу «29.20.23», «29.20» —
+    более частную «29.20.23», а «20.14.11.112» — свою подкатегорию «20.14.11.110».
+
+    ⚠ D14 #141: до 08.10.2026 сравнение шло ПОСЕГМЕНТНО, и подкатегория «…YZ0», подгруппа
+    «XX.XX.X» и подкласс «XX.X» для своих же подкодов были соседями, а не предками."""
+    return code_relation(rec_codes, query_code) is not None
 
 
 def _prefixes(code: str) -> list[str]:
@@ -178,8 +200,30 @@ def _order_key(h: Hit) -> tuple:
 
     Ключ детерминированный и не зависит от порядка прихода: `source_anchor` уникален у записи,
     имя добавлено на случай пустого якоря. Меняется только разрешение НИЧЬИХ — записи с разным
-    score остаются на своих местах, поэтому ранжирование как таковое не трогается."""
-    return (not h.okpd2_match, -h.score, h.source_anchor or "", h.product_name or "")
+    score остаются на своих местах, поэтому ранжирование как таковое не трогается.
+
+    ⚠ D14 #141: ВНУТРИ совпавших по коду сначала тот же код, затем ближайшая позиция-предок, и
+    только потом score. Прежде все совпавшие шли по score, и код ПОЗИЦИЮ не выбирал: на «Н-бутан
+    очищенный 20.14.11.112» окно занимали 14 «Катализаторов …» с кодом КЛАССА «20», а целевой
+    становился один из них; на «Шкаф управления … 27.12.31.000» «Реле защиты» (27.12) обходили
+    «Панели …» (27.12.31). Чем точнее код позиции, тем авторитетнее совпадение — ровно то, на чём
+    стоит правило 3а промпта. Без кода ярус у всех 0, и порядок прежний."""
+    return (not h.okpd2_match, h.code_tier, -h.score, h.source_anchor or "", h.product_name or "")
+
+
+def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
+    """Ярус совпадения по коду (`Hit.code_tier`): 0 тот же код, 1 ближайшая позиция-предок из
+    найденных, 2 прочие совпавшие. «Ближайшая» — среди найденных: если позиции на уровне
+    подкатегории нет, ближайшим становится вид или группа, а не «ничего»."""
+    rel = {id(h): code_relation(h.okpd2_codes, okpd2) for h in hits if h.okpd2_match}
+    up = [r for r in rel.values() if r is not None and r > 0]
+    nearest = min(up) if up else None
+    for h in hits:
+        if id(h) not in rel:
+            h.code_tier = 0          # не совпала вовсе — порядок решает `not okpd2_match`
+            continue
+        r = rel[id(h)]
+        h.code_tier = 0 if r == 0 else 1 if r is not None and r == nearest else 2
 
 
 def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
@@ -218,6 +262,23 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
                     h.okpd2_match = True
                     seen.add(h.source_anchor)
                     hits.append(h)
+            # D14 #141: связи, которых посегментный добор выше не видит, — предки на уровнях
+            # подкатегории «…YZ0», категории «…Y00», подгруппы «XX.XX.X», подкласса «XX.X» и
+            # вида «…000», плюс потомки этих уровней. ОТДЕЛЬНЫМ запросом и только ДОБАВЛЕНИЕМ:
+            # прежний добор остаётся побайтно тем же, и состав окна у кодов, которых правка не
+            # касается, не сдвигается от того, что в общий фильтр подмешались новые точки.
+            up = [f for f in okpd2_ref.okpd2_ancestor_forms(okpd2) if f not in prefixes]
+            down = [f for f in okpd2_ref.okpd2_descendant_forms(okpd2) if f != okpd2.strip()]
+            should = ([models.FieldCondition(key="okpd2_codes", match=models.MatchAny(any=up))] if up else []) + \
+                     ([models.FieldCondition(key="okpd2_prefixes", match=models.MatchAny(any=down))] if down else [])
+            for p in (_hybrid(query, max(limit, 12), qfilter=models.Filter(should=should), qvec=qvec)
+                      if should else []):
+                h = _to_hit(p)
+                if h.source_anchor not in seen and okpd2_match(h.okpd2_codes, okpd2):
+                    h.okpd2_match = True
+                    seen.add(h.source_anchor)
+                    hits.append(h)
+        _set_code_tiers(hits, okpd2)
 
     # Полный порядок ДО усечения окна: совпавшие по коду выше, далее score, далее якорь.
     # Сортируем ВСЕГДА, а не только при наличии кода: ничья на границе окна возможна в обоих
