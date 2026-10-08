@@ -46,14 +46,11 @@
       </div>
 
       <div class="side-group">
+        {# Б3 (макет): в сайдбаре — последние беседы, все — на странице «История запросов»
+           (поиск по вопросам и ответам, период, группы по датам) #}
         <div class="side-head">
           <span>История</span>
-          <button class="side-head-btn" id="search-btn" type="button" title="Поиск по чатам" aria-label="Поиск по чатам">
-            <svg viewBox="0 0 24 24" fill="none" width="15" height="15"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-          </button>
-        </div>
-        <div class="search-box hidden" id="search-box">
-          <input type="text" id="search-input" placeholder="Поиск по чатам…" autocomplete="off">
+          <button class="side-head-link" id="history-all" type="button">Посмотреть всё</button>
         </div>
         <div class="history" id="history"></div>
       </div>
@@ -139,6 +136,34 @@
 
     <div class="main-row">
       <div class="main-col">
+        {# Б3: страница «История запросов» (макет «Navigator 719 Service»). Наполняет chat.js из
+           /api/history; беседа открывается кликом по строке. #}
+        <section class="history-page hidden" id="history-page" aria-label="История запросов">
+          <div class="hp-col">
+            <div class="hp-head">
+              <h1>История запросов</h1>
+              <p>Все ваши вопросы и ответы с источниками</p>
+            </div>
+            <div class="hp-tools">
+              <label class="hp-search">
+                <svg viewBox="0 0 24 24" fill="none" width="20" height="20" aria-hidden="true"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+                <input type="search" id="hp-query" placeholder="Поиск по вопросам и ответам" autocomplete="off" aria-label="Поиск по вопросам и ответам">
+              </label>
+              <div class="hp-filters" role="group" aria-label="Период">
+                <button type="button" class="hp-filter on" data-period="all" aria-pressed="true">Все</button>
+                <button type="button" class="hp-filter" data-period="today" aria-pressed="false">Сегодня</button>
+                <button type="button" class="hp-filter" data-period="week" aria-pressed="false">Неделя</button>
+                <button type="button" class="hp-filter" data-period="earlier" aria-pressed="false">Ранее</button>
+              </div>
+            </div>
+            <div id="hp-list" class="hp-list"></div>
+            <div class="hp-empty hidden" id="hp-empty">
+              <div class="hp-empty-t">Ничего не найдено</div>
+              <div class="hp-empty-s">Измените запрос или период</div>
+            </div>
+          </div>
+        </section>
+
         <div class="chat-scroll" id="chat-scroll">
           <div class="chat-col">
             <div id="messages" class="messages"></div>

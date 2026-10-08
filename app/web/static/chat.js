@@ -752,9 +752,20 @@ function setActive(sid) {
     if (on) title = x.title;
   });
   setTitle(title);
-  // «Главная» подсвечена, когда открыт пустой экран вопроса
+  // «Главная» подсвечена, когда открыт пустой экран вопроса (а не страница истории)
   const home = document.getElementById("go-home");
-  if (home) home.classList.toggle("active", !sid);
+  if (home) home.classList.toggle("active", !sid && !main.classList.contains("history-mode"));
+  trimHistory();
+}
+
+// Б3: в сайдбаре — только последние беседы (макет); все остальные — на странице «История запросов».
+// Элементы остаются в разметке (заголовок беседы для шапки берётся отсюда), лишние лишь скрыты;
+// открытая беседа видна всегда, даже если она старше последних.
+const HISTORY_SIDE_N = 5;
+function trimHistory() {
+  Array.from(history.children).forEach((it, i) => {
+    it.classList.toggle("extra", i >= HISTORY_SIDE_N && !it.classList.contains("active"));
+  });
 }
 
 function addHistoryItem(sid, title, prepend) {
@@ -781,6 +792,7 @@ function addHistoryItem(sid, title, prepend) {
 function removeHistoryItem(sid) {
   const it = history.querySelector('[data-sid="' + sid + '"]');
   if (it) it.remove();
+  trimHistory();
 }
 
 async function deleteConversation(sid, item) {
@@ -789,6 +801,8 @@ async function deleteConversation(sid, item) {
     const r = await fetch("/api/conversations/" + sid, { method: "DELETE" });
     if (!r.ok) return;
     item.remove();
+    trimHistory();
+    if (inHistory()) loadHistory();
     if (sessionId === sid) {
       messages.innerHTML = "";
       sessionId = null;
@@ -817,6 +831,7 @@ async function openConversation(sid) {
     const r = await fetch("/api/conversations/" + sid);
     if (!r.ok) return;
     const data = await r.json();
+    leaveHistory();
     messages.innerHTML = "";
     main.classList.remove("empty");
     // U5: подсказку последнего ответа старой беседы мы не храним (в БД её нет) — поле остаётся
@@ -830,6 +845,12 @@ async function openConversation(sid) {
       else addAssistant(m.content, m.sources, m.message_id);
     });
     setActive(sid);
+    // беседы нет в сайдбаре (открыта со страницы истории, а список загружен раньше) — заголовок
+    // шапки берём из первого вопроса самой беседы
+    if (!chatTitle.textContent) {
+      const first = data.messages.find((m) => m.role === "user");
+      setTitle(first ? first.content : "");
+    }
     scrollDown();
     updateJumpBtn(); // T16: показать/скрыть навигатор по вопросам открытой беседы
   } catch (e) { /* сеть */ }
@@ -859,6 +880,7 @@ async function handleRejected(r, text, pending) {
 }
 
 async function ask(text) {
+  leaveHistory();
   main.classList.remove("empty");
   hintBeforeAsk = inputHint;
   setHint("");         // подсказка прошлого ответа устарела в момент нового вопроса
@@ -1186,6 +1208,7 @@ input.addEventListener("keydown", (e) => {
 // «Новый вопрос» и «Главная» — текущая беседа уже в истории (сохранена в БД); чистим экран, начинаем
 // новую. В макете это две кнопки одного действия: возврат на пустой экран вопроса.
 function goHome() {
+  leaveHistory();
   messages.innerHTML = "";
   sessionId = null;
   main.classList.add("empty");
@@ -1235,25 +1258,103 @@ if (sideCollapse) sideCollapse.addEventListener("click", () => setCollapsed(true
 if (sideExpand) sideExpand.addEventListener("click", () => setCollapsed(false));
 try { if (localStorage.getItem("sidebarCollapsed") === "1") appEl.classList.add("collapsed"); } catch (e) {}
 
-// --- поиск по чатам (фильтр истории по заголовку) ---
-const searchBtn = document.getElementById("search-btn");
-const searchBox = document.getElementById("search-box");
-const searchInput = document.getElementById("search-input");
-function filterHistory(qq) {
-  const q = (qq || "").trim().toLowerCase();
-  history.querySelectorAll(".history-item").forEach((it) => {
-    const label = it.querySelector(".hi-title");
-    const t = (label ? label.textContent : "").toLowerCase();
-    it.style.display = !q || t.indexOf(q) !== -1 ? "" : "none";
+// --- Б3: страница «История запросов» (макет «Navigator 719 Service») ----------------------------
+// В сайдбаре — последние беседы (HISTORY_SIDE_N) и «Посмотреть всё»; все беседы — здесь: поиск по
+// вопросам И ответам (на сервере: тексты ответов в сайдбар не грузятся, R24), период, группы по
+// датам. Строка открывает беседу. Прежний фильтр сайдбара по заголовку заменён этой страницей.
+const histPage = document.getElementById("history-page");
+const histAll = document.getElementById("history-all");
+const hpQuery = document.getElementById("hp-query");
+const hpList = document.getElementById("hp-list");
+const hpEmpty = document.getElementById("hp-empty");
+let hpPeriod = "all";
+let hpTimer = null;
+let hpSeq = 0;   // ответ на устаревший запрос (быстрый ввод) не должен перерисовать свежий
+
+function inHistory() { return main.classList.contains("history-mode"); }
+
+function showHistory() {
+  if (!histPage) return;
+  closeSource();
+  main.classList.add("history-mode");
+  histPage.classList.remove("hidden");
+  if (histAll) histAll.classList.add("active");
+  setActive(null);
+  setTitle("История запросов");
+  loadHistory();
+  if (hpQuery) hpQuery.focus();
+}
+
+function leaveHistory() {
+  if (!histPage || !inHistory()) return;
+  main.classList.remove("history-mode");
+  histPage.classList.add("hidden");
+  if (histAll) histAll.classList.remove("active");
+}
+
+async function loadHistory() {
+  const seq = ++hpSeq;
+  const p = new URLSearchParams({ q: hpQuery ? hpQuery.value.trim() : "", period: hpPeriod });
+  try {
+    const r = await fetch("/api/history?" + p.toString());
+    if (r.status === 401) { window.location = "/login"; return; }
+    if (!r.ok || seq !== hpSeq) return;
+    renderHistory((await r.json()).groups || []);
+  } catch (e) { /* сеть — список останется прежним */ }
+}
+
+function renderHistory(groups) {
+  hpList.innerHTML = "";
+  hpEmpty.classList.toggle("hidden", groups.length > 0);
+  groups.forEach((g) => {
+    const box = el("hp-group");
+    const label = el("hp-group-label");
+    label.textContent = g.label;
+    box.appendChild(label);
+    g.items.forEach((it) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.className = "hp-item";
+      const text = el("hp-text");
+      const q = el("hp-q");
+      q.textContent = it.q;
+      text.appendChild(q);
+      if (it.a) { const a = el("hp-a"); a.textContent = it.a; text.appendChild(a); }
+      b.appendChild(text);
+      const meta = el("hp-meta");
+      const refs = el("hp-refs");
+      (it.refs || []).forEach((r) => {
+        const s = document.createElement("span");
+        s.className = "hp-ref";
+        s.textContent = r;
+        refs.appendChild(s);
+      });
+      meta.appendChild(refs);
+      const t = el("hp-time");
+      t.textContent = it.time || "";
+      meta.appendChild(t);
+      b.appendChild(meta);
+      b.addEventListener("click", () => openConversation(it.session_id));
+      box.appendChild(b);
+    });
+    hpList.appendChild(box);
   });
 }
-if (searchBtn) searchBtn.addEventListener("click", () => {
-  if (appEl.classList.contains("collapsed")) setCollapsed(false); // развернуть для поиска
-  searchBox.classList.toggle("hidden");
-  if (!searchBox.classList.contains("hidden")) { searchInput.focus(); }
-  else { searchInput.value = ""; filterHistory(""); }
+
+if (histAll) histAll.addEventListener("click", showHistory);
+if (hpQuery) hpQuery.addEventListener("input", () => {
+  clearTimeout(hpTimer);
+  hpTimer = setTimeout(loadHistory, 250);   // не дёргаем сервер на каждую букву
 });
-if (searchInput) searchInput.addEventListener("input", () => filterHistory(searchInput.value));
+document.querySelectorAll(".hp-filter").forEach((f) => f.addEventListener("click", () => {
+  hpPeriod = f.dataset.period;
+  document.querySelectorAll(".hp-filter").forEach((x) => {
+    const on = x === f;
+    x.classList.toggle("on", on);
+    x.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+  loadHistory();
+}));
 
 // форма обратной связи
 const modal = document.getElementById("fb-modal");
@@ -1299,8 +1400,9 @@ const TOUR_STEPS = [
     text: "Сервис помнит контекст беседы и удерживает код, о котором идёт речь. Для другой продукции " +
           "начните новый вопрос — так контексты не смешаются." },
   { sel: "#history", title: "История и экспорт", pad: 4,
-    text: "Диалоги сохраняются: к ним можно вернуться, найти нужный поиском, а по «⋮» — выгрузить " +
-          "или удалить. В любой выгрузке остаётся пометка о предварительном характере ответов." },
+    text: "Здесь — последние диалоги, все — по «Посмотреть всё»: поиск по вопросам и ответам, " +
+          "фильтр по периоду. По «⋮» диалог можно выгрузить или удалить. В любой выгрузке остаётся " +
+          "пометка о предварительном характере ответов." },
   { sel: "#fb-open", title: "Оценка — главный способ улучшить сервис",
     text: "Под каждым ответом есть «Оценить ответ» и «Сообщить об ошибке». Разбор ошибок экспертами " +
           "попадает в базу проверенных случаев, и сервис начинает отвечать верно — без дообучения модели." },
@@ -1456,7 +1558,7 @@ const TOUR_SEEN_KEY = "tour719Seen_v2";
   backdrop.addEventListener("click", close);
   sidebar.addEventListener("click", (e) => {   // переход по пункту закрывает шторку на мобиле
     if (window.innerWidth > 760) return;
-    if (e.target.closest("#new-chat, #go-home, #history, a.nav-item, .side-link, .logout")) close();
+    if (e.target.closest("#new-chat, #go-home, #history, #history-all, a.nav-item, .side-link, .logout")) close();
   });
 })();
 
