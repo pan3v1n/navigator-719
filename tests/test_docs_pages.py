@@ -516,6 +516,13 @@ class TestHelpMenuLayout(unittest.TestCase):
         self.assertNotIn("overflow: hidden", block)
         self.assertIn("z-index", block)
 
+    def test_sections_clip_their_own_content(self):
+        """Ревью test33: без обрезки у сайдбара его подписи на первых кадрах разворота ложились
+        поверх чата. Обрезают СЕКЦИИ; `.side-nav` (там подменю) — нет."""
+        self.assertIn(".side-top, .side-new, .quota-card, .side-bottom, .nav-item { overflow: hidden; }", self.css)
+        self.assertIn(".side-scroll { overflow-x: hidden; }", self.css)
+        self.assertNotRegex(self.css, r"\.side-nav[^{]*\{[^}]*overflow: hidden", "подменю снова обрежется")
+
     def test_menu_stays_inside_the_drawer_on_phone(self):
         """В мобильной шторке справа места нет — подменю открывается внутри неё, над пунктом."""
         mobile = self.css.split("@media (max-width: 760px)")[1]
