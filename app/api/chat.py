@@ -42,7 +42,7 @@ from app.rag.edition import (
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
-from app.rag.pipeline import answer, answer_stream
+from app.rag.pipeline import SOURCE_TEXT_CAP, answer, answer_stream, source_text
 from app.tools.navigator import extract_okpd2
 
 router = APIRouter()
@@ -131,6 +131,10 @@ class SourceItem(BaseModel):
     source_anchor: str | None = None
     okpd2_match: bool = False
     url: str | None = None  # прямая ссылка на первоисточник (процедурные источники); None → фронт строит по ОКПД2/наим.
+    # Б1 (дизайн 08.10.2026): текст позиции/пункта для панели «Источник» — эксперт сверяет ответ, не
+    # уходя из сервиса. У ответов, записанных до правки, поля нет: фронт ведёт тогда в первоисточник.
+    text: str | None = None
+    kind: str = "product"  # product — позиция приложения 719 · rule — пункт процедурного документа
 
 
 class ChatResponse(BaseModel):
@@ -154,9 +158,21 @@ def _sources_from_hits(hits) -> list[SourceItem]:
             okpd2=h.okpd2_codes or [],
             source_anchor=h.source_anchor,
             okpd2_match=h.okpd2_match,
+            text=_safe_source_text(h),
         )
         for h in hits
     ]
+
+
+def _safe_source_text(h) -> str | None:
+    """Текст панели «Источник» — БЕЗ права уронить ответ (ревью 08.10.2026): он собирается ПОСЛЕ
+    генерации, и исключение здесь превращало бы оплаченный ответ в 500, а в стриме — в фолбэк с
+    повторным вызовом DeepSeek. Не собрался — панель честно ведёт в первоисточник."""
+    try:
+        return source_text(h) or None
+    except Exception:  # noqa: BLE001
+        logger.exception(f"chat: текст источника не собрался ({h.product_name[:60]!r})")
+        return None
 
 
 # --- Кликабельные источники ПРОЦЕДУРНОГО ответа (пункты Правил/тела ПП №719/Приказа №52). ----------
@@ -247,8 +263,22 @@ def _sources_from_rules(rules) -> list[SourceItem]:
             source_anchor=None,  # уже в product_name (метка пункта) — не дублируем в подписи
             okpd2_match=False,
             url=_rule_url(doc_type, r.get("text") or ""),
+            text=_rule_text(r) or None,
+            kind="rule",
         ))
     return out
+
+
+def _rule_text(r: dict) -> str:
+    """Пункт ЦЕЛИКОМ (в контексте модели он усечён `RULES_TEXT_CAP`) с вводной фразой родителя —
+    без неё подпункт списка читается неизвестно к чему (P2)."""
+    text = (r.get("text") or "").strip()
+    intro = (r.get("parent_intro") or "").strip()
+    if intro and intro not in text:
+        text = f"{intro}\n{text}"
+    if len(text) > SOURCE_TEXT_CAP:
+        text = text[:SOURCE_TEXT_CAP].rstrip() + " …(полный текст — в первоисточнике)"
+    return text
 
 
 def _load_history(user_id: int, session_id: str, max_msgs: int = 12) -> list[dict]:
@@ -395,6 +425,14 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     )
 
 
+@router.get("/api/quota")
+def get_quota(user: User = Depends(require_user)) -> dict:
+    """Б4: расход тарифа текущего периода — для карточки в сайдбаре; фронт перечитывает его после
+    каждого ответа. `{"quota": null}` — лимита нет (тариф не назначен, admin)."""
+    with get_session() as db:
+        return {"quota": quota.quota_view(db, user)}
+
+
 @router.get("/api/conversations")
 def list_conversations(user: User = Depends(require_user)) -> list[dict]:
     """Список бесед пользователя для сайдбара (новые сверху)."""
@@ -417,6 +455,10 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
             item = {"role": m.role, "content": m.content}
             if m.sources_json:
                 item["sources"] = json.loads(m.sources_json)
+            if m.role == "assistant":
+                # Б2: id ответа — чтобы и в переоткрытой беседе можно было оценить ответ и сообщить
+                # об ошибке. Чужой ответ так не оценить: `/api/feedback` сверяет владельца сообщения.
+                item["message_id"] = m.id
             out.append(item)
     return {"session_id": session_id, "messages": out}
 

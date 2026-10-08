@@ -1,11 +1,12 @@
 {# Базовый макет правовых и справочных страниц (Условия, Политика, Справочный центр).
    Публичные: открываются без входа — их читают ДО того, как согласиться. #}
 {% extends "base.html" %}
+{% from "_mark.html" import mark %}
 {% block title %}{{ page_title }} — {{ app_title }}{% endblock %}
 {% block body %}
 <div class="doc-wrap">
   <header class="doc-head">
-    <a class="doc-logo" href="{{ '/chat' if user else '/login' }}" title="К сервису">719</a>
+    <a class="doc-logo" href="{{ '/chat' if user else '/login' }}" title="К сервису">{{ mark(30) }}</a>
     <nav class="doc-nav">
       <a href="/terms" {% if active == 'terms' %}class="on"{% endif %}>Условия использования</a>
       <a href="/privacy" {% if active == 'privacy' %}class="on"{% endif %}>Политика конфиденциальности</a>

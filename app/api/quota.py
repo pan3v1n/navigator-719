@@ -52,6 +52,19 @@ def quota_state(db: Session, user, now: datetime | None = None) -> QuotaState | 
     return QuotaState(user.plan, limit, q.count_answer_usage(db, user.id, start, end), start, end)
 
 
+def quota_view(db: Session, user) -> dict | None:
+    """Расход для интерфейса (Б4, дизайн 08.10.2026): карточка в сайдбаре и строка под полем ввода.
+
+    `renews` — день, с которого начинается новый период (по Москве): макет пишет «осталось N до
+    этой даты», и конец текущего периода ровно на её 00:00 МСК. None — у пользователя нет лимита,
+    карточки нет."""
+    st = quota_state(db, user)
+    if st is None:
+        return None
+    return {"plan": st.plan, "limit": st.limit, "used": min(st.used, st.limit),
+            "remaining": st.remaining, "renews": f"{plans.msk_date(st.end):%d.%m.%Y}"}
+
+
 def exhausted_message(st: QuotaState) -> str:
     return (f"Лимит тарифа «{st.plan}» исчерпан: {st.used} из {st.limit} запросов за период "
             f"с {plans.msk_date(st.start):%d.%m.%Y}. Новый период начнётся "

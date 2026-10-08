@@ -1,8 +1,9 @@
 {% extends "base.html" %}
+{% from "_mark.html" import mark %}
 {% block title %}Панель — {{ app_title }}{% endblock %}
 {% block body %}
 <header class="admin-header">
-  <a class="brand" href="/chat" title="На начальную страницу"><span class="logo">719</span> Навигатор · панель</a>
+  <a class="brand" href="/chat" title="На начальную страницу">{{ mark(28) }}<span class="brand-text">Навигатор · панель</span></a>
   <div class="spacer"></div>
   <span class="muted">{{ admin.username }} · admin</span>
   <a class="link" href="/chat">Чат</a>

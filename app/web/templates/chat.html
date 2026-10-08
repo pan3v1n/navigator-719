@@ -1,52 +1,81 @@
 {% extends "base.html" %}
+{% from "_mark.html" import mark %}
 {# ⚠ Чат гасит общий маркер намеренно: метка версии стоит ВНУТРИ дисклеймера под полем ввода
    (см. `composer-version` ниже), а не второй надписью в углу. Источник строки тот же. #}
 {% block release_marker %}{% endblock %}
 {% block title %}Чат — {{ app_title }}{% endblock %}
 {% block body %}
+{# Перенос макета «Navigator 719 Service» (Claude Design, 08.10.2026; референс — Нейроюрист).
+   Из макета взяты каркас, тексты и токены дизайн-системы ТПП. Не перенесены — решение владельца
+   08.10: готовые команды, баннер заявки на экспертизу, папки и файлы, тариф и оплата, вход по коду
+   и гостевой режим. Всё, что было в прежнем чате и чего нет в макете (экспорт, оценка, исправление,
+   справка, логи для admin, тур), сохранено — оно держит процесс и принципы 1–2. #}
+{% set who = (user.full_name or user.username or "?") %}
+{% set parts = who.split() %}
+{% set initials = (parts[0][0] ~ (parts[1][0] if parts|length > 1 else ""))|upper %}
+{% set role_line = user.region if (user.role == 'user' and user.region) else
+   ({'admin': 'Администратор', 'expert': 'Эксперт ТПП'}.get(user.role) or 'Участник') %}
 <div class="app" id="app">
   <aside class="sidebar">
     <div class="side-top">
-      <a class="brand" href="/chat" title="На начальную страницу">
-        <span class="logo">719</span>
-        <span class="brand-text">Навигатор</span>
+      <a class="brand" href="/chat" title="На главную">
+        {{ mark(30) }}
+        <span class="brand-text">Навигатор ПП&nbsp;719</span>
       </a>
-      <button class="side-collapse" id="side-collapse" type="button" title="Свернуть меню">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M15 6l-6 6 6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <button class="side-collapse" id="side-collapse" type="button" title="Свернуть меню" aria-label="Свернуть меню">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       </button>
-      <button class="side-expand" id="side-expand" type="button" title="Развернуть меню">
-        <span class="logo">719</span>
-        <svg class="expand-ic" viewBox="0 0 24 24" fill="none"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      <button class="side-expand" id="side-expand" type="button" title="Развернуть меню" aria-label="Развернуть меню">
+        <svg viewBox="0 0 24 24" fill="none"><path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
       </button>
     </div>
 
-    <button class="new-chat" id="new-chat" type="button" title="Новый диалог">
-      <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
-      <span class="nc-text">Новый диалог</span>
-    </button>
-
-    <button class="new-chat" id="search-btn" type="button" title="Поиск по чатам">
-      <svg viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-      <span class="nc-text">Поиск по чатам</span>
-    </button>
-
-    <div class="search-box hidden" id="search-box">
-      <input type="text" id="search-input" placeholder="Поиск по чатам…" autocomplete="off">
+    <div class="side-new">
+      <button class="new-chat" id="new-chat" type="button" title="Новый вопрос">
+        <span class="nc-text">Новый вопрос</span>
+        <svg viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+      </button>
     </div>
 
-    <div class="history" id="history"></div>
+    <div class="side-scroll">
+      <div class="side-links">
+        <button class="side-link" id="go-home" type="button">Главная</button>
+        {# Текст постановления — первоисточник в редакции КОРПУСА (адрес отдаёт сервер, см. KONTUR_719) #}
+        <a class="side-link" href="{{ kontur_719_url }}" target="_blank" rel="noopener"
+           title="Текст ПП №719 на Контур.Норматив — в редакции, по которой собрана база">Текст постановления</a>
+      </div>
+
+      <div class="side-group">
+        <div class="side-head">
+          <span>История</span>
+          <button class="side-head-btn" id="search-btn" type="button" title="Поиск по чатам" aria-label="Поиск по чатам">
+            <svg viewBox="0 0 24 24" fill="none" width="15" height="15"><circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="search-box hidden" id="search-box">
+          <input type="text" id="search-input" placeholder="Поиск по чатам…" autocomplete="off">
+        </div>
+        <div class="history" id="history"></div>
+      </div>
+    </div>
+
+    {# Б4: расход тарифа. Наполняет chat.js из `window.QUOTA` и перечитывает после ответа (/api/quota);
+       у пользователя без тарифа карточки нет. #}
+    <div class="quota-card hidden" id="quota-card">
+      <div class="quota-title">Запросы по тарифу</div>
+      <div class="quota-track"><div class="quota-fill" id="quota-fill"></div></div>
+      <div class="quota-note" id="quota-note"></div>
+      {% if landing_url %}
+      <a class="quota-link" href="{{ landing_url }}/#pricing" target="_blank" rel="noopener">Увеличить лимит
+        <svg viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M7 17L17 7M9 7h8v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+      {% endif %}
+    </div>
 
     <nav class="side-nav">
       {% if user.role == 'admin' %}
       <a class="nav-item" href="/admin">
         <svg viewBox="0 0 24 24" fill="none"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
         <span class="nc-text">Логи диалогов</span>
-      </a>
-      {% endif %}
-      {% if user.role == 'user' %}
-      <a class="nav-item" href="/profile">
-        <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="8" r="4" stroke="currentColor" stroke-width="1.8"/><path d="M4 20c0-3.4 3.6-6 8-6s8 2.6 8 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span class="nc-text">Профиль</span>
       </a>
       {% endif %}
       <button class="nav-item" id="export-btn" type="button">
@@ -58,12 +87,10 @@
         <span class="nc-text">Оставить отзыв</span>
       </button>
       {# Справка: подменю открывается по наведению, но держится и на клике/Tab — иначе с клавиатуры
-         и на тач-экране до пунктов не добраться (hover там не существует).
-         Знакомство с интерфейсом переехало сюда из отдельного пункта сайдбара: запускают его редко,
-         а место в постоянном меню оно занимало наравне с ежедневными действиями. #}
+         и на тач-экране до пунктов не добраться (hover там не существует). #}
       <div class="nav-group" id="help-group">
         <button class="nav-item" id="help-toggle" type="button" aria-haspopup="true" aria-expanded="false">
-          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.2 2.4c-.6.2-.9.7-.9 1.3v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><circle cx="12" cy="16.6" r="1.1" fill="currentColor"/></svg>
+          <svg viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M9.6 9.2a2.5 2.5 0 1 1 3.2 2.4c-.6.2-.9.7-.9 1.3v.4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/><path d="M12 16.8h.01" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
           <span class="nc-text">Справка</span>
           <svg class="nav-caret nc-text" viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
         </button>
@@ -77,11 +104,18 @@
     </nav>
 
     <div class="side-bottom">
+      {% if user.role == 'user' %}
+      <a class="user-chip" href="/profile" title="Профиль">
+      {% else %}
       <div class="user-chip">
-        <span class="avatar">{{ user.username[0]|upper }}</span>
-        <span class="uname nc-text">{{ user.username }}{% if user.role == 'admin' %} · admin{% endif %}</span>
-      </div>
-      <a class="logout nc-text" href="/logout">Выйти</a>
+      {% endif %}
+        <span class="avatar">{{ initials }}</span>
+        <span class="uinfo nc-text">
+          <span class="uname">{{ who }}</span>
+          <span class="urole">{{ role_line }}</span>
+        </span>
+      {% if user.role == 'user' %}</a>{% else %}</div>{% endif %}
+      <a class="logout nc-text" href="/logout" title="Выйти">Выйти</a>
     </div>
   </aside>
   <div class="drawer-backdrop" id="drawer-backdrop"></div>
@@ -91,50 +125,84 @@
       <button class="menu-btn" id="menu-btn" type="button" aria-label="Меню">
         <svg viewBox="0 0 24 24" fill="none"><path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
       </button>
-      <div class="chat-title">{{ app_title }}</div>
+      <div class="chat-title" id="chat-title"></div>
+      <div class="head-right">
+        {# E1: редакция корпуса видна всегда — тегом в шапке, как в макете #}
+        <span class="edition-tag" title="Редакция ПП №719, по которой собрана база ответов">ПП № 719 · {{ corpus_edition }}</span>
+        {% if user.role == 'user' %}
+        <a class="avatar head-avatar" href="/profile" title="Профиль" aria-label="Профиль">{{ initials }}</a>
+        {% else %}
+        <span class="avatar head-avatar" title="{{ who }}">{{ initials }}</span>
+        {% endif %}
+      </div>
     </header>
 
-    <div class="chat-scroll" id="chat-scroll">
-      <div class="chat-col">
-        <div id="messages" class="messages"></div>
-      </div>
-    </div>
+    <div class="main-row">
+      <div class="main-col">
+        <div class="chat-scroll" id="chat-scroll">
+          <div class="chat-col">
+            <div id="messages" class="messages"></div>
+          </div>
+        </div>
 
-    <div class="composer-area">
-      <div class="hero" id="hero">
-        <h1>Чем помочь по ПП №719?</h1>
-        <p>Опишите продукцию, укажите код ОКПД2 или ТН ВЭД — подскажу позицию приложения, требования и баллы.
-          База в {{ corpus_edition }}.</p>
+        <div class="composer-area">
+          <div class="hero" id="hero">
+            <h1>Какой вопрос по ПП 719?</h1>
+            <p>Отвечу со ссылкой на пункт постановления</p>
+          </div>
+          <div class="composer-frame">
+            <form id="chat-form" class="composer">
+              {# U5: подсказка приходит с сервера (app/rag/followup.py) и дальше меняется по состоянию
+                 беседы — в пустом чате эта, после ответа её задаёт ветка ответа. Своей копии текста
+                 у фронта нет: разъехавшаяся вторая копия уже стоила ссылки на недействующую редакцию. #}
+              <textarea id="input" rows="1" placeholder="{{ input_hint }}" autofocus></textarea>
+              <div class="composer-bar">
+                <button class="jump-btn hidden" id="jump-btn" type="button" title="Вопросы в этом чате" aria-label="Вопросы в этом чате">
+                  <svg viewBox="0 0 24 24" fill="none"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1.4" fill="currentColor"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor"/><circle cx="4.5" cy="18" r="1.4" fill="currentColor"/></svg>
+                </button>
+                <button type="submit" id="send" class="send-btn" aria-label="Отправить">
+                  <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M9 5l7 7-7 7" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+                </button>
+              </div>
+            </form>
+          </div>
+          {# Принцип 1: ответ ИИ — черновик, вердикт за экспертом. Строка стоит под полем ввода ВСЕГДА
+             (на главной и в диалоге) — так в макете; перед ней — расход тарифа (Б4), если тариф есть. #}
+          <div class="composer-notice" id="composer-notice"><span class="limit-line hidden" id="limit-line"></span>Ответы носят справочный характер и не заменяют экспертизу ТПП</div>
+          <div class="composer-disclaimer">
+            {{ app_title }} — это ИИ и может ошибаться; окончательное решение принимает уполномоченный
+            эксперт ТПП. Диалоги сохраняются и могут просматриваться организаторами для улучшения сервиса ·
+            <a href="/terms">Условия использования</a> · <a href="/privacy">Политика конфиденциальности</a> ·
+            <a href="/help">Справка</a>
+            {# Метка релиза — что ИМЕННО крутится на этой машине. `APP_VERSION` для этого не годится:
+               он держится на 0.5.0 до приёмки ≥ 70 %, и полтора десятка сборок уехали на бой под
+               одним числом. Источник строки один на все страницы (`_ctx` → `release_label`), а сам
+               тег пишет выкатка в файл `RELEASE` — тот же источник, что у маркеров релиза. #}
+            <span class="composer-version" title="Версия сервиса, развёрнутая на этом сервере">
+              Версия: {{ release_label }}</span>
+          </div>
+        </div>
       </div>
-      {# Появляется, когда диалог начат: у пустого экрана роль дисклеймера играет hero-блок,
-         а над активной перепиской нужна короткая постоянная оговорка (E1 — редакция базы тут же). #}
-      <div class="composer-notice" id="composer-notice">
-        {{ app_title }} — это ИИ и может ошибаться. Проверяйте важное по первоисточнику · база в {{ corpus_edition }}
-      </div>
-      <form id="chat-form" class="composer">
-        {# U5: подсказка приходит с сервера (app/rag/followup.py) и дальше меняется по состоянию
-           беседы — в пустом чате эта, после ответа её задаёт ветка ответа. Своей копии текста
-           у фронта нет: разъехавшаяся вторая копия уже стоила ссылки на недействующую редакцию. #}
-        <textarea id="input" rows="1" placeholder="{{ input_hint }}" autofocus></textarea>
-        <button class="jump-btn hidden" id="jump-btn" type="button" title="Вопросы в этом чате" aria-label="Вопросы в этом чате">
-          <svg viewBox="0 0 24 24" fill="none"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1.4" fill="currentColor"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor"/><circle cx="4.5" cy="18" r="1.4" fill="currentColor"/></svg>
-        </button>
-        <button type="submit" id="send" class="send-btn" aria-label="Отправить">
-          <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M12 19V5M6 11l6-6 6 6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>
-        </button>
-      </form>
-      <div class="composer-disclaimer">
-        {{ app_title }} — это ИИ. Пользуясь сервисом, вы соглашаетесь с <a href="/terms">Условиями использования</a>
-        и <a href="/privacy">Политикой конфиденциальности</a>. Диалоги сохраняются и могут просматриваться
-        организаторами для улучшения сервиса; окончательное решение принимает уполномоченный эксперт ТПП.
-        <a href="/help">Подробнее</a>
-        {# Метка релиза — что ИМЕННО крутится на этой машине. `APP_VERSION` для этого не годится:
-           он держится на 0.5.0 до приёмки ≥ 70 %, и полтора десятка сборок уехали на бой под
-           одним числом. Источник строки один на все страницы (`_ctx` → `release_label`), а сам
-           тег пишет выкатка в файл `RELEASE` — тот же источник, что у маркеров релиза. #}
-        <span class="composer-version" title="Версия сервиса, развёрнутая на этом сервере">
-          Версия: {{ release_label }}</span>
-      </div>
+
+      {# Б1: панель «Источник» — текст позиции приложения или пункта документа, на который сослался
+         ответ ([N] в тексте и чипы под ним). Наполняет chat.js; у ответов, записанных до 08.10.2026,
+         текста нет — панель ведёт в первоисточник. #}
+      <aside class="src-panel hidden" id="src-panel" aria-label="Источник">
+        <div class="src-panel-head">
+          <span>Источник</span>
+          <button class="icon-btn" id="src-close" type="button" aria-label="Закрыть">
+            <svg viewBox="0 0 24 24" fill="none" width="20" height="20"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+          </button>
+        </div>
+        <div class="src-panel-body">
+          <div class="src-doc" id="src-doc"></div>
+          <div class="src-title" id="src-title"></div>
+          <div class="src-meta" id="src-meta"></div>
+          <div class="src-text" id="src-text"></div>
+          <a class="src-open" id="src-open" href="#" target="_blank" rel="noopener">Открыть полный текст документа
+            <svg viewBox="0 0 24 24" fill="none" width="14" height="14"><path d="M7 17L17 7M9 7h8v8" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg></a>
+        </div>
+      </aside>
     </div>
   </main>
 </div>
@@ -208,7 +276,11 @@
 
 {# Адрес текста ПП №719 у Контура зависит от РЕДАКЦИИ корпуса (app/rag/edition.py). Отдаём его
    фронту отсюда, а не держим второй константой в chat.js: одна из двух копий уже отстала на две
-   редакции, и источники вели на недействующий текст. #}
-<script>window.KONTUR_719 = {{ kontur_719_url | tojson }};</script>
-<script src="/static/chat.js"></script>
+   редакции, и источники вели на недействующий текст. Редакция — для подписи в панели источника. #}
+<script>
+  window.KONTUR_719 = {{ kontur_719_url | tojson }};
+  window.CORPUS_EDITION = {{ corpus_edition | tojson }};
+  window.QUOTA = {{ (quota or none) | tojson }};
+</script>
+<script src="/static/chat.js?v={{ asset_v }}"></script>
 {% endblock %}

@@ -82,11 +82,18 @@ class TestChatDisclaimers(unittest.TestCase):
         self.assertIn('href="/privacy"', self.html)
         self.assertIn('href="/help"', self.html)  # «Подробнее»
 
-    def test_notice_above_input_exists_and_is_shown_only_in_started_chat(self):
+    def test_notice_under_input_is_shown_on_home_and_in_chat(self):
+        """Макет 08.10.2026: строка «Ответы носят справочный характер и не заменяют экспертизу ТПП»
+        стоит ПОД полем ввода и на главной, и в диалоге (прежде — короткая оговорка НАД полем,
+        только в начатом диалоге). Принцип 1 держится тем, что строка видна всегда."""
         self.assertIn('id="composer-notice"', self.html)
-        self.assertIn("может ошибаться", self.html)
-        # на пустом экране роль дисклеймера играет hero — строка не должна дублировать его
-        self.assertIn(".main:not(.empty) .composer-notice", self.css)
+        self.assertIn("не заменяют экспертизу ТПП", self.html)
+        self.assertGreater(self.html.index('id="composer-notice"'), self.html.index('class="composer-frame"'),
+                           "оговорка уехала выше поля ввода")
+        self.assertIn("может ошибаться", self.html)  # правовая строка под ней — как и прежде
+        # ни в одном состоянии экрана строку не прячут
+        self.assertNotRegex(self.css, r"\.composer-notice\s*\{[^}]*display:\s*none")
+        self.assertNotIn(".main.empty .composer-notice { display: none", self.css)
 
     def test_corpus_edition_still_visible(self):
         """E1: редакция корпуса не должна пропасть из интерфейса при переверстке дисклеймера."""
@@ -163,11 +170,18 @@ class TestAnswerTools(unittest.TestCase):
         self.assertIn("isSecureContext", self.js)
         self.assertIn("execCommand", self.js)
 
-    def test_tooltip_on_hover_and_focus(self):
-        self.assertIn(".tool-btn::after", self.css)
-        self.assertIn("content: attr(data-tip)", self.css)
-        self.assertIn("dataset.tip", self.js)          # подпись задаётся из JS
-        self.assertIn(".tool-btn:focus-visible::after", self.css)  # и доступна с клавиатуры
+    def test_result_shown_on_the_button_and_label_restored(self):
+        """Макет 08.10.2026: действия под ответом — текстовые ссылки («Копировать», «Уточнить»,
+        «Сообщить об ошибке»), итог пишется на самой кнопке («Скопировано») и подпись возвращается.
+        Прежние иконки с подсказкой по наведению ушли вместе с иконками."""
+        tools = self.js.split("function addAnswerTools")[1].split("\nfunction ")[0]
+        for label in ('"Копировать"', '"Уточнить"', '"Скопировано"'):
+            self.assertIn(label, tools)
+        self.assertIn("btn.textContent = btn.dataset.label", tools, "подпись не возвращается после итога")
+        self.assertIn(".act-btn:focus-visible", self.css)  # доступно с клавиатуры
+        bar = self.js.split("function addFeedbackBar")[1].split("\nfunction ")[0]
+        self.assertIn('"Сообщить об ошибке"', bar)
+        self.assertIn("correction: val", bar, "«Сообщить об ошибке» перестало писать исправление")
 
 
 class TestLongTableCollapse(unittest.TestCase):
