@@ -11,8 +11,11 @@ const chatTitle = document.getElementById("chat-title");
 let sessionId = null;
 
 // Заголовок в шапке — название открытой беседы (макет 08.10.2026); на главной пусто.
+// ⚠ Пока открыта страница истории, шапка принадлежит ей (ревью test32): ответ, дописавшийся в фоне,
+// и удаление беседы зовут setActive → setTitle, и без этой проверки шапка показывала беседу поверх
+// списка истории. Страница ставит свой заголовок сама (showHistory).
 function setTitle(text) {
-  if (chatTitle) chatTitle.textContent = text || "";
+  if (chatTitle && !main.classList.contains("history-mode")) chatTitle.textContent = text || "";
 }
 
 // U5: подсказка в поле ввода зависит от СОСТОЯНИЯ беседы. Пустой чат — стартовая инструкция
@@ -747,7 +750,7 @@ function addFeedbackBar(wrap, messageId, sid, withRating = true) {
 function setActive(sid) {
   let title = "";
   history.querySelectorAll(".history-item").forEach((x) => {
-    const on = x.dataset.sid === sid;
+    const on = x.dataset.sid === sid && !main.classList.contains("history-mode");  // на странице истории беседа не «активна»
     x.classList.toggle("active", on);
     if (on) title = x.title;
   });
@@ -847,7 +850,7 @@ async function openConversation(sid) {
     setActive(sid);
     // беседы нет в сайдбаре (открыта со страницы истории, а список загружен раньше) — заголовок
     // шапки берём из первого вопроса самой беседы
-    if (!chatTitle.textContent) {
+    if (chatTitle && !chatTitle.textContent) {
       const first = data.messages.find((m) => m.role === "user");
       setTitle(first ? first.content : "");
     }
@@ -1280,7 +1283,7 @@ function showHistory() {
   histPage.classList.remove("hidden");
   if (histAll) histAll.classList.add("active");
   setActive(null);
-  setTitle("История запросов");
+  if (chatTitle) chatTitle.textContent = "История запросов";  // мимо setTitle: тот в режиме истории молчит
   loadHistory();
   if (hpQuery) hpQuery.focus();
 }

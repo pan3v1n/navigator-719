@@ -24,6 +24,7 @@ from app.api.auth import require_user
 from app.core import plans
 from app.db.engine import get_session
 from app.db.models import Message, User
+from app.db.queries import get_user_sessions as q_sessions
 from sqlalchemy import select
 
 router = APIRouter()
@@ -49,15 +50,22 @@ class _Conv:
 
 
 def group_index(day: date, today: date) -> int:
-    """Номер группы по календарным дням (МСК): 0 сегодня, 1 вчера, 2 — до недели назад, 3 — раньше."""
+    """Номер группы по календарным дням (МСК): 0 сегодня, 1 вчера, 2 — раньше на ЭТОЙ календарной
+    неделе (пн–вс), 3 — раньше. ⚠ Неделя календарная, а не «последние 7 дней» (ревью test32):
+    подпись группы — «На этой неделе», и субботний разговор в четверг к ней не относится."""
     delta = (today - day).days
     if delta <= 0:
         return 0
     if delta == 1:
         return 1
-    if delta < 7:
+    if day.isocalendar()[:2] == today.isocalendar()[:2]:
         return 2
     return 3
+
+
+def _norm(s: str) -> str:
+    """Для поиска: регистр и «ё/е» не различаем — в ответах встречаются оба написания."""
+    return (s or "").lower().replace("ё", "е")
 
 
 def excerpt(text: str, n: int = EXCERPT_LEN) -> str:
@@ -67,8 +75,9 @@ def excerpt(text: str, n: int = EXCERPT_LEN) -> str:
         s = line.strip()
         if not s or s.startswith("|"):
             continue
-        s = REF_RE.sub("", s).replace("**", "").replace("_", " ")
-        s = re.sub(r"^[•\-*]\s+", "", s)
+        s = REF_RE.sub("", s).replace("**", "").replace("`", "")
+        s = re.sub(r"(?<!\w)_(.+?)_(?!\w)", r"\1", s)   # _курсив_ → курсив; snake_case не трогаем
+        s = re.sub(r"^(#{1,6}\s+|[•\-*]\s+)", "", s)     # заголовки и маркеры списка
         lines.append(s)
     out = re.sub(r"\s+", " ", " ".join(lines)).strip()
     out = re.sub(r"\s+([.,;:])", r"\1", out)   # «позиция [1].» → «позиция.», а не «позиция .»
@@ -89,20 +98,30 @@ def ref_label(src: dict) -> str:
 
 
 def cited_refs(answer: str, sources: list) -> list[str]:
-    """Подписи источников, на которые ответ СОСЛАЛСЯ ([N]), в порядке первой ссылки, без повторов."""
+    """Подписи источников, на которые ответ СОСЛАЛСЯ ([N]), в порядке первой ссылки, без повторов.
+
+    ⚠ Правило то же, что у кнопок в чате (`chat.js`, linkRefs): группа «[1, 9]» с номером вне списка
+    не считается ссылкой ЦЕЛИКОМ — иначе история показывала бы цитату, которой чат не показывает."""
     out: list[str] = []
     for m in REF_RE.finditer(answer or ""):
-        for x in re.split(r"[,;]", m.group(1)):
-            i = int(x) - 1
-            if 0 <= i < len(sources):
-                label = ref_label(sources[i])
-                if label and label not in out:
-                    out.append(label)
+        ids = [int(x) - 1 for x in re.split(r"[,;]", m.group(1))]
+        if not all(0 <= i < len(sources) for i in ids):
+            continue
+        for i in ids:
+            label = ref_label(sources[i])
+            if label and label not in out:
+                out.append(label)
     return out[:MAX_REFS]
 
 
-def build_history(messages, q: str = "", period: str = "all", now: datetime | None = None) -> dict:
-    """Группы истории из реплик пользователя (по возрастанию времени). Чистая функция — без БД."""
+def build_history(messages, q: str = "", period: str = "all", now: datetime | None = None,
+                  meta: dict | None = None) -> dict:
+    """Группы истории из реплик пользователя (по возрастанию времени). Чистая функция — без БД.
+
+    `meta` — {session_id: (заголовок, время последней активности)} из `queries.get_user_sessions`:
+    тот же источник, что у сайдбара (ревью test32 — иначе «заголовок беседы» и «последняя
+    активность» имели бы два определения и разошлись бы при первой правке одного). Без `meta`
+    (тесты) они выводятся из реплик по тем же правилам."""
     convs: dict[str, _Conv] = {}
     for m in messages:
         c = convs.setdefault(m.session_id, _Conv(m.session_id))
@@ -112,20 +131,24 @@ def build_history(messages, q: str = "", period: str = "all", now: datetime | No
         elif m.role == "assistant" and not c.answer:
             c.answer = m.content or ""
             try:
-                c.sources = json.loads(m.sources_json) if m.sources_json else []
+                c.sources = json.loads(m.sources_json) if getattr(m, "sources_json", None) else []
             except ValueError:
                 c.sources = []
         if c.last_ts is None or (m.ts and m.ts > c.last_ts):
             c.last_ts = m.ts
+    for sid, (title, ts) in (meta or {}).items():
+        if sid in convs:
+            convs[sid].question = title or convs[sid].question
+            convs[sid].last_ts = ts or convs[sid].last_ts
 
-    needle = (q or "").strip().lower()
+    needle = _norm((q or "").strip())
     allow = PERIOD_GROUPS.get(period, PERIOD_GROUPS["all"])
     today = plans.msk_today(now)
     groups: list[list[dict]] = [[] for _ in GROUPS]
     for c in sorted(convs.values(), key=lambda x: x.last_ts or datetime.min, reverse=True):
         if not c.question and not c.answer:
             continue
-        if needle and not any(needle in t.lower() for t in c.texts):
+        if needle and not any(needle in _norm(t) for t in c.texts):
             continue
         day = plans.msk_date(c.last_ts) if c.last_ts else today
         gi = group_index(day, today)
@@ -148,12 +171,35 @@ def build_history(messages, q: str = "", period: str = "all", now: datetime | No
     return {"groups": [{"label": GROUPS[i], "items": items} for i, items in enumerate(groups) if items]}
 
 
+@dataclass
+class _Row:
+    session_id: str
+    role: str
+    content: str
+    ts: datetime
+    sources_json: str | None = None
+
+
 @router.get("/api/history")
 def history(q: str = "", period: str = "all", user: User = Depends(require_user)) -> dict:
-    """Б3: история запросов пользователя — только свои беседы (фильтр по `user_id`)."""
+    """Б3: история запросов пользователя — только свои беседы (фильтр по `user_id`).
+
+    ⚠ ЛЁГКИЙ ЗАПРОС (ревью test32): тексты реплик нужны для поиска, а `sources_json` — только у
+    ПЕРВОГО ответа беседы (чипы строки). С `test31` в нём лежит полный текст источников (до 8 × 6000
+    знаков на ответ), и грузить его по всем репликам на каждую букву поиска — класс R24."""
     with get_session() as db:
-        msgs = list(db.execute(
-            select(Message).where(Message.user_id == user.id).order_by(Message.ts, Message.id)
-        ).scalars())
-        return build_history(msgs, q=q[:200], period=period if period in PERIODS else "all",
-                             now=datetime.now(timezone.utc))
+        raw = db.execute(
+            select(Message.id, Message.session_id, Message.role, Message.content, Message.ts)
+            .where(Message.user_id == user.id).order_by(Message.ts, Message.id)
+        ).all()
+        first_answer: dict[str, int] = {}
+        for mid, sid, role, _content, _ts in raw:
+            if role == "assistant" and sid not in first_answer:
+                first_answer[sid] = mid
+        src = dict(db.execute(
+            select(Message.id, Message.sources_json).where(Message.id.in_(list(first_answer.values())))
+        ).all()) if first_answer else {}
+        rows = [_Row(sid, role, content, ts, src.get(mid)) for mid, sid, role, content, ts in raw]
+        meta = {s["session_id"]: (s["title"], s["ts"]) for s in q_sessions(db, user.id)}
+    return build_history(rows, q=q[:200], period=period if period in PERIODS else "all",
+                         now=datetime.now(timezone.utc), meta=meta)

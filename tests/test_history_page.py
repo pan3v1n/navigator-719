@@ -76,8 +76,12 @@ class TestGroups(unittest.TestCase):
         today = plans.msk_today(NOW_UTC)
         self.assertEqual(hist.group_index(today, today), 0)
         self.assertEqual(hist.group_index(today - timedelta(days=1), today), 1)
-        self.assertEqual(hist.group_index(today - timedelta(days=6), today), 2)
-        self.assertEqual(hist.group_index(today - timedelta(days=7), today), 3)
+        # 08.10.2026 — четверг; неделя КАЛЕНДАРНАЯ (пн 05.10 – вс 11.10), а не «последние 7 дней»
+        self.assertEqual(hist.group_index(today - timedelta(days=3), today), 2)   # пн 05.10
+        self.assertEqual(hist.group_index(today - timedelta(days=5), today), 3)   # сб 03.10 — прошлая неделя
+        monday = datetime(2026, 10, 12).date()
+        self.assertEqual(hist.group_index(monday - timedelta(days=2), monday), 3,
+                         "в понедельник субботний разговор — уже не «эта неделя»")
 
     def test_midnight_moscow_is_the_border(self):
         """00:30 МСК — это уже СЕГОДНЯ, хотя по UTC ещё вчера: группа считается по Москве."""
@@ -88,18 +92,18 @@ class TestGroups(unittest.TestCase):
     def test_groups_order_and_time_format(self):
         msgs = (conv("t", msk(2026, 10, 8, 14, 32), "сегодня", "о")
                 + conv("y", msk(2026, 10, 7, 17, 48), "вчера", "о")
-                + conv("w", msk(2026, 10, 3), "на неделе", "о")
+                + conv("w", msk(2026, 10, 6), "на неделе", "о")
                 + conv("e", msk(2026, 9, 18), "давно", "о")
                 + conv("old", msk(2025, 12, 1), "в прошлом году", "о"))
         g = run(msgs)["groups"]
         self.assertEqual([x["label"] for x in g], ["Сегодня", "Вчера", "На этой неделе", "Ранее"])
         self.assertEqual(g[0]["items"][0]["time"], "14:32")
-        self.assertEqual(g[2]["items"][0]["time"], "03.10")
+        self.assertEqual(g[2]["items"][0]["time"], "06.10")
         self.assertEqual([i["time"] for i in g[3]["items"]], ["18.09", "01.12.25"])
 
     def test_period_filter_matches_the_mockup(self):
         msgs = (conv("t", msk(2026, 10, 8), "a", "о") + conv("y", msk(2026, 10, 7), "b", "о")
-                + conv("w", msk(2026, 10, 4), "c", "о") + conv("e", msk(2026, 9, 1), "d", "о"))
+                + conv("w", msk(2026, 10, 6), "c", "о") + conv("e", msk(2026, 9, 1), "d", "о"))
         labels = lambda p: [x["label"] for x in run(msgs, period=p)["groups"]]  # noqa: E731
         self.assertEqual(labels("today"), ["Сегодня"])
         self.assertEqual(labels("week"), ["Сегодня", "Вчера", "На этой неделе"])
@@ -124,6 +128,10 @@ class TestSearch(unittest.TestCase):
         items = [i for g in run(self.MSGS, q="СВАРКА")["groups"] for i in g["items"]]
         self.assertEqual([i["session_id"] for i in items], ["a"])
 
+    def test_yo_and_ye_are_the_same(self):
+        """«выдает» находит «выдаёт»: в ответах встречаются оба написания."""
+        self.assertEqual(run(self.MSGS, q="выдает")["groups"][0]["items"][0]["session_id"], "b")
+
     def test_finds_by_question_and_reports_empty(self):
         self.assertEqual(run(self.MSGS, q="экспертизы")["groups"][0]["items"][0]["session_id"], "b")
         self.assertEqual(run(self.MSGS, q="мочеприемники"), {"groups": []})
@@ -145,11 +153,27 @@ class TestRowContent(unittest.TestCase):
         self.assertEqual(a, "Позиция: «Специальное машиностроение», бульдозеры. порог не приведён")
         self.assertNotIn("|", a)
 
+    def test_excerpt_keeps_identifiers_and_drops_headings(self):
+        msgs = conv("a", msk(2026, 10, 8), "вопрос", "### Позиция\nКоллекция `verified_cases` и _курсив_")
+        self.assertEqual(run(msgs)["groups"][0]["items"][0]["a"], "Позиция Коллекция verified_cases и курсив")
+
     def test_long_excerpt_is_cut(self):
         msgs = conv("a", msk(2026, 10, 8), "вопрос", "слово " * 200)
         a = run(msgs)["groups"][0]["items"][0]["a"]
         self.assertLessEqual(len(a), hist.EXCERPT_LEN)
         self.assertTrue(a.endswith("…"))
+
+    def test_group_with_out_of_range_number_is_not_a_citation(self):
+        """Правило чата (linkRefs): «[1, 9]» при трёх источниках — не ссылка целиком."""
+        msgs = conv("a", msk(2026, 10, 8), "вопрос", "см. [1, 9]", [PRODUCT_SRC, OTHER_SRC, RULE_SRC])
+        self.assertEqual(run(msgs)["groups"][0]["items"][0]["refs"], [])
+
+    def test_sidebar_metadata_wins(self):
+        """Заголовок и время — из того же источника, что у сайдбара (`get_user_sessions`)."""
+        msgs = conv("a", msk(2026, 10, 1), "первый вопрос", "ответ")
+        out = hist.build_history(msgs, now=NOW_UTC, meta={"a": ("заголовок сайдбара", msk(2026, 10, 8, 9))})
+        item = out["groups"][0]["items"][0]
+        self.assertEqual((out["groups"][0]["label"], item["q"]), ("Сегодня", "заголовок сайдбара"))
 
     def test_broken_sources_json_does_not_break_the_page(self):
         msgs = [M("a", "user", "вопрос", msk(2026, 10, 8)),
@@ -174,6 +198,25 @@ class TestEndpointIsolation(unittest.TestCase):
             out = hist.history(q="вопрос", user=a)
         sids = [i["session_id"] for g in out["groups"] for i in g["items"]]
         self.assertEqual(sids, ["sa"])
+
+    def test_endpoint_takes_chips_from_the_first_answer(self):
+        """Через саму ручку: лёгкий запрос несёт `sources_json` только первого ответа беседы."""
+        engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
+                               poolclass=StaticPool)
+        Base.metadata.create_all(engine)
+        S = sessionmaker(bind=engine, expire_on_commit=False)
+        with S() as db:
+            u = q.create_user(db, "u", "h", role="user")
+            q.log_message(db, user_id=u.id, session_id="s", role="user", content="бульдозеры")
+            q.log_message(db, user_id=u.id, session_id="s", role="assistant", content="ответ [1]",
+                          sources=[PRODUCT_SRC])
+            q.log_message(db, user_id=u.id, session_id="s", role="assistant", content="второй [1]",
+                          sources=[RULE_SRC])
+            u = q.get_user(db, u.id)
+            db.expunge(u)
+        with mock.patch.object(hist, "get_session", S):
+            item = hist.history(user=u)["groups"][0]["items"][0]
+        self.assertEqual((item["q"], item["refs"]), ("бульдозеры", ["Разд. III, поз. 2"]))
 
 
 class TestFront(unittest.TestCase):
@@ -206,6 +249,14 @@ class TestFront(unittest.TestCase):
     def test_active_old_conversation_stays_visible_in_sidebar(self):
         trim = self.js.split("function trimHistory")[1].split("\n}")[0]
         self.assertIn('!it.classList.contains("active")', trim)
+
+    def test_history_page_owns_the_header(self):
+        """Ответ, дописавшийся в фоне, и удаление беседы не перекрашивают шапку и сайдбар поверх
+        страницы истории (ревью test32): setTitle и подсветка молчат в режиме истории."""
+        title = self.js.split("function setTitle(text)")[1].split("\n}")[0]
+        self.assertIn('!main.classList.contains("history-mode")', title)
+        active = self.js.split("function setActive(sid)")[1].split("\n}")[0]
+        self.assertIn('x.dataset.sid === sid && !main.classList.contains("history-mode")', active)
 
     def test_stale_search_response_does_not_overwrite(self):
         body = self.js.split("async function loadHistory")[1].split("\n}")[0]
