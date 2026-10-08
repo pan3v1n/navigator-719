@@ -468,6 +468,29 @@ class TestOnboardingTour(unittest.TestCase):
         self.assertIn("transition: top", self.css)
 
 
+class TestNewTabLinks(unittest.TestCase):
+    """«Текст постановления» открылся у владельца в той же вкладке при `target="_blank"` (08.10, test32):
+    новая вкладка открывается явно, обычная ссылка — запасной путь."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
+        cls.html = (WEB / "templates" / "chat.html").read_text(encoding="utf-8")
+
+    def test_regulation_link_is_marked_for_new_tab(self):
+        line = [l for l in self.html.splitlines() if 'class="side-link" href="{{ kontur_719_url }}"' in l][0]
+        self.assertIn('target="_blank"', line)
+
+    def test_new_tab_is_opened_explicitly_with_fallback(self):
+        body = self.js.split("// --- Ссылки «в новой вкладке»")[1].split("\n});")[0]
+        self.assertIn('closest(\'a[target="_blank"]\')', body)
+        self.assertIn('window.open(a.href, "_blank")', body)
+        # обычная ссылка остаётся запасным путём: отменяем её только когда вкладка открылась
+        self.assertLess(body.index("if (!w) return;"), body.index("e.preventDefault()"))
+        for mod in ("e.ctrlKey", "e.metaKey", "e.shiftKey", "e.button !== 0"):
+            self.assertIn(mod, body, "клик с модификатором должен остаться за браузером")
+
+
 class TestHelpMenuLayout(unittest.TestCase):
     """Подменю «Справка» — последний пункт у нижнего края сайдбара."""
 
@@ -482,6 +505,29 @@ class TestHelpMenuLayout(unittest.TestCase):
         block = re.search(r"\.nav-menu \{[^}]*\}", self.css).group(0)
         self.assertIn("bottom: 0", block)
         self.assertNotIn("top: 0", block)
+
+    def test_menu_is_not_clipped_by_the_sidebar(self):
+        """Подменю выезжает ВПРАВО за край сайдбара. С `overflow: hidden` у сайдбара (так было в
+        test31–test32) его обрезало, и оно оказывалось под чатом — видна была полоска у края
+        (замечание владельца на бою 08.10). Сайдбар не обрезает и стоит слоем над основной областью."""
+        import re
+
+        block = re.search(r"\n\.sidebar \{[^}]*\}", self.css).group(0)
+        self.assertNotIn("overflow: hidden", block)
+        self.assertIn("z-index", block)
+
+    def test_sections_clip_their_own_content(self):
+        """Ревью test33: без обрезки у сайдбара его подписи на первых кадрах разворота ложились
+        поверх чата. Обрезают СЕКЦИИ; `.side-nav` (там подменю) — нет."""
+        self.assertIn(".side-top, .side-new, .quota-card, .side-bottom, .nav-item { overflow: hidden; }", self.css)
+        self.assertIn(".side-scroll { overflow-x: hidden; }", self.css)
+        self.assertNotRegex(self.css, r"\.side-nav[^{]*\{[^}]*overflow: hidden", "подменю снова обрежется")
+
+    def test_menu_stays_inside_the_drawer_on_phone(self):
+        """В мобильной шторке справа места нет — подменю открывается внутри неё, над пунктом."""
+        mobile = self.css.split("@media (max-width: 760px)")[1]
+        self.assertIn(".nav-group .nav-menu, .app.collapsed .nav-menu { left: 0; right: 0; bottom: calc(100% + 4px)",
+                      mobile)
 
     def test_button_item_looks_like_the_links(self):
         """Кнопка запуска тура среди ссылок не должна выглядеть выделенной сама по себе."""
