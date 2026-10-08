@@ -483,6 +483,22 @@ class TestHelpMenuLayout(unittest.TestCase):
         self.assertIn("bottom: 0", block)
         self.assertNotIn("top: 0", block)
 
+    def test_menu_is_not_clipped_by_the_sidebar(self):
+        """Подменю выезжает ВПРАВО за край сайдбара. С `overflow: hidden` у сайдбара (так было в
+        test31–test32) его обрезало, и оно оказывалось под чатом — видна была полоска у края
+        (замечание владельца на бою 08.10). Сайдбар не обрезает и стоит слоем над основной областью."""
+        import re
+
+        block = re.search(r"\n\.sidebar \{[^}]*\}", self.css).group(0)
+        self.assertNotIn("overflow: hidden", block)
+        self.assertIn("z-index", block)
+
+    def test_menu_stays_inside_the_drawer_on_phone(self):
+        """В мобильной шторке справа места нет — подменю открывается внутри неё, над пунктом."""
+        mobile = self.css.split("@media (max-width: 760px)")[1]
+        self.assertIn(".nav-group .nav-menu, .app.collapsed .nav-menu { left: 0; right: 0; bottom: calc(100% + 4px)",
+                      mobile)
+
     def test_button_item_looks_like_the_links(self):
         """Кнопка запуска тура среди ссылок не должна выглядеть выделенной сама по себе."""
         import re
