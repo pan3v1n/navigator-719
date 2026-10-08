@@ -622,6 +622,19 @@ def okpd2_descendant_forms(code: str | None) -> list[str]:
     return _dotted(k) if n == 9 else []
 
 
+def _name_key(s: str | None) -> str:
+    s = re.sub(r"<[^>]*>", " ", (s or "").lower().replace("ё", "е"))
+    return re.sub(r"[^\w]+", " ", s).strip()
+
+
+def is_grouping_name(code: str | None, product_name: str | None) -> bool:
+    """Наименование позиции — официальное наименование её кода по справочнику, то есть позиция и
+    есть вся группировка, а не названные товары внутри неё («из 20 Катализаторы …»). Кода в
+    справочнике нет — False: утверждать охват не на чем."""
+    official = _okpd2_names().get((code or "").strip())
+    return bool(official) and _name_key(official) == _name_key(product_name)
+
+
 def okpd2_name(code: str | None) -> str | None:
     """Наименование по коду ОКПД2. Точного нет → ближайший предок по поразрядной иерархии
     (28.13.14.999 → 28.13.14.990 → 28.13.14.900 → 28.13.14 …)."""

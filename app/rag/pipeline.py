@@ -24,7 +24,7 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse, st1_ref
+from app.rag import documents_ref, fragments, inheritance, okpd2_ref, retriever, sparse, st1_ref
 from app.rag.embeddings import embed_query
 from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, okpd2_match, search,
                                search_cases, search_rules)
@@ -327,15 +327,14 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]
     опровергнуть; факта иерархии достаточно — оба ответа и без запрета начинались с «да»."""
     notes = []
     for c in codes + [d for d in dialog_codes if d not in codes]:
-        # ⚠ Ревью PR #177, две находки. (1) Только ОХВАТЫВАЮЩИЙ предок (`retriever.covers`:
-        # подгруппа и глубже): «из 20 Катализаторы» не группировка н-бутана, и строка «позиция
-        # распространяется на этот код» возвращала бы ровно тот ответ, который здесь чинится.
-        # (2) Код из ПРОШЛОГО хода — только если код вопроса строки не дал: иначе «шкаф
-        # 27.12.31.000», затем «требования у реле 27.12» давали реле строку «распространяется на
-        # шкаф». Второй ход н-бутана называл код ГРУППЫ — у него своей строки нет, нужен прошлый.
+        # ⚠ Ревью PR #177. (1) Только ОХВАТЫВАЮЩИЙ предок (`retriever.covers`: позиция — сама
+        # группировка, её наименование = наименованию кода): «из 20 Катализаторы» не группировка
+        # н-бутана, и строка «позиция распространяется на этот код» вернула бы ровно тот ответ,
+        # который здесь чинится. (2) Код из ПРОШЛОГО хода — только если код вопроса строки не дал;
+        # что у кода из прошлого хода нет СВОЕЙ позиции, проверяет `_plan_answer`.
         if c not in codes and notes:
             break
-        rc = covers(h.okpd2_codes or [], c)
+        rc = covers(h.okpd2_codes or [], h.product_name, c)
         if rc is None:
             continue
         said = "из вопроса" if c in codes else "продукции, названный ранее в диалоге,"
@@ -715,19 +714,20 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
         # ⚠ D14 #141: ярусы — то же правило, что порядок окна (`retriever.code_tiers`): «точное» —
         # тот же код по поразрядному ключу («27.12.31.000» и «27.12.31» — один вид); без точного —
         # БЛИЖАЙШАЯ позиция-предок, если код вопроса глубже всего найденного (н-бутан 20.14.11.112 →
-        # 20.14.11.110, а не «Катализаторы» с кодом класса «20»); есть потомки — выбор прежний, по
-        # рангу (находка ревью PR #177: на «20.14» класс «20» вытеснял настоящие 20.14.x).
-        # Предок, ОХВАТЫВАЮЩИЙ код (`retriever.covers`: подгруппа и глубже), отдаёт ВСЕ свои записи,
-        # как точный код: у расколотой ячейки 26.11.22.210 их две, и подкод .219 терял половину
-        # требований (ревью PR #177). Мелкий предок («из 20 Катализаторы») — по-прежнему одну.
+        # 20.14.11.110, а не «Катализаторы» с кодом класса «20»); есть потомки — первый по рангу из
+        # ПОТОМКОВ, предки ниже них (ревью PR #177: на «20.14» класс «20» вытеснял настоящие 20.14.x).
+        # ⚠ Без точного — ОДНА запись (первая по рангу в лучшем ярусе), как и до D14. Находку раунда 1
+        # «предок отдаёт все записи, как точный код» раунд 2 опроверг на корпусе: под одним кодом
+        # лежат РАЗНЫЕ изделия (26.51.12 — 14 записей, 28.99.39.190 — 77), и у «теодолита
+        # 26.51.12.110» целевыми стали бы эхолоты и пингеры с полными требованиями — откат `EV7`;
+        # а две записи 26.11.22.210 — не половинки ячейки, а позиции с ПРОТИВОПОЛОЖНЫМИ областями
+        # («в части белого диапазона» / «за исключением»).
         picked: list[Hit] = []
         for c in _codes(code):
             tiers = code_tiers([h.okpd2_codes or [] for h in matched], c)
+            present = [t for t in tiers if t is not None]
             exact = [h for h, t in zip(matched, tiers) if t == 0]
-            near = [h for h, t in zip(matched, tiers) if t == 1]
-            if near and not covers(near[0].okpd2_codes or [], c):
-                near = near[:1]
-            chosen = exact or near or [h for h, t in zip(matched, tiers) if t is not None][:1]
+            chosen = exact or [h for h, t in zip(matched, tiers) if present and t == min(present)][:1]
             for h in chosen:
                 h = _content_sibling(h, hits)
                 if not any(h is p for p in picked):
@@ -1586,7 +1586,12 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
 
     # D14: код продукции из прошлых ходов — только для строки «входит в группировку» (`_group_notes`);
     # поиск и выбор целевой он не трогает.
+    # ⚠ Ревью PR #177, раунд 2: у кода из прошлого хода может быть СВОЯ позиция («прибор 26.51.12.130»,
+    # затем «а эхолот 26.51.12?»), и тогда группировка нового вопроса на него не распространяется —
+    # действует его собственная. Строку даём только коду, своей позиции не имеющему (н-бутан).
     hist_code = _anchor_code(history)
+    if hist_code and (hist_code in all_codes or retriever.has_exact_position(hist_code)):
+        hist_code = None
     ctx = format_context(hits, search_query, all_codes,
                          dialog_codes=[hist_code] if hist_code else None)
     cases_ctx = format_cases(cases) if cases else None

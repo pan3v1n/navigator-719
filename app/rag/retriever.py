@@ -66,41 +66,65 @@ def code_relation(rec_codes: list[str], query_code: str) -> int | None:
     return link[0] if link else None
 
 
-# ⚠ D14 #141, находка ревью PR #177: С КАКОЙ ГЛУБИНЫ ГРУППИРОВКА ПОЗИЦИИ ОХВАТЫВАЕТ КОД ВОПРОСА.
-# Позиции с кодом класса, подкласса или группы в приложении — это строки «из …»: требования только
-# к товарам, названным в наименовании (прим. 3). Замер по корпусу 08.10.2026 (строки
-# `pp719_full.txt`): коды в 2 и 3 разряда — «из» у 20 из 20 («из 20 Катализаторы …»), в 4 разряда
-# — у 26 из 32 («из 27.12 Реле защиты»); с подгруппы (5 разрядов) начинаются полные позиции.
-# Значит, «20» для «20.14.11.112» — не группировка продукта, а соседняя продукция с общим классом:
-# такой предок не считается охватывающим — ни для строки «входит в группировку», ни для роли
-# «все записи этой группировки целевые».
-COVER_MIN_KEY = 5
-
-
 def code_tiers(rec_code_lists: list[list[str]], query_code: str) -> list[int | None]:
     """Ярус совпадения по коду для каждой позиции — ЕДИНСТВЕННОЕ правило для окна (`search`) и для
     целевой (`pipeline.target_hits`): None — не связана; 0 — тот же код; 1 — ближайшая позиция-
-    предок; 2 — прочие связанные (дальние предки, потомки).
+    предок, когда потомков среди связанных нет; 2 — потомки; 3 — прочие предки.
 
-    ⚠ Ярус 1 — только когда среди связанных НЕТ ПОТОМКОВ (находка ревью PR #177). Широкий код
-    вопроса («20.14», «20.14.11») — это вопрос о группе, внутри которой есть свои позиции; ближайшим
-    предком у него оказывался класс «20», и 14 «Катализаторов» вытесняли из окна 20.14.11.110 и
-    .120. Поднимать предка нужно, когда код вопроса ГЛУБЖЕ всего найденного (н-бутан
-    20.14.11.112), а когда есть потомки — выбор прежний, по рангу."""
+    ⚠ Ревью PR #177, два раунда. Широкий код вопроса («20.14», «20.14.11») — вопрос о группе, внутри
+    которой есть свои позиции; ближайшим предком у него оказывался класс «20», и 14 «Катализаторов»
+    вытесняли 20.14.11.110 и .120. Первая правка снимала ярус 1 при потомках, но оставляла класс и
+    потомков в ОДНОМ ярусе по score — катализаторы с большим score по-прежнему выигрывали. Поэтому
+    предки, кроме ближайшего при отсутствии потомков, стоят НИЖЕ потомков: строка «из 20
+    Катализаторы» о группе 20.14 говорит меньше, чем позиция внутри неё. Предка поднимаем, когда код
+    вопроса ГЛУБЖЕ всего найденного (н-бутан 20.14.11.112 → 20.14.11.110, а не «20»)."""
     rels = [code_relation(codes, query_code) for codes in rec_code_lists]
     related = [r for r in rels if r is not None]
     up = [r for r in related if r > 0]
     nearest = min(up) if up and not any(r < 0 for r in related) else None
-    return [None if r is None else 0 if r == 0 else 1 if r == nearest else 2 for r in rels]
+
+    def tier(r: int | None) -> int | None:
+        if r is None:
+            return None
+        return 0 if r == 0 else 1 if r == nearest else 2 if r < 0 else 3
+    return [tier(r) for r in rels]
 
 
-def covers(rec_codes: list[str], query_code: str) -> str | None:
-    """Код позиции, группировка которого ОХВАТЫВАЕТ код вопроса (предок не мельче подгруппы,
-    `COVER_MIN_KEY`), иначе None. Тот же код охватом не считается — это точное совпадение."""
+def covers(rec_codes: list[str], product_name: str, query_code: str) -> str | None:
+    """Код позиции, группировка которого ОХВАТЫВАЕТ код вопроса, иначе None: позиция — предок, и
+    она САМА ЕСТЬ эта группировка — её наименование совпадает с наименованием кода в справочнике
+    (`okpd2_ref.is_grouping_name`). Тот же код охватом не считается — это точное совпадение.
+
+    ⚠ Ревью PR #177, раунд 2: прежний признак («предок не мельче подгруппы») держался на ложной
+    посылке — пометка «из» массово стоит и у глубоких кодов («из 28.93.12 Бактофуги для молока»).
+    Флаг «из» в корпусе потерян (#173), а наименование — нет: замер 08.10.2026 по строкам
+    `pp719_full.txt` — у позиций с наименованием кода из справочника пометка «из» у 19 из 462
+    (и у этих 19 названа вся группа: «из 27.11.4 Трансформаторы электрические»), у прочих — у 854
+    из 1180. «Из 20 Катализаторы» группировкой 20 не является, «Углеводороды ациклические
+    насыщенные» 20.14.11.110 — является."""
     link = closest_link(rec_codes, query_code)
-    if link is None or link[0] <= 0 or len(okpd2_ref.okpd2_key(link[1])) < COVER_MIN_KEY:
+    if link is None or link[0] <= 0 or not okpd2_ref.is_grouping_name(link[1], product_name):
         return None
     return link[1]
+
+
+def has_exact_position(code: str) -> bool:
+    """В коллекции есть позиция с этим кодом (поразрядно тем же). Ошибка Qdrant → True: вызывающий
+    тогда не утверждает ничего о группировке — прежнее поведение безопаснее догадки."""
+    from qdrant_client import models
+
+    forms = [f for f in okpd2_ref.okpd2_ancestor_forms(code)
+             if okpd2_ref.okpd2_key(f) == okpd2_ref.okpd2_key(code)]
+    if not forms:
+        return True
+    try:
+        return _client().count(
+            collection_name=settings.QDRANT_COLLECTION, exact=True,
+            count_filter=models.Filter(must=[models.FieldCondition(
+                key="okpd2_codes", match=models.MatchAny(any=forms))])).count > 0
+    except Exception as exc:  # noqa: BLE001 — сбой проверки не должен ронять ответ
+        logger.warning("has_exact_position({}): {}", code, exc)
+        return True
 
 
 def okpd2_match(rec_codes: list[str], query_code: str) -> bool:
@@ -249,7 +273,7 @@ def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
     for h in hits:
         h.code_tier = 0
     for h, t in zip(matched, code_tiers([h.okpd2_codes for h in matched], okpd2)):
-        h.code_tier = 2 if t is None else t
+        h.code_tier = 3 if t is None else t
 
 
 def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
@@ -296,9 +320,13 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
             # ⚠ Запрос стоит ~43 мс (замер 08.10, ревью PR #177), поэтому только когда ТОЧНОЙ позиции
             # среди найденного нет: при точной целевая и так своя (`code_tiers`), а это самый частый
             # случай — эксперт называет код из приложения.
+            # ⚠ Формы потомков берутся ВСЕ, включая сам код (потомок-или-тот-же), хотя прежний добор
+            # их уже спрашивал: там предки и потомки делят ОДИН лимит 12, и 14 «Катализаторов» класса
+            # «20» с большим score вытесняли из него и потомков широкого кода, и саму ТОЧНУЮ позицию
+            # (тест на подменённом корпусе, ревью PR #177, раунд 2). Свой лимит — свои места.
             exact = any(code_relation(h.okpd2_codes, okpd2) == 0 for h in hits if h.okpd2_match)
             up = [] if exact else [f for f in okpd2_ref.okpd2_ancestor_forms(okpd2) if f not in prefixes]
-            down = [] if exact else [f for f in okpd2_ref.okpd2_descendant_forms(okpd2) if f != okpd2.strip()]
+            down = [] if exact else okpd2_ref.okpd2_descendant_forms(okpd2)
             should = ([models.FieldCondition(key="okpd2_codes", match=models.MatchAny(any=up))] if up else []) + \
                      ([models.FieldCondition(key="okpd2_prefixes", match=models.MatchAny(any=down))] if down else [])
             for p in (_hybrid(query, max(limit, 12), qfilter=models.Filter(should=should), qvec=qvec)

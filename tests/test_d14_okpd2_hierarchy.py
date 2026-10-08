@@ -125,26 +125,30 @@ class TestTargetChoice(unittest.TestCase):
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "27.12.31.000")],
                          ["панели"])
 
+    def test_all_exact_records_stay_targets_across_spellings(self):
+        """Точное совпадение — по ключу, и целевыми остаются ВСЕ точные записи, как до D14
+        (у одного кода бывает несколько позиций): «27.12.31» и «27.12.31.000» — один вид."""
+        hits = [_hit("А", ["27.12.31"], 0.9), _hit("Б", ["27.12.31.000"], 0.5), _hit("реле", ["27.12"], 0.4)]
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "27.12.31.000")], ["А", "Б"])
+
     def test_only_descendants_keep_rank_order(self):
         """Код шире позиций («28.13») — выбор прежний: первая совпавшая по рангу."""
         hits = [_hit("насос А", ["28.13.14.110"], 0.9), _hit("насос Б", ["28.13.1"], 0.1)]
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "28.13")], ["насос А"])
 
-    def test_broad_code_with_descendants_ignores_class_ancestor(self):
-        """Ревью PR #177: на «20.14» ближайшим предком был класс «20», и «Катализаторы» вытесняли
-        настоящие 20.14.x. Есть потомки — предок не поднимается, выбор по рангу."""
-        hits = [_hit("углеводороды", ["20.14.11.110"], 0.9), _hit("катализатор", ["20"], 0.1)]
+    def test_broad_code_prefers_descendants_over_ancestors(self):
+        """Ревью PR #177, оба раунда: на «20.14» ближайшим предком был класс «20», и «Катализаторы»
+        вытесняли настоящие 20.14.x — даже с БОЛЬШИМ score они обязаны стоять ниже потомков."""
+        hits = [_hit(f"кат{i}", ["20"], 0.9 - i / 100) for i in range(5)] + \
+               [_hit("углеводороды", ["20.14.11.110"], 0.3)]
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "20.14")], ["углеводороды"])
-        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [2, 2])
+        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [3] * 5 + [2])
 
-    def test_covering_ancestor_gives_all_its_records(self):
-        """Ревью PR #177: расколотая ячейка 26.11.22.210 — две записи; подкод получает обе, как
-        точный код. Мелкий предок («из 20 Катализаторы») — по-прежнему одну."""
+    def test_ancestor_gives_one_record(self):
+        """Без точного кода — ОДНА целевая. Находку раунда 1 («предок отдаёт все записи») раунд 2
+        опроверг: под одним кодом разные изделия, а записи 26.11.22.210 — противоположные области."""
         split = [_hit("210a", ["26.11.22.210"], 0.9), _hit("210b", ["26.11.22.210"], 0.5)]
-        self.assertEqual([h.source_anchor for h in pipeline.target_hits(split, "26.11.22.219")],
-                         ["210a", "210b"])
-        cats = [_hit("кат1", ["20"], 0.9), _hit("кат2", ["20"], 0.5)]
-        self.assertEqual([h.source_anchor for h in pipeline.target_hits(cats, "20.59.59.190")], ["кат1"])
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(split, "26.11.22.219")], ["210a"])
 
 
 def _point(anchor, codes, score):
@@ -156,25 +160,42 @@ def _point(anchor, codes, score):
 class TestSearchFetchesNewRelations(unittest.TestCase):
     """`search` добирает новые связи ОТДЕЛЬНЫМ запросом и ставит ближайшего предка первым."""
 
-    def _run(self, code):
+    def _run(self, code, pool_has_category=False):
+        """Подмена `_hybrid` ФИЛЬТРУЕТ маленький корпус по правилам Qdrant (MatchAny по
+        `okpd2_codes` и по посегментным префиксам), а не отвечает заготовкой: иначе тест проверял
+        бы подмену. Катализаторы с кодом класса «20» — score выше, чем у подкатегории."""
         calls = []
-        catalysts = [_point(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)]
+        corpus = [(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)] + \
+                 [("подкатегория", ["20.14.11.110"], 0.05)]
+
+        def ok(codes, qfilter):
+            if qfilter is None:
+                return True
+            for cond in qfilter.should:
+                vals = set(cond.match.any)
+                field = codes if cond.key == "okpd2_codes" else [p for c in codes for p in _seg_prefixes(c)]
+                if vals & set(field):
+                    return True
+            return False
 
         def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None):
-            forms = []
-            for cond in (getattr(qfilter, "should", None) or []):
-                forms += list(cond.match.any)
-            calls.append(forms)
-            if qfilter is None:
-                return catalysts
-            if "20.14.11.110" in forms:
-                return [_point("подкатегория", ["20.14.11.110"], 0.05)]
-            return catalysts[:limit]
+            calls.append([v for cond in (getattr(qfilter, "should", None) or []) for v in cond.match.any])
+            rows = [r for r in corpus if ok(r[1], qfilter)]
+            if qfilter is None and not pool_has_category:
+                rows = [r for r in rows if r[0] != "подкатегория"]    # текстом пул её не находит
+            return [_point(*r) for r in sorted(rows, key=lambda r: -r[2])[:limit]]
 
         with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid), \
                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
             hits = retriever.search("Н-бутан очищенный", okpd2=code, limit=8)
         return hits, calls
+
+    def test_broad_code_puts_descendant_above_class_ancestors(self):
+        """Ревью PR #177: «20.14» — подкатегория внутри группы выше 14 «Катализаторов» класса «20»,
+        хотя у тех score больше; окно 8 занимают не одни катализаторы."""
+        hits, _calls = self._run("20.14")
+        self.assertEqual(hits[0].source_anchor, "подкатегория")
+        self.assertEqual(hits[0].code_tier, 2)
 
     def test_subcode_pulls_and_ranks_its_category_first(self):
         hits, calls = self._run("20.14.11.112")
@@ -191,9 +212,17 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
 
     def test_exact_position_found_makes_no_extra_call(self):
         """Ревью PR #177: запрос новых связей (~43 мс) не нужен, когда точная позиция уже найдена."""
-        hits, calls = self._run("20.14.11.110")
+        hits, calls = self._run("20.14.11.110", pool_has_category=True)
         self.assertEqual(hits[0].source_anchor, "подкатегория")
         self.assertEqual(len(calls), 2)
+
+    def test_exact_position_crowded_out_is_recovered(self):
+        """Прежний добор делит лимит 12 между предками и потомками: 14 катализаторов класса «20» с
+        большим score вытесняли из него точную позицию. Новый запрос с точными формами её возвращает."""
+        hits, calls = self._run("20.14.11.110")
+        self.assertEqual(hits[0].source_anchor, "подкатегория")
+        self.assertEqual(hits[0].code_tier, 0)
+        self.assertEqual(len(calls), 3)
 
 
 class TestGroupNoteInContext(unittest.TestCase):
@@ -213,6 +242,18 @@ class TestGroupNoteInContext(unittest.TestCase):
     def test_no_note_for_shallow_ancestor(self):
         """Ревью PR #177: «из 20 Катализаторы» не группировка н-бутана — строки быть не должно."""
         self.assertNotIn("ГРУППИРОВКУ", self._ctx("20.14.11.112", codes=("20",)))
+
+    def test_no_note_for_named_goods_position(self):
+        """Ревью PR #177, раунд 2: «из» стоит и у глубоких кодов. Позиция «из 27.12.31 Панели … (ГРЩ …)»
+        — названные товары внутри вида, а не сам вид: строки «распространяется» нет."""
+        h = _hit("V/31", ["27.12.31"], 0.5, name="Панели и прочие комплекты (главные распределительные щиты)")
+        ctx = pipeline.format_context([h], "вопрос", "27.12.31.190")
+        self.assertNotIn("ГРУППИРОВКУ", ctx)
+
+    def test_grouping_name_is_the_official_one(self):
+        self.assertTrue(okpd2_ref.is_grouping_name("20.14.11.110", "Углеводороды ациклические насыщенные <11>"))
+        self.assertFalse(okpd2_ref.is_grouping_name("20", "Катализаторы гидроочистки"))
+        self.assertFalse(okpd2_ref.is_grouping_name("99.99.99", "что угодно"))
 
     def test_dialog_code_does_not_attach_to_a_new_product(self):
         """Ревью PR #177: «шкаф 27.12.31.000», затем «требования у реле 27.12» — реле не получает
@@ -236,7 +277,7 @@ class TestDialogCodeReachesPrompt(unittest.TestCase):
     передал код продукции из истории в `format_context`. Тест `format_context` напрямую этого
     не проверяет — на бою «нельзя» прозвучало именно на втором ходе диалога."""
 
-    def test_second_turn_with_group_code_mentions_product_code(self):
+    def _plan(self, own_position: bool):
         hit = _hit("Приложение, Раздел XXI, позиция 142", ["20.14.11.110"], 0.5,
                    name="Углеводороды ациклические насыщенные")
         history = [{"role": "user", "content": "Н-бутан очищенный 20.14.11.112"},
@@ -245,11 +286,19 @@ class TestDialogCodeReachesPrompt(unittest.TestCase):
                 mock.patch.object(pipeline, "search", lambda *a, **k: [hit]), \
                 mock.patch.object(pipeline, "search_cases", lambda *a, **k: []), \
                 mock.patch.object(pipeline, "dense_top1", lambda *a, **k: 0.95), \
+                mock.patch.object(retriever, "has_exact_position", lambda code: own_position), \
                 mock.patch.object(pipeline.settings, "RERANK_ENABLED", False):
             plan = pipeline._plan_answer("можно ли применять к нему требования позиции 20.14.11.110?",
                                          okpd2="20.14.11.110", history=history)
-        self.assertIn("названный ранее в диалоге, 20.14.11.112 ВХОДИТ В ГРУППИРОВКУ",
-                      plan.messages[-1]["content"])
+        return plan.messages[-1]["content"]
+
+    def test_second_turn_with_group_code_mentions_product_code(self):
+        self.assertIn("названный ранее в диалоге, 20.14.11.112 ВХОДИТ В ГРУППИРОВКУ", self._plan(False))
+
+    def test_dialog_code_with_own_position_gets_no_note(self):
+        """Ревью PR #177, раунд 2: у кода из прошлого хода СВОЯ позиция («прибор 26.51.12.130», затем
+        «а эхолот 26.51.12?») — группировка нового вопроса на него не распространяется."""
+        self.assertNotIn("ГРУППИРОВКУ", self._plan(True))
 
 
 class TestExpertSetIsGrounded(unittest.TestCase):
