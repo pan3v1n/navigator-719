@@ -82,10 +82,17 @@ class TestOkpd2Match(unittest.TestCase):
     def test_no_match_different_branch(self):
         self.assertFalse(okpd2_match(["28.15.10"], "29.10.2"))
 
-    def test_segmentwise_not_substring(self):
-        # ключевой кейс: 29.10.2 НЕ должен матчить 29.10.23 (посегментно 2 != 23)
-        self.assertFalse(okpd2_match(["29.10.23"], "29.10.2"))
-        self.assertFalse(okpd2_match(["29.10.2"], "29.10.23"))
+    def test_digitwise_hierarchy_not_substring(self):
+        # ⚠ D14 #141 (08.10.2026): до этого тест утверждал «29.10.2 НЕ матчит 29.10.23 (посегментно
+        # 2 != 23)» — и закреплял ту самую ошибку. По справочнику ОКПД2 29.10.2 «Автомобили легковые» —
+        # подгруппа, 29.10.23 (дизельные легковые) — её вид: иерархия ПОРАЗРЯДНАЯ, и дизельный
+        # легковой автомобиль обязан находить позицию раздела II с кодом 29.10.2.
+        self.assertTrue(okpd2_match(["29.10.23"], "29.10.2"))
+        self.assertTrue(okpd2_match(["29.10.2"], "29.10.23"))
+        # Исходная цель теста сохранена — не подстрока: соседние ветки не совпадают.
+        self.assertFalse(okpd2_match(["29.10.32"], "29.10.2"))
+        self.assertFalse(okpd2_match(["29.10.2"], "29.10.32"))
+        self.assertFalse(okpd2_match(["28.21"], "28.1"))
 
     def test_empty_inputs(self):
         self.assertFalse(okpd2_match([], "29.20"))

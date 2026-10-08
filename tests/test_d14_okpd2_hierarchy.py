@@ -267,7 +267,11 @@ class TestGroupNoteInContext(unittest.TestCase):
     def _ctx(self, code, dialog=None, codes=("20.14.11.110",)):
         h = _hit("Приложение, Раздел XXI, позиция 142", list(codes), 0.5,
                  name="Углеводороды ациклические насыщенные")
-        return pipeline.format_context([h], "вопрос", code, dialog_codes=dialog)
+        # ⚠⚠ ОФЛАЙН (`O3` #104): строка для кода из истории спрашивает Qdrant «есть ли у кода своя
+        # позиция» (`has_exact_position`). Без подмены тест был зелёным у меня (Qdrant поднят) и
+        # КРАСНЫМ в CI (Qdrant нет → сбой → строку не печатать) — пять коммитов PR #177 подряд.
+        with mock.patch.object(retriever, "has_exact_position", lambda code: False):
+            return pipeline.format_context([h], "вопрос", code, dialog_codes=dialog)
 
     def test_subcode_in_question_gets_note(self):
         ctx = self._ctx("20.14.11.112")
