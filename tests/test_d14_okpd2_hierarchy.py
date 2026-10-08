@@ -130,6 +130,22 @@ class TestTargetChoice(unittest.TestCase):
         hits = [_hit("насос А", ["28.13.14.110"], 0.9), _hit("насос Б", ["28.13.1"], 0.1)]
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "28.13")], ["насос А"])
 
+    def test_broad_code_with_descendants_ignores_class_ancestor(self):
+        """Ревью PR #177: на «20.14» ближайшим предком был класс «20», и «Катализаторы» вытесняли
+        настоящие 20.14.x. Есть потомки — предок не поднимается, выбор по рангу."""
+        hits = [_hit("углеводороды", ["20.14.11.110"], 0.9), _hit("катализатор", ["20"], 0.1)]
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "20.14")], ["углеводороды"])
+        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [2, 2])
+
+    def test_covering_ancestor_gives_all_its_records(self):
+        """Ревью PR #177: расколотая ячейка 26.11.22.210 — две записи; подкод получает обе, как
+        точный код. Мелкий предок («из 20 Катализаторы») — по-прежнему одну."""
+        split = [_hit("210a", ["26.11.22.210"], 0.9), _hit("210b", ["26.11.22.210"], 0.5)]
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(split, "26.11.22.219")],
+                         ["210a", "210b"])
+        cats = [_hit("кат1", ["20"], 0.9), _hit("кат2", ["20"], 0.5)]
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(cats, "20.59.59.190")], ["кат1"])
+
 
 def _point(anchor, codes, score):
     return SimpleNamespace(id=anchor, score=score, payload={
@@ -173,6 +189,12 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         _hits, calls = self._run("20")
         self.assertEqual(len(calls), 2)        # пул + прежний добор, нового запроса нет
 
+    def test_exact_position_found_makes_no_extra_call(self):
+        """Ревью PR #177: запрос новых связей (~43 мс) не нужен, когда точная позиция уже найдена."""
+        hits, calls = self._run("20.14.11.110")
+        self.assertEqual(hits[0].source_anchor, "подкатегория")
+        self.assertEqual(len(calls), 2)
+
 
 class TestGroupNoteInContext(unittest.TestCase):
     def _ctx(self, code, dialog=None, codes=("20.14.11.110",)):
@@ -187,6 +209,20 @@ class TestGroupNoteInContext(unittest.TestCase):
     def test_dialog_code_gets_note(self):
         ctx = self._ctx("20.14.11.110", dialog=["20.14.11.112"])
         self.assertIn("названный ранее в диалоге, 20.14.11.112 ВХОДИТ В ГРУППИРОВКУ", ctx)
+
+    def test_no_note_for_shallow_ancestor(self):
+        """Ревью PR #177: «из 20 Катализаторы» не группировка н-бутана — строки быть не должно."""
+        self.assertNotIn("ГРУППИРОВКУ", self._ctx("20.14.11.112", codes=("20",)))
+
+    def test_dialog_code_does_not_attach_to_a_new_product(self):
+        """Ревью PR #177: «шкаф 27.12.31.000», затем «требования у реле 27.12» — реле не получает
+        строку «распространяется на шкаф» (27.12 — группа, в приложении это строки «из»)."""
+        self.assertNotIn("ГРУППИРОВКУ", self._ctx("27.12", dialog=["27.12.31.000"], codes=("27.12",)))
+
+    def test_dialog_code_only_when_question_gave_none(self):
+        ctx = self._ctx("20.14.11.112", dialog=["20.14.11.111"])
+        self.assertIn("из вопроса 20.14.11.112", ctx)
+        self.assertNotIn("20.14.11.111", ctx)
 
     def test_no_note_for_exact_or_unrelated(self):
         self.assertNotIn("ГРУППИРОВКУ", self._ctx("20.14.11.110"))

@@ -26,7 +26,7 @@ from app.core.prompts import (
 )
 from app.rag import documents_ref, fragments, inheritance, okpd2_ref, sparse, st1_ref
 from app.rag.embeddings import embed_query
-from app.rag.retriever import (Hit, ancestor_code, code_relation, dense_top1, okpd2_match, search,
+from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, okpd2_match, search,
                                search_cases, search_rules)
 from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
 
@@ -327,8 +327,16 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]
     опровергнуть; факта иерархии достаточно — оба ответа и без запрета начинались с «да»."""
     notes = []
     for c in codes + [d for d in dialog_codes if d not in codes]:
-        rc = ancestor_code(h.okpd2_codes or [], c)
-        if rc is None or code_relation(h.okpd2_codes or [], c) == 0:
+        # ⚠ Ревью PR #177, две находки. (1) Только ОХВАТЫВАЮЩИЙ предок (`retriever.covers`:
+        # подгруппа и глубже): «из 20 Катализаторы» не группировка н-бутана, и строка «позиция
+        # распространяется на этот код» возвращала бы ровно тот ответ, который здесь чинится.
+        # (2) Код из ПРОШЛОГО хода — только если код вопроса строки не дал: иначе «шкаф
+        # 27.12.31.000», затем «требования у реле 27.12» давали реле строку «распространяется на
+        # шкаф». Второй ход н-бутана называл код ГРУППЫ — у него своей строки нет, нужен прошлый.
+        if c not in codes and notes:
+            break
+        rc = covers(h.okpd2_codes or [], c)
+        if rc is None:
             continue
         said = "из вопроса" if c in codes else "продукции, названный ранее в диалоге,"
         notes.append(
@@ -704,19 +712,22 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
         # ТОЧНО (у одного кода в приложении бывает несколько записей с поделёнными требованиями,
         # напр. 26.11.22.210). Так «сравни по 28.13.14 и по 26.30.50» даёт две опоры (`EV8`), а
         # «требования по 28.13» — по-прежнему одну, хотя под префикс подходят 52 записи.
-        # ⚠ D14 #141: «точное» — тот же код по поразрядному ключу («27.12.31.000» и «27.12.31» — один
-        # вид), а без точного целевой становится БЛИЖАЙШАЯ позиция-предок, а не первая по score.
-        # Прежде первая совпавшая по score: «Н-бутан 20.14.11.112» отдавал целевую «Катализаторам»
-        # с кодом класса «20», хотя в окне была подкатегория 20.14.11.110. Если предков нет (код
-        # вопроса шире позиций, «28.13»), выбор прежний — первая по рангу.
+        # ⚠ D14 #141: ярусы — то же правило, что порядок окна (`retriever.code_tiers`): «точное» —
+        # тот же код по поразрядному ключу («27.12.31.000» и «27.12.31» — один вид); без точного —
+        # БЛИЖАЙШАЯ позиция-предок, если код вопроса глубже всего найденного (н-бутан 20.14.11.112 →
+        # 20.14.11.110, а не «Катализаторы» с кодом класса «20»); есть потомки — выбор прежний, по
+        # рангу (находка ревью PR #177: на «20.14» класс «20» вытеснял настоящие 20.14.x).
+        # Предок, ОХВАТЫВАЮЩИЙ код (`retriever.covers`: подгруппа и глубже), отдаёт ВСЕ свои записи,
+        # как точный код: у расколотой ячейки 26.11.22.210 их две, и подкод .219 терял половину
+        # требований (ревью PR #177). Мелкий предок («из 20 Катализаторы») — по-прежнему одну.
         picked: list[Hit] = []
         for c in _codes(code):
-            rel = [(h, code_relation(h.okpd2_codes or [], c)) for h in matched]
-            exact = [h for h, r in rel if r == 0]
-            up = [r for _h, r in rel if r is not None and r > 0]
-            chosen = (exact
-                      or [h for h, r in rel if up and r == min(up)][:1]
-                      or [h for h, r in rel if r is not None][:1])
+            tiers = code_tiers([h.okpd2_codes or [] for h in matched], c)
+            exact = [h for h, t in zip(matched, tiers) if t == 0]
+            near = [h for h, t in zip(matched, tiers) if t == 1]
+            if near and not covers(near[0].okpd2_codes or [], c):
+                near = near[:1]
+            chosen = exact or near or [h for h, t in zip(matched, tiers) if t is not None][:1]
             for h in chosen:
                 h = _content_sibling(h, hits)
                 if not any(h is p for p in picked):

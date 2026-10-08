@@ -49,28 +49,58 @@ def _segments(code: str) -> list[str]:
     return [s for s in code.strip().replace(" ", "").split(".") if s]
 
 
-def code_relation(rec_codes: list[str], query_code: str) -> int | None:
-    """Ближайшая связь позиции с кодом вопроса по иерархии ОКПД2 (`okpd2_ref.okpd2_relation`):
-    0 — тот же код, k > 0 — позиция-предок на k разрядов выше, k < 0 — потомок, None — не связаны.
-    Из нескольких кодов позиции берётся ближайший: тот же код, затем ближайший предок, затем потомок."""
-    rels = [r for rc in rec_codes or [] if (r := okpd2_ref.okpd2_relation(rc, query_code)) is not None]
-    if not rels:
+def closest_link(rec_codes: list[str], query_code: str) -> tuple[int, str] | None:
+    """Ближайшая связь позиции с кодом вопроса по иерархии ОКПД2 и код позиции, который её даёт:
+    (0, код) — тот же код; (k > 0, код) — позиция-предок на k разрядов выше; (k < 0, код) — потомок;
+    None — не связаны. Из нескольких кодов позиции: тот же код, затем ближайший предок, затем потомок."""
+    links = [(r, rc) for rc in rec_codes or []
+             if (r := okpd2_ref.okpd2_relation(rc, query_code)) is not None]
+    if not links:
         return None
-    if 0 in rels:
-        return 0
-    up = [r for r in rels if r > 0]
-    return min(up) if up else max(rels)
+    return min(links, key=lambda x: (x[0] != 0, x[0] < 0, abs(x[0])))
 
 
-def ancestor_code(rec_codes: list[str], query_code: str) -> str | None:
-    """Код позиции, группировка которого включает код вопроса (ближайший), иначе None.
-    Тот же код предком не считается: это точное совпадение."""
-    best = None
-    for rc in rec_codes or []:
-        r = okpd2_ref.okpd2_relation(rc, query_code)
-        if r is not None and r > 0 and (best is None or r < best[0]):
-            best = (r, rc)
-    return best[1] if best else None
+def code_relation(rec_codes: list[str], query_code: str) -> int | None:
+    """Только число из `closest_link`: 0 — тот же код, > 0 — предок, < 0 — потомок, None — не связаны."""
+    link = closest_link(rec_codes, query_code)
+    return link[0] if link else None
+
+
+# ⚠ D14 #141, находка ревью PR #177: С КАКОЙ ГЛУБИНЫ ГРУППИРОВКА ПОЗИЦИИ ОХВАТЫВАЕТ КОД ВОПРОСА.
+# Позиции с кодом класса, подкласса или группы в приложении — это строки «из …»: требования только
+# к товарам, названным в наименовании (прим. 3). Замер по корпусу 08.10.2026 (строки
+# `pp719_full.txt`): коды в 2 и 3 разряда — «из» у 20 из 20 («из 20 Катализаторы …»), в 4 разряда
+# — у 26 из 32 («из 27.12 Реле защиты»); с подгруппы (5 разрядов) начинаются полные позиции.
+# Значит, «20» для «20.14.11.112» — не группировка продукта, а соседняя продукция с общим классом:
+# такой предок не считается охватывающим — ни для строки «входит в группировку», ни для роли
+# «все записи этой группировки целевые».
+COVER_MIN_KEY = 5
+
+
+def code_tiers(rec_code_lists: list[list[str]], query_code: str) -> list[int | None]:
+    """Ярус совпадения по коду для каждой позиции — ЕДИНСТВЕННОЕ правило для окна (`search`) и для
+    целевой (`pipeline.target_hits`): None — не связана; 0 — тот же код; 1 — ближайшая позиция-
+    предок; 2 — прочие связанные (дальние предки, потомки).
+
+    ⚠ Ярус 1 — только когда среди связанных НЕТ ПОТОМКОВ (находка ревью PR #177). Широкий код
+    вопроса («20.14», «20.14.11») — это вопрос о группе, внутри которой есть свои позиции; ближайшим
+    предком у него оказывался класс «20», и 14 «Катализаторов» вытесняли из окна 20.14.11.110 и
+    .120. Поднимать предка нужно, когда код вопроса ГЛУБЖЕ всего найденного (н-бутан
+    20.14.11.112), а когда есть потомки — выбор прежний, по рангу."""
+    rels = [code_relation(codes, query_code) for codes in rec_code_lists]
+    related = [r for r in rels if r is not None]
+    up = [r for r in related if r > 0]
+    nearest = min(up) if up and not any(r < 0 for r in related) else None
+    return [None if r is None else 0 if r == 0 else 1 if r == nearest else 2 for r in rels]
+
+
+def covers(rec_codes: list[str], query_code: str) -> str | None:
+    """Код позиции, группировка которого ОХВАТЫВАЕТ код вопроса (предок не мельче подгруппы,
+    `COVER_MIN_KEY`), иначе None. Тот же код охватом не считается — это точное совпадение."""
+    link = closest_link(rec_codes, query_code)
+    if link is None or link[0] <= 0 or len(okpd2_ref.okpd2_key(link[1])) < COVER_MIN_KEY:
+        return None
+    return link[1]
 
 
 def okpd2_match(rec_codes: list[str], query_code: str) -> bool:
@@ -212,18 +242,14 @@ def _order_key(h: Hit) -> tuple:
 
 
 def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
-    """Ярус совпадения по коду (`Hit.code_tier`): 0 тот же код, 1 ближайшая позиция-предок из
-    найденных, 2 прочие совпавшие. «Ближайшая» — среди найденных: если позиции на уровне
-    подкатегории нет, ближайшим становится вид или группа, а не «ничего»."""
-    rel = {id(h): code_relation(h.okpd2_codes, okpd2) for h in hits if h.okpd2_match}
-    up = [r for r in rel.values() if r is not None and r > 0]
-    nearest = min(up) if up else None
+    """`Hit.code_tier` по правилу `code_tiers` (совпавшие по коду); прочим — 0, их порядок решает
+    `not okpd2_match`. «Ближайшая» — среди найденных: если позиции на уровне подкатегории нет,
+    ближайшим становится вид или группа, а не «ничего»."""
+    matched = [h for h in hits if h.okpd2_match]
     for h in hits:
-        if id(h) not in rel:
-            h.code_tier = 0          # не совпала вовсе — порядок решает `not okpd2_match`
-            continue
-        r = rel[id(h)]
-        h.code_tier = 0 if r == 0 else 1 if r is not None and r == nearest else 2
+        h.code_tier = 0
+    for h, t in zip(matched, code_tiers([h.okpd2_codes for h in matched], okpd2)):
+        h.code_tier = 2 if t is None else t
 
 
 def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
@@ -267,8 +293,12 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
             # вида «…000», плюс потомки этих уровней. ОТДЕЛЬНЫМ запросом и только ДОБАВЛЕНИЕМ:
             # прежний добор остаётся побайтно тем же, и состав окна у кодов, которых правка не
             # касается, не сдвигается от того, что в общий фильтр подмешались новые точки.
-            up = [f for f in okpd2_ref.okpd2_ancestor_forms(okpd2) if f not in prefixes]
-            down = [f for f in okpd2_ref.okpd2_descendant_forms(okpd2) if f != okpd2.strip()]
+            # ⚠ Запрос стоит ~43 мс (замер 08.10, ревью PR #177), поэтому только когда ТОЧНОЙ позиции
+            # среди найденного нет: при точной целевая и так своя (`code_tiers`), а это самый частый
+            # случай — эксперт называет код из приложения.
+            exact = any(code_relation(h.okpd2_codes, okpd2) == 0 for h in hits if h.okpd2_match)
+            up = [] if exact else [f for f in okpd2_ref.okpd2_ancestor_forms(okpd2) if f not in prefixes]
+            down = [] if exact else [f for f in okpd2_ref.okpd2_descendant_forms(okpd2) if f != okpd2.strip()]
             should = ([models.FieldCondition(key="okpd2_codes", match=models.MatchAny(any=up))] if up else []) + \
                      ([models.FieldCondition(key="okpd2_prefixes", match=models.MatchAny(any=down))] if down else [])
             for p in (_hybrid(query, max(limit, 12), qfilter=models.Filter(should=should), qvec=qvec)
