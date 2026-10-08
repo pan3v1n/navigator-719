@@ -77,24 +77,22 @@ class TestHierarchy(unittest.TestCase):
         self.assertEqual(lost, [])
 
     def test_filter_forms_agree_with_relation(self):
-        """⚠ ДВЕ ТАБЛИЦЫ ПРО ОДНО: формы для фильтров Qdrant (`okpd2_codes` ∋ предок,
-        `okpd2_prefixes` ∋ форма потомка) обязаны находить РОВНО те позиции, которые
-        `okpd2_relation` считает предками и потомками. Иначе отношение верное, а добор слепой."""
+        """⚠ ДВЕ ТАБЛИЦЫ ПРО ОДНО: формы для фильтра Qdrant (`okpd2_codes` ∋ предок) обязаны находить
+        РОВНО те позиции, которые `okpd2_relation` считает предками (и тем же кодом). Иначе
+        отношение верное, а добор слепой."""
         corpus = _corpus_codes()
         names = list(okpd2_ref._okpd2_names())
         sample = random.Random(141).sample(names, 3000) + [
             "20.14.11.112", "20.14.11.122", "27.12.31.000", "29.10.21", "27.3", "20.60.1"]
         bad = []
         for q in sample:
-            anc, desc = set(okpd2_ref.okpd2_ancestor_forms(q)), set(okpd2_ref.okpd2_descendant_forms(q))
+            anc = set(okpd2_ref.okpd2_ancestor_forms(q))
             for rc in corpus:
                 if rc[:2] != q[:2]:
                     continue
                 r = okpd2_ref.okpd2_relation(rc, q)
                 if (rc in anc) != (r is not None and r >= 0):
                     bad.append(("предок", rc, q))
-                if bool(desc & set(_seg_prefixes(rc))) != (r is not None and r <= 0):
-                    bad.append(("потомок", rc, q))
         self.assertEqual(bad[:10], [])
 
     def test_okpd2_name_fallback_goes_to_nearest_ancestor(self):
@@ -136,13 +134,14 @@ class TestTargetChoice(unittest.TestCase):
         hits = [_hit("насос А", ["28.13.14.110"], 0.9), _hit("насос Б", ["28.13.1"], 0.1)]
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "28.13")], ["насос А"])
 
-    def test_broad_code_prefers_descendants_over_ancestors(self):
-        """Ревью PR #177, оба раунда: на «20.14» ближайшим предком был класс «20», и «Катализаторы»
-        вытесняли настоящие 20.14.x — даже с БОЛЬШИМ score они обязаны стоять ниже потомков."""
-        hits = [_hit(f"кат{i}", ["20"], 0.9 - i / 100) for i in range(5)] + \
-               [_hit("углеводороды", ["20.14.11.110"], 0.3)]
-        self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "20.14")], ["углеводороды"])
-        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [4] * 5 + [3])
+    def test_broad_code_keeps_pre_d14_ranking(self):
+        """УЗКИЙ D14 (решение владельца 08.10): широкий код («20.14») — ближайшего предка не поднимаем
+        (потомки есть), остальное ПО РАНГУ, как до D14. Раунд 2 ставил потомков выше предков — замер
+        показал цену (21.20.10.110 → медизделие, «Мониторы» → «Гидрофоны»): score разных запросов
+        несравнимы (#179), и порядок широких кодов этим правилом не чинится."""
+        hits = [_hit(f"кат{i}", ["20"], 0.9 - i / 100) for i in range(5)] +                [_hit("углеводороды", ["20.14.11.110"], 0.3)]
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "20.14")], ["кат0"])
+        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [3] * 6)
 
     def test_grouping_position_wins_inside_nearest_tier(self):
         """Ревью PR #177, раунд 3: у 28.25.11.110 три позиции — «Теплообменники» (XV/5, сама
@@ -167,6 +166,16 @@ class TestTargetChoice(unittest.TestCase):
                 white]
         self.assertEqual(sorted(h.source_anchor for h in pipeline.target_hits(hits, "26.11.22.219")),
                          ["IV/2", "IV/5"])
+
+    def test_subgroup_ancestor_competes_with_descendants_by_rank(self):
+        """Замер радиуса 08.10: «потомки выше ВСЕХ предков» отдавало «Препараты для лечения ЖКТ»
+        21.20.10.110 медизделию VII/73 (подкод .111) вместо VIII/1 «Препараты лекарственные»
+        (21.20.1). Предок от подгруппы — содержательная группировка: с потомком по рангу."""
+        drugs = _hit("VIII/1", ["21.10.51", "21.20.1"], 0.9, name="Препараты лекарственные, сыворотки и вакцины")
+        device = _hit("VII/73", ["21.20.10.111"], 0.3, name="Рассасывающиеся гемостатические материалы")
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits([drugs, device], "21.20.10.110")],
+                         ["VIII/1"])
+        self.assertEqual(retriever.code_tiers([drugs.okpd2_codes, device.okpd2_codes], "21.20.10.110"), [3, 3])
 
     def test_ancestor_gives_one_record(self):
         """Без точного кода — ОДНА целевая. Находку раунда 1 («предок отдаёт все записи») раунд 2
@@ -217,12 +226,13 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
             hits = retriever.search("Н-бутан очищенный", okpd2=code, limit=8)
         return hits, calls
 
-    def test_broad_code_puts_descendant_above_class_ancestors(self):
-        """Ревью PR #177: «20.14» — подкатегория внутри группы выше 14 «Катализаторов» класса «20»,
-        хотя у тех score больше; окно 8 занимают не одни катализаторы."""
-        hits, _calls = self._run("20.14")
-        self.assertEqual(hits[0].source_anchor, CAT)
-        self.assertEqual(hits[0].code_tier, 3)
+    def test_broad_code_gets_no_new_descendant_fetch(self):
+        """Узкий D14: новые запросы добирают только точные формы и новых ПРЕДКОВ, потомков — нет; у
+        «20.14» окно собирается как до D14 (прежний добор не изменился)."""
+        hits, calls = self._run("20.14")
+        self.assertNotIn(CAT, [h.source_anchor for h in hits])
+        self.assertEqual(hits[0].source_anchor, "катализатор 0")      # по score, как до D14
+        self.assertTrue(all("20.14.11.110" not in c for c in calls[2:]))
 
     def test_subcode_pulls_and_ranks_its_category_first(self):
         hits, calls = self._run("20.14.11.112")

@@ -602,26 +602,6 @@ def okpd2_ancestor_forms(code: str | None) -> list[str]:
     return [f for n in range(2, len(k) + 1) for f in _dotted(k[:n])]
 
 
-def okpd2_descendant_forms(code: str | None) -> list[str]:
-    """Значения поля `okpd2_prefixes` (посегментные префиксы кодов позиции, `load_kb`), по которым
-    находятся позиции-потомки кода и сам код. Посегментный префикс — то, что лежит в индексе, а
-    потомок «27.3» — это и «27.3», и «27.31…»: перечисляем, чем может начинаться его код."""
-    k = okpd2_key(code)
-    n = len(k)
-    if n in (2, 4, 6):
-        return _dotted(k)[:1]
-    if n in (3, 5):
-        base = _dotted(k)[0]
-        return [base] + [base + d for d in "0123456789"]
-    if n == 7:
-        head = _dotted(k)[0][:-2]
-        return [head + a + b for a in "0123456789" for b in "0123456789"]
-    if n == 8:
-        head = _dotted(k)[0][:-1]
-        return [head + d for d in "0123456789"]
-    return _dotted(k) if n == 9 else []
-
-
 def _name_key(s: str | None) -> str:
     s = re.sub(r"<[^>]*>", " ", (s or "").lower().replace("ё", "е"))
     return re.sub(r"[^\w]+", " ", s).strip()
