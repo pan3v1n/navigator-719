@@ -136,8 +136,16 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 
 /* ---------- каркас приложения ---------- */
 .app { display: flex; height: 100vh; min-height: 560px; overflow: hidden; }
+/* ⚠ Без `overflow: hidden` и со своим слоем над основной областью: подменю «Справка» выезжает ВПРАВО
+   за край сайдбара, и обрезка прятала его под чатом — видна была полоска у края (замечание владельца
+   на бою test32). Прокрутку держит `.side-scroll`, длинные подписи — своё многоточие. */
 .sidebar { width: 280px; flex-shrink: 0; background: var(--gray); box-shadow: inset -1px 0 0 rgba(33, 56, 130, .1);
-  display: flex; flex-direction: column; overflow: hidden; transition: width .2s; }
+  display: flex; flex-direction: column; transition: width .2s; position: relative; z-index: 20; }
+/* …но СЕКЦИИ сайдбара обрезают своё содержимое сами (ревью test33): при развороте ширина растёт за
+   0.2 с, а подписи уже видны — без обрезки они на первых кадрах ложились поверх чата. Подменю
+   «Справка» живёт в `.nav-group` — рядом с `.nav-item`, а не внутри него, — и под обрезку не попадает. */
+.side-top, .side-new, .quota-card, .side-bottom, .nav-item { overflow: hidden; }
+.side-scroll { overflow-x: hidden; }
 .side-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 20px 16px 16px 20px; }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; color: var(--ink); }
 .brand:hover { opacity: .85; }
@@ -698,6 +706,8 @@ a.head-avatar:hover { opacity: .9; }
     box-shadow: 2px 0 22px rgba(3, 5, 12, .16); }
   .sidebar.open { transform: none; }
   .side-collapse, .side-expand, .app.collapsed .side-expand { display: none; }
+  /* в шторке подменю «Справка» открывается ВНУТРИ неё, над пунктом: вправо оно уходило за край экрана */
+  .nav-group .nav-menu, .app.collapsed .nav-menu { left: 0; right: 0; bottom: calc(100% + 4px); min-width: 0; }
   .app.collapsed .nc-text, .app.collapsed .brand, .app.collapsed .side-scroll,
   .app.collapsed .quota-card { display: revert; }
   .app.collapsed .side-scroll { display: flex; }
