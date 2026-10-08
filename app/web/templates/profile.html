@@ -20,7 +20,7 @@
       <span class="avatar">{{ initials }}</span>
       <div>
         <h1>{{ who }}</h1>
-        <div class="who-sub">{{ prefill_region or user.region or "Участник" }} · {{ org }}</div>
+        <div class="who-sub">{{ prefill_region or user.region or "Участник" }}</div>
       </div>
     </div>
 
@@ -28,7 +28,7 @@
       <form class="panel" method="post" action="/profile">
         <div>
           <h2>Данные пользователя</h2>
-          <p class="panel-sub">Заполните данные о себе — это нужно для доступа к навигатору по ПП №719 · {{ org }}</p>
+          <p class="panel-sub">Заполните данные о себе — это нужно для доступа к навигатору по ПП №719</p>
         </div>
         {% if error %}<div class="error">{{ error }}</div>{% endif %}
 

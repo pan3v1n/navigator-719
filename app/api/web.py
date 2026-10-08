@@ -53,7 +53,7 @@ templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " "
 
 @lru_cache(maxsize=1)
 def asset_version() -> str:
-    """Версия статики для ссылок `?v=` — хеш содержимого `style.css` и `chat.js`.
+    """Версия статики для ссылок `?v=` — хеш содержимого `style.css`, `chat.js` и фавикона.
 
     ⚠ Без неё выкатка переоформления ломала бы интерфейс на часы: у статики нет `Cache-Control`,
     и браузер кэширует её ЭВРИСТИЧЕСКИ (доля возраста по Last-Modified) — новая разметка чата
@@ -61,7 +61,7 @@ def asset_version() -> str:
     макета: headless Chrome показал новую кнопку в стилях прошлой сборки. Хеш, а не тег релиза:
     меняется ровно тогда, когда меняются файлы."""
     h = hashlib.sha1()
-    for name in ("style.css", "chat.js"):
+    for name in ("style.css", "chat.js", "favicon.svg"):
         try:
             h.update((_WEB / "static" / name).read_bytes())
         except OSError:
@@ -221,20 +221,23 @@ def profile_page(request: Request):
     if not user:
         return RedirectResponse("/login", status_code=302)
     prefill = user.region or region_from_username(user.username)
-    with get_session() as db:
-        st = quota.quota_state(db, user)
-        qv = quota.quota_view(db, user)
-    plan_line = (f"Тариф «{st.plan}»: использовано {st.used} из {st.limit} запросов, новый период "
-                 f"начнётся {plans.msk_date(st.end):%d.%m.%Y}.") if st else ""
-    # can_leave — профиль уже заполнен: показываем «Вернуться к сервису». Пока он не заполнен,
-    # уйти некуда — чат вернёт сюда же (гейт `needs_profile`).
     return templates.TemplateResponse(
         "profile.html",
         _ctx(request, user=user, error=None, regions=REGIONS, prefill_region=prefill,
              full_name=user.full_name or "", telegram=user.telegram or "",
-             consent=bool(user.consent), plan_line=plan_line, quota=qv,
-             can_leave=not needs_profile(user)),
+             consent=bool(user.consent), **_profile_extras(user)),
     )
+
+
+def _profile_extras(user: User) -> dict:
+    """Карточка тарифа и выход из профиля — для GET и для ре-рендера ошибки POST (ревью 08.10.2026:
+    без них страница с ошибкой теряла «Вернуться к сервису» и тариф). Расход считается ОДИН раз.
+    can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда же (`needs_profile`)."""
+    with get_session() as db:
+        qv = quota.quota_view(db, user)
+    plan_line = (f"Тариф «{qv['plan']}»: использовано {qv['used']} из {qv['limit']} запросов, "
+                 f"новый период начнётся {qv['renews']}.") if qv else ""
+    return {"quota": qv, "plan_line": plan_line, "can_leave": not needs_profile(user)}
 
 
 @router.post("/profile", response_class=HTMLResponse)
@@ -256,7 +259,7 @@ def profile_submit(
             _ctx(request, user=user,
                  error="Заполните ФИО, регион и Telegram и подтвердите согласие на обработку персональных данных.",
                  regions=REGIONS, prefill_region=rg or region_from_username(user.username),
-                 full_name=fn, telegram=tg, consent=bool(consent)),
+                 full_name=fn, telegram=tg, consent=bool(consent), **_profile_extras(user)),
             status_code=400,
         )
     with get_session() as db:

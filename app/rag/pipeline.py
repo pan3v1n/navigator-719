@@ -264,7 +264,12 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
     Те же данные и те же правила, что в блоке контекста (`format_context`): порог позиции либо
     добранный из примечаний, закупочный порог — отдельной строкой со своим условием, требования
     группы — с атрибуцией. Без указаний модели: эта строка читается экспертом, а не промптом.
-    Полный перечень без ранжирования по запросу — эксперт сверяет позицию целиком."""
+    Полный перечень без ранжирования по запросу — эксперт сверяет позицию целиком.
+
+    ⚠ ВТОРОЙ РЕНДЕР ТЕХ ЖЕ ДАННЫХ (ревью 08.10.2026): правила порога и наследования здесь повторяют
+    целевой блок `format_context`. Разойтись им нельзя — эксперт увидел бы в панели не тот порог,
+    что получила модель. Согласованность держит тест по ВСЕМ записям корпуса
+    (`test_service_design.TestPanelMatchesModelContext`), а не память."""
     mt = h.min_threshold or lookup_threshold(h.okpd2_codes, h.product_name, h.section_roman)
     ops = _hit_operations(h, NOTE_CAP_TARGET, mt)
     lines: list[str] = []
@@ -276,7 +281,8 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
                          + (f" (ОКПД2 {codes})" if codes else "") + ".")
             ops = list(parent.get("operations") or [])
             if parent.get("min_threshold") and not mt:
-                mt = f"{parent['min_threshold']} — порог группы"
+                mt = (f"{parent['min_threshold']} — порог группы, указан у позиции "
+                      f"«{parent.get('product_name', '')}»")
     if mt:
         lines.insert(0, f"Порог: {mt}")
     proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)

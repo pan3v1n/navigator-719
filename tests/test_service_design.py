@@ -96,6 +96,40 @@ class TestSourceText(unittest.TestCase):
         self.assertIn("полный перечень — в первоисточнике", t)
 
 
+class TestPanelMatchesModelContext(unittest.TestCase):
+    """Два рендера одних данных — панель эксперту (`source_text`) и блок модели (`format_context`) —
+    обязаны совпадать по тому, что меняет вердикт: порог, закупочный порог, позиция группы.
+    По ВСЕМ записям корпуса: разъедутся — эксперт сверит ответ не с тем, что видела модель."""
+
+    @staticmethod
+    def _grab(text: str, prefix: str):
+        for line in text.splitlines():
+            if line.strip().startswith(prefix):
+                return line.strip()[len(prefix):].strip().lower()
+        return None
+
+    def test_every_record(self):
+        bad = []
+        for r in _records():
+            h = _hit(r)
+            h.okpd2_match = True  # позиция — целевая: только у целевой контекст печатает требования
+            ctx = pipeline.format_context([h], code=(r.get("okpd2_codes") or [None])[0])
+            st = pipeline.source_text(h)
+            mt = self._grab(ctx, "Порог:")
+            if mt and mt.startswith("не предусмотрен"):
+                mt = None  # «порога нет» контекст говорит модели; панели нечего добавить
+            pairs = ((mt, self._grab(st, "Порог:")),
+                     (self._grab(ctx, "Порог ДЛЯ ЦЕЛЕЙ ЗАКУПОК (не для подтверждения происхождения):"),
+                      self._grab(st, "Порог для целей закупок (не для подтверждения происхождения):")))
+            if any(a != b for a, b in pairs):
+                bad.append(r["product_name"][:60])
+            if "ТРЕБОВАНИЯ ГРУППЫ" in ctx:
+                parent = ctx.split("приведены у позиции «", 1)[1].split("»", 1)[0]
+                if f"приведены у позиции «{parent}»" not in st:
+                    bad.append("группа: " + r["product_name"][:60])
+        self.assertEqual(bad, [], f"панель разошлась с контекстом модели у {len(bad)} записей")
+
+
 class TestSourceItems(unittest.TestCase):
     def test_product_sources_carry_text(self):
         src = chat_mod._sources_from_hits([_hit(_find("Бульдозеры"))])[0]
@@ -118,6 +152,44 @@ class TestSourceItems(unittest.TestCase):
         s = chat_mod.SourceItem(**old)
         self.assertIsNone(s.text)
         self.assertEqual(s.kind, "product")
+
+
+class TestReviewFixes(unittest.TestCase):
+    """Находки ревью 08.10.2026 — каждая закреплена, чтобы не вернулась."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.js = (WEB / "static" / "chat.js").read_text(encoding="utf-8")
+
+    def test_source_text_failure_does_not_break_the_answer(self):
+        """Текст панели собирается ПОСЛЕ оплаченной генерации — его сбой не должен ронять ответ."""
+        with mock.patch.object(chat_mod, "source_text", side_effect=RuntimeError("сбой")):
+            src = chat_mod._sources_from_hits([_hit(_find("Бульдозеры"))])[0]
+        self.assertIsNone(src.text)
+        self.assertEqual(src.product_name[:10], "Бульдозеры")
+
+    def test_reopened_answer_has_no_rating(self):
+        """Повторная оценка старого ответа пишется новой строкой и задваивает метрику приёмки."""
+        hist = self.js.split("function addAssistant")[1].split("\nfunction ")[0]
+        self.assertIn("addFeedbackBar(wrap, messageId, sessionId, false)", hist)
+        bar = self.js.split("function addFeedbackBar")[1].split("\nfunction ")[0]
+        self.assertIn("if (withRating)", bar)
+
+    def test_uncited_answer_lists_no_answer_sources(self):
+        """Отказ или ответ без [N] — «Источников ответа» нет, окно поиска только за кнопкой."""
+        body = self.js.split("function addSources")[1].split("\nfunction ")[0]
+        self.assertIn("if (cited.size === 0) head.remove()", body)
+        self.assertIn("(cited.has(i) ? chips : rest)", body)
+
+    def test_refs_not_linked_inside_links_or_code(self):
+        body = self.js.split("function linkRefs")[1].split("\nfunction ")[0]
+        self.assertIn('closest("a, code, pre, button")', body)
+
+    def test_disclaimer_names_the_expert_verdict(self):
+        """Принцип 1 (CLAUDE.md): постоянная строка под полем ввода — вердикт за экспертом ТПП."""
+        html = (WEB / "templates" / "chat.html").read_text(encoding="utf-8")
+        tail = html[html.index('class="composer-frame"'):]
+        self.assertIn("окончательное решение принимает уполномоченный", tail)
 
 
 class _DB(unittest.TestCase):
@@ -167,6 +239,25 @@ class TestConversationGivesAnswerIds(_DB):
         msgs = chat_mod.get_conversation("s1", user=u)["messages"]
         self.assertNotIn("message_id", msgs[0], "у вопроса id ответа быть не должно")
         self.assertEqual(msgs[1]["message_id"], a.id)
+
+
+class TestProfileErrorKeepsContext(_DB):
+    def test_error_rerender_keeps_exit_and_plan(self):
+        """Ревью: ре-рендер ошибки POST /profile терял «Вернуться к сервису» и карточку тарифа."""
+        from app.api import web
+        u = self._user("p1", plan="Старт")
+        with self.Session() as db:
+            q.update_profile(db, u.id, full_name="Иван Петров", region="Курская область",
+                             telegram="@ivan", consent=True)
+            u = q.get_user(db, u.id)
+            db.expunge(u)
+        with mock.patch.object(web, "get_session", self.Session), \
+             mock.patch.object(web, "current_user", lambda request: u):
+            resp = web.profile_submit(_Req(), consent="", full_name="", region="", telegram="")
+        body = resp.body.decode("utf-8")
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Вернуться к сервису", body)
+        self.assertIn("Использовано 0 из 100 запросов", body)
 
 
 class _Req:  # Jinja-шаблону от запроса нужен только объект в контексте

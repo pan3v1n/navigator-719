@@ -328,7 +328,10 @@ function addAssistant(text, sources, messageId) {
   messages.appendChild(wrap);
   if (sources) addSources(wrap, sources);
   addAnswerTools(wrap);
-  if (messageId) addFeedbackBar(wrap, messageId, sessionId);
+  // ⚠ В переоткрытой беседе — только «Сообщить об ошибке», БЕЗ оценки (ревью 08.10.2026): прежняя
+  // оценка не показывается, а каждая новая пишется отдельной строкой, и метрика приёмки (гейт 1.0)
+  // считала бы повторные голоса за одно и то же. Исправление повторять не вредно — оно не метрика.
+  if (messageId) addFeedbackBar(wrap, messageId, sessionId, false);
   return wrap;
 }
 
@@ -383,9 +386,12 @@ function addSources(wrap, sources) {
   box.appendChild(head);
   // «Источники ответа» — это то, на что ответ СОСЛАЛСЯ. Остальное окно поиска (кандидаты, о которых
   // ответ не говорит) прячем за кнопкой: в прежнем свёрнутом списке их было не видно, а открытыми
-  // чипами «Оборудование для мойки бутылок» читалось бы источником ответа про бульдозеры. Если
-  // ссылок [N] в тексте нет вовсе (старые ответы), показываем всё.
+  // чипами «Оборудование для мойки бутылок» читалось бы источником ответа про бульдозеры.
+  // ⚠ Ссылок [N] в ответе нет вовсе — отказ вне сферы, ответ при низкой релевантности, перевод
+  // кода (ревью 08.10.2026): тогда источников ОТВЕТА нет, и всё окно поиска уходит за кнопку, а
+  // заголовок «Источники ответа» не печатается.
   const cited = citedSources(wrap.dataset.raw || "", sources.length);
+  if (cited.size === 0) head.remove();
   const mkChip = (s, i) => {
     const b = document.createElement("button");
     b.type = "button";
@@ -403,14 +409,14 @@ function addSources(wrap, sources) {
   };
   const chips = el("src-chips");
   const rest = el("src-chips src-rest hidden");
-  sources.forEach((s, i) => (cited.size === 0 || cited.has(i) ? chips : rest).appendChild(mkChip(s, i)));
-  box.appendChild(chips);
+  sources.forEach((s, i) => (cited.has(i) ? chips : rest).appendChild(mkChip(s, i)));
+  if (chips.children.length) box.appendChild(chips);
   if (rest.children.length) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "src-more";
-    const label = "Ещё " + rest.children.length + " " + plural(rest.children.length, "позиция", "позиции", "позиций")
-      + " из поиска — в ответе не цитируются";
+    const label = (chips.children.length ? "Ещё " : "Найдено поиском: ") + rest.children.length + " "
+      + plural(rest.children.length, "позиция", "позиции", "позиций") + " — в ответе не цитируются";
     more.textContent = label;
     more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", () => {
@@ -452,7 +458,9 @@ function linkRefs(wrap) {
   const walker = document.createTreeWalker(bubble, NodeFilter.SHOW_TEXT);
   const nodes = [];
   while (walker.nextNode()) {
-    if (/\[\d/.test(walker.currentNode.nodeValue)) nodes.push(walker.currentNode);
+    const node = walker.currentNode;
+    // внутрь ссылки или кода кнопку не вставляем: вложенный интерактив и порча образца кода
+    if (/\[\d/.test(node.nodeValue) && !node.parentElement.closest("a, code, pre, button")) nodes.push(node);
   }
   nodes.forEach((node) => {
     const text = node.nodeValue;
@@ -655,7 +663,7 @@ function addAnswerTools(wrap) {
   wrap.appendChild(tools);
 }
 
-function addFeedbackBar(wrap, messageId, sid) {
+function addFeedbackBar(wrap, messageId, sid, withRating = true) {
   if (!messageId) return; // без id ответа привязать оценку нельзя (редкий сбой лога)
   const bar = el("fb-bar");
 
@@ -723,9 +731,11 @@ function addFeedbackBar(wrap, messageId, sid) {
   const errLink = mkFbLink("Сообщить об ошибке", () => only(errPanel));
   errLink.className = "act-btn";
   row.appendChild(errLink);
-  const rateLink = mkFbLink("Оценить ответ", () => only(ratePanel));
-  rateLink.className = "act-btn act-rate";
-  row.appendChild(rateLink);
+  if (withRating) {
+    const rateLink = mkFbLink("Оценить ответ", () => only(ratePanel));
+    rateLink.className = "act-btn act-rate";
+    row.appendChild(rateLink);
+  }
   // комментарий ко всей беседе — из панели оценки: это редкое действие, в общем ряду оно лишнее
   ratePanel.wrap.appendChild(mkFbLink("Комментарий ко всему диалогу", () => only(dlgPanel)));
   bar.appendChild(ratePanel.wrap); bar.appendChild(errPanel.wrap); bar.appendChild(dlgPanel.wrap);

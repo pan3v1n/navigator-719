@@ -158,10 +158,21 @@ def _sources_from_hits(hits) -> list[SourceItem]:
             okpd2=h.okpd2_codes or [],
             source_anchor=h.source_anchor,
             okpd2_match=h.okpd2_match,
-            text=source_text(h) or None,
+            text=_safe_source_text(h),
         )
         for h in hits
     ]
+
+
+def _safe_source_text(h) -> str | None:
+    """Текст панели «Источник» — БЕЗ права уронить ответ (ревью 08.10.2026): он собирается ПОСЛЕ
+    генерации, и исключение здесь превращало бы оплаченный ответ в 500, а в стриме — в фолбэк с
+    повторным вызовом DeepSeek. Не собрался — панель честно ведёт в первоисточник."""
+    try:
+        return source_text(h) or None
+    except Exception:  # noqa: BLE001
+        logger.exception(f"chat: текст источника не собрался ({h.product_name[:60]!r})")
+        return None
 
 
 # --- Кликабельные источники ПРОЦЕДУРНОГО ответа (пункты Правил/тела ПП №719/Приказа №52). ----------
