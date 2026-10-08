@@ -37,8 +37,9 @@ class Hit:
     source_anchor: str | None
     okpd2_match: bool = False
     payload: dict = field(default_factory=dict)
-    # D14: ярус совпадения по коду — 0 тот же код, 1 ближайший предок из найденных, 2 прочие
-    # совпавшие (дальние предки, потомки). Решает порядок окна ВНУТРИ совпавших, см. `_order_key`.
+    # D14: ярус совпадения по коду (`code_tiers`): 0 тот же код · 1 ближайший предок, сам являющийся
+    # группировкой · 2 прочие позиции ближайшего предка · 3 потомки · 4 прочие предки. Решает
+    # порядок окна ВНУТРИ совпавших, см. `_order_key`.
     code_tier: int = 0
 
 
@@ -66,10 +67,18 @@ def code_relation(rec_codes: list[str], query_code: str) -> int | None:
     return link[0] if link else None
 
 
-def code_tiers(rec_code_lists: list[list[str]], query_code: str) -> list[int | None]:
+def code_tiers(rec_code_lists: list[list[str]], query_code: str,
+               names: list[str] | None = None) -> list[int | None]:
     """Ярус совпадения по коду для каждой позиции — ЕДИНСТВЕННОЕ правило для окна (`search`) и для
-    целевой (`pipeline.target_hits`): None — не связана; 0 — тот же код; 1 — ближайшая позиция-
-    предок, когда потомков среди связанных нет; 2 — потомки; 3 — прочие предки.
+    целевой (`pipeline.target_hits`): None — не связана; 0 — тот же код; 1 — позиция ближайшего
+    предка, которая САМА есть его группировка (`covers`, нужны `names`); 2 — прочие позиции
+    ближайшего предка; 3 — потомки; 4 — прочие предки. Ближайший предок — только когда потомков
+    среди связанных нет.
+
+    ⚠ Ревью PR #177, раунд 3: у одного кода предка бывают и группировка, и названные товары —
+    у 28.25.11.110 «Теплообменники» (XV/5) и «Аппараты теплообменные пластинчатые для пищевой
+    промышленности» (III/177). Для «кожухотрубчатых» 28.25.11.111 применяется группировка; по score
+    целевой могла стать пищевая аппаратура — тот же класс ошибки, что D14.
 
     ⚠ Ревью PR #177, два раунда. Широкий код вопроса («20.14», «20.14.11») — вопрос о группе, внутри
     которой есть свои позиции; ближайшим предком у него оказывался класс «20», и 14 «Катализаторов»
@@ -82,12 +91,17 @@ def code_tiers(rec_code_lists: list[list[str]], query_code: str) -> list[int | N
     related = [r for r in rels if r is not None]
     up = [r for r in related if r > 0]
     nearest = min(up) if up and not any(r < 0 for r in related) else None
+    names = names or [""] * len(rels)
 
-    def tier(r: int | None) -> int | None:
+    def tier(r: int | None, codes: list[str], name: str) -> int | None:
         if r is None:
             return None
-        return 0 if r == 0 else 1 if r == nearest else 2 if r < 0 else 3
-    return [tier(r) for r in rels]
+        if r == 0:
+            return 0
+        if r == nearest:
+            return 1 if covers(codes, name, query_code) else 2
+        return 3 if r < 0 else 4
+    return [tier(r, c, n) for r, c, n in zip(rels, rec_code_lists, names)]
 
 
 def covers(rec_codes: list[str], product_name: str, query_code: str) -> str | None:
@@ -272,8 +286,9 @@ def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
     matched = [h for h in hits if h.okpd2_match]
     for h in hits:
         h.code_tier = 0
-    for h, t in zip(matched, code_tiers([h.okpd2_codes for h in matched], okpd2)):
-        h.code_tier = 3 if t is None else t
+    tiers = code_tiers([h.okpd2_codes for h in matched], okpd2, [h.product_name for h in matched])
+    for h, t in zip(matched, tiers):
+        h.code_tier = 4 if t is None else t
 
 
 def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
@@ -324,18 +339,23 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
             # их уже спрашивал: там предки и потомки делят ОДИН лимит 12, и 14 «Катализаторов» класса
             # «20» с большим score вытесняли из него и потомков широкого кода, и саму ТОЧНУЮ позицию
             # (тест на подменённом корпусе, ревью PR #177, раунд 2). Свой лимит — свои места.
+            # ⚠ Предки и потомки — ДВУМЯ запросами, а не одним (раунд 3): у предка уровня «…YZ0» бывает
+            # десятки позиций (28.99.39.190 — 77), и в общем лимите они вытесняли бы и точную позицию.
+            # Потомки идут первыми: в их формах есть сам код, а точная позиция побеждает всё.
             exact = any(code_relation(h.okpd2_codes, okpd2) == 0 for h in hits if h.okpd2_match)
             up = [] if exact else [f for f in okpd2_ref.okpd2_ancestor_forms(okpd2) if f not in prefixes]
             down = [] if exact else okpd2_ref.okpd2_descendant_forms(okpd2)
-            should = ([models.FieldCondition(key="okpd2_codes", match=models.MatchAny(any=up))] if up else []) + \
-                     ([models.FieldCondition(key="okpd2_prefixes", match=models.MatchAny(any=down))] if down else [])
-            for p in (_hybrid(query, max(limit, 12), qfilter=models.Filter(should=should), qvec=qvec)
-                      if should else []):
-                h = _to_hit(p)
-                if h.source_anchor not in seen and okpd2_match(h.okpd2_codes, okpd2):
-                    h.okpd2_match = True
-                    seen.add(h.source_anchor)
-                    hits.append(h)
+            for key, forms in (("okpd2_prefixes", down), ("okpd2_codes", up)):
+                if not forms or (key == "okpd2_codes" and any(
+                        code_relation(h.okpd2_codes, okpd2) == 0 for h in hits if h.okpd2_match)):
+                    continue                   # точная пришла с потомками — предки ей не соперники
+                flt = models.Filter(must=[models.FieldCondition(key=key, match=models.MatchAny(any=forms))])
+                for p in _hybrid(query, max(limit, 12), qfilter=flt, qvec=qvec):
+                    h = _to_hit(p)
+                    if h.source_anchor not in seen and okpd2_match(h.okpd2_codes, okpd2):
+                        h.okpd2_match = True
+                        seen.add(h.source_anchor)
+                        hits.append(h)
         _set_code_tiers(hits, okpd2)
 
     # Полный порядок ДО усечения окна: совпавшие по коду выше, далее score, далее якорь.

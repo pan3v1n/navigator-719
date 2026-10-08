@@ -142,7 +142,31 @@ class TestTargetChoice(unittest.TestCase):
         hits = [_hit(f"кат{i}", ["20"], 0.9 - i / 100) for i in range(5)] + \
                [_hit("углеводороды", ["20.14.11.110"], 0.3)]
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "20.14")], ["углеводороды"])
-        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [3] * 5 + [2])
+        self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [4] * 5 + [3])
+
+    def test_grouping_position_wins_inside_nearest_tier(self):
+        """Ревью PR #177, раунд 3: у 28.25.11.110 три позиции — «Теплообменники» (XV/5, сама
+        группировка) и две с названными товарами (III/177, III/178). Для «кожухотрубчатых»
+        28.25.11.111 целевая — группировка, даже если у пищевой аппаратуры score больше."""
+        hits = [_hit("III/177", ["28.25.11.110"], 0.9,
+                     name="Аппараты теплообменные пластинчатые для пищевой промышленности"),
+                _hit("XV/5", ["28.25.11.110"], 0.1, name="Теплообменники")]
+        self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "28.25.11.111")], ["XV/5"])
+
+    def test_scope_qualifiers_stay_both_without_sibling_swap(self):
+        """Ревью PR #177, раунд 3: «Светодиоды прочие» 26.11.22.219 поднимаются к двум позициям
+        26.11.22.210 с противоположными областями. Код область не различает — целевые ОБЕ, и без
+        подмены «в части белого» на 26.11.22.216 «Светодиоды белого диапазона»."""
+        white = _hit("IV/3", ["26.11.22.216"], 0.4, name="Светодиоды белого диапазона", match=False)
+        # ⚠ У белых в корпусе 15 операций — без них подмена сиблингом не срабатывала бы вовсе, и тест
+        # её не видел (мутация «подмена и у квалификаторов» выжила).
+        white.requirement_blocks = [{"component": "операции", "operations": [
+            {"text": f"операция {i}", "points": 10} for i in range(15)]}]
+        hits = [_hit("IV/2", ["26.11.22.210"], 0.9, name="Светодиоды (в части светодиодов белого диапазона)"),
+                _hit("IV/5", ["26.11.22.210"], 0.5, name="Светодиоды (за исключением светодиодов белого диапазона)"),
+                white]
+        self.assertEqual(sorted(h.source_anchor for h in pipeline.target_hits(hits, "26.11.22.219")),
+                         ["IV/2", "IV/5"])
 
     def test_ancestor_gives_one_record(self):
         """Без точного кода — ОДНА целевая. Находку раунда 1 («предок отдаёт все записи») раунд 2
@@ -157,36 +181,39 @@ def _point(anchor, codes, score):
         "okpd2_codes": codes, "source_anchor": anchor, "requirement_blocks": []})
 
 
+CAT = "Углеводороды ациклические насыщенные"      # официальное имя 20.14.11.110 — позиция-группировка
+
+
 class TestSearchFetchesNewRelations(unittest.TestCase):
-    """`search` добирает новые связи ОТДЕЛЬНЫМ запросом и ставит ближайшего предка первым."""
+    """`search` добирает новые связи отдельными запросами и ставит ближайшего предка первым."""
 
     def _run(self, code, pool_has_category=False):
         """Подмена `_hybrid` ФИЛЬТРУЕТ маленький корпус по правилам Qdrant (MatchAny по
-        `okpd2_codes` и по посегментным префиксам), а не отвечает заготовкой: иначе тест проверял
-        бы подмену. Катализаторы с кодом класса «20» — score выше, чем у подкатегории."""
+        `okpd2_codes` и по посегментным префиксам, `must` и `should`), а не отвечает заготовкой:
+        иначе тест проверял бы подмену. Катализаторы класса «20» — score выше, чем у подкатегории."""
         calls = []
-        corpus = [(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)] + \
-                 [("подкатегория", ["20.14.11.110"], 0.05)]
+        corpus = [(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)] +                  [(CAT, ["20.14.11.110"], 0.05)]
+
+        def cond_ok(codes, cond):
+            field = codes if cond.key == "okpd2_codes" else [p for c in codes for p in _seg_prefixes(c)]
+            return bool(set(cond.match.any) & set(field))
 
         def ok(codes, qfilter):
             if qfilter is None:
                 return True
-            for cond in qfilter.should:
-                vals = set(cond.match.any)
-                field = codes if cond.key == "okpd2_codes" else [p for c in codes for p in _seg_prefixes(c)]
-                if vals & set(field):
-                    return True
-            return False
+            if qfilter.must:
+                return all(cond_ok(codes, c) for c in qfilter.must)
+            return any(cond_ok(codes, c) for c in qfilter.should or [])
 
         def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None):
-            calls.append([v for cond in (getattr(qfilter, "should", None) or []) for v in cond.match.any])
+            conds = (getattr(qfilter, "should", None) or []) + (getattr(qfilter, "must", None) or [])
+            calls.append([v for cond in conds for v in cond.match.any])
             rows = [r for r in corpus if ok(r[1], qfilter)]
             if qfilter is None and not pool_has_category:
-                rows = [r for r in rows if r[0] != "подкатегория"]    # текстом пул её не находит
+                rows = [r for r in rows if r[0] != CAT]    # текстом пул её не находит
             return [_point(*r) for r in sorted(rows, key=lambda r: -r[2])[:limit]]
 
-        with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid), \
-                mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
+        with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid),                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
             hits = retriever.search("Н-бутан очищенный", okpd2=code, limit=8)
         return hits, calls
 
@@ -194,33 +221,34 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         """Ревью PR #177: «20.14» — подкатегория внутри группы выше 14 «Катализаторов» класса «20»,
         хотя у тех score больше; окно 8 занимают не одни катализаторы."""
         hits, _calls = self._run("20.14")
-        self.assertEqual(hits[0].source_anchor, "подкатегория")
-        self.assertEqual(hits[0].code_tier, 2)
+        self.assertEqual(hits[0].source_anchor, CAT)
+        self.assertEqual(hits[0].code_tier, 3)
 
     def test_subcode_pulls_and_ranks_its_category_first(self):
         hits, calls = self._run("20.14.11.112")
-        self.assertEqual(hits[0].source_anchor, "подкатегория")
-        self.assertEqual(hits[0].code_tier, 1)
+        self.assertEqual(hits[0].source_anchor, CAT)
+        self.assertEqual(hits[0].code_tier, 1)            # позиция — сама группировка
         self.assertTrue(all(h.okpd2_match for h in hits))
-        # прежний добор не изменился: в нём нет новых форм
+        # прежний добор не изменился: в нём нет новых форм; подкатегорию приносит новый запрос
         self.assertNotIn("20.14.11.110", calls[1])
-        self.assertIn("20.14.11.110", calls[2])
+        self.assertTrue(any("20.14.11.110" in c for c in calls[2:]))
 
     def test_class_code_makes_no_extra_call(self):
         _hits, calls = self._run("20")
-        self.assertEqual(len(calls), 2)        # пул + прежний добор, нового запроса нет
+        self.assertEqual(len(calls), 2)        # «Катализаторы» с кодом «20» — точные: новых запросов нет
 
     def test_exact_position_found_makes_no_extra_call(self):
         """Ревью PR #177: запрос новых связей (~43 мс) не нужен, когда точная позиция уже найдена."""
         hits, calls = self._run("20.14.11.110", pool_has_category=True)
-        self.assertEqual(hits[0].source_anchor, "подкатегория")
+        self.assertEqual(hits[0].source_anchor, CAT)
         self.assertEqual(len(calls), 2)
 
     def test_exact_position_crowded_out_is_recovered(self):
         """Прежний добор делит лимит 12 между предками и потомками: 14 катализаторов класса «20» с
-        большим score вытесняли из него точную позицию. Новый запрос с точными формами её возвращает."""
+        большим score вытесняли из него точную позицию. Запрос потомков (в его формах — сам код)
+        её возвращает, и предков после этого не спрашиваем."""
         hits, calls = self._run("20.14.11.110")
-        self.assertEqual(hits[0].source_anchor, "подкатегория")
+        self.assertEqual(hits[0].source_anchor, CAT)
         self.assertEqual(hits[0].code_tier, 0)
         self.assertEqual(len(calls), 3)
 
@@ -252,6 +280,8 @@ class TestGroupNoteInContext(unittest.TestCase):
 
     def test_grouping_name_is_the_official_one(self):
         self.assertTrue(okpd2_ref.is_grouping_name("20.14.11.110", "Углеводороды ациклические насыщенные <11>"))
+        # раунд 3: по ключу — «…000» в корпусе, «32.50.12» в справочнике
+        self.assertTrue(okpd2_ref.is_grouping_name("32.50.12.000", "Стерилизаторы хирургические или лабораторные"))
         self.assertFalse(okpd2_ref.is_grouping_name("20", "Катализаторы гидроочистки"))
         self.assertFalse(okpd2_ref.is_grouping_name("99.99.99", "что угодно"))
 
@@ -277,16 +307,15 @@ class TestDialogCodeReachesPrompt(unittest.TestCase):
     передал код продукции из истории в `format_context`. Тест `format_context` напрямую этого
     не проверяет — на бою «нельзя» прозвучало именно на втором ходе диалога."""
 
-    def _plan(self, own_position: bool):
-        hit = _hit("Приложение, Раздел XXI, позиция 142", ["20.14.11.110"], 0.5,
-                   name="Углеводороды ациклические насыщенные")
+    def _plan(self, own_position, name="Углеводороды ациклические насыщенные"):
+        hit = _hit("Приложение, Раздел XXI, позиция 142", ["20.14.11.110"], 0.5, name=name)
         history = [{"role": "user", "content": "Н-бутан очищенный 20.14.11.112"},
                    {"role": "assistant", "content": "Точной позиции не нашёл."}]
         with mock.patch.object(pipeline, "embed_query", lambda *a, **k: [0.0] * 8), \
                 mock.patch.object(pipeline, "search", lambda *a, **k: [hit]), \
                 mock.patch.object(pipeline, "search_cases", lambda *a, **k: []), \
                 mock.patch.object(pipeline, "dense_top1", lambda *a, **k: 0.95), \
-                mock.patch.object(retriever, "has_exact_position", lambda code: own_position), \
+                mock.patch.object(retriever, "has_exact_position", own_position if callable(own_position) else (lambda code: own_position)), \
                 mock.patch.object(pipeline.settings, "RERANK_ENABLED", False):
             plan = pipeline._plan_answer("можно ли применять к нему требования позиции 20.14.11.110?",
                                          okpd2="20.14.11.110", history=history)
@@ -294,6 +323,13 @@ class TestDialogCodeReachesPrompt(unittest.TestCase):
 
     def test_second_turn_with_group_code_mentions_product_code(self):
         self.assertIn("названный ранее в диалоге, 20.14.11.112 ВХОДИТ В ГРУППИРОВКУ", self._plan(False))
+
+    def test_own_position_check_is_lazy(self):
+        """Раунд 3: запрос к Qdrant «есть ли своя позиция» — только когда строка напечаталась бы.
+        Позиция не группировка — строки нет, и проверка не нужна."""
+        asked = []
+        self._plan(lambda code: asked.append(code) or False, name="Катализаторы гидроочистки")
+        self.assertEqual(asked, [])
 
     def test_dialog_code_with_own_position_gets_no_note(self):
         """Ревью PR #177, раунд 2: у кода из прошлого хода СВОЯ позиция («прибор 26.51.12.130», затем

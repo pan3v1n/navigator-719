@@ -631,8 +631,12 @@ def is_grouping_name(code: str | None, product_name: str | None) -> bool:
     """Наименование позиции — официальное наименование её кода по справочнику, то есть позиция и
     есть вся группировка, а не названные товары внутри неё («из 20 Катализаторы …»). Кода в
     справочнике нет — False: утверждать охват не на чем."""
-    official = _okpd2_names().get((code or "").strip())
-    return bool(official) and _name_key(official) == _name_key(product_name)
+    # ⚠ По КЛЮЧУ, а не по строке (ревью PR #177, раунд 3): «32.50.12.000 Стерилизаторы …» в
+    # справочнике записан как «32.50.12» — по строке группировка не узнавалась.
+    k = okpd2_key(code)
+    names = _okpd2_names()
+    official = [names[f] for f in okpd2_ancestor_forms(code) if okpd2_key(f) == k and f in names]
+    return bool(k) and any(_name_key(o) == _name_key(product_name) for o in official)
 
 
 def okpd2_name(code: str | None) -> str | None:
