@@ -333,6 +333,85 @@ class TestSummary(_PanelDB):
         self.assertIn('href="/admin/users?status=no_profile"', html)
 
 
+class TestLeadsToAccounts(_PanelDB):
+    """Заявки → учётки (этап 3): статус и заметка, «Создать учётку из заявки» с переносом
+    организации, ИНН и контактов и тарифом, заявка становится «Подключена»."""
+
+    def setUp(self):
+        super().setUp()
+        with self.Session() as db:
+            self.lead = q.create_lead(db, tariff="Старт", name="Иван", org="ООО «Станкозавод»",
+                                      inn="4632000000", email="I.Petrov@zavod.ru", phone="+7 900 000-00-00").id
+            self.other = q.create_lead(db, tariff="Для организаций", name="Анна", org="АО «Прибор»",
+                                       inn="4632111111", email="anna@pribor.ru", phone="+7 900 111-11-11").id
+
+    def _lead(self, lid):
+        with self.Session() as db:
+            return q.get_lead(db, lid)
+
+    def test_status_note_and_filter(self):
+        self.assertEqual(self._lead(self.lead).status, "new")
+        r = self.as_admin.post(f"/api/admin/leads/{self.lead}/status",
+                               data={"status": "in_work", "note": "звонил 09.10"}, follow_redirects=False)
+        self.assertEqual((r.status_code, r.headers["location"]), (303, f"/admin/leads#lead-{self.lead}"))
+        lead = self._lead(self.lead)
+        self.assertEqual((lead.status, lead.note), ("in_work", "звонил 09.10"))
+        self.assertIsNotNone(lead.status_at)
+        self.assertEqual(self.as_admin.post(f"/api/admin/leads/{self.lead}/status",
+                                            data={"status": "lost"}).status_code, 422)
+        page = self.as_admin.get("/admin/leads?status=in_work").text
+        self.assertIn("ООО «Станкозавод»", page)
+        self.assertNotIn("АО «Прибор»", page, "фильтр статуса не работает")
+        self.assertIn("В работе · 1", page)
+
+    def test_account_from_lead(self):
+        page = self.as_admin.get("/admin/leads").text
+        self.assertIn('name="username" value="i.petrov"', page, "логин не предложен из email")
+        r = self.as_admin.post(f"/api/admin/leads/{self.lead}/account",
+                               data={"username": "i.petrov", "role": "user", "plan": "Старт"})
+        self.assertEqual(r.status_code, 200)
+        self.assertIn(f"Учётка создана из заявки №{self.lead}", r.text)
+        pw = r.text.split('id="new-password">')[1].split("<")[0]
+        with self.Session() as db:
+            u = q.get_user_by_username(db, "i.petrov")
+        self.assertTrue(verify_password(pw, u.password_hash))
+        self.assertEqual((u.org, u.inn, u.email, u.phone, u.role), ("ООО «Станкозавод»", "4632000000",
+                                                                    "I.Petrov@zavod.ru", "+7 900 000-00-00", "user"))
+        self.assertEqual((u.plan, plans.msk_date(u.plan_started_at)), ("Старт", plans.msk_today()))
+        self.assertFalse(u.consent, "согласие за пользователя не ставится — его даёт анкета")
+        lead = self._lead(self.lead)
+        self.assertEqual((lead.status, lead.user_id), ("connected", u.id))
+        again = self.as_admin.post(f"/api/admin/leads/{self.lead}/account", data={"username": "other.login"})
+        self.assertEqual(again.status_code, 400)
+        self.assertIn("уже создана: i.petrov", again.text)
+        self.assertIn(f'href="/admin/users/{u.id}">i.petrov</a>', self.as_admin.get("/admin/leads").text)
+
+    def test_suggestion_avoids_taken_login_and_bad_input_keeps_the_lead(self):
+        self._mk("i.petrov")
+        self.assertIn('name="username" value="i.petrov2"', self.as_admin.get("/admin/leads").text)
+        for data, msg in (({"username": "i.petrov"}, "уже занят"), ({"username": "Иван"}, "Логин — латинские"),
+                          ({"username": "ok.login", "plan": "Безлимит"}, "Неизвестный тариф")):
+            with self.subTest(data=data):
+                r = self.as_admin.post(f"/api/admin/leads/{self.lead}/account", data=data)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(msg, r.text)
+        self.assertEqual(self._lead(self.lead).status, "new")
+        self.assertIsNone(self._lead(self.lead).user_id)
+
+    def test_only_admin(self):
+        anon = self.TestClient(self.app)
+        for path in (f"/api/admin/leads/{self.lead}/status", f"/api/admin/leads/{self.lead}/account"):
+            self.assertEqual(anon.post(path, data={"status": "new", "username": "x.y"}).status_code, 401)
+        self.assertEqual(self._lead(self.lead).status, "new")
+
+    def test_summary_counts_new_leads(self):
+        from app.api import admin_summary
+
+        self.as_admin.post(f"/api/admin/leads/{self.lead}/status", data={"status": "rejected"})
+        with self.Session() as db:
+            self.assertEqual(admin_summary.summary_view(db)["leads"]["new"], 1)
+
+
 class TestAccessAndNavigation(_PanelDB):
     PAGES = ("/admin", "/admin/users", "/admin/leads", "/admin/quality", "/admin/dialogs", "/admin/trial")
 

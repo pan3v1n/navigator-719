@@ -1,21 +1,67 @@
 {% extends "admin/base.html" %}
 {% block content %}
-<div class="adm-head"><h1>Заявки</h1></div>
-  <!-- ===== ЗАЯВКИ С ЛЕНДИНГА (ПДн: только admin; фильтры периода сюда не применяются) ===== -->
-  <section id="tab-leads" class="adm-section">
-    <div class="card">
-      <h3>С сайта 719-навигатор.рф · {{ leads_total }}{% if leads_total > leads|length %} (показаны последние {{ leads|length }}){% endif %}</h3>
-      <p class="muted">Заявки хранятся не дольше 12 месяцев (политика ПДн, раздел 9) и удаляются автоматически. По отзыву согласия — «Удалить».</p>
-      <div class="feed">
-        {% for l in leads %}
-        <div class="feed-row">
-          <span class="feed-q"><b>{{ l.name }}</b> · {{ l.org }} · ИНН {{ l.inn }} · тариф «{{ l.tariff }}»{% if l.promo %} · промокод {{ l.promo }}{% endif %}</span>
-          <span class="feed-meta"><a href="mailto:{{ l.email }}">{{ l.email }}</a> · {{ l.phone }} · {{ l.created_at.strftime('%d.%m.%Y %H:%M') }} UTC · согласие на ПДн получено
-            <form method="post" action="/api/admin/leads/{{ l.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить заявку {{ l.id }}? Это необратимо.')"><button type="submit" class="link">Удалить</button></form></span>
-        </div>
-        {% else %}<p class="empty">Заявок пока нет.</p>{% endfor %}
-      </div>
-    </div>
-  </section>
+<div class="adm-head">
+  <h1>Заявки</h1>
+  <span class="muted">{{ leads_total }} всего{% if leads_total > shown %} · показаны последние {{ shown }}{% endif %}</span>
+</div>
+<nav class="adm-filters" aria-label="Статус заявки">
+  <a class="seg-chip{% if not status %} on{% endif %}" href="/admin/leads">Все</a>
+  {% for key, label in statuses.items() %}
+  <a class="seg-chip{% if key == status %} on{% endif %}" href="/admin/leads?status={{ key }}">{{ label }} · {{ counts[key] }}</a>
+  {% endfor %}
+</nav>
+<p class="muted">Заявки с сайта 719-навигатор.рф — персональные данные: видны только здесь и хранятся не дольше
+  12 месяцев (политика ПДн, раздел 9), затем удаляются автоматически. По отзыву согласия — «Удалить заявку».</p>
+{% if error %}<div class="adm-note err" role="alert">Заявка №{{ error_lead }}: {{ error }}</div>{% endif %}
 
+{% for r in rows %}{% set l = r.lead %}
+<section class="adm-card adm-lead" id="lead-{{ l.id }}">
+  <div class="adm-lead-head">
+    <div>
+      <h2>№{{ l.id }} · {{ l.org }}</h2>
+      <div class="muted">{{ r.created }} · тариф «{{ l.tariff }}»{% if l.promo %} · промокод {{ l.promo }}{% endif %}</div>
+    </div>
+    <span class="badge st-{{ l.status }}">{{ statuses.get(l.status, l.status) }}</span>
+  </div>
+  <dl class="adm-dl">
+    <dt>Контакт</dt><dd>{{ l.name }}</dd>
+    <dt>Email</dt><dd><a href="mailto:{{ l.email }}">{{ l.email }}</a></dd>
+    <dt>Телефон</dt><dd>{{ l.phone }}</dd>
+    <dt>ИНН</dt><dd>{{ l.inn }}</dd>
+    <dt>Учётка</dt><dd>{% if r.linked %}<a href="/admin/users/{{ r.linked_id }}">{{ r.linked }}</a>{% else %}не создана{% endif %}</dd>
+  </dl>
+  <form method="post" action="/api/admin/leads/{{ l.id }}/status" class="adm-form">
+    <label>Статус
+      <select name="status">{% for key, label in statuses.items() %}<option value="{{ key }}"{% if key == l.status %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+    <label class="adm-grow">Заметка <input name="note" value="{{ l.note or '' }}" maxlength="500" placeholder="кто связался, о чём договорились"></label>
+    <button class="ds-btn secondary" type="submit">Сохранить</button>
+  </form>
+  {% if not r.linked %}
+  {% set f = form if error_lead == l.id else {} %}
+  <details class="adm-create"{% if error_lead == l.id %} open{% endif %}>
+    <summary>Создать учётку из заявки</summary>
+    <form method="post" action="/api/admin/leads/{{ l.id }}/account" class="adm-form">
+      <label>Логин <input name="username" value="{{ f.username or r.suggest }}" required maxlength="64"
+             pattern="[a-z0-9][a-z0-9._\-]{2,63}" autocomplete="off"></label>
+      <label>Роль <select name="role">{% for key, label in roles.items() %}<option value="{{ key }}"{% if key == (f.role or 'user') %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
+      {% set chosen = f.plan if f else r.plan %}
+      <label>Тариф
+        <select name="plan">
+          <option value=""{% if not chosen %} selected{% endif %}>без тарифа</option>
+          <optgroup label="Платные">{% for p in paid_plans %}<option value="{{ p }}"{% if p == chosen %} selected{% endif %}>{{ p }}</option>{% endfor %}</optgroup>
+          <optgroup label="Внутренние">{% for p in internal_plans %}<option value="{{ p }}"{% if p == chosen %} selected{% endif %}>{{ p }}</option>{% endfor %}</optgroup>
+        </select></label>
+      <button class="ds-btn" type="submit">Создать учётку</button>
+    </form>
+    <p class="muted">В учётку перенесутся организация, ИНН, email и телефон; заявка станет «Подключена». Пароль
+      покажется один раз на карточке учётки. Тариф — с сегодняшнего дня.</p>
+  </details>
+  {% endif %}
+  <form method="post" action="/api/admin/leads/{{ l.id }}/delete" onsubmit="return confirm('Удалить заявку №{{ l.id }}? Это необратимо.')">
+    <button type="submit" class="ds-link adm-danger-link">Удалить заявку</button>
+  </form>
+</section>
+{% else %}
+<p class="muted">{{ 'Заявок с таким статусом нет.' if status else 'Заявок пока нет.' }}</p>
+{% endfor %}
 {% endblock %}

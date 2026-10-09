@@ -122,6 +122,17 @@ def delete_user(db: Session, user_id: int) -> bool:
     return True
 
 
+def prefill_contacts(db: Session, user_id: int, *, email: str | None, phone: str | None) -> None:
+    """Контакты новой учётки из заявки (09.10.2026). Пользователь подтверждает их сам в анкете
+    кабинета вместе с согласием — до этого они только подставлены."""
+    u = db.get(User, user_id)
+    if not u:
+        return
+    u.email = (email or "").strip() or None
+    u.phone = (phone or "").strip() or None
+    db.commit()
+
+
 def count_active_admins(db: Session) -> int:
     return db.execute(select(func.count(User.id)).where(
         User.role == "admin", User.blocked_at.is_(None))).scalar_one()
@@ -387,8 +398,32 @@ def list_leads(db: Session, limit: int | None = None) -> list[Lead]:
     return list(db.execute(stmt).scalars())
 
 
-def count_leads(db: Session) -> int:
-    return db.execute(select(func.count(Lead.id))).scalar_one()
+def count_leads(db: Session, status: str | None = None) -> int:
+    stmt = select(func.count(Lead.id))
+    if status:
+        stmt = stmt.where(Lead.status == status)
+    return db.execute(stmt).scalar_one()
+
+
+def get_lead(db: Session, lead_id: int) -> Lead | None:
+    return db.get(Lead, lead_id)
+
+
+def set_lead_status(db: Session, lead_id: int, status: str, note: str | None = None,
+                    user_id: int | None = None) -> Lead | None:
+    """Статус заявки (+ момент смены), заметка администратора и учётка, созданная из заявки."""
+    lead = db.get(Lead, lead_id)
+    if not lead:
+        return None
+    if lead.status != status:
+        lead.status, lead.status_at = status, _utcnow()
+    if note is not None:
+        lead.note = note.strip() or None
+    if user_id is not None:
+        lead.user_id = user_id
+    db.commit()
+    db.refresh(lead)
+    return lead
 
 
 # Срок хранения заявки — обещание политики ПДн (раздел 9: «не дольше 12 месяцев»). Исполняется

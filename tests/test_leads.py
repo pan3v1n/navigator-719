@@ -169,7 +169,7 @@ class TestLeadRetention(unittest.TestCase):
         import ast
 
         # админ-панель пересобрана 09.10.2026: заявки — свой раздел /admin/leads
-        for rel, fn in (("app/api/leads.py", "submit_lead"), ("app/api/admin.py", "admin_leads_page")):
+        for rel, fn in (("app/api/leads.py", "submit_lead"), ("app/api/admin.py", "_leads_response")):
             tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
             node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn)
             calls = {c.attr for c in ast.walk(node) if isinstance(c, ast.Attribute)}
@@ -198,7 +198,7 @@ class TestLeadsInAdminOnly(unittest.TestCase):
             src = (ROOT / rel).read_text(encoding="utf-8")
             callers += [n.name for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
                         and any(isinstance(c, ast.Attribute) and c.attr == "list_leads" for c in ast.walk(n))]
-        self.assertEqual(callers, ["admin_leads_page"])
+        self.assertEqual(callers, ["_leads_response"])   # раздел «Заявки» и ре-рендер его ошибки
 
 
 class TestLandingGuards(unittest.TestCase):

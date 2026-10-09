@@ -183,19 +183,11 @@ def admin_create_user(request: Request, username: str = Form(default=""), role: 
     пароль не должен жить ни в URL, ни в куке. Регион региональному участнику с логином вида
     `kursk.expert2` подставит анкета (`regions`)."""
     login, role = username.strip().lower(), role.strip()
-    error = None
-    if not _USERNAME_RE.match(login):
-        error = ("Логин — латинские буквы, цифры, точка, дефис или подчёркивание, от 3 до 64 "
-                 "символов, начинается с буквы или цифры.")
-    elif role not in ACCOUNT_ROLES:
-        error = "Неизвестная роль."
-    else:
-        with get_session() as db:
-            if q.get_user_by_username(db, login) is not None:
-                error = f"Логин «{login}» уже занят."
-            else:
-                password = generate_password()
-                uid = q.create_user(db, login, hash_password(password), role=role).id
+    with get_session() as db:
+        error = _new_account_error(db, login, role)
+        if not error:
+            password = generate_password()
+            uid = q.create_user(db, login, hash_password(password), role=role).id
     if error:
         with get_session() as db:
             activity = q.user_activity(db)
@@ -205,6 +197,18 @@ def admin_create_user(request: Request, username: str = Form(default=""), role: 
                      create_error=error, create_form={"username": login, "role": role})
     logger.info(f"учётка: admin_id={admin.id} создал «{login}» ({role})")  # пароль в журнал — никогда
     return _card(request, admin, uid, password_shown=password, notice="Учётка создана.")
+
+
+def _new_account_error(db, login: str, role: str) -> str:
+    """Причина, по которой учётку с таким логином и ролью завести нельзя, или «»."""
+    if not _USERNAME_RE.match(login):
+        return ("Логин — латинские буквы, цифры, точка, дефис или подчёркивание, от 3 до 64 "
+                "символов, начинается с буквы или цифры.")
+    if role not in ACCOUNT_ROLES:
+        return "Неизвестная роль."
+    if q.get_user_by_username(db, login) is not None:
+        return f"Логин «{login}» уже занят."
+    return ""
 
 
 def _card(request: Request, admin: User, user_id: int, *, password_shown: str | None = None,
@@ -380,18 +384,108 @@ def admin_set_org(user_id: int, org: str = Form(default=""), inn: str = Form(def
 # --------------------------------------------------------------------------- #
 # Заявки с лендинга (ПДн: только здесь, за ролью admin)
 # --------------------------------------------------------------------------- #
+LEAD_STATUSES = {"new": "Новая", "in_work": "В работе", "connected": "Подключена", "rejected": "Отказ"}
+
+
+def _suggest_login(db, lead) -> str:
+    """Логин по умолчанию для учётки из заявки — из email (часть до @), латиницей, свободный."""
+    base = re.sub(r"[^a-z0-9._-]", "", (lead.email or "").split("@")[0].lower()).strip("._-")
+    base = (base or f"client{lead.id}")[:56]
+    if len(base) < 3:
+        base = f"{base}.client"
+    login, n = base, 1
+    while q.get_user_by_username(db, login) is not None:
+        n += 1
+        login = f"{base}{n}"
+    return login
+
+
 @router.get("/admin/leads", response_class=HTMLResponse)
-def admin_leads_page(request: Request):
-    """Заявки с лендинга. Просроченные (срок из политики ПДн) удаляются при каждом открытии;
-    на страницу — не больше LEADS_ON_PAGE."""
+def admin_leads_page(request: Request, status: str = ""):
+    """Заявки с лендинга: статус, заметка, «Создать учётку из заявки»."""
     gate = _gate(request)
     if isinstance(gate, RedirectResponse):
         return gate
+    return _leads_response(request, gate, status=status)
+
+
+def _leads_response(request: Request, admin: User, *, status: str = "", error: str = "",
+                    error_lead: int | None = None, form: dict | None = None, status_code: int = 200):
+    """Единственное место, где читаются заявки (ПДн): раздел «Заявки» и ре-рендер его ошибки.
+    Просроченные (срок из политики ПДн) удаляются при каждом открытии; на страницу — не больше
+    LEADS_ON_PAGE."""
+    status = status if status in LEAD_STATUSES else ""
     with get_session() as db:
         q.purge_old_leads(db)
         leads = q.list_leads(db, limit=LEADS_ON_PAGE)
+        counts = {s: q.count_leads(db, s) for s in LEAD_STATUSES}
         leads_total = q.count_leads(db)
-    return _page(request, gate, "leads", "leads", "Заявки", leads=leads, leads_total=leads_total)
+        rows = []
+        for lead in leads:
+            if status and lead.status != status:
+                continue
+            linked = q.get_user(db, lead.user_id) if lead.user_id else None
+            rows.append({"lead": lead, "linked": linked.username if linked else "",
+                         "linked_id": linked.id if linked else None,
+                         "suggest": _suggest_login(db, lead) if not lead.user_id else "",
+                         "plan": lead.tariff if lead.tariff in plans.ALL_PLANS else "",
+                         "created": _msk(lead.created_at)})
+    return _page(request, admin, "leads", "leads", "Заявки", status_code=status_code, rows=rows,
+                 leads_total=leads_total, shown=len(leads), counts=counts, statuses=LEAD_STATUSES,
+                 status=status, error=error, error_lead=error_lead, form=form or {},
+                 roles=ACCOUNT_ROLES, paid_plans=list(PLAN_LIMITS), internal_plans=list(plans.INTERNAL_PLANS))
+
+
+@router.post("/api/admin/leads/{lead_id}/status")
+def admin_lead_status(lead_id: int, status: str = Form(default=""), note: str = Form(default=""),
+                      admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Статус заявки и заметка администратора (кто звонил, о чём договорились)."""
+    if status not in LEAD_STATUSES:
+        raise HTTPException(status_code=422, detail="Неизвестный статус заявки")
+    with get_session() as db:
+        if q.set_lead_status(db, lead_id, status, note=note) is None:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+    logger.info(f"заявка: admin_id={admin.id} lead_id={lead_id} → {status}")
+    return RedirectResponse(f"/admin/leads#lead-{lead_id}", status_code=303)
+
+
+@router.post("/api/admin/leads/{lead_id}/account", response_class=HTMLResponse)
+def admin_lead_account(request: Request, lead_id: int, username: str = Form(default=""),
+                       role: str = Form(default="user"), plan: str = Form(default=""),
+                       admin: User = Depends(require_admin)):
+    """Учётка из заявки: организация, ИНН, email и телефон переносятся из заявки, тариф — по
+    выбору admin'а (подставлен из заявки, если такой есть). Заявка становится «Подключена» и
+    ссылается на учётку. Пароль — один раз, на карточке, как при обычном создании."""
+    login, role, plan = username.strip().lower(), role.strip(), plan.strip()
+    form = {"username": login, "role": role, "plan": plan}
+    with get_session() as db:
+        lead = q.get_lead(db, lead_id)
+        if lead is None:
+            raise HTTPException(status_code=404, detail="Заявка не найдена")
+        if lead.user_id:
+            linked = q.get_user(db, lead.user_id)
+            error = f"Учётка по этой заявке уже создана: {linked.username if linked else lead.user_id}."
+        elif plan and plan not in plans.ALL_PLANS:
+            error = f"Неизвестный тариф «{plan}»."
+        else:
+            error = _new_account_error(db, login, role)
+        if not error:
+            password = generate_password()
+            uid = q.create_user(db, login, hash_password(password), role=role).id
+            q.set_user_org(db, uid, lead.org, lead.inn)
+            q.prefill_contacts(db, uid, email=lead.email, phone=lead.phone)
+            if plan:
+                day = plans.msk_today()
+                until = day + timedelta(days=plans.TRIAL_DAYS) if plan == plans.TRIAL_PLAN else None
+                q.set_user_plan(db, uid, plan, plans.anchor_from_date(day),
+                                plans.anchor_from_date(until) if until else None)
+            q.set_lead_status(db, lead_id, "connected", user_id=uid)
+    if error:
+        return _leads_response(request, admin, error=error, error_lead=lead_id, form=form,
+                               status_code=400)
+    logger.info(f"заявка: admin_id={admin.id} создал из lead_id={lead_id} учётку «{login}» ({role})")
+    return _card(request, admin, uid, password_shown=password,
+                 notice=f"Учётка создана из заявки №{lead_id}: организация, ИНН и контакты перенесены.")
 
 
 @router.post("/api/admin/leads/{lead_id}/delete")

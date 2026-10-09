@@ -166,3 +166,9 @@ class Lead(Base):
     phone: Mapped[str] = mapped_column(String(32))
     promo: Mapped[str | None] = mapped_column(String(64), nullable=True)
     consent_at: Mapped[datetime] = mapped_column(DateTime)  # согласие обязательно — без него заявки нет
+    # Работа с заявкой в админке (09.10.2026): статус, заметка администратора и учётка, созданная
+    # из заявки. Статусы — `LEAD_STATUSES` в app/api/admin.py.
+    status: Mapped[str] = mapped_column(String(16), default="new", nullable=False, server_default="new")
+    status_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # логическая ссылка на users.id

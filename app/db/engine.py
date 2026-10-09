@@ -55,6 +55,12 @@ def _ensure_columns() -> None:
             ("org", "TEXT"),                  # организация и ИНН — заполняет admin
             ("inn", "VARCHAR(12)"),
         ],
+        "leads": [  # работа с заявкой в админке (09.10.2026); старые заявки — «новые»
+            ("status", "VARCHAR(16) NOT NULL DEFAULT 'new'"),
+            ("status_at", "DATETIME"),
+            ("note", "TEXT"),
+            ("user_id", "INTEGER"),
+        ],
     }
     with engine.begin() as conn:
         for table, cols in wanted.items():

@@ -117,7 +117,8 @@ def summary_view(db, now: datetime | None = None) -> dict:
             "no_profile": sum(1 for u in users if u.role == "user"
                               and not (u.consent and u.full_name and u.region)),
         },
-        "leads": {"total": q.count_leads(db), "week": q.count_leads_since(db, today - timedelta(days=7))},
+        "leads": {"total": q.count_leads(db), "week": q.count_leads_since(db, today - timedelta(days=7)),
+                  "new": q.count_leads(db, "new")},
         "trial": {"enabled": settings.GUEST_TRIAL_ENABLED, "cap": settings.GUEST_DAILY_TOTAL,
                   "today": q.count_guest_answers_since(db, today)},
     }

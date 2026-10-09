@@ -768,6 +768,18 @@ a.head-avatar:hover { opacity: .9; }
 .adm-health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--ink-40); }
 .adm-health .dot.ok { background: #2e9d5b; }
 .adm-health .dot.bad { background: var(--red); }
+/* заявки: чипы статусов, карточка заявки */
+.seg-chip { padding: 8px 14px; border-radius: 999px; background: var(--gray); font: 500 14px/1.2 var(--font); color: var(--ink-80); }
+.seg-chip:hover { color: var(--ink); }
+.seg-chip.on { background: var(--grad-btn); color: #fff; }
+.adm-lead-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; }
+.adm-grow { flex: 1 1 260px; }
+.adm-grow input { width: 100%; }
+.badge.st-new { background: var(--blue-07); color: var(--blue); }
+.badge.st-in_work { background: rgba(214, 140, 0, .12); color: #9a6200; }
+.badge.st-connected { background: rgba(46, 157, 91, .12); color: #1f7a45; }
+.badge.st-rejected { background: var(--gray); color: var(--ink-60); }
+.adm-danger-link { border: 0; background: none; padding: 0; cursor: pointer; color: var(--red); font: 500 13px/1.3 var(--font); }
 .adm-fail a { color: var(--ink); }
 .adm-fail a:hover { color: var(--blue); }
 @media (max-width: 900px) {
