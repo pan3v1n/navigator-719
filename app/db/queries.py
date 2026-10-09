@@ -146,6 +146,73 @@ def user_activity(db: Session) -> dict[int, tuple]:
     return {uid: (last, n) for uid, last, n in rows}
 
 
+# --- «Диалоги» админ-панели (09.10.2026): беседы агрегатом, тексты — только для поиска -------
+def _dialog_filters(stmt, *, user_id=None, since=None, until=None, session_ids=None):
+    if user_id is not None:
+        stmt = stmt.where(Message.user_id == user_id)
+    if since is not None:
+        stmt = stmt.where(Message.ts >= since)
+    if until is not None:
+        stmt = stmt.where(Message.ts < until)
+    if session_ids is not None:
+        stmt = stmt.where(Message.session_id.in_(session_ids))
+    return stmt
+
+
+def dialog_page(db: Session, *, user_id=None, since=None, until=None, session_ids=None,
+                flagged=False, offset=0, limit=50) -> tuple[int, list]:
+    """Беседы (новые сверху) одним агрегатом, без текстов: (всего, строки страницы).
+    Строка: session_id, user_id, начало, конец, реплик, токены вход/выход, флаг низкой
+    релевантности, число ответов с непроверенными числами."""
+    from sqlalchemy import case
+
+    flags = (func.max(case((Message.low_relevance.is_(True), 1), else_=0)).label("lowrel"),
+             func.count(Message.unverified_json).label("unverified"))
+    stmt = _dialog_filters(
+        select(Message.session_id, Message.user_id, func.min(Message.ts).label("first"),
+               func.max(Message.ts).label("last"), func.count(Message.id).label("n"),
+               func.sum(Message.prompt_tokens).label("pt"), func.sum(Message.completion_tokens).label("ct"),
+               *flags),
+        user_id=user_id, since=since, until=until, session_ids=session_ids,
+    ).group_by(Message.session_id, Message.user_id)
+    if flagged:
+        stmt = stmt.having((flags[0] > 0) | (flags[1] > 0))
+    total = db.execute(select(func.count()).select_from(stmt.subquery())).scalar_one()
+    rows = db.execute(stmt.order_by(func.max(Message.ts).desc()).offset(offset).limit(limit)).all()
+    return total, rows
+
+
+def dialog_titles(db: Session, session_ids: list[str]) -> dict[str, str]:
+    """Первый вопрос каждой беседы — её заголовок."""
+    out: dict[str, str] = {}
+    for sid, content in db.execute(
+            select(Message.session_id, Message.content)
+            .where(Message.session_id.in_(session_ids), Message.role == "user").order_by(Message.id)):
+        out.setdefault(sid, content)
+    return out
+
+
+def dialog_texts(db: Session, *, user_id=None, since=None, until=None):
+    """(session_id, текст) всех реплик в срезе — для поиска по вопросам и ответам. Поиск идёт в
+    Python, а не LIKE: SQLite сравнивает без учёта регистра только латиницу."""
+    return db.execute(_dialog_filters(select(Message.session_id, Message.content),
+                                      user_id=user_id, since=since, until=until)).all()
+
+
+def get_dialog(db: Session, session_id: str) -> list[Message]:
+    """Беседа целиком (любого пользователя) — для просмотра в админке."""
+    return list(db.execute(select(Message).where(Message.session_id == session_id)
+                           .order_by(Message.id)).scalars())
+
+
+def feedback_for_messages(db: Session, message_ids: list[int]) -> dict[int, list[Feedback]]:
+    out: dict[int, list[Feedback]] = {}
+    for f in db.execute(select(Feedback).where(Feedback.message_id.in_(message_ids))
+                        .order_by(Feedback.id)).scalars():
+        out.setdefault(f.message_id, []).append(f)
+    return out
+
+
 # --- сводка админ-панели (09.10.2026): только нужные колонки за период, без текстов ----------
 def message_rows_since(db: Session, since) -> list:
     """Реплики пользователей с момента `since` (наивное UTC) — без текстов, по порядку записи."""

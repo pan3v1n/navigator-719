@@ -21,8 +21,10 @@
 
 from __future__ import annotations
 
+import json
 import re
 from datetime import datetime, timedelta, timezone
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -43,6 +45,7 @@ from app.api.web import (
 )
 from app.core import plans
 from app.core.config import settings
+from app.core.costs import cost_rub
 from app.core.plans import PLAN_LIMITS
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.release import release_label
@@ -598,18 +601,90 @@ def admin_quality(request: Request, date_from: str = "", date_to: str = "", regi
                  filter_action="/admin/quality", **view)
 
 
+DIALOGS_PER_PAGE = 50
+
+
+def _norm(s: str) -> str:
+    return (s or "").lower().replace("ё", "е")
+
+
 @router.get("/admin/dialogs", response_class=HTMLResponse)
-def admin_dialogs(request: Request, date_from: str = "", date_to: str = "", region: str = "",
-                  role: str = "", user: str = ""):
-    """Диалоги по пользователям; `user` — показать одного (ссылки из карточки и из плохих ответов)."""
+def admin_dialogs(request: Request, user: str = "", date_from: str = "", date_to: str = "",
+                  flagged: str = "", page: int = 1):
+    """Беседы всех пользователей, новые сверху, по DIALOGS_PER_PAGE на странице. Фильтры:
+    пользователь (логин), период (даты по Москве), только с флагами движка; поиск ?q= — по
+    вопросам и ответам, каждое слово в любом месте, «ё» = «е».
+
+    Без поиска список собирается агрегатом в SQL и текстов не читает; с поиском тексты среза
+    читаются в Python (SQLite не сравнивает кириллицу без учёта регистра) — при росте базы это
+    место переводить на полнотекстовый поиск PostgreSQL."""
     gate = _gate(request)
     if isinstance(gate, RedirectResponse):
         return gate
-    view = _stats_view(date_from, date_to, region, role)
-    if user:
-        view["data"] = [u for u in view["data"] if u["username"] == user]
-    return _page(request, gate, "dialogs", "dialogs", "Диалоги", filter_action="/admin/dialogs",
-                 only_user=user, **view)
+    text = request.query_params.get("q", "").strip()
+    page = max(page, 1)
+    d_from, d_to = _parse_date(date_from), _parse_date(date_to)
+    since = plans.anchor_from_date(d_from) if d_from else None
+    until = plans.anchor_from_date(d_to + timedelta(days=1)) if d_to else None
+    with get_session() as db:
+        uid, unknown_user = None, False
+        if user:
+            found = q.get_user_by_username(db, user.strip().lower())
+            uid, unknown_user = (found.id, False) if found else (None, True)
+        if unknown_user:
+            total, rows = 0, []
+        else:
+            session_ids = None
+            if text:
+                words = _norm(text).split()
+                hits = {}
+                for sid, content in q.dialog_texts(db, user_id=uid, since=since, until=until):
+                    hits.setdefault(sid, []).append(_norm(content))
+                session_ids = [sid for sid, texts in hits.items()
+                               if all(any(w in t for t in texts) for w in words)]
+            total, rows = q.dialog_page(db, user_id=uid, since=since, until=until, session_ids=session_ids,
+                                        flagged=bool(flagged), offset=(page - 1) * DIALOGS_PER_PAGE,
+                                        limit=DIALOGS_PER_PAGE)
+        titles = q.dialog_titles(db, [r.session_id for r in rows])
+        users = {u.id: u.username for u in q.list_users(db)}
+    items = [{"sid": r.session_id, "user": users.get(r.user_id, "—"), "user_id": r.user_id,
+              "title": titles.get(r.session_id) or "Диалог", "last": _msk(r.last), "n": r.n,
+              "rub": cost_rub(r.pt, r.ct), "lowrel": bool(r.lowrel), "unverified": r.unverified}
+             for r in rows]
+    pages = max(1, -(-total // DIALOGS_PER_PAGE))
+    filters = {"q": text, "user": user, "date_from": date_from, "date_to": date_to, "flagged": flagged}
+    return _page(request, gate, "dialogs", "dialogs", "Диалоги", items=items, total=total, page=page,
+                 pages=pages, filters=filters, unknown_user=unknown_user,
+                 qs=lambda **kw: urlencode({k: v for k, v in {**filters, **kw}.items() if v}))
+
+
+@router.get("/admin/dialogs/{session_id}", response_class=HTMLResponse)
+def admin_dialog(request: Request, session_id: str):
+    """Беседа целиком: вопросы и ответы, время, токены и ₽, флаги движка, оценки, комментарии и
+    исправления экспертов к ответам."""
+    gate = _gate(request)
+    if isinstance(gate, RedirectResponse):
+        return gate
+    with get_session() as db:
+        msgs = q.get_dialog(db, session_id)
+        if not msgs:
+            raise HTTPException(status_code=404, detail="Беседа не найдена")
+        owner = q.get_user(db, msgs[0].user_id)
+        fb = q.feedback_for_messages(db, [m.id for m in msgs])
+        for m in msgs:
+            db.expunge(m)
+        owner_login, owner_id = (owner.username, owner.id) if owner else ("—", None)
+    rows = []
+    for m in msgs:
+        unverified = json.loads(m.unverified_json) if m.unverified_json else []
+        rows.append({"role": m.role, "content": m.content, "ts": _msk(m.ts),
+                     "tokens": (m.prompt_tokens or 0) + (m.completion_tokens or 0),
+                     "rub": cost_rub(m.prompt_tokens, m.completion_tokens), "lowrel": m.low_relevance,
+                     "unverified": ", ".join(map(str, unverified)),
+                     "feedback": [{"rating": f.rating, "comment": f.comment, "correction": f.correction}
+                                  for f in fb.get(m.id, [])]})
+    return _page(request, gate, "dialog", "dialogs", "Беседа", rows=rows, owner=owner_login,
+                 owner_id=owner_id, total_rub=sum(r["rub"] for r in rows))
 
 
 @router.get("/api/admin/export")

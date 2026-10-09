@@ -104,7 +104,7 @@
     {% if sessions %}
     <ul class="adm-list">
       {% for s in sessions %}
-      <li><a href="/admin/dialogs?user={{ u.username | urlencode }}#th-{{ s.session_id }}">{{ (s.title or 'Диалог') | truncate(90) }}</a>
+      <li><a href="/admin/dialogs/{{ s.session_id }}">{{ (s.title or 'Диалог') | truncate(90) }}</a>
         <span class="muted">{{ s.ts }}</span></li>
       {% endfor %}
     </ul>

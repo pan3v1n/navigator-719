@@ -1,53 +1,43 @@
 {% extends "admin/base.html" %}
 {% block content %}
-<div class="adm-head"><h1>Диалоги</h1>{% if only_user %}<span class="muted">пользователь {{ only_user }} · <a class="ds-link" href="/admin/dialogs">все</a></span>{% endif %}</div>
-{% include "admin/_filters.html" %}
-  <!-- ===== ЛОГИ ===== -->
-  <section id="tab-logs" class="adm-section">
-    {% for u in data %}
-    <details class="user-log"{% if only_user %} open{% endif %}>
-      <summary>
-        <span class="ul-name">{{ u.username }} <span class="role">{{ u.role }}</span>{% if u.region %} <span class="ul-region">{{ u.region }}</span>{% endif %}</span>
-        <span class="ul-meta">диалогов {{ u.conversations }} · запросов {{ u.requests }} · {{ u.tokens|spaced }} ток. · {{ '%.2f'|format(u.cost) }} ₽</span>
-      </summary>
-      <div class="ul-body">
-        {% if u.feedback %}
-        <div class="fb-list">
-          <h3>Отзывы</h3>
-          {% for f in u.feedback %}
-          <div class="fb">оценка: <b>{{ f.rating if f.rating is not none else '—' }}</b>
-            · соответствие 719: <b>{{ f.matched or '—' }}</b>{% if f.comment %}<br>«{{ f.comment }}»{% endif %}
-            <span class="ts">{{ f.ts }}</span></div>
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% for s in u.sessions %}
-        <details class="thread" id="th-{{ s.sid }}">
-          <summary>{{ s.title }}<span class="thread-meta"> · {{ s.date }} · {{ s.messages|length }} реплик · {{ s.tokens|spaced }} ток. · {{ '%.3f'|format(s.cost) }} ₽</span></summary>
-          {% for m in s.messages %}
-          <div class="log-msg {{ m.role }}">
-            <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
-            <span class="content">{{ m.content }}</span>
-            <span class="ts">{{ m.ts }}</span>
-            {% if m.tokens %}<span class="tok">{{ m.tokens|spaced }} ток.</span>{% endif %}
-            {% if m.unverified %}<span class="flag">непроверенные числа: {{ m.unverified }}</span>{% endif %}
-            {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
-          </div>
-          {% endfor %}
-        </details>
-        {% else %}<p class="empty">Нет диалогов.</p>{% endfor %}
-      </div>
-    </details>
-    {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
-  </section>
+<div class="adm-head">
+  <h1>Диалоги</h1>
+  <span class="muted">{{ total }} {{ total | plural('беседа', 'беседы', 'бесед') }}{% if pages > 1 %} · страница {{ page }} из {{ pages }}{% endif %}</span>
+</div>
+<form class="adm-filters" method="get" action="/admin/dialogs">
+  <input type="search" name="q" value="{{ filters.q }}" placeholder="Поиск по вопросам и ответам" aria-label="Поиск">
+  <input name="user" value="{{ filters.user }}" placeholder="логин" aria-label="Пользователь" size="16">
+  <label class="muted">с <input type="date" name="date_from" value="{{ filters.date_from }}"></label>
+  <label class="muted">по <input type="date" name="date_to" value="{{ filters.date_to }}"></label>
+  <label class="adm-check"><input type="checkbox" name="flagged" value="1"{% if filters.flagged %} checked{% endif %}> только с флагами движка</label>
+  <button class="ds-btn secondary" type="submit">Найти</button>
+  {% if filters.q or filters.user or filters.date_from or filters.date_to or filters.flagged %}<a class="ds-link" href="/admin/dialogs">Сбросить</a>{% endif %}
+</form>
+{% if unknown_user %}<div class="adm-note err">Пользователя «{{ filters.user }}» нет.</div>{% endif %}
 
-<script>
-  // Ссылка с якорем беседы (карточка учётки, плохие ответы): раскрыть беседу и прокрутить к ней.
-  (function () {
-    var th = location.hash && document.getElementById(location.hash.slice(1));
-    if (!th) return;
-    for (var p = th; p; p = p.parentElement) { if (p.tagName === "DETAILS") p.open = true; }
-    th.scrollIntoView({ block: "center" });
-  })();
-</script>
+<div class="adm-table-wrap">
+  <table class="adm-table">
+    <thead><tr><th>Беседа</th><th>Пользователь</th><th>Последняя реплика</th><th>Реплик</th><th>Расход</th></tr></thead>
+    <tbody>
+    {% for d in items %}
+      <tr>
+        <td><a class="adm-strong" href="/admin/dialogs/{{ d.sid }}">{{ d.title | truncate(110) }}</a>
+          {% if d.lowrel %}<span class="badge warn">низкая релевантность</span>{% endif %}
+          {% if d.unverified %}<span class="badge bad">непроверенные числа</span>{% endif %}</td>
+        <td><a href="/admin/users/{{ d.user_id }}">{{ d.user }}</a></td>
+        <td>{{ d.last }}</td><td>{{ d.n }}</td><td>{{ '%.3f' | format(d.rub) }} ₽</td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">Бесед не нашлось.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% if pages > 1 %}
+<nav class="adm-pager" aria-label="Страницы">
+  {% if page > 1 %}<a class="ds-link" href="/admin/dialogs?{{ qs(page=page - 1) }}">← Назад</a>{% endif %}
+  <span class="muted">{{ page }} / {{ pages }}</span>
+  {% if page < pages %}<a class="ds-link" href="/admin/dialogs?{{ qs(page=page + 1) }}">Дальше →</a>{% endif %}
+</nav>
+{% endif %}
 {% endblock %}

@@ -769,6 +769,32 @@ a.head-avatar:hover { opacity: .9; }
 .adm-health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--ink-40); }
 .adm-health .dot.ok { background: #2e9d5b; }
 .adm-health .dot.bad { background: var(--red); }
+/* «Качество» и «Пробный режим»: прежние виджеты скоркарда — в токенах и формах нового каркаса */
+.adm-main .card, .adm-main .kpi, .adm-main .bad-intro, .adm-main .bad-card { border: 0; box-shadow: var(--ring); border-radius: 16px; }
+.adm-main .card { padding: 20px 24px; }
+.adm-main .card h3 { font: 500 16px/1.3 var(--font); text-transform: none; letter-spacing: 0; color: var(--ink); }
+.adm-main .kpi { background: var(--gray); box-shadow: none; border-radius: 12px; padding: 16px; }
+.adm-main .kpi-val { font: 500 26px/1.15 var(--font); color: var(--ink); }
+.adm-main .kpi-label { font: 500 14px/1.3 var(--font); color: var(--ink-80); }
+.adm-main .kpi-sub, .adm-main .trend-note, .adm-main .feed-meta, .adm-main .f-stamp, .adm-main .f-export { color: var(--ink-60); }
+.adm-main .filters { background: var(--gray); border: 0; border-radius: 12px; padding: 14px 16px; }
+.adm-main .f-field span { text-transform: none; letter-spacing: 0; font: 500 13px/1.2 var(--font); color: var(--ink-60); }
+.adm-main .f-apply { height: 40px; padding: 0 16px; border-radius: 8px; background: var(--grad-btn); font: 600 14px/1 var(--font); }
+.adm-main .f-reset, .adm-main .f-export a { color: var(--blue); }
+.adm-main .section-title { font: 500 22px/1.25 var(--font); text-transform: none; letter-spacing: 0; color: var(--ink); }
+.adm-main .bad-card { border-left: 0; box-shadow: inset 0 0 0 1px rgba(216, 51, 50, .35); }
+.adm-main .bad-card .stars { background: var(--red); }
+.adm-main .feed-row { border-top-color: var(--line-soft); }
+@media (max-width: 900px) { .adm-main .charts { grid-template-columns: 1fr; } }
+/* диалоги: страницы, беседа */
+.adm-check { display: inline-flex; align-items: center; gap: 6px; font: 400 14px/1.3 var(--font); color: var(--ink-80); }
+.adm-pager { display: flex; gap: 16px; align-items: center; justify-content: center; }
+.adm-thread { display: flex; flex-direction: column; gap: 12px; max-width: 900px; }
+.adm-msg { border-radius: 12px; padding: 14px 18px; display: flex; flex-direction: column; gap: 8px; box-shadow: var(--ring); }
+.adm-msg.user { background: var(--gray); box-shadow: none; }
+.adm-msg-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; font-size: 14px; }
+.adm-msg-body { white-space: pre-wrap; font: 400 15px/1.5 var(--font); color: var(--ink); overflow-wrap: anywhere; }
+.adm-fb { border-top: 1px solid var(--line-soft); padding-top: 8px; font-size: 14px; color: var(--ink-80); }
 /* заявки: чипы статусов, карточка заявки */
 .seg-chip { padding: 8px 14px; border-radius: 999px; background: var(--gray); font: 500 14px/1.2 var(--font); color: var(--ink-80); }
 .seg-chip:hover { color: var(--ink); }

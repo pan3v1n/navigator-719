@@ -242,7 +242,7 @@ class TestCardActions(_PanelDB):
         for piece in ("Анна Смирнова", "a@tpp.ru", "+7 900 000-00-00", "Эксперт", "дано",
                       f'action="/api/admin/users/{u.id}/plan"', f'action="/api/admin/users/{u.id}/org"',
                       f'action="/api/admin/users/{u.id}/password"', f'action="/api/admin/users/{u.id}/delete"',
-                      "/admin/dialogs?user=kursk.expert5#th-sid1", "Требования к станкам?"):
+                      "/admin/dialogs/sid1", "Требования к станкам?"):
             self.assertIn(piece, html)
         own = self.as_admin.get(f"/admin/users/{self.admin.id}").text
         self.assertIn("Это ваша учётка", own)
@@ -327,7 +327,7 @@ class TestSummary(_PanelDB):
         with mock.patch.object(adm, "system_health", return_value={"collections": [], "server_time": "—"}):
             html = self.as_admin.get("/admin").text
         self.assertIn('<a href="/admin" class="on" aria-current="page">Сводка</a>', html)
-        self.assertIn("/admin/dialogs?user=kursk.a#th-s2", html, "сбой без ссылки на беседу")
+        self.assertIn("/admin/dialogs/s2", html, "сбой без ссылки на беседу")
         self.assertIn("Упавший вопрос", html)
         self.assertIn(f'href="/admin/users/{self.a.id}">kursk.a</a> · Старт · до', html)
         self.assertIn('href="/admin/users?status=no_profile"', html)
@@ -471,6 +471,76 @@ class TestOrganizations(_PanelDB):
         found = self.as_admin.get("/admin/orgs?q=прибор").text
         self.assertIn("АО «Прибор»", found)
         self.assertNotIn("ИНН 4632000000", found)
+
+
+class TestDialogs(_PanelDB):
+    """Диалоги (этап 5): беседы новые сверху, постранично; поиск по вопросам и ответам (кириллица
+    без учёта регистра, «ё» = «е», каждое слово); фильтры; страница беседы с оценками экспертов."""
+
+    def setUp(self):
+        super().setUp()
+        from datetime import datetime, timedelta, timezone
+
+        self.u = self._mk("kursk.expert1")
+        self.v = self._mk("perm.expert1")
+        now = plans.naive_utc(datetime.now(timezone.utc))
+        with self.Session() as db:
+            def say(uid, sid, role, text, ago, **kw):
+                m = q.log_message(db, user_id=uid, session_id=sid, role=role, content=text, **kw)
+                m.ts = now - ago
+                db.commit()
+                return m
+
+            say(self.u.id, "old", "user", "Требования к СТАНКАМ с ЧПУ?", timedelta(days=3))
+            say(self.u.id, "old", "assistant", "Ответ про Ёмкости и баллы.", timedelta(days=3), low_relevance=True)
+            say(self.v.id, "mid", "user", "Какие документы для реестра?", timedelta(days=1))
+            self.ans = say(self.v.id, "mid", "assistant", "Заявка через ГИСП.", timedelta(days=1),
+                           unverified=["25"], prompt_tokens=1000, completion_tokens=100)
+            say(self.u.id, "new", "user", "Срок действия заключения?", timedelta(minutes=5))
+            q.save_feedback(db, user_id=self.v.id, kind="answer", rating=1, matched=None, comment="не то",
+                            correction="Через ТПП, а не ГИСП", session_id="mid", message_id=self.ans.id)
+
+    def _sids(self, query=""):
+        html = self.as_admin.get("/admin/dialogs" + query).text
+        return [s for s in ("new", "mid", "old") if f'href="/admin/dialogs/{s}"' in html], html
+
+    def test_order_and_pages(self):
+        sids, html = self._sids()
+        self.assertEqual(sids, ["new", "mid", "old"])
+        with mock.patch.object(adm, "DIALOGS_PER_PAGE", 2):
+            first, page1 = self._sids()
+            second, page2 = self._sids("?page=2")
+        self.assertEqual((first, second), (["new", "mid"], ["old"]))
+        self.assertIn("Дальше →", page1)
+        self.assertIn("← Назад", page2)
+
+    def test_search_questions_and_answers(self):
+        for query, expect in (("?q=станкам", ["old"]),             # регистр кириллицы
+                              ("?q=емкости", ["old"]),             # «ё» = «е», и ищется в ответе
+                              ("?q=станкам баллы", ["old"]),       # слова — из вопроса и ответа одной беседы
+                              ("?q=станкам гисп", []),             # слова из разных бесед — не совпадение
+                              ("?q=гисп", ["mid"])):
+            with self.subTest(query=query):
+                self.assertEqual(self._sids(query)[0], expect)
+
+    def test_filters(self):
+        self.assertEqual(self._sids("?user=perm.expert1")[0], ["mid"])
+        sids, html = self._sids("?user=nobody")
+        self.assertEqual(sids, [])
+        self.assertIn("Пользователя «nobody» нет", html)
+        self.assertEqual(self._sids("?flagged=1")[0], ["mid", "old"], "флаги: низкая релевантность и числа")
+        today = plans.msk_today()
+        self.assertEqual(self._sids(f"?date_from={today.isoformat()}")[0], ["new"])
+
+    def test_thread_page(self):
+        html = self.as_admin.get("/admin/dialogs/mid").text
+        for piece in ("Какие документы для реестра?", "Заявка через ГИСП.", "непроверенные числа: 25",
+                      "Оценка эксперта: <b>1★</b>", "Исправление: <b>Через ТПП, а не ГИСП</b>",
+                      f'href="/admin/users/{self.v.id}">perm.expert1</a>'):
+            self.assertIn(piece, html)
+        self.assertEqual(self.as_admin.get("/admin/dialogs/нет-такой").status_code, 404)
+        anon = self.TestClient(self.app)
+        self.assertEqual(anon.get("/admin/dialogs/mid", follow_redirects=False).headers["location"], "/login")
 
 
 class TestAccessAndNavigation(_PanelDB):
