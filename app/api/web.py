@@ -11,10 +11,12 @@ import json
 from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
+from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
+from loguru import logger
 from pydantic import BaseModel
 
 from app.api.auth import (
@@ -30,9 +32,11 @@ from app.api.auth import (
 )
 from app.api import quota, trial
 from app.api.leads import LIMITS as LEAD_LIMITS
+from app.api.leads import TARIFFS as LEAD_TARIFFS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
+from app.core import pricing
 from app.core.config import settings
 from app.core.release import release_label
 from app.core.regions import REGIONS, region_from_username
@@ -58,6 +62,8 @@ def plural(n: int, one: str, few: str, many: str) -> str:
 
 
 templates.env.filters["plural"] = plural
+# Витрина тарифов (09.10.2026) — описание одно на все отрисовки кабинета, не поле контекста страницы.
+templates.env.globals["pricing"] = pricing
 
 
 @lru_cache(maxsize=1)
@@ -330,7 +336,8 @@ def _profile_form(user: User, **over) -> dict:
 
 
 def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
-                      saved: bool = False, error: str | None = None, status_code: int = 200):
+                      saved: bool = False, error: str | None = None, status_code: int = 200,
+                      requested: str = ""):
     """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
@@ -341,17 +348,55 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
         _ctx(request, user=user, form=form, regions=REGIONS, error=error, saved=saved,
              tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
              quota=pv["quota"] if pv else None,
+             requested=requested if requested in LEAD_TARIFFS else "",
              can_leave=not needs_profile(user)),
         status_code=status_code,
     )
 
 
 @router.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request, tab: str = "profile", saved: str = ""):
+def profile_page(request: Request, tab: str = "profile", saved: str = "", requested: str = ""):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
-    return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved))
+    return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
+                             requested=requested)
+
+
+# «Подключить» на витрине тарифов кабинета (09.10.2026). Оплаты в сервисе нет — это заявка,
+# привязанная к учётке: она попадает в «Заявки» админки, тариф назначает admin в карточке. Контакты —
+# из профиля (их человек сам подтвердил в анкете с согласием). Лимит — от повторных нажатий.
+PLAN_REQUESTS_PER_HOUR = 5
+_plan_request_limit = SlidingWindow(PLAN_REQUESTS_PER_HOUR, window=3600.0)
+
+
+@router.post("/api/plan-request", response_class=HTMLResponse)
+def plan_request(request: Request, tariff: str = Form(default=""), kind: str = Form(default="individual"),
+                 addon: str = Form(default=""), period: str = Form(default="month"),
+                 seats: str = Form(default="1"), trial: str = Form(default="")):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+
+    def fail(msg: str, code: int):
+        return _profile_response(request, user, _profile_form(user), tab="plan", error=msg, status_code=code)
+
+    if tariff not in LEAD_TARIFFS:
+        return fail("Выберите тариф.", 422)
+    n = int(seats) if seats.isdigit() and len(seats) <= 4 else 0
+    options, errs = pricing.parse_options(tariff, kind=kind, addon=bool(addon), period=period,
+                                          seats=n, trial=bool(trial))
+    if errs:
+        return fail(" ".join(f"{m}." for m in errs.values()), 422)
+    if not _plan_request_limit.check(f"user:{user.id}"):
+        return fail("Слишком много заявок подряд — попробуйте через час.", 429)
+    with get_session() as db:
+        lead = q.create_lead(db, tariff=tariff, name=user.full_name or user.username, org=user.org or "",
+                             inn=user.inn or "", email=user.email or "", phone=user.phone or "",
+                             options=" · ".join(filter(None, ("из личного кабинета", options))),
+                             user_id=user.id)
+    logger.info(f"заявка #{lead.id} из кабинета: user_id={user.id}, тариф «{tariff}»")
+    return RedirectResponse(f"/profile?tab=plan&requested={quote(tariff)}", status_code=303)
 
 
 def _contact_errors(position: str, email: str, phone: str) -> list[str]:

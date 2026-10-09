@@ -242,9 +242,10 @@ class TestLandingGuards(unittest.TestCase):
         from app.core.plans import PLAN_LIMITS
 
         # «в месяц» — период лимита (#160: месяц от даты подключения), решение владельца 07.10
-        vols = re.findall(r'class="plan-name">([^<]+)</div>.*?class="plan-desc">До (\d+) запросов в месяц ',
-                          self.html, re.S)
-        self.assertEqual(vols, [("Старт", "100"), ("Стандарт", "200"), ("Профи", "400")])
+        vols = re.findall(r'class="plan-name">([^<]+)</div></div>\s*<div class="plan-desc">До (\d+) запросов в месяц ',
+                          self.html)
+        # витрина по образцу Нейроюриста (09.10.2026): те же три тарифа на обеих вкладках
+        self.assertEqual(vols, [("Старт", "100"), ("Стандарт", "200"), ("Профи", "400")] * 2)
         self.assertEqual({name: int(n) for name, n in vols}, PLAN_LIMITS)
 
     def test_nothing_loads_from_outside(self):

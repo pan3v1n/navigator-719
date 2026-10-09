@@ -39,6 +39,9 @@
     </nav>
 
     {% if tab == 'plan' %}
+    {% if requested %}<div class="plan-flash" role="status">Заявка на тариф «{{ requested }}» отправлена. Администратор
+      свяжется с вами{% if user.email %} по адресу {{ user.email }}{% endif %} и подключит тариф.</div>{% endif %}
+    {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
     {# Б4: расход тарифа — те же данные, что у карточки в сайдбаре (`quota.quota_view`) #}
     {% set pct = ((100 * quota.used / quota.limit) | round | int) if (quota and quota.limit) else 0 %}
     <div class="grid2" style="align-items:start">
@@ -72,9 +75,74 @@
           <span class="plan-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
           <span><b>Доступ к источникам в ответах Навигатора</b><span>Подключено</span></span>
         </div>
-        {% if quota and landing_url %}<a class="ds-btn block" href="{{ landing_url }}/#pricing" target="_blank" rel="noopener">Сменить тариф</a>{% endif %}
+        {% if quota %}<a class="ds-btn block" href="#tariffs">Сменить тариф</a>{% endif %}
       </div>
     </div>
+    {# Витрина тарифов (решение владельца 09.10.2026: «как у Нейроюриста, но с плейсхолдерами вместо
+       сумм»). Описание — `app/core/pricing.py`, лендинг повторяет его (сверяет тест). Оплаты нет:
+       «Подключить» — заявка, привязанная к учётке (`/api/plan-request`), её видит admin в «Заявках». #}
+    <section class="tariffs" id="tariffs" aria-labelledby="tariffs-h">
+      <div class="tariffs-head">
+        <h2 id="tariffs-h">Тарифы для индивидуального использования</h2>
+        <div class="seg" role="tablist" aria-label="Вид тарифа">
+          <button type="button" role="tab" class="seg-item on" aria-selected="true" data-kind="individual"
+                  data-title="Тарифы для индивидуального использования">Индивидуальные</button>
+          <button type="button" role="tab" class="seg-item" aria-selected="false" data-kind="corporate" tabindex="-1"
+                  data-title="Тарифы для организаций">Корпоративные</button>
+        </div>
+      </div>
+      {% for kind in ('individual', 'corporate') %}
+      <div class="tcards" data-panel="{{ kind }}" role="tabpanel"{% if kind == 'corporate' %} hidden{% endif %}>
+        {% for p in pricing.PLANS %}{% set promo = p.trial and kind == 'individual' %}
+        <form class="tcard{% if promo %} promo{% endif %}" method="post" action="/api/plan-request">
+          {% if promo %}<span class="tcard-badge">Предложение ограничено</span>{% endif %}
+          <input type="hidden" name="tariff" value="{{ p.name }}"><input type="hidden" name="kind" value="{{ kind }}">
+          {% if promo %}<input type="hidden" name="trial" value="1">{% endif %}
+          <div class="tcard-name">{{ p.name }}</div>
+          <div class="tcard-desc">{{ p.desc }}</div>
+          {% if kind == 'corporate' %}
+          <div class="tcard-ctl">
+            <div class="mini-seg" role="radiogroup" aria-label="Период оплаты">
+              <label><input type="radio" name="period" value="month" checked><span>месяц</span></label>
+              <label><input type="radio" name="period" value="year"><span>год</span></label>
+            </div>
+            <div class="seats">
+              <button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button>
+              <input name="seats" type="number" value="1" min="1" max="{{ pricing.MAX_SEATS }}" inputmode="numeric" aria-label="Число пользователей">
+              <button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button>
+              <span class="seats-l">польз.</span>
+            </div>
+          </div>
+          {% endif %}
+          <div class="tcard-price">
+            {% if promo %}<s class="price-old">{{ pricing.PRICE }} ₽/мес</s><div class="price">{{ pricing.TRIAL_TEXT }}</div>
+            {% else %}<div class="price">{{ pricing.PRICE }} ₽/<span class="per">мес</span></div>{% endif %}
+          </div>
+          <label class="addon"><input type="checkbox" name="addon" value="1">
+            <span><b>{{ pricing.ADDON }}</b>
+              <small>{% if promo %}Бесплатно первую неделю, далее + {{ pricing.PRICE }} ₽/мес{% else %}+ {{ pricing.PRICE }} ₽/<span class="per">мес</span>{% endif %}</small></span></label>
+          <button class="ds-btn block tcard-btn" type="submit">
+            {% if promo %}Подключить за {{ pricing.TRIAL_PRICE }}<small>далее {{ pricing.PRICE }} ₽/мес</small>
+            {% else %}Подключить<small>за {{ pricing.PRICE }} ₽/<span class="per">мес</span></small>{% endif %}</button>
+        </form>
+        {% endfor %}
+        <form class="tcard org" method="post" action="/api/plan-request">
+          <input type="hidden" name="tariff" value="{{ pricing.ORG_TARIFF }}">
+          <div class="tcard-name">{{ 'Для организаций' if kind == 'individual' else 'Особые условия' }}</div>
+          <div class="tcard-desc">{{ pricing.ORG_DESC if kind == 'individual' else pricing.SPECIAL_DESC }}</div>
+          <ul class="tcard-list">{% for b in pricing.ORG_BULLETS %}<li>{{ b }}</li>{% endfor %}</ul>
+          <div class="tcard-actions">
+            {% if kind == 'individual' %}<button type="button" class="ds-btn block" data-goto="corporate">Посмотреть тарифы</button>{% endif %}
+            <button type="submit" class="ds-btn block secondary">Свяжитесь со мной</button>
+          </div>
+        </form>
+      </div>
+      {% endfor %}
+      {% for kind, notes in pricing.FOOTNOTES.items() %}
+      <div class="tariffs-fine" data-panel="{{ kind }}"{% if kind == 'corporate' %} hidden{% endif %}>
+        {% for n in notes %}<p>{{ n }}</p>{% endfor %}</div>
+      {% endfor %}
+    </section>
     {% else %}
     <form class="panel" method="post" action="/profile">
       <div>
@@ -255,6 +323,44 @@
         input.setCustomValidity("Выберите регион из списка");
         input.reportValidity();
       }
+    });
+  })();
+</script>
+{% endif %}
+{% if tab == 'plan' %}
+<script>
+  // Витрина тарифов: вкладки «Индивидуальные» / «Корпоративные», период и число пользователей.
+  // Суммы — плейсхолдеры, считать нечего: период меняет только подпись «/мес» ↔ «/год».
+  (function () {
+    var box = document.getElementById("tariffs");
+    if (!box) return;
+    var tabs = box.querySelectorAll('[role="tab"]'), title = document.getElementById("tariffs-h");
+    function show(kind) {
+      tabs.forEach(function (t) {
+        var on = t.getAttribute("data-kind") === kind;
+        t.classList.toggle("on", on); t.setAttribute("aria-selected", String(on)); t.tabIndex = on ? 0 : -1;
+        if (on) title.textContent = t.getAttribute("data-title");
+      });
+      box.querySelectorAll("[data-panel]").forEach(function (p) { p.hidden = p.getAttribute("data-panel") !== kind; });
+    }
+    tabs.forEach(function (t) { t.addEventListener("click", function () { show(t.getAttribute("data-kind")); }); });
+    box.querySelectorAll("[data-goto]").forEach(function (b) {
+      b.addEventListener("click", function () { show(b.getAttribute("data-goto")); title.scrollIntoView({ block: "start" }); });
+    });
+    box.querySelectorAll(".tcard").forEach(function (card) {
+      card.querySelectorAll('input[name="period"]').forEach(function (r) {
+        r.addEventListener("change", function () {
+          card.querySelectorAll(".per").forEach(function (s) { s.textContent = r.value === "year" ? "год" : "мес"; });
+        });
+      });
+      var seats = card.querySelector('input[name="seats"]');
+      if (!seats) return;
+      card.querySelectorAll(".seat-btn").forEach(function (b) {
+        b.addEventListener("click", function () {
+          var n = (parseInt(seats.value, 10) || 1) + parseInt(b.getAttribute("data-d"), 10);
+          seats.value = Math.max(1, Math.min(n, parseInt(seats.max, 10)));
+        });
+      });
     });
   })();
 </script>

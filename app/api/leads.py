@@ -21,6 +21,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.api.ratelimit import SlidingWindow, client_ip
+from app.core import pricing
 from app.db import queries as q
 from app.db.engine import get_session
 
@@ -53,6 +54,13 @@ class LeadIn(BaseModel):
     promo: str = ""
     consent: bool = False
     nav719_hp: str = ""  # поле-ловушка: скрыто от людей, заполняют только боты
+    # Опции с витрины тарифов (09.10.2026, `app/core/pricing.py`). По умолчанию — как у формы до
+    # витрины: старый скрипт из кэша браузера их не шлёт, и заявка от этого не ломается.
+    kind: str = "individual"
+    addon: bool = False
+    period: str = "month"
+    seats: int = 1
+    trial: bool = False
 
 
 def _digits(s: str) -> str:
@@ -84,6 +92,10 @@ def validate_lead(f: LeadIn) -> dict[str, str]:
         e["promo"] = "Слишком длинный промокод"
     if not f.consent:
         e["consent"] = "Необходимо согласие на обработку данных"
+    _, opt_errors = pricing.parse_options(f.tariff, kind=f.kind, addon=f.addon, period=f.period,
+                                          seats=f.seats, trial=f.trial)
+    if opt_errors:   # своего поля в форме у опций нет — фронт покажет их общей строкой
+        e["options"] = "; ".join(opt_errors.values())
     return e
 
 
@@ -100,10 +112,12 @@ def submit_lead(lead: LeadIn, request: Request) -> JSONResponse:
     if not _lead_limit.check(ip):
         return JSONResponse({"ok": False, "error": "Слишком много заявок с этого адреса, попробуйте позже"},
                             status_code=429, headers={"Retry-After": str(_lead_limit.retry_after(ip))})
+    options, _ = pricing.parse_options(lead.tariff, kind=lead.kind, addon=lead.addon, period=lead.period,
+                                       seats=lead.seats, trial=lead.trial)
     with get_session() as db:
         row = q.create_lead(db, tariff=lead.tariff, name=lead.name.strip(), org=lead.org.strip(),
                             inn=lead.inn.strip(), email=lead.email.strip(), phone=lead.phone.strip(),
-                            promo=lead.promo.strip())
+                            promo=lead.promo.strip(), options=options)
         purged = q.purge_old_leads(db)
     logger.info("lead: сохранена заявка #{} (тариф «{}»){}", row.id, row.tariff,
                 f"; удалено просроченных: {purged}" if purged else "")
