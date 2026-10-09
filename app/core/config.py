@@ -75,6 +75,20 @@ class Settings(BaseSettings):
     RATE_LIMIT_CHAT_PER_MIN: int = 20
     RATE_LIMIT_LOGIN_PER_MIN: int = 10
 
+    # Пробный режим без входа (решение владельца 09.10.2026). Гость задаёт GUEST_TRIAL_QUESTIONS
+    # вопросов на браузер — счёт по случайному id в подписанной куке. Куку сбрасывает очистка
+    # браузера, поэтому сверху два потолка: по IP за сутки (в памяти процесса — адрес в базу не
+    # пишется) и общий на всех гостей за сутки по Москве (по базе) — он и задаёт худший случай
+    # расхода токенов DeepSeek. GUEST_TRIAL_ENABLED=false закрывает режим: /chat без входа снова
+    # ведёт на /login. Ответ гостю дешевле: меньше позиций приложения в контексте (у пользователя
+    # 8) и потолок длины ответа с просьбой отвечать кратко (`pipeline.BRIEF_NOTE`).
+    GUEST_TRIAL_ENABLED: bool = True
+    GUEST_TRIAL_QUESTIONS: int = 3
+    GUEST_IP_PER_DAY: int = 10
+    GUEST_DAILY_TOTAL: int = 300
+    GUEST_CONTEXT_LIMIT: int = 5
+    GUEST_MAX_TOKENS: int = 700
+
     APP_ENV: str = "development"
     APP_HOST: str = "0.0.0.0"
     APP_PORT: int = 8000

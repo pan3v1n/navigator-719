@@ -10,11 +10,17 @@
    08.10: готовые команды, баннер заявки на экспертизу, папки и файлы, тариф и оплата, вход по коду
    и гостевой режим. Всё, что было в прежнем чате и чего нет в макете (экспорт, оценка, исправление,
    справка, логи для admin, тур), сохранено — оно держит процесс и принципы 1–2. #}
+{# Пробный режим (09.10.2026, макет: режим guest): `guest` — остаток пробных вопросов, `user` — None.
+   Гостю не показываются история, экспорт, отзыв и кабинет; вместо них — «Войти» (шапка, сайдбар,
+   баннер на главной). Тексты — из макета, без «создавать папки»: папок в сервисе нет. #}
+{% if user %}
 {% set who = (user.full_name or user.username or "?") %}
 {% set parts = who.split() %}
 {% set initials = (parts[0][0] ~ (parts[1][0] if parts|length > 1 else ""))|upper %}
-{% set role_line = user.region if (user.role == 'user' and user.region) else
-   ({'admin': 'Администратор', 'expert': 'Эксперт ТПП'}.get(user.role) or 'Участник') %}
+{# Под именем — организация, как в макете; пока admin её не указал — регион или роль #}
+{% set role_line = user.org or (user.region if (user.role == 'user' and user.region) else
+   ({'admin': 'Администратор', 'expert': 'Эксперт ТПП'}.get(user.role) or 'Участник')) %}
+{% endif %}
 <div class="app" id="app">
   <aside class="sidebar">
     <div class="side-top">
@@ -45,6 +51,7 @@
            title="Текст ПП №719 на Контур.Норматив — в редакции, по которой собрана база">Текст постановления</a>
       </div>
 
+      {% if user %}
       <div class="side-group">
         {# Б3 (макет): в сайдбаре — последние беседы, все — на странице «История запросов»
            (поиск по вопросам и ответам, период, группы по датам) #}
@@ -54,6 +61,10 @@
         </div>
         <div class="history" id="history"></div>
       </div>
+      {% else %}
+      {# У гостя истории нет, но контейнер нужен chat.js: из него шапка берёт название беседы #}
+      <div class="history hidden" id="history"></div>
+      {% endif %}
     </div>
 
     {# Б4: расход тарифа. Наполняет chat.js из `window.QUOTA` и перечитывает после ответа (/api/quota);
@@ -69,12 +80,8 @@
     </div>
 
     <nav class="side-nav">
-      {% if user.role == 'admin' %}
-      <a class="nav-item" href="/admin">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span class="nc-text">Логи диалогов</span>
-      </a>
-      {% endif %}
+      {# «Логи диалогов» убраны (решение владельца 09.10.2026): админ-панель — по адресу /admin #}
+      {% if user %}
       <button class="nav-item" id="export-btn" type="button">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="nc-text">Экспорт диалогов</span>
@@ -83,6 +90,7 @@
         <svg viewBox="0 0 24 24" fill="none"><path d="M11 4H4v16h16v-7M18.5 2.5a2.1 2.1 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
         <span class="nc-text">Оставить отзыв</span>
       </button>
+      {% endif %}
       {# Справка: подменю открывается по наведению, но держится и на клике/Tab — иначе с клавиатуры
          и на тач-экране до пунктов не добраться (hover там не существует). #}
       <div class="nav-group" id="help-group">
@@ -100,20 +108,26 @@
       </div>
     </nav>
 
+    {% if user %}
     <div class="side-bottom">
-      {% if user.role == 'user' %}
-      <a class="user-chip" href="/profile" title="Профиль">
-      {% else %}
-      <div class="user-chip">
-      {% endif %}
+      {# Личный кабинет — у всех ролей (09.10.2026): контакты правит и эксперт, и admin #}
+      <a class="user-chip" href="/profile" title="Личный кабинет">
         <span class="avatar">{{ initials }}</span>
         <span class="uinfo nc-text">
           <span class="uname">{{ who }}</span>
           <span class="urole">{{ role_line }}</span>
         </span>
-      {% if user.role == 'user' %}</a>{% else %}</div>{% endif %}
+      </a>
       <a class="logout nc-text" href="/logout" title="Выйти">Выйти</a>
     </div>
+    {% else %}
+    <div class="guest-card nc-text" id="guest-card">
+      <div class="guest-card-t">Войдите в аккаунт</div>
+      <div class="guest-card-s">Чтобы сохранять историю вопросов и работать без ограничений</div>
+      <a class="ds-btn block" href="/login">Войти</a>
+      {% if landing_url %}<a class="ds-link" href="{{ landing_url }}/#pricing" target="_blank" rel="noopener">Подключить организацию</a>{% endif %}
+    </div>
+    {% endif %}
   </aside>
   <div class="drawer-backdrop" id="drawer-backdrop"></div>
 
@@ -126,10 +140,10 @@
       <div class="head-right">
         {# E1: редакция корпуса видна всегда — тегом в шапке, как в макете #}
         <span class="edition-tag" title="Редакция ПП №719, по которой собрана база ответов">ПП № 719 · {{ corpus_edition }}</span>
-        {% if user.role == 'user' %}
-        <a class="avatar head-avatar" href="/profile" title="Профиль" aria-label="Профиль">{{ initials }}</a>
+        {% if user %}
+        <a class="avatar head-avatar" href="/profile" title="Личный кабинет" aria-label="Личный кабинет">{{ initials }}</a>
         {% else %}
-        <span class="avatar head-avatar" title="{{ who }}">{{ initials }}</span>
+        <a class="ds-btn head-login" href="/login">Войти</a>
         {% endif %}
       </div>
     </header>
@@ -194,10 +208,29 @@
           {# Принцип 1: ответ ИИ — черновик, вердикт за экспертом. Строка стоит под полем ввода ВСЕГДА
              (на главной и в диалоге) — так в макете; перед ней — расход тарифа (Б4), если тариф есть. #}
           <div class="composer-notice" id="composer-notice"><span class="limit-line hidden" id="limit-line"></span>Ответы носят справочный характер и не заменяют экспертизу ТПП</div>
+          {% if guest %}
+          <section class="guest-banner" id="guest-banner">
+            <div class="guest-banner-text">
+              <h2>Вы используете пробный доступ</h2>
+              <p>Доступно {{ guest.limit }} {{ guest.limit | plural('вопрос', 'вопроса', 'вопросов') }} без входа. Войдите в аккаунт организации, чтобы
+                сохранять историю и видеть полный текст источников</p>
+            </div>
+            <div class="guest-banner-actions">
+              <a class="ds-btn tertiary" href="/login">Войти</a>
+              {% if landing_url %}<a class="ds-btn secondary" href="{{ landing_url }}/#pricing" target="_blank" rel="noopener">Полный тариф</a>{% endif %}
+            </div>
+          </section>
+          {% endif %}
           <div class="composer-disclaimer">
             {{ app_title }} — это ИИ и может ошибаться; окончательное решение принимает уполномоченный
-            эксперт ТПП. Диалоги сохраняются и могут просматриваться организаторами для улучшения сервиса ·
+            эксперт ТПП.
+            {% if user %}Диалоги сохраняются и могут просматриваться организаторами для улучшения сервиса ·
             <a href="/terms">Условия использования</a> · <a href="/privacy">Политика конфиденциальности</a> ·
+            {% else %}В пробном режиме вопросы сохраняются без привязки к вам и могут просматриваться
+            организаторами для улучшения сервиса; не вводите персональные данные. Задавая вопрос, вы
+            принимаете <a href="/terms">Условия использования</a> и
+            <a href="/privacy">Политику конфиденциальности</a> ·
+            {% endif %}
             <a href="/help">Справка</a>
             {# Метка релиза — что ИМЕННО крутится на этой машине. `APP_VERSION` для этого не годится:
                он держится на 0.5.0 до приёмки ≥ 70 %, и полтора десятка сборок уехали на бой под
@@ -306,6 +339,7 @@
   window.KONTUR_719 = {{ kontur_719_url | tojson }};
   window.CORPUS_EDITION = {{ corpus_edition | tojson }};
   window.QUOTA = {{ (quota or none) | tojson }};
+  window.GUEST = {{ (guest or none) | tojson }};
 </script>
 <script src="/static/chat.js?v={{ asset_v }}"></script>
 {% endblock %}

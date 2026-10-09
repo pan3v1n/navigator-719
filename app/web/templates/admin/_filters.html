@@ -1,0 +1,32 @@
+{# Срез скоркарда пилота: период, регион, роль + выгрузка (Качество, Диалоги) #}
+  <!-- Панель фильтров: единый срез для всех вкладок (изоляция когорты, сравнение регионов). -->
+  <form class="filters" method="get" action="{{ filter_action }}">
+    <label class="f-field"><span>Период с</span>
+      <input type="date" name="date_from" value="{{ stats.filter_from }}"></label>
+    <label class="f-field"><span>по</span>
+      <input type="date" name="date_to" value="{{ stats.filter_to }}"></label>
+    <label class="f-field"><span>Регион</span>
+      <select name="region">
+        <option value="">Все регионы</option>
+        {% for r in stats.all_regions %}
+        <option value="{{ r }}" {{ 'selected' if r == stats.filter_region }}>{{ r }}</option>
+        {% endfor %}
+      </select></label>
+    <label class="f-field"><span>Роль</span>
+      <select name="role">
+        <option value="">Все роли</option>
+        {% for r in stats.all_roles %}
+        <option value="{{ r }}" {{ 'selected' if r == stats.filter_role }}>{{ r }}</option>
+        {% endfor %}
+      </select></label>
+    <button type="submit" class="f-apply">Применить</button>
+    {% if stats.filter_active %}<a class="f-reset" href="{{ filter_action }}">Сбросить</a>{% endif %}
+    <span class="f-right">
+      <span class="f-export">выгрузить:
+        <a href="/api/admin/export?fmt=csv&date_from={{ stats.filter_from }}&date_to={{ stats.filter_to }}&region={{ stats.filter_region|urlencode }}&role={{ stats.filter_role|urlencode }}" title="Скоркард — одна строка на оценённый ответ, CSV для Excel">CSV</a>
+        <a href="/api/admin/export?fmt=json&date_from={{ stats.filter_from }}&date_to={{ stats.filter_to }}&region={{ stats.filter_region|urlencode }}&role={{ stats.filter_role|urlencode }}" title="Полная выгрузка: скоркард + разбивки + все оценки, JSON">JSON</a>
+      </span>
+      <span class="f-stamp">данные на {{ stats.generated_at }}</span>
+    </span>
+  </form>
+

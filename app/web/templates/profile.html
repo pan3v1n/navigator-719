@@ -1,83 +1,262 @@
 {% extends "base.html" %}
 {% from "_mark.html" import mark %}
-{% block title %}Профиль — {{ app_title }}{% endblock %}
+{% block title %}Личный кабинет — {{ app_title }}{% endblock %}
 {% block body %}
-{# Макет «Navigator 719 Service», экран «Личный кабинет» → вкладка «Профиль» (08.10.2026). Поля —
-   наши, а не макетные: ФИО, регион и Telegram обязательны для регионального участника (гейт до чата),
-   согласие на обработку ПДн — явной галочкой (152-ФЗ), а не пассивным «продолжая, вы соглашаетесь».
-   Вкладки «Тариф и оплата» и «Документы» не перенесены — биллинга нет (решение владельца 08.10);
-   расход тарифа показан карточкой справа. #}
-{% set who = (full_name or user.full_name or user.username or "?") %}
+{# Макет «Navigator 719 Service», экран «Личный кабинет» (account). Решения владельца 09.10.2026:
+   * поля — макетные плюс наши: ФИО, регион, рабочий email и телефон обязательны, должность и
+     Telegram — по желанию (уточнение того же дня; в гейт до чата входят ФИО и регион — см.
+     `auth.profile_complete`); организацию и ИНН ведёт admin сервиса
+     (в макете — «администратор организации»), здесь они только для чтения;
+   * согласие на обработку ПДн — явной галочкой (152-ФЗ), а не пассивным «продолжая, вы соглашаетесь»;
+   * вкладки «Профиль» и «Тариф»; «Оплата» и «Документы» макета не показываются, пока нет биллинга.
+   Подзаголовок формы свой: макетное «Используются в договоре и закрывающих документах» неправда —
+   договоров и документов сервис не ведёт. #}
+{% set who = (form.full_name or user.full_name or user.username or "?") %}
 {% set parts = who.split() %}
 {% set initials = (parts[0][0] ~ (parts[1][0] if parts|length > 1 else ""))|upper %}
+{% if user.org %}{% set who_sub = user.org ~ (" · ИНН " ~ user.inn if user.inn else "") %}
+{% else %}{% set who_sub = form.region or ({'admin': 'Администратор', 'expert': 'Эксперт ТПП'}.get(user.role) or 'Участник') %}{% endif %}
 <div class="page">
   <div class="page-top">
     <a class="auth-brand" href="/chat">{{ mark(30) }}<span>Навигатор ПП&nbsp;719</span></a>
     {% if can_leave %}<a class="ds-link" href="/chat">Вернуться к сервису</a>{% endif %}
   </div>
   <div class="page-body">
-    <div class="who">
-      <span class="avatar">{{ initials }}</span>
-      <div>
-        <h1>{{ who }}</h1>
-        <div class="who-sub">{{ prefill_region or user.region or "Участник" }}</div>
+    <div class="acct-head">
+      <div class="who">
+        <span class="avatar">{{ initials }}</span>
+        <div>
+          <h1>{{ who }}</h1>
+          <div class="who-sub">{{ who_sub }}</div>
+        </div>
       </div>
+      <a class="ds-btn secondary" href="/logout">Выйти</a>
     </div>
 
+    <nav class="seg" aria-label="Разделы кабинета">
+      <a class="seg-item{% if tab == 'profile' %} on{% endif %}" href="/profile"{% if tab == 'profile' %} aria-current="page"{% endif %}>Профиль</a>
+      <a class="seg-item{% if tab == 'plan' %} on{% endif %}" href="/profile?tab=plan"{% if tab == 'plan' %} aria-current="page"{% endif %}>Тариф</a>
+    </nav>
+
+    {% if tab == 'plan' %}
+    {# Б4: расход тарифа — те же данные, что у карточки в сайдбаре (`quota.quota_view`) #}
+    {% set pct = ((100 * quota.used / quota.limit) | round | int) if (quota and quota.limit) else 0 %}
     <div class="grid2" style="align-items:start">
-      <form class="panel" method="post" action="/profile">
-        <div>
-          <h2>Данные пользователя</h2>
-          <p class="panel-sub">Заполните данные о себе — это нужно для доступа к навигатору по ПП №719</p>
+      <div class="plan-card">
+        {# Срок тарифа (09.10.2026): «Активен до …» — как в макете, или «Бессрочно»; истёкший — красным #}
+        <div class="plan-head"><span>Текущий тариф</span>
+          {% if plan %}{% if plan.expired %}<span class="tag expired">Срок истёк {{ plan.expires }}</span>
+          {% elif plan.expires %}<span class="tag">Активен до {{ plan.expires }}</span>
+          {% else %}<span class="tag">Бессрочно</span>{% endif %}{% endif %}</div>
+        {% if plan and plan.expired %}
+        <div class="plan-expired">Срок действия тарифа истёк — новые вопросы недоступны. История и экспорт
+          диалогов остаются. Чтобы продлить, обратитесь в {{ org }}.</div>
+        {% endif %}
+        {% if quota %}
+        <div class="plan-title">
+          <div class="plan-name">{{ quota.plan }}</div>
+          <div class="plan-sub">до {{ quota.limit }} запросов в месяц</div>
         </div>
-        {% if error %}<div class="error">{{ error }}</div>{% endif %}
+        <div class="plan-usage">
+          <div class="plan-use"><span>Использовано {{ quota.used }} из {{ quota.limit }} запросов</span><span>{{ pct }}%</span></div>
+          <div class="plan-track"><div style="width:{{ pct }}%"></div></div>
+          <div class="plan-note">{% if quota.renews_first is false %}Запросы действуют до окончания тарифа — {{ quota.expires }}{% else %}Лимит обновится {{ quota.renews }}{% endif %}</div>
+        </div>
+        {% else %}
+        <div class="plan-title">
+          <div class="plan-name">{{ plan.plan if plan else "Без тарифа" }}</div>
+          <div class="plan-sub">Число запросов не ограничено</div>
+        </div>
+        {% endif %}
+        <div class="plan-feature">
+          <span class="plan-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
+          <span><b>Доступ к источникам в ответах Навигатора</b><span>Подключено</span></span>
+        </div>
+        {% if quota and landing_url %}<a class="ds-btn block" href="{{ landing_url }}/#pricing" target="_blank" rel="noopener">Сменить тариф</a>{% endif %}
+      </div>
+    </div>
+    {% else %}
+    <form class="panel" method="post" action="/profile">
+      <div>
+        <h2>Данные пользователя</h2>
+        <p class="panel-sub">ФИО, регион, рабочий email и телефон нужны для доступа к навигатору по ПП №719;
+          должность и Telegram — по желанию.</p>
+      </div>
+      {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+      <div class="grid2">
         <label class="field"><span>ФИО</span>
-          <input name="full_name" value="{{ full_name or '' }}" placeholder="Фамилия Имя Отчество"
-                 autocomplete="name" required autofocus>
+          <input name="full_name" value="{{ form.full_name }}" placeholder="Фамилия Имя Отчество"
+                 autocomplete="name" maxlength="200" required{% if not can_leave %} autofocus{% endif %}>
         </label>
-
-        <label class="field"><span>Регион</span>
-          <select name="region" required>
-            <option value="" disabled {% if not prefill_region %}selected{% endif %}>— выберите регион —</option>
+        <label class="field"><span>Должность</span>
+          <input name="position" value="{{ form.position }}" placeholder="Например, эксперт"
+                 autocomplete="organization-title" maxlength="128">
+        </label>
+        <label class="field"><span>Рабочий email</span>
+          <input name="email" type="email" value="{{ form.email }}" placeholder="name@tpp.ru"
+                 autocomplete="email" maxlength="255" required>
+        </label>
+        <label class="field"><span>Телефон</span>
+          <input name="phone" type="tel" value="{{ form.phone }}" placeholder="+7 900 000-00-00"
+                 autocomplete="tel" maxlength="32" required>
+        </label>
+        {# Регион — список с поиском по совпадению (просьба владельца 09.10.2026). Обычный <select>
+           остаётся: без JS работает он, со скриптом его подменяет поле ввода с фильтром (ниже). #}
+        <div class="field"><span id="region-label">Регион</span>
+          <select name="region" id="region-select" aria-labelledby="region-label" required>
+            <option value="" disabled {% if not form.region %}selected{% endif %}>— выберите регион —</option>
             {% for r in regions %}
-            <option value="{{ r }}" {% if r == prefill_region %}selected{% endif %}>{{ r }}</option>
+            <option value="{{ r }}" {% if r == form.region %}selected{% endif %}>{{ r }}</option>
             {% endfor %}
           </select>
-        </label>
-
-        <label class="field"><span>Ник в Telegram</span>
-          <input name="telegram" value="{{ telegram or '' }}" placeholder="@username" required>
-        </label>
-
-        <label class="check">
-          <input type="checkbox" name="consent" value="1" {% if consent %}checked{% endif %} required>
-          <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, ник в Telegram,
-            содержание диалогов с сервисом) оператором — {{ org }} — в целях проведения тестирования и
-            улучшения сервиса «Навигатор ПП №719», на условиях
-            <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
-            Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
-        </label>
-        <p class="plan-note" style="margin:0">Не вводите данные ограниченного доступа: вопросы обрабатывает
-          внешняя языковая модель.</p>
-
-        <button class="ds-btn" type="submit" style="align-self:flex-start">Сохранить и продолжить</button>
-      </form>
-
-      {% if quota %}
-      {# Б4: расход тарифа — те же данные, что у карточки в сайдбаре (`quota.quota_view`) #}
-      <div class="plan-card">
-        <div class="plan-head"><span>Текущий тариф</span><span class="tag">Новый период с {{ quota.renews }}</span></div>
-        <div class="plan-name">{{ quota.plan }}</div>
-        <div>
-          <div class="plan-use"><span>Использовано {{ quota.used }} из {{ quota.limit }} запросов</span>
-            <span>{{ ((100 * quota.used / quota.limit) | round | int) if quota.limit else 0 }}%</span></div>
-          <div class="plan-track" style="margin-top:10px"><div style="width:{{ ((100 * quota.used / quota.limit) | round | int) if quota.limit else 0 }}%"></div></div>
+          <div class="combo hidden" id="region-combo">
+            <input id="region-input" type="text" role="combobox" aria-labelledby="region-label"
+                   aria-autocomplete="list" aria-expanded="false" aria-controls="region-list"
+                   autocomplete="off" spellcheck="false" placeholder="Начните вводить регион">
+            <ul class="combo-list hidden" id="region-list" role="listbox" aria-labelledby="region-label"></ul>
+          </div>
         </div>
-        <div class="plan-note">{{ plan_line }}</div>
+        <label class="field"><span>Ник в Telegram</span>
+          <input name="telegram" value="{{ form.telegram }}" placeholder="@username" maxlength="128">
+        </label>
+        {# Только чтение: без name — поле не уходит с формой; сервер всё равно его не принял бы #}
+        <label class="field"><span>Организация</span>
+          <input value="{{ user.org or '' }}" placeholder="Не указана" disabled>
+          <span class="hint">Меняется через администратора сервиса</span>
+        </label>
+        <label class="field"><span>ИНН организации</span>
+          <input value="{{ user.inn or '' }}" placeholder="Не указан" disabled>
+          <span class="hint">Меняется через администратора сервиса</span>
+        </label>
       </div>
-      {% endif %}
-    </div>
+
+      <label class="check">
+        <input type="checkbox" name="consent" value="1" {% if form.consent %}checked{% endif %} required>
+        <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, рабочий email, телефон,
+          а если я их укажу — должность и ник в Telegram; содержание диалогов с сервисом) оператором —
+          {{ org }} — в целях проведения тестирования и улучшения сервиса «Навигатор ПП №719», на условиях
+          <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
+          Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
+      </label>
+      <p class="plan-note" style="margin:0">Не вводите данные ограниченного доступа: вопросы обрабатывает
+        внешняя языковая модель.</p>
+
+      <div class="save-row">
+        <button class="ds-btn" type="submit">{% if can_leave %}Сохранить изменения{% else %}Сохранить и продолжить{% endif %}</button>
+        {% if saved %}<span class="saved-note" role="status">Изменения сохранены</span>{% endif %}
+      </div>
+    </form>
+    {% endif %}
   </div>
 </div>
+{% if tab != 'plan' %}
+<script>
+  // Регион с поиском по совпадению. Значение по-прежнему уходит в <select name="region">: поле ввода
+  // только выбирает в нём вариант, поэтому на сервер попадает лишь регион из справочника (его
+  // проверяет и сервер). Совпадение — по каждому слову запроса в любом месте названия, «ё» = «е»:
+  // «курск» → Курская область, «моск обл» → Московская область.
+  (function () {
+    var sel = document.getElementById("region-select"), combo = document.getElementById("region-combo");
+    var input = document.getElementById("region-input"), list = document.getElementById("region-list");
+    if (!sel || !combo) return;
+    var regions = Array.prototype.filter.call(sel.options, function (o) { return o.value; })
+      .map(function (o) { return o.value; });
+    var norm = function (s) { return s.toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim(); };
+    var shown = [], active = -1;
+
+    sel.classList.add("hidden");
+    sel.required = false;          // скрытое обязательное поле браузер не может подсветить
+    combo.classList.remove("hidden");
+    input.required = true;
+    input.value = sel.value;
+
+    function match(q) {
+      var words = norm(q).split(" ").filter(Boolean);
+      return regions.filter(function (r) {
+        var n = norm(r);
+        return words.every(function (w) { return n.indexOf(w) !== -1; });
+      });
+    }
+    function render() {
+      list.innerHTML = "";
+      if (!shown.length) {
+        var empty = document.createElement("li");
+        empty.className = "combo-empty";
+        empty.textContent = "Ничего не найдено";
+        list.appendChild(empty);
+      }
+      shown.forEach(function (r, i) {
+        var li = document.createElement("li");
+        li.id = "region-opt-" + i;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", r === sel.value ? "true" : "false");
+        li.textContent = r;
+        if (i === active) li.classList.add("active");
+        li.addEventListener("mousedown", function (e) { e.preventDefault(); pick(r); });
+        list.appendChild(li);
+      });
+      input.setAttribute("aria-activedescendant", active >= 0 ? "region-opt-" + active : "");
+      var cur = list.querySelector(".active");
+      if (cur) cur.scrollIntoView({ block: "nearest" });
+    }
+    function open(q) {
+      shown = match(q);
+      active = shown.length ? 0 : -1;
+      list.classList.remove("hidden");
+      input.setAttribute("aria-expanded", "true");
+      render();
+    }
+    function close() {
+      list.classList.add("hidden");
+      input.setAttribute("aria-expanded", "false");
+    }
+    function pick(r) {
+      sel.value = r;
+      input.value = r;
+      input.setCustomValidity("");
+      close();
+    }
+    // Точное название (без учёта регистра и «ё») выбирает регион и без клика по списку.
+    function syncExact() {
+      var hit = regions.filter(function (r) { return norm(r) === norm(input.value); })[0];
+      sel.value = hit || "";
+      if (hit) input.setCustomValidity("");
+    }
+
+    input.addEventListener("focus", function () { open(input.value === sel.value ? "" : input.value); });
+    input.addEventListener("input", function () { syncExact(); open(input.value); });
+    input.addEventListener("keydown", function (e) {
+      var isOpen = !list.classList.contains("hidden");
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!isOpen) { open(input.value === sel.value ? "" : input.value); return; }
+        if (!shown.length) return;
+        active = (active + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
+        render();
+      } else if (e.key === "Enter" && isOpen && active >= 0) {
+        e.preventDefault();       // Enter выбирает регион, а не отправляет форму
+        pick(shown[active]);
+      } else if (e.key === "Escape" && isOpen) {
+        e.preventDefault();
+        close();
+      }
+    });
+    input.addEventListener("blur", function () {
+      syncExact();
+      var only = match(input.value);
+      if (!sel.value && input.value.trim() && only.length === 1) pick(only[0]);   // «курск» → единственный вариант
+      close();
+    });
+    input.form.addEventListener("submit", function (e) {
+      syncExact();
+      if (!sel.value) {
+        e.preventDefault();
+        input.setCustomValidity("Выберите регион из списка");
+        input.reportValidity();
+      }
+    });
+  })();
+</script>
+{% endif %}
 {% endblock %}

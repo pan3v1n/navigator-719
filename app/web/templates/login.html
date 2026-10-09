@@ -14,9 +14,9 @@
       <div class="auth-box">
         <div>
           <h1>Вход в Навигатор</h1>
-          <p class="auth-lead">Для сотрудников организаций с подключённым тарифом.</p>
         </div>
         <form class="auth-form" method="post" action="/login">
+          {% if trial_over %}<div class="note-box">Пробные вопросы закончились. Войдите, чтобы продолжить работу.</div>{% endif %}
           {% if error %}<div class="error">{{ error }}</div>{% endif %}
           <label class="field"><span>Логин</span>
             <input name="username" autocomplete="username" required autofocus>
@@ -27,6 +27,11 @@
           <label class="check"><input type="checkbox" name="remember"> Запомнить меня</label>
           <button class="ds-btn block" type="submit">Войти</button>
         </form>
+        {# Пробный режим (09.10.2026): пока гость не исчерпал вопросы, ему есть куда вернуться #}
+        {% if guest_trial and not trial_over %}
+        <a class="ds-link" href="/chat">Попробовать без входа — {{ guest_questions }}
+          {{ guest_questions | plural('вопрос', 'вопроса', 'вопросов') }}</a>
+        {% endif %}
         {% if landing_url %}
         <div class="auth-alt">
           <span>Организация ещё не подключена?</span>
@@ -42,16 +47,22 @@
       и <a href="/privacy">Политику конфиденциальности</a> · <a href="/help">Справка</a>
     </div>
   </div>
-  {# Пример ответа — ДОСЛОВНО по п. 7 Правил формирования и ведения реестра (ПП №719). В макете
-     стояло «…или уполномоченная ею территориальная палата»: в п. 7 этих слов нет, а эта страница
-     публичная — пример со ссылкой на пункт обязан совпадать с пунктом. #}
+  {# Демо-чат — анимация как на первом экране лендинга (09.10.2026): вопрос печатается, «Навигатор
+     ищет…», ответ проявляется вместе со ссылкой, дальше следующий пример. Примеры — `LOGIN_DEMO` в
+     web.py: страница публичная, и ответ со ссылкой на пункт обязан стоять на тексте пункта (цитаты
+     сверяет тест). Без JS и при «уменьшить движение» — первый пример целиком, как раньше. #}
+  {% set first = login_demo[0] %}
   <div class="auth-side">
     <h2>Ответы по ПП&nbsp;719 со&nbsp;ссылкой на&nbsp;пункт</h2>
-    <div class="auth-demo">
-      <div class="auth-demo-q">Кто выдаёт акт экспертизы для подтверждения производства?</div>
-      <p class="auth-demo-a">Заявки для выдачи акта экспертизы рассматривает Торгово-промышленная палата
-        Российской Федерации — в порядке, определённом ею по согласованию с Минпромторгом России.</p>
-      <span class="auth-demo-ref">п. 7 Правил</span>
+    <div class="auth-demo" aria-label="Пример работы сервиса">
+      <div class="auth-demo-top">
+        <span>Навигатор ПП 719</span>
+        <span class="auth-dots" id="auth-dots" aria-hidden="true">{% for _ in login_demo %}<span{% if loop.first %} class="on"{% endif %}></span>{% endfor %}</span>
+      </div>
+      <div class="auth-demo-q" id="auth-demo-q">{{ first.q }}</div>
+      <div class="auth-demo-label" id="auth-demo-label">Навигатор ПП 719</div>
+      <p class="auth-demo-a" id="auth-demo-a">{{ first.a }}</p>
+      <span class="auth-demo-ref" id="auth-demo-ref">{{ first.ref }}</span>
     </div>
     <div class="auth-points">
       <div>История вопросов и экспорт диалогов</div>
@@ -60,4 +71,47 @@
     </div>
   </div>
 </div>
+<script>
+  // Демо-чат панели входа — та же машина состояний, что у первого экрана лендинга (landing/app.js):
+  // печать вопроса → «ищет…» → ответ со ссылкой → следующий пример.
+  (function () {
+    var DEMO = {{ login_demo | tojson }};
+    var reduce = window.matchMedia && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+    if (reduce || DEMO.length < 2) return;   // статичный первый пример уже в разметке
+    var dq = document.getElementById("auth-demo-q"), dl = document.getElementById("auth-demo-label"),
+        da = document.getElementById("auth-demo-a"), dr = document.getElementById("auth-demo-ref"),
+        dots = document.getElementById("auth-dots").children;
+    var d = { i: 0, phase: "typing", n: 0, dots: 0, caret: true }, caretEl = document.createElement("span");
+    caretEl.className = "auth-caret";
+
+    function paint() {
+      var it = DEMO[d.i], ans = d.phase === "answer", out = d.phase === "out";
+      dq.textContent = it.q.slice(0, d.n);
+      if (d.phase === "typing" && d.caret) dq.appendChild(caretEl);
+      dq.classList.toggle("gone", out);
+      dl.textContent = d.phase === "thinking"
+        ? "Навигатор ищет в тексте документов" + ".".repeat(d.dots % 4) : "Навигатор ПП 719";
+      dl.classList.toggle("gone", d.phase === "typing" || out);
+      da.textContent = it.a;
+      dr.textContent = it.ref;
+      da.classList.toggle("fade", !ans);
+      dr.classList.toggle("fade", !ans);
+      for (var k = 0; k < dots.length; k++) dots[k].classList.toggle("on", k === d.i);
+    }
+    function tick() {
+      var it = DEMO[d.i], wait = 0;
+      if (d.phase === "typing") {
+        d.n += 2;
+        if (d.n >= it.q.length) { d.n = it.q.length; d.phase = "thinking"; d.dots = 0; wait = 350; } else wait = 28;
+      } else if (d.phase === "thinking") { d.dots++; wait = 280; if (d.dots > 5) { d.phase = "answer"; wait = 4200; } }
+      else if (d.phase === "answer") { d.phase = "out"; wait = 350; }
+      else { d.i = (d.i + 1) % DEMO.length; d.n = 0; d.phase = "typing"; wait = 200; }
+      paint();
+      setTimeout(tick, wait);
+    }
+    // Первый пример уже виден целиком: даём его прочитать, затем уводим и начинаем цикл со второго.
+    d.phase = "answer"; d.n = DEMO[0].q.length; paint(); setTimeout(tick, 3500);
+    setInterval(function () { d.caret = !d.caret; if (d.phase === "typing") paint(); }, 450);
+  })();
+</script>
 {% endblock %}

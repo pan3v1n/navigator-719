@@ -10,6 +10,12 @@ const main = document.getElementById("main");
 const chatTitle = document.getElementById("chat-title");
 let sessionId = null;
 
+// Пробный режим без входа (09.10.2026): window.GUEST — остаток пробных вопросов, иначе null.
+// Вопросы гостя идут в свои ручки (`app/api/guest.py`); оценки, истории и кабинета у него нет.
+const GUEST = window.GUEST || null;
+const CHAT_URL = GUEST ? "/api/guest/chat" : "/api/chat";
+const STREAM_URL = GUEST ? "/api/guest/chat/stream" : "/api/chat/stream";
+
 // Заголовок в шапке — название открытой беседы (макет 08.10.2026); на главной пусто.
 // ⚠ Пока открыта страница истории, шапка принадлежит ей (ревью test32): ответ, дописавшийся в фоне,
 // и удаление беседы зовут setActive → setTitle, и без этой проверки шапка показывала беседу поверх
@@ -523,8 +529,13 @@ function openSource(wrap, i) {
   const textEl = document.getElementById("src-text");
   textEl.classList.toggle("missing", !s.text);
   textEl.textContent = s.text
-    || "Текст этого источника не сохранён вместе с ответом (ответ записан до обновления сервиса). "
-       + "Откройте полный текст документа по ссылке ниже.";
+    || (GUEST
+      // пробный режим: текст пункта сервер не отдаёт (макет — «видеть полный текст источников»
+      // после входа); первоисточник по ссылке ниже открыт всем
+      ? "Текст пункта в сервисе доступен после входа в аккаунт организации. "
+        + "Первоисточник — по ссылке ниже."
+      : "Текст этого источника не сохранён вместе с ответом (ответ записан до обновления сервиса). "
+        + "Откройте полный текст документа по ссылке ниже.");
   const href = sourceHref(s);
   const open = document.getElementById("src-open");
   open.classList.toggle("hidden", !href);
@@ -906,8 +917,31 @@ async function ask(text) {
   } finally {
     send.disabled = false;
     autoScroll();  // в конце ответа не выдёргиваем пользователя вниз, если он читает выше
-    refreshQuota();  // Б4: ответ мог списать запрос тарифа (или его не дали — 402)
+    if (!GUEST) refreshQuota();  // Б4: ответ мог списать запрос тарифа (или его не дали — 402)
   }
+}
+
+// Пробный режим: отказы сервера. 402 — пробные вопросы кончились: на вход, с пояснением (макет:
+// «Пробные вопросы закончились. Войдите, чтобы продолжить работу»). 429 — потолок по адресу или
+// общий суточный: причина в поле ввода, вопрос не теряется. 403 — нет куки гостя (её ставит
+// страница /chat): перезагрузить страницу. true — ответ разобран, фолбэк не нужен.
+async function guestRejected(r, text, pending) {
+  if (r.status === 402) { window.location = "/login?trial_over=1"; return true; }
+  if (r.status === 403) { window.location.reload(); return true; }
+  if (r.status === 429) { await handleRejected(r, text, pending); return true; }
+  return false;
+}
+
+// Остаток пробных вопросов — строкой под полем ввода, как в макете («Осталось 2 из 3 пробных
+// вопросов»). Считает сервер: первый раз — в разметке (window.GUEST), дальше — в каждом ответе.
+function renderTrial(tv) {
+  const line = document.getElementById("limit-line");
+  if (!line || !tv) return;
+  line.textContent = (tv.remaining > 0
+    ? "Осталось " + tv.remaining + " из " + tv.limit + " "
+      + plural(tv.limit, "пробного вопроса", "пробных вопросов", "пробных вопросов")
+    : "Пробные вопросы закончились") + " · ";
+  line.classList.remove("hidden");
 }
 
 // --- Ссылки «в новой вкладке»: «Текст постановления», первоисточник в панели, тарифы ------------
@@ -937,12 +971,19 @@ function renderQuota(qv) {
   const left = qv.remaining;
   const pct = qv.limit ? Math.max(0, Math.min(100, Math.round(100 * left / qv.limit))) : 0;
   document.getElementById("quota-fill").style.width = pct + "%";
-  document.getElementById("quota-note").textContent =
-    "Осталось " + left + " из " + qv.limit + " до " + qv.renews + ". Лимиты обновляются каждый месяц.";
-  card.classList.toggle("low", left === 0);
+  // Срок тарифа (09.10.2026): истёкший закрывает вопросы — говорим об этом, а не об остатке
+  // тариф, который кончится раньше нового периода (неделя пробы), считаем до своей даты окончания
+  const until = qv.renews_first === false ? qv.expires : qv.renews;
+  document.getElementById("quota-note").textContent = qv.expired
+    ? "Срок действия тарифа истёк " + qv.expires + ". Чтобы продлить, обратитесь в Курскую ТПП."
+    : qv.renews_first === false
+      ? "Осталось " + left + " из " + qv.limit + " до " + until + " — дата окончания тарифа."
+      : "Осталось " + left + " из " + qv.limit + " до " + until + ". Лимиты обновляются каждый месяц."
+        + (qv.expires ? " Тариф действует до " + qv.expires + "." : "");
+  card.classList.toggle("low", left === 0 || !!qv.expired);
   card.classList.remove("hidden");
-  line.textContent = "Осталось " + left + " " + plural(left, "запрос", "запроса", "запросов")
-    + " до " + qv.renews + " · ";
+  line.textContent = qv.expired ? "Срок тарифа истёк · "
+    : "Осталось " + left + " " + plural(left, "запрос", "запроса", "запросов") + " до " + until + " · ";
   line.classList.remove("hidden");
 }
 
@@ -955,6 +996,7 @@ async function refreshQuota() {
   } catch (e) { /* сеть — карточка останется прежней */ }
 }
 renderQuota(window.QUOTA || null);
+if (GUEST) renderTrial(GUEST);   // у гостя тарифа нет — та же строка показывает пробные вопросы
 
 // Стриминг: fetch SSE-поток → дописываем delta в пузырь → на done навешиваем источники+оценку.
 // Возврат: true = завершилось финалом (done / редирект на login|profile); false = нужен фолбэк.
@@ -964,12 +1006,16 @@ async function askStream(text, pending, bubble, isNew) {
   let acc = "";
   let done = null;
   try {
-    const r = await fetch("/api/chat/stream", {
+    const r = await fetch(STREAM_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text, session_id: sessionId }),
       signal: ctrl.signal,
     });
+    if (GUEST && await guestRejected(r, text, pending)) {
+      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      return true;
+    }
     if (r.status === 401) { window.location = "/login"; return true; }
     if (r.status === 403) { window.location = "/profile"; return true; }  // профиль/согласие не заполнены
     // 422 — сервер нашёл в вопросе то, чего нельзя отправлять. Фолбэк бессмысленен: там та же
@@ -1015,7 +1061,8 @@ async function askStream(text, pending, bubble, isNew) {
     addUnverifiedFlag(pending, done.unverified_numbers);
     addSources(pending, done.sources);
     addAnswerTools(pending);
-    addFeedbackBar(pending, done.message_id, sessionId);
+    if (GUEST) renderTrial(done.trial);   // оценка ответа — после входа
+    else addFeedbackBar(pending, done.message_id, sessionId);
     setHint(done.input_hint);  // U5: следующий шаг задаёт ветка, которой отвечено
     return true;
   } catch (e) {
@@ -1030,12 +1077,16 @@ async function askFallback(text, pending, bubble, isNew) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);  // клиентский таймаут (бэкенд режет DeepSeek на 30с/вызов)
   try {
-    const r = await fetch("/api/chat", {
+    const r = await fetch(CHAT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: text, session_id: sessionId }),
       signal: ctrl.signal,
     });
+    if (GUEST && await guestRejected(r, text, pending)) {
+      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      return;
+    }
     if (r.status === 401) { window.location = "/login"; return; }
     if (r.status === 403) { window.location = "/profile"; return; }  // профиль/согласие не заполнены
     if (r.status === 422 || r.status === 402) {
@@ -1061,7 +1112,8 @@ async function askFallback(text, pending, bubble, isNew) {
     addUnverifiedFlag(pending, data.unverified_numbers);
     addSources(pending, data.sources);
     addAnswerTools(pending);
-    addFeedbackBar(pending, data.message_id, sessionId);
+    if (GUEST) renderTrial(data.trial);   // как в стриминге
+    else addFeedbackBar(pending, data.message_id, sessionId);
     setHint(data.input_hint);  // U5: фолбэк ведёт себя так же, как стриминг
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
@@ -1376,7 +1428,8 @@ document.querySelectorAll(".hp-filter").forEach((f) => f.addEventListener("click
 
 // форма обратной связи
 const modal = document.getElementById("fb-modal");
-document.getElementById("fb-open").addEventListener("click", () => modal.classList.remove("hidden"));
+const fbOpen = document.getElementById("fb-open");  // у гостя кнопки нет — отзыв только после входа
+if (fbOpen) fbOpen.addEventListener("click", () => modal.classList.remove("hidden"));
 document.getElementById("fb-cancel").addEventListener("click", () => modal.classList.add("hidden"));
 document.getElementById("fb-form").addEventListener("submit", async (e) => {
   e.preventDefault();
@@ -1397,8 +1450,8 @@ document.getElementById("fb-form").addEventListener("submit", async (e) => {
   }
 });
 
-// загрузить историю бесед при открытии
-loadConversations();
+// загрузить историю бесед при открытии (у гостя истории нет: /api/conversations ответил бы 401)
+if (!GUEST) loadConversations();
 
 // --- онбординг: попап при первом входе (localStorage) + кнопка «Как пользоваться» ---
 // Онбординг-тур: затемняем экран, оставляя «окно» вокруг одной области, и объясняем её назначение.
@@ -1452,8 +1505,8 @@ const TOUR_SEEN_KEY = "tour719Seen_v2";
   let steps = [];
   let i = 0;
 
-  // Шаг без видимой цели пропускаем: сайдбар скрыт на узком экране, «Логи диалогов» есть только у
-  // админа — подсвечивать пустоту хуже, чем не показать шаг вовсе.
+  // Шаг без видимой цели пропускаем: сайдбар скрыт на узком экране, «Экспорт» и «Отзыв» есть не у
+  // всех (гость) — подсвечивать пустоту хуже, чем не показать шаг вовсе.
   const visible = (s) => {
     const t = document.querySelector(s.sel);
     return t && t.getBoundingClientRect().width > 0 && t.getBoundingClientRect().height > 0;
@@ -1543,7 +1596,9 @@ const TOUR_SEEN_KEY = "tour719Seen_v2";
 
   let seen = false;
   try { seen = localStorage.getItem(TOUR_SEEN_KEY) === "1"; } catch (e) {}
-  if (!seen) setTimeout(open, 400);  // даём интерфейсу отрисоваться, иначе позиции «прыгают»
+  // Гостю тур сам не открывается: у него три вопроса и баннер пробного доступа — знакомство с
+  // историей и оценками, которых у него нет, только мешает. Открыть можно из «Справки».
+  if (!seen && !GUEST) setTimeout(open, 400);  // даём интерфейсу отрисоваться, иначе позиции «прыгают»
 })();
 
 // Меню «Справка» в сайдбаре. Раскрытие по наведению делает CSS; здесь — клик и клавиатура:

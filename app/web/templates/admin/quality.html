@@ -1,57 +1,9 @@
-{% extends "base.html" %}
-{% from "_mark.html" import mark %}
-{% block title %}Панель — {{ app_title }}{% endblock %}
-{% block body %}
-<header class="admin-header">
-  <a class="brand" href="/chat" title="На начальную страницу">{{ mark(28) }}<span class="brand-text">Навигатор · панель</span></a>
-  <div class="spacer"></div>
-  <span class="muted">{{ admin.username }} · admin</span>
-  <a class="link" href="/chat">Чат</a>
-  <a class="link" href="/logout">Выйти</a>
-</header>
-
-<main class="admin">
-  <div class="tabs">
-    <button class="tab active" data-tab="dash">Обзор</button>
-    <button class="tab" data-tab="bad">Плохие ответы<span class="tab-badge {{ 'warn' if stats.bad_count else '' }}">{{ stats.bad_count }}</span></button>
-    <button class="tab" data-tab="logs">Логи</button>
-    <button class="tab" data-tab="leads">Заявки<span class="tab-badge">{{ leads_total }}</span></button>
-    <button class="tab" data-tab="plans">Тарифы</button>
-  </div>
-
-  <!-- Панель фильтров: единый срез для всех вкладок (изоляция когорты, сравнение регионов). -->
-  <form class="filters" method="get" action="/admin">
-    <label class="f-field"><span>Период с</span>
-      <input type="date" name="date_from" value="{{ stats.filter_from }}"></label>
-    <label class="f-field"><span>по</span>
-      <input type="date" name="date_to" value="{{ stats.filter_to }}"></label>
-    <label class="f-field"><span>Регион</span>
-      <select name="region">
-        <option value="">Все регионы</option>
-        {% for r in stats.all_regions %}
-        <option value="{{ r }}" {{ 'selected' if r == stats.filter_region }}>{{ r }}</option>
-        {% endfor %}
-      </select></label>
-    <label class="f-field"><span>Роль</span>
-      <select name="role">
-        <option value="">Все роли</option>
-        {% for r in stats.all_roles %}
-        <option value="{{ r }}" {{ 'selected' if r == stats.filter_role }}>{{ r }}</option>
-        {% endfor %}
-      </select></label>
-    <button type="submit" class="f-apply">Применить</button>
-    {% if stats.filter_active %}<a class="f-reset" href="/admin">Сбросить</a>{% endif %}
-    <span class="f-right">
-      <span class="f-export">выгрузить:
-        <a href="/api/admin/export?fmt=csv&date_from={{ stats.filter_from }}&date_to={{ stats.filter_to }}&region={{ stats.filter_region|urlencode }}&role={{ stats.filter_role|urlencode }}" title="Скоркард — одна строка на оценённый ответ, CSV для Excel">CSV</a>
-        <a href="/api/admin/export?fmt=json&date_from={{ stats.filter_from }}&date_to={{ stats.filter_to }}&region={{ stats.filter_region|urlencode }}&role={{ stats.filter_role|urlencode }}" title="Полная выгрузка: скоркард + разбивки + все оценки, JSON">JSON</a>
-      </span>
-      <span class="f-stamp">данные на {{ stats.generated_at }}</span>
-    </span>
-  </form>
-
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="adm-head"><h1>Качество</h1><span class="muted">приёмка, плохие ответы, исправления экспертов</span></div>
+{% include "admin/_filters.html" %}
   <!-- ===== ОБЗОР ===== -->
-  <section id="tab-dash" class="tab-panel">
+  <section id="tab-dash" class="adm-section">
 
     <!-- Витрина показателей: пульс сервиса + тренд к прошлому периоду. -->
     <div class="kpis">
@@ -243,8 +195,9 @@
     </div>
   </section>
 
+  <h2 class="adm-h2">Плохие ответы (≤2★) · {{ stats.bad_count }}</h2>
   <!-- ===== ПЛОХИЕ ОТВЕТЫ (триаж ≤2★) ===== -->
-  <section id="tab-bad" class="tab-panel hidden">
+  <section id="tab-bad" class="adm-section">
     <div class="bad-intro">
       Ответы с оценкой <b>≤2★</b> — <b>{{ stats.bad_count }}</b>. Худшие и свежие сверху. Это рабочий список
       «почему проседает качество»: вопрос эксперта, ответ ИИ, флаги движка и что эксперт прокомментировал
@@ -258,7 +211,7 @@
         <span class="ts">{{ b.ts }}</span>
         {% if b.unverified %}<span class="flag">непроверенные числа: {{ b.unverified }}</span>{% endif %}
         {% if b.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
-        <a class="bad-link" href="#th-{{ b.session_id }}" data-sid="{{ b.session_id }}">показать в логах →</a>
+        <a class="bad-link" href="/admin/dialogs/{{ b.session_id }}?u={{ b.owner_id }}">открыть беседу →</a>
       </div>
       <div class="bad-q"><span class="lbl">Вопрос</span>{{ b.question or '—' }}</div>
       <details class="bad-a">
@@ -271,122 +224,4 @@
     {% else %}<p class="empty">Ответов с оценкой ≤2★ в выборке нет — либо их пока не оценивали.</p>{% endfor %}
   </section>
 
-  <!-- ===== ЛОГИ ===== -->
-  <section id="tab-logs" class="tab-panel hidden">
-    {% for u in data %}
-    <details class="user-log">
-      <summary>
-        <span class="ul-name">{{ u.username }} <span class="role">{{ u.role }}</span>{% if u.region %} <span class="ul-region">{{ u.region }}</span>{% endif %}</span>
-        <span class="ul-meta">диалогов {{ u.conversations }} · запросов {{ u.requests }} · {{ u.tokens|spaced }} ток. · {{ '%.2f'|format(u.cost) }} ₽</span>
-      </summary>
-      <div class="ul-body">
-        {% if u.feedback %}
-        <div class="fb-list">
-          <h3>Отзывы</h3>
-          {% for f in u.feedback %}
-          <div class="fb">оценка: <b>{{ f.rating if f.rating is not none else '—' }}</b>
-            · соответствие 719: <b>{{ f.matched or '—' }}</b>{% if f.comment %}<br>«{{ f.comment }}»{% endif %}
-            <span class="ts">{{ f.ts }}</span></div>
-          {% endfor %}
-        </div>
-        {% endif %}
-        {% for s in u.sessions %}
-        <details class="thread" id="th-{{ s.sid }}">
-          <summary>{{ s.title }}<span class="thread-meta"> · {{ s.date }} · {{ s.messages|length }} реплик · {{ s.tokens|spaced }} ток. · {{ '%.3f'|format(s.cost) }} ₽</span></summary>
-          {% for m in s.messages %}
-          <div class="log-msg {{ m.role }}">
-            <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
-            <span class="content">{{ m.content }}</span>
-            <span class="ts">{{ m.ts }}</span>
-            {% if m.tokens %}<span class="tok">{{ m.tokens|spaced }} ток.</span>{% endif %}
-            {% if m.unverified %}<span class="flag">непроверенные числа: {{ m.unverified }}</span>{% endif %}
-            {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
-          </div>
-          {% endfor %}
-        </details>
-        {% else %}<p class="empty">Нет диалогов.</p>{% endfor %}
-      </div>
-    </details>
-    {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
-  </section>
-
-  <!-- ===== ЗАЯВКИ С ЛЕНДИНГА (ПДн: только admin; фильтры периода сюда не применяются) ===== -->
-  <section id="tab-leads" class="tab-panel hidden">
-    <div class="card">
-      <h3>Заявки с сайта 719-навигатор.рф · {{ leads_total }}{% if leads_total > leads|length %} (показаны последние {{ leads|length }}){% endif %}</h3>
-      <p class="muted">Заявки хранятся не дольше 12 месяцев (политика ПДн, раздел 9) и удаляются автоматически. По отзыву согласия — «Удалить».</p>
-      <div class="feed">
-        {% for l in leads %}
-        <div class="feed-row">
-          <span class="feed-q"><b>{{ l.name }}</b> · {{ l.org }} · ИНН {{ l.inn }} · тариф «{{ l.tariff }}»{% if l.promo %} · промокод {{ l.promo }}{% endif %}</span>
-          <span class="feed-meta"><a href="mailto:{{ l.email }}">{{ l.email }}</a> · {{ l.phone }} · {{ l.created_at.strftime('%d.%m.%Y %H:%M') }} UTC · согласие на ПДн получено
-            <form method="post" action="/api/admin/leads/{{ l.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить заявку {{ l.id }}? Это необратимо.')"><button type="submit" class="link">Удалить</button></form></span>
-        </div>
-        {% else %}<p class="empty">Заявок пока нет.</p>{% endfor %}
-      </div>
-    </div>
-  </section>
-
-  <!-- ===== ТАРИФЫ (#160): назначение и расход текущего периода ===== -->
-  <section id="tab-plans" class="tab-panel hidden">
-    <div class="card">
-      <h3>Тарифы пользователей</h3>
-      <p class="muted">Период — месяц от даты подключения (с 00:00 МСК). Считаются ответы сервиса на вопросы;
-        приветствия и сбои не считаются. По исчерпании вопросы блокируются до начала нового периода.
-        Без тарифа — без ограничения; у admin лимита нет никогда.</p>
-      <div class="feed">
-        {% for r in plan_rows %}
-        <div class="feed-row">
-          <span class="feed-q"><b>{{ r.username }}</b> · {{ r.role }}{% if r.who %} · {{ r.who }}{% endif %}
-            {% if r.unknown %} · <span class="warn">тариф «{{ r.plan }}» неизвестен — лимит не действует</span>{% endif %}
-            {% if r.state %} · <b>{{ r.state.used }} из {{ r.state.limit }}</b> за {{ r.period }}{% if r.state.exhausted %} · <span class="warn">исчерпан</span>{% endif %}{% endif %}</span>
-          <span class="feed-meta">
-            <form method="post" action="/api/admin/users/{{ r.id }}/plan" style="display:inline">
-              <select name="plan" aria-label="Тариф {{ r.username }}">
-                <option value="" {% if not r.plan %}selected{% endif %}>без тарифа</option>
-                {% for p in plan_names %}<option value="{{ p }}" {% if p == r.plan %}selected{% endif %}>{{ p }}</option>{% endfor %}
-              </select>
-              с <input type="date" name="started" value="{{ r.started or today }}" max="{{ today }}" aria-label="Дата подключения {{ r.username }}">
-              <button type="submit" class="link">Сохранить</button>
-            </form></span>
-        </div>
-        {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
-      </div>
-    </div>
-  </section>
-</main>
-
-<script>
-  // Переключение вкладок + запоминание активной (переживает перезагрузку при «Применить»).
-  var KEY = "admin_tab";
-  function activate(name) {
-    document.querySelectorAll(".tab").forEach(function (x) { x.classList.toggle("active", x.dataset.tab === name); });
-    document.querySelectorAll(".tab-panel").forEach(function (p) { p.classList.add("hidden"); });
-    var panel = document.getElementById("tab-" + name);
-    if (panel) panel.classList.remove("hidden");
-  }
-  document.querySelectorAll(".tab").forEach(function (t) {
-    t.addEventListener("click", function () {
-      try { localStorage.setItem(KEY, t.dataset.tab); } catch (e) {}
-      activate(t.dataset.tab);
-    });
-  });
-  // «Показать в логах»: перейти на вкладку логов, раскрыть нужный диалог и его пользователя, прокрутить.
-  document.querySelectorAll(".bad-link").forEach(function (a) {
-    a.addEventListener("click", function (e) {
-      e.preventDefault();
-      activate("logs");
-      try { localStorage.setItem(KEY, "logs"); } catch (e) {}
-      var th = document.getElementById("th-" + a.dataset.sid);
-      if (th) {
-        for (var p = th; p; p = p.parentElement) { if (p.tagName === "DETAILS") p.open = true; }
-        th.scrollIntoView({ behavior: "smooth", block: "center" });
-      }
-    });
-  });
-  try {
-    var saved = localStorage.getItem(KEY);
-    if (saved && document.getElementById("tab-" + saved)) activate(saved);
-  } catch (e) {}
-</script>
 {% endblock %}

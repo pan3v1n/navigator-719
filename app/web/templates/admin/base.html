@@ -1,0 +1,25 @@
+{% extends "base.html" %}
+{% from "_mark.html" import mark %}
+{% block title %}{{ page_title }} · админ-панель — {{ app_title }}{% endblock %}
+{% block body %}
+{# Админ-панель (пересборка 09.10.2026): разделы с собственными адресами в стиле сервиса — сайдбар
+   вместо вкладок, таблицы вместо лент. Доступ — только admin (`app/api/admin.py`). #}
+<div class="adm">
+  <aside class="adm-side">
+    <a class="adm-brand" href="/admin">{{ mark(28) }}<span>Навигатор ПП&nbsp;719<small>админ-панель</small></span></a>
+    <nav class="adm-nav" aria-label="Разделы панели">
+      {% for key, href, label in sections %}
+      <a href="{{ href }}"{% if key == section %} class="on" aria-current="page"{% endif %}>{{ label }}</a>
+      {% endfor %}
+    </nav>
+    <div class="adm-side-bottom">
+      <span class="adm-me">{{ admin.username }}</span>
+      <a href="/chat">В чат</a>
+      <a href="/logout">Выйти</a>
+    </div>
+  </aside>
+  <main class="adm-main">
+    {% block content %}{% endblock %}
+  </main>
+</div>
+{% endblock %}
