@@ -36,7 +36,9 @@ from app.api.leads import TARIFFS as LEAD_TARIFFS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import pricing
+from app.core import plans, pricing
+from app.core.plans import PLAN_LIMITS
+from app.core.inn import inn_valid
 from app.core.config import settings
 from app.core.release import release_label
 from app.core.regions import REGIONS, region_from_username
@@ -330,14 +332,15 @@ def _profile_form(user: User, **over) -> dict:
     form = {"full_name": user.full_name or "", "telegram": user.telegram or "",
             "region": user.region or region_from_username(user.username),
             "position": user.position or "", "email": user.email or "", "phone": user.phone or "",
-            "consent": bool(user.consent)}
+            "org": user.org or "", "inn": user.inn or "", "consent": bool(user.consent)}
     form.update(over)
     return form
 
 
 def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
                       saved: bool = False, error: str | None = None, status_code: int = 200,
-                      requested: str = "", confirm: dict | None = None, tariff_kind: str = ""):
+                      requested: str = "", confirm: dict | None = None, tariff_kind: str = "",
+                      editing: bool = False, renew: dict | None = None):
     """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
@@ -349,7 +352,12 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
              tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
              quota=pv["quota"] if pv else None,
              requested=requested if requested in LEAD_TARIFFS else "",
-             confirm=confirm, tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
+             confirm=confirm, renew=renew, renewable=_renewal(user) is not None,
+             tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
+             # Форма профиля — просмотр, правка по «Редактировать» (просьба владельца 09.10.2026). Открыта
+             # сразу, пока профиль не заполнен (гейт до чата) и когда сохранение вернуло ошибку — иначе
+             # нечего было бы исправлять.
+             editing=editing or needs_profile(user) or bool(error),
              can_leave=not needs_profile(user)),
         status_code=status_code,
     )
@@ -357,29 +365,38 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
 
 @router.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, tab: str = "profile", saved: str = "", requested: str = "",
-                 err: str = ""):
+                 err: str = "", edit: str = ""):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     # «Подключить» на карточке — GET сюда же с выбранными условиями: панель подтверждения с данными
     # из профиля и галочкой согласия; заявку создаёт только она (`/api/plan-request`). Поля читаются из
     # адреса, а не параметрами функции: имя `trial` занято модулем.
-    qp, confirm = request.query_params, None
+    qp, confirm, renew = request.query_params, None, None
     error = PLAN_REQUEST_ERRORS.get(err)
-    if tab == "plan" and qp.get("confirm") == "1":
+    if tab == "plan" and qp.get("renew") == "1":
+        renew = _renewal(user)
+        if renew is None:
+            unlimited = user.plan in PLAN_LIMITS and not user.plan_expires_at
+            error = PLAN_REQUEST_ERRORS["renew_unlimited" if unlimited else "renew"]
+        elif not (user.email and user.phone):
+            renew, error = None, PLAN_REQUEST_ERRORS["profile"]
+    elif tab == "plan" and qp.get("confirm") == "1":
         seats = qp.get("seats")
         fields, summary, code = _plan_choice(qp.get("tariff", ""), qp.get("kind") or "individual",
-                                             qp.get("addon", ""), qp.get("period") or "month",
+                                             qp.get("period") or "month",
                                              "1" if seats is None else seats, qp.get("trial", ""))
         if code is None and not (user.email and user.phone):
             code = "profile"
         if code is None:
-            confirm = {"tariff": fields["tariff"], "summary": summary, "fields": fields}
+            # Корпоративный тариф и «Для организаций» — только через связь с заказчиком: попап с комментарием
+            confirm = {"tariff": fields["tariff"], "summary": summary, "fields": fields,
+                       "popup": fields["kind"] == "corporate" or fields["tariff"] == pricing.ORG_TARIFF}
         else:
             error = PLAN_REQUEST_ERRORS[code]
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
-                             requested=requested, error=error, confirm=confirm,
-                             tariff_kind=qp.get("kind", ""))
+                             requested=requested, error=error, confirm=confirm, renew=renew,
+                             tariff_kind=qp.get("kind", ""), editing=edit == "1")
 
 
 # «Подключить» на витрине тарифов кабинета (09.10.2026). Оплаты в сервисе нет — это заявка,
@@ -399,30 +416,52 @@ PLAN_REQUEST_ERRORS = {
                "вами свяжутся.",
     "consent": "Отметьте согласие на обработку персональных данных — без него заявку не отправить.",
     "limit": "Слишком много заявок подряд — попробуйте через час.",
+    "renew": "Продлевается только текущий платный тариф — выберите тариф на витрине.",
+    "renew_unlimited": "Ваш тариф бессрочный — продлевать его не нужно.",
+    "message": "Комментарий — не длиннее 1000 знаков.",
 }
+MESSAGE_LIMIT = 1000
 
 
-def _plan_choice(tariff: str, kind: str, addon: str, period: str, seats: str, trial: str):
+def _renewal(user: User) -> dict | None:
+    """«Продлить» (решение владельца 09.10.2026, вечер): только платный тариф СО СРОКОМ. Новый срок — на
+    месяц от конца текущего, а если он уже истёк — от сегодня. Личный продлевается заявкой (позже —
+    оплатой с личной карты), корпоративный — только через связь с заказчиком (попап). None — продлевать
+    нечего: не платный тариф или бессрочный."""
+    # Бессрочный тариф продлевать нечего: «продление до …» поставило бы срок там, где его не было (ревью
+    # PR #186) — кнопки нет, пока admin не задал срок.
+    if user.plan not in PLAN_LIMITS or not user.plan_expires_at:
+        return None
+    today = plans.msk_today()
+    until = plans.msk_date(user.plan_expires_at)
+    base = max(today, until)
+    new = plans.add_months(datetime(base.year, base.month, base.day), 1).date()
+    return {"tariff": user.plan, "corporate": user.plan_kind == "corporate",
+            "now_until": f"{until:%d.%m.%Y}", "new_until": f"{new:%d.%m.%Y}"}
+
+
+def _plan_choice(tariff: str, kind: str, period: str, seats: str, trial: str):
     """Выбор на карточке → (поля заявки, строка условий, код ошибки). Один разбор и для панели
     подтверждения, и для самой заявки. Пользователей — только ASCII-цифры: «²».isdigit() — True, а
     int("²") роняет обработчик в 500 (ревью PR #184); пустое поле — ошибка, а не молча «1»."""
     if tariff not in LEAD_TARIFFS:
         return None, None, "tariff"
     n = int(seats) if seats.isascii() and seats.isdigit() and len(seats) <= 4 else 0
-    summary, errs = pricing.parse_options(tariff, kind=kind, addon=bool(addon), period=period,
-                                          seats=n, trial=bool(trial))
+    summary, errs = pricing.parse_options(tariff, kind=kind, period=period, seats=n, trial=bool(trial))
     if errs:
         return None, None, "options"
     fields = {"tariff": tariff, "kind": kind, "period": period, "seats": str(n)}
-    fields.update({k: "1" for k, on in (("addon", addon), ("trial", trial)) if on})
+    if trial:
+        fields["trial"] = "1"
     return fields, summary, None
 
 
 @router.post("/api/plan-request", response_class=HTMLResponse)
 def plan_request(request: Request, tariff: str = Form(default=""), kind: str = Form(default="individual"),
-                 addon: str = Form(default=""), period: str = Form(default="month"),
+                 period: str = Form(default="month"),
                  seats: str = Form(default="1"), trial_flag: str = Form(default="", alias="trial"),
-                 consent: str = Form(default="")):
+                 consent: str = Form(default=""), renew: str = Form(default=""),
+                 message: str = Form(default="")):
     # `trial_flag`, а не `trial`: имя занято модулем `app.api.trial` (ревью PR #184)
     user = current_user(request)
     if not user:
@@ -431,12 +470,24 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
     def back(err: str):
         # Ошибка — внутри витрины и на той вкладке, с которой пришла заявка (повторное ревью PR #184:
         # над карточкой тарифа она уезжала за край экрана, а корпоративная возвращалась на «Индивидуальные»)
+        if renew == "1":    # продление — назад к его панели, а не к витрине
+            return RedirectResponse(f"/profile?tab=plan&renew=1&err={err}#renew", status_code=303)
         tab_kind = "&kind=corporate" if kind == "corporate" else ""
         return RedirectResponse(f"/profile?tab=plan&err={err}{tab_kind}#tariffs", status_code=303)
 
-    _, options, code = _plan_choice(tariff, kind, addon, period, seats, trial_flag)
-    if code:
-        return back(code)
+    msg = message.replace("\r\n", "\n").strip()   # перевод строки — один знак, как считает браузер
+    if len(msg) > MESSAGE_LIMIT:
+        return back("message")
+    if renew == "1":
+        r = _renewal(user)
+        if r is None or tariff != r["tariff"]:
+            return back("renew")
+        options = ("корпоративный · " if r["corporate"] else "") + f"продление до {r['new_until']}"
+        kind = "corporate" if r["corporate"] else "individual"
+    else:
+        _, options, code = _plan_choice(tariff, kind, period, seats, trial_flag)
+        if code:
+            return back(code)
     # Заявка — ПДн со временем согласия (152-ФЗ). Согласие — галочкой на панели подтверждения, как в
     # форме лендинга (политика, раздел 9): согласие анкеты дано на другую цель — тестирование сервиса
     # (повторное ревью PR #184). Контакты обязательны: без них с человеком не связаться.
@@ -450,7 +501,8 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         lead = q.create_lead(db, tariff=tariff, name=user.full_name or user.username, org=user.org or "",
                              inn=user.inn or "", email=user.email, phone=user.phone,
                              options=" · ".join(filter(None, ("из личного кабинета", options))),
-                             user_id=user.id)
+                             user_id=user.id, message=msg,
+                             kind="corporate" if kind == "corporate" or tariff == pricing.ORG_TARIFF else None)
         q.purge_old_leads(db)   # срок хранения политики — и на этом пути новой заявки (ревью PR #184)
     logger.info(f"заявка #{lead.id} из кабинета: user_id={user.id}, тариф «{tariff}»")
     return RedirectResponse(f"/profile?tab=plan&requested={quote(tariff)}", status_code=303)
@@ -479,16 +531,24 @@ def profile_submit(
     position: str = Form(default=""),
     email: str = Form(default=""),
     phone: str = Form(default=""),
+    org: str | None = Form(default=None),
+    inn: str | None = Form(default=None),
 ):
-    """Сохранение профиля. Организацию и ИНН форма не принимает вовсе: их ведёт admin
-    (`admin_set_org`), присланные в форме поля `org`/`inn` отбрасываются ещё на разборе."""
+    """Сохранение профиля. Организацию и ИНН вписывает сам пользователь (решение владельца 09.10.2026,
+    вечер; утром их вёл только admin) — по желанию; ИНН проверяется по контрольным цифрам. Правка
+    организации или ИНН снимает подтверждение admin'а (`queries.update_profile`)."""
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     fn, rg, tg = full_name.strip(), region.strip(), telegram.strip()
     pos, em, ph = position.strip(), email.strip(), phone.strip()
+    # Нет поля в POST (страница, открытая до выкатки) — не трогаем: None; иначе пустая форма стёрла бы
+    # организацию и подтверждение (ревью PR #186).
+    og = q.norm_org(org) or "" if org is not None else (user.org or "")
+    nn = q.norm_org(inn) or "" if inn is not None else (user.inn or "")
     form = _profile_form(user, full_name=fn, region=rg or region_from_username(user.username),
-                         telegram=tg, position=pos, email=em, phone=ph, consent=bool(consent))
+                         telegram=tg, position=pos, email=em, phone=ph, org=og, inn=nn,
+                         consent=bool(consent))
     # Обязательны ФИО, регион, рабочий email, телефон и согласие; должность и Telegram — по
     # желанию (решение владельца 09.10.2026). Ошибка → ре-рендер с введённым, а не потеря формы.
     errs = []
@@ -503,12 +563,19 @@ def profile_submit(
     if len(fn) > PROFILE_LIMITS["full_name"] or len(tg) > PROFILE_LIMITS["telegram"]:
         errs.append("Слишком длинное ФИО или ник в Telegram.")
     errs += _contact_errors(pos, em, ph)
+    if len(og) > ORG_LIMIT:
+        errs.append("Слишком длинное название организации.")
+    # Контрольные цифры — только у ИНН, который пользователь ввёл сам: ИНН из заявки или от admin'а мог
+    # пройти лишь проверку длины, и без этого человек не сохранил бы анкету (гейт до чата) — ревью PR #186.
+    if nn and nn != (q.norm_org(user.inn) or "") and not inn_valid(nn):
+        errs.append("Проверьте ИНН: 10 цифр у организации или 12 у ИП, контрольные цифры не сходятся.")
     if errs:
         return _profile_response(request, user, form, error=" ".join(errs), status_code=400)
     first_fill = needs_profile(user)
     with get_session() as db:
         q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True,
-                         position=pos, email=em, phone=ph)
+                         position=pos, email=em, phone=ph,
+                         org=None if org is None else og, inn=None if inn is None else nn)
     # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
     # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
     return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)

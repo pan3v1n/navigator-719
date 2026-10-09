@@ -19,7 +19,7 @@
 <section class="adm-card adm-lead" id="lead-{{ l.id }}">
   <div class="adm-lead-head">
     <div>
-      <h2>№{{ l.id }} · {{ l.org }}</h2>
+      <h2>№{{ l.id }} · {{ l.org or l.name }}</h2>
       <div class="muted">{{ r.created }} · тариф «{{ l.tariff }}»{% if l.options %} · {{ l.options }}{% endif %}{% if l.promo %} · промокод {{ l.promo }}{% endif %}</div>
     </div>
     <span class="badge st-{{ l.status }}">{{ statuses.get(l.status, l.status) }}</span>
@@ -28,6 +28,7 @@
     <dt>Контакт</dt><dd>{{ l.name }}</dd>
     <dt>Email</dt><dd><a href="mailto:{{ l.email }}">{{ l.email }}</a></dd>
     <dt>Телефон</dt><dd>{{ l.phone }}</dd>
+    {% if l.message %}<dt>Комментарий</dt><dd class="adm-msg-text">{{ l.message }}</dd>{% endif %}
     <dt>ИНН</dt><dd>{{ l.inn }}</dd>
     <dt>Учётка</dt><dd>{% if r.linked %}<a href="/admin/users/{{ r.linked_id }}">{{ r.linked }}</a>{% else %}не создана{% endif %}</dd>
   </dl>

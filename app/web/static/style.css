@@ -83,6 +83,16 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 .field input:focus, .field select:focus { outline: none; box-shadow: inset 0 0 0 1px var(--blue); }
 .field input[disabled] { opacity: .6; }
 .field .hint { font: 400 12px/1.3 var(--font); color: var(--ink-60); }
+/* форма профиля: просмотр по умолчанию, правка по «Редактировать» (09.10.2026) */
+.fields-lock { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 32px; }
+.fields-lock:disabled .field input, .fields-lock:disabled .field select { opacity: 1; color: var(--ink);
+  background: rgba(255, 255, 255, .5); cursor: default; }
+.fields-lock:disabled .check { cursor: default; }
+.req { color: var(--red); font-weight: 600; }
+.org-status { grid-column: 1 / -1; padding: 10px 14px; border-radius: 8px; font: 500 14px/1.35 var(--font); }
+.org-status.ok { background: rgba(35, 140, 80, .1); color: #1d6b3f; }
+.org-status.wait { background: var(--blue-07); color: var(--ink-80); }
+.req-note { margin: -16px 0 0; font: 400 12px/1.3 var(--font); color: var(--ink-60); }
 .check { display: flex; align-items: flex-start; gap: 12px; font: 400 14px/1.45 var(--font); color: var(--ink-80); cursor: pointer; }
 .check input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--blue); flex: none; }
 .check a { color: var(--blue); text-decoration: underline; }
@@ -749,6 +759,7 @@ a.head-avatar:hover { opacity: .9; }
   background: var(--gray); color: var(--ink-80); }
 .badge.bad { background: rgba(216, 51, 50, .1); color: var(--red); }
 .badge.warn { background: rgba(214, 140, 0, .12); color: #9a6200; }
+.badge.ok { background: rgba(46, 157, 91, .12); color: #1f7a45; }
 .adm-dl { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; margin: 0; font: 400 14px/1.4 var(--font); }
 .adm-dl dt { color: var(--ink-60); }
 .adm-dl dd { margin: 0; color: var(--ink); overflow-wrap: anywhere; }
@@ -1075,6 +1086,9 @@ body.tour-on { overflow: hidden; }
 .tcard .addon { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border-radius: 10px; background: var(--gray);
   cursor: pointer; font: 400 13px/1.35 var(--font); color: var(--ink-80); }
 .tcard .addon input { margin: 2px 0 0; width: 16px; height: 16px; accent-color: var(--blue); flex: none; }
+.tcard .addon .incl-check { width: 16px; height: 16px; margin-top: 2px; border-radius: 4px; flex: none; display: inline-flex;
+  align-items: center; justify-content: center; background: var(--blue); color: #fff; }
+.tcard .addon.incl { cursor: default; }
 .tcard .addon b { display: block; font-weight: 500; color: var(--ink); }
 .tcard .addon small { display: block; font-size: 12px; color: var(--ink-60); }
 .tcard-btn { height: auto; min-height: 56px; padding: 8px 12px; flex-direction: column; gap: 2px; line-height: 1.15; }
@@ -1109,5 +1123,17 @@ body.tour-on { overflow: hidden; }
 .tconfirm-consent { display: flex; gap: 10px; align-items: flex-start; font: 400 14px/1.45 var(--font); color: var(--ink-80); }
 .tconfirm-consent input { margin: 3px 0 0; width: 16px; height: 16px; accent-color: var(--blue); flex: none; }
 .tconfirm-actions { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.renew-facts { margin: 0; display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)); gap: 12px; }
+.renew-facts div { padding: 12px 14px; border-radius: 10px; background: var(--gray); }
+.renew-facts dt { font: 400 13px/1.3 var(--font); color: var(--ink-60); }
+.renew-facts dd { margin: 4px 0 0; font: 600 18px/1.3 var(--font); color: var(--ink); }
+.pop-back { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+  padding: 16px; background: rgba(3, 5, 12, .45); }
+.pop { width: 100%; max-width: 560px; max-height: calc(100vh - 32px); overflow: auto; display: flex; flex-direction: column;
+  gap: 14px; padding: 28px; border-radius: 16px; background: #fff; box-shadow: var(--shadow); }
+.pop h2 { margin: 0; font: 600 22px/1.25 var(--font); color: var(--ink); }
+.pop p { margin: 0; font: 400 15px/1.45 var(--font); color: var(--ink-80); }
+.tconfirm-msg textarea { min-height: 84px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px;
+  font: 400 15px/1.4 var(--font); color: var(--ink); resize: vertical; }
 .plan-flash { background: var(--blue-07); color: var(--blue); padding: 12px 16px; border-radius: 8px; font: 500 14px/1.4 var(--font); }
 @media (max-width: 560px) { .tariffs-head h2 { font-size: 24px; } }
