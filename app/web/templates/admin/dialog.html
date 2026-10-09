@@ -1,0 +1,29 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<a class="ds-link adm-back" href="/admin/dialogs">← Все диалоги</a>
+<div class="adm-head">
+  <h1>Беседа</h1>
+  <span class="muted">{% if owner_id %}<a class="ds-link" href="/admin/users/{{ owner_id }}">{{ owner }}</a>{% else %}{{ owner }}{% endif %}
+    · {{ rows | length }} {{ rows | length | plural('реплика', 'реплики', 'реплик') }} · {{ '%.3f' | format(total_rub) }} ₽</span>
+</div>
+<div class="adm-thread">
+  {% for m in rows %}
+  <article class="adm-msg {{ m.role }}">
+    <div class="adm-msg-head">
+      <b>{{ 'Вопрос' if m.role == 'user' else 'Ответ' }}</b>
+      <span class="muted">{{ m.ts }}{% if m.tokens %} · {{ m.tokens | spaced }} ток. · {{ '%.3f' | format(m.rub) }} ₽{% endif %}</span>
+      {% if m.lowrel %}<span class="badge warn">низкая релевантность</span>{% endif %}
+      {% if m.unverified %}<span class="badge bad">непроверенные числа: {{ m.unverified }}</span>{% endif %}
+    </div>
+    <div class="adm-msg-body">{{ m.content }}</div>
+    {% for f in m.feedback %}
+    <div class="adm-fb">
+      {% if f.rating is not none %}Оценка эксперта: <b>{{ f.rating }}★</b>{% endif %}
+      {% if f.comment %}<div>Комментарий: «{{ f.comment }}»</div>{% endif %}
+      {% if f.correction %}<div>Исправление: <b>{{ f.correction }}</b></div>{% endif %}
+    </div>
+    {% endfor %}
+  </article>
+  {% endfor %}
+</div>
+{% endblock %}

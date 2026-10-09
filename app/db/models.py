@@ -37,9 +37,23 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(Text, nullable=True)            # ФИО
     region: Mapped[str | None] = mapped_column(String(128), nullable=True)
     telegram: Mapped[str | None] = mapped_column(String(128), nullable=True)      # ник в Telegram
+    # Кабинет по макету (09.10.2026): необязательные контакты — пользователь правит сам.
+    position: Mapped[str | None] = mapped_column(String(128), nullable=True)      # должность
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)         # рабочий email
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Организация и ИНН — ТОЛЬКО admin сервиса (`/admin`, решение владельца 09.10.2026): по ним
+    # учитывается подключение организации, и пользователь не должен переписывать их сам.
+    org: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inn: Mapped[str | None] = mapped_column(String(12), nullable=True)
     # Тариф (#160): None — без лимита. Лимиты и период — `app/core/plans.py`; назначает admin.
     plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
     plan_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # дата подключения
+    # Срок тарифа (09.10.2026): 00:00 МСК дня, с которого он уже не действует; None — бессрочно.
+    plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Доступ (админка 09.10.2026): блокировка без удаления данных и «эпоха» входа — её поднимают
+    # сброс пароля и блокировка, и все выданные сессии и куки «запомнить меня» гаснут сразу.
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    auth_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
@@ -109,6 +123,30 @@ class AnswerUsage(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 
+class GuestMessage(Base):
+    """Реплика пробного режима без входа (решение владельца 09.10.2026).
+
+    ⚠ Обезличенно: ни учётки, ни IP-адреса. `guest_id` — случайный идентификатор из подписанной
+    куки браузера; по нему считаются пробные вопросы и собирается мультитёрн беседы. Отдельно от
+    `messages`, а не под техническим пользователем: иначе гостевые реплики попали бы в приёмочный
+    скоркард, срезы по ролям и регионам и в расход тарифов. Видит только admin (`/admin`).
+    `charged` — ответ засчитан в пробные вопросы (приветствия и повторы — нет)."""
+
+    __tablename__ = "guest_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guest_id: Mapped[str] = mapped_column(String(32), index=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    low_relevance: Mapped[bool] = mapped_column(Boolean, default=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    charged: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Lead(Base):
     """Заявка на подключение с лендинга 719-навигатор.рф (форма «Оставить заявку»).
 
@@ -128,3 +166,9 @@ class Lead(Base):
     phone: Mapped[str] = mapped_column(String(32))
     promo: Mapped[str | None] = mapped_column(String(64), nullable=True)
     consent_at: Mapped[datetime] = mapped_column(DateTime)  # согласие обязательно — без него заявки нет
+    # Работа с заявкой в админке (09.10.2026): статус, заметка администратора и учётка, созданная
+    # из заявки. Статусы — `LEAD_STATUSES` в app/api/admin.py.
+    status: Mapped[str] = mapped_column(String(16), default="new", nullable=False, server_default="new")
+    status_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # логическая ссылка на users.id

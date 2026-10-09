@@ -1,0 +1,57 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="adm-head">
+  <h1>Организации</h1>
+  <span class="muted">{{ total }} {{ total | plural('организация', 'организации', 'организаций') }}</span>
+</div>
+<form class="adm-filters" method="get" action="/admin/orgs">
+  <input type="search" name="q" value="{{ q_text }}" placeholder="Название или ИНН" aria-label="Поиск организации">
+  <button class="ds-btn secondary" type="submit">Найти</button>
+  {% if q_text %}<a class="ds-link" href="/admin/orgs">Сбросить</a>{% endif %}
+</form>
+<p class="muted">Учётки сгруппированы по ИНН, а без ИНН — по названию. Организацию и ИНН задаёт администратор
+  на карточке учётки или при создании учётки из заявки.</p>
+
+{% for o in rows %}
+<section class="adm-card">
+  <div class="adm-lead-head">
+    <div>
+      <h2>{{ o.name }}</h2>
+      <div class="muted">{% if o.inn %}ИНН {{ o.inn }}{% elif o.kind == 'name' %}ИНН не указан{% else %}учётки без организации{% endif %}
+        · {{ o.people | length }} {{ o.people | length | plural('учётка', 'учётки', 'учёток') }}{% if o.blocked %} · заблокировано {{ o.blocked }}{% endif %}</div>
+    </div>
+    <div class="adm-badges">
+      {% for plan, n in o.plans %}<span class="badge">{{ plan }}{% if n > 1 %} × {{ n }}{% endif %}</span>{% endfor %}
+    </div>
+  </div>
+  <div class="adm-tiles">
+    <div class="adm-tile"><div class="adm-tile-v">{{ o.asked_month }}</div><div class="adm-tile-l">вопросов за месяц</div></div>
+    <div class="adm-tile"><div class="adm-tile-v">{% if o.limit %}{{ o.used }} / {{ o.limit }}{% else %}—{% endif %}</div>
+      <div class="adm-tile-l">расход лимитов за период</div></div>
+    <div class="adm-tile"><div class="adm-tile-v adm-tile-small">{{ o.last or '—' }}</div><div class="adm-tile-l">последний вопрос</div></div>
+    <div class="adm-tile"><div class="adm-tile-v adm-tile-small">{{ o.soonest or '—' }}</div><div class="adm-tile-l">ближайшее окончание тарифа</div></div>
+  </div>
+  <div class="adm-table-wrap">
+    <table class="adm-table">
+      <thead><tr><th>Учётка</th><th>Роль</th><th>Тариф</th><th>Вопросов за месяц</th><th>Последний вопрос</th></tr></thead>
+      <tbody>
+      {% for p in o.people %}
+        <tr><td><a class="adm-strong" href="/admin/users/{{ p.id }}">{{ p.username }}</a>
+              {% if p.full_name %}<div class="muted">{{ p.full_name }}</div>{% endif %}
+              {% if p.blocked %}<span class="badge bad">заблокирована</span>{% endif %}</td>
+            <td>{{ p.role }}</td>
+            <td>{{ p.plan or '—' }}{% if p.expired %} <span class="badge bad">истёк</span>{% endif %}</td>
+            <td>{{ p.asked }}</td><td>{{ p.last or '—' }}</td></tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% if o.leads %}
+  <p class="muted">Заявки с этим ИНН:
+    {% for l in o.leads %}<a class="ds-link" href="/admin/leads#lead-{{ l.id }}">№{{ l.id }} · {{ l.status }}</a>{% if not loop.last %}, {% endif %}{% endfor %}</p>
+  {% endif %}
+</section>
+{% else %}
+<p class="muted">{{ 'Ничего не нашлось.' if q_text else 'Учёток пока нет.' }}</p>
+{% endfor %}
+{% endblock %}

@@ -8,14 +8,13 @@ from __future__ import annotations
 
 import hashlib
 import json
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from loguru import logger
 from pydantic import BaseModel
 
 from app.api.auth import (
@@ -25,21 +24,20 @@ from app.api.auth import (
     login_session,
     logout_session,
     needs_profile,
-    require_admin,
+    remember_from,
     require_user_profiled,
     set_remember_cookie,
 )
-from app.api import quota
-from app.api.admin_stats import build_admin_view, system_health
+from app.api import quota, trial
+from app.api.leads import LIMITS as LEAD_LIMITS
+from app.api.leads import _EMAIL_RE as EMAIL_RE
+from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import plans
 from app.core.config import settings
-from app.core.plans import PLAN_LIMITS
 from app.core.release import release_label
-from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
 from app.rag import followup
-from app.rag.edition import corpus_edition, corpus_line, kontur_719_url
+from app.rag.edition import corpus_edition, kontur_719_url
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -49,6 +47,17 @@ _WEB = Path(__file__).resolve().parents[1] / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
 # Разряды числа с неразрывным пробелом (12345 → «12 345») — для читабельных токенов/₽ в админке.
 templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " ")
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Форма слова по числу: 1 вопрос, 3 вопроса, 5 вопросов (11–14 — «многие»)."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+
+
+templates.env.filters["plural"] = plural
 
 
 @lru_cache(maxsize=1)
@@ -80,7 +89,12 @@ def _ctx(request: Request, **kw) -> dict:
     landing = f"https://{settings.PUBLIC_DOMAIN}" if settings.PUBLIC_DOMAIN else ""
     return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
             "corpus_edition": corpus_edition(), "release_label": release_label(),
-            "landing_url": landing, "asset_v": asset_version(), **kw}
+            "landing_url": landing, "asset_v": asset_version(),
+            # пробный режим без входа — ссылка на него со страницы входа
+            "guest_trial": settings.GUEST_TRIAL_ENABLED,
+            "guest_questions": settings.GUEST_TRIAL_QUESTIONS,
+            # демо-чат страницы входа (и её ре-рендера после ошибки) — без служебных полей сверки
+            "login_demo": [{k: d[k] for k in ("q", "a", "ref")} for d in LOGIN_DEMO], **kw}
 
 
 def _parse_date(s: str):
@@ -114,11 +128,53 @@ def root(request: Request):
     return RedirectResponse("/chat", status_code=302)
 
 
+# Демо-чат на синей панели входа — анимация как на первом экране лендинга (просьба владельца
+# 09.10.2026). ⚠ Страница публичная, и каждый пример ссылается на пункт: ответ обязан стоять на
+# тексте этого пункта. Поэтому у примера записаны источник и ДОСЛОВНАЯ цитата — их сверяет тест с
+# корпусом (`tests.test_auth.TestLoginDemo`). Примеры лендинга сюда не скопированы как есть: два из
+# четырёх (перечень документов к заявке, «через территориальные палаты») в цитируемых пунктах не
+# подтверждаются. Первый пример — тот, что стоял на странице статично и уже сверен с п. 7 Правил.
+LOGIN_DEMO = [
+    {"q": "Кто выдаёт акт экспертизы для подтверждения производства?",
+     "a": "Заявки для выдачи акта экспертизы рассматривает Торгово-промышленная палата Российской "
+          "Федерации — в порядке, определённом ею по согласованию с Минпромторгом России.",
+     "ref": "п. 7 Правил",
+     "src": "pp719_full.txt", "start": "\n7. Заявки на включение сведений в реестр",
+     "quote": "рассматриваются Торгово-промышленной палатой Российской Федерации в порядке, "
+              "определенном ею по согласованию с Министерством промышленности и торговли"},
+    {"q": "Куда подаётся заявка на получение акта экспертизы?",
+     "a": "В уполномоченную ТПП: заявитель подаёт заявку на включение сведений в реестр в порядке, "
+          "предусмотренном разделом 5 Положения.",
+     "ref": "Приказ ТПП РФ № 52, п. 4.1",
+     "src": "prikaz52_tpp_full.txt", "start": "\n4.1. ",
+     "quote": "заявитель подает в уполномоченную ТПП в порядке, предусмотренном разделом 5 "
+              "настоящего Положения, заявку на включение сведений в реестр"},
+    {"q": "Какие требования применяются к металлообрабатывающим станкам?",
+     "a": "Станки входят в раздел I приложения — «Продукция станкоинструментальной "
+          "промышленности». Требования балльные: например, наличие управляющего "
+          "программно-аппаратного комплекса, произведённого в России, даёт 25 баллов.",
+     "ref": "Приложение, разд. I",
+     "src": "chunks/02_I_stankoinstrument.txt", "start": "\n28.41.1|Станки для обработки металлов",
+     "quote": "наличие управляющего программно-аппаратного комплекса, произведенного на "
+              "территории Российской Федерации (25 баллов)"},
+    {"q": "Где размещаются выданные акты экспертизы?",
+     "a": "В ГИСП: акты экспертизы выдаются с использованием ГИСП, и выданные акты размещаются "
+          "в этой системе.",
+     "ref": "Приказ ТПП РФ № 52, п. 3.5",
+     "src": "prikaz52_tpp_full.txt", "start": "\n3.5. ",
+     "quote": "Выданные акты экспертизы, сертификаты о происхождении товара (продукции), акты о "
+              "проведении оценки и акты экспертизы на компоненты размещаются в указанной "
+              "информационной системе"},
+]
+
+
 @router.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
+def login_page(request: Request, trial_over: str = ""):
     if current_user(request):
         return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse("login.html", _ctx(request, error=None))
+    # trial_over — гость исчерпал пробные вопросы (фронт ведёт сюда по 402 пробного режима)
+    return templates.TemplateResponse("login.html", _ctx(request, error=None,
+                                                         trial_over=bool(trial_over)))
 
 
 # --------------------------------------------------------------------------- #
@@ -129,7 +185,7 @@ def login_page(request: Request):
 # а согласие даётся именно на её условиях. Дата редакции задаётся здесь и показывается на
 # странице: молча меняющийся правовой документ хуже отсутствующего.
 # --------------------------------------------------------------------------- #
-DOCS_UPDATED = "13.08.2026"
+DOCS_UPDATED = "09.10.2026"  # кабинет: должность, email, телефон, организация и ИНН в политике
 
 
 def _doc(request: Request, template: str, page_title: str, active: str) -> HTMLResponse:
@@ -178,13 +234,18 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
         return templates.TemplateResponse(
             "login.html", _ctx(request, error="Неверный логин или пароль"), status_code=401
         )
+    if user.blocked_at is not None:
+        # Только после верного пароля: так блокировка не подсказывает, какие логины существуют.
+        return templates.TemplateResponse(
+            "login.html", _ctx(request, error="Учётная запись заблокирована. Обратитесь к "
+                                              "администратору сервиса."), status_code=403)
     # Успешный вход снимает счётчик: человек, вспомнивший пароль с 9-й попытки, не должен
     # оставаться под лимитом — он бьёт по перебору, а не по забывчивости.
     _login_limit.reset(f"login:{ip}")
     login_session(request, user)
     resp = RedirectResponse("/", status_code=302)
-    if remember:  # «Запомнить меня» → персистентный cookie автовхода
-        set_remember_cookie(resp, user.id)
+    if remember:  # «Запомнить меня» → персистентный cookie автовхода (с эпохой входа)
+        set_remember_cookie(resp, user.id, user.auth_epoch or 0)
     return resp
 
 
@@ -196,10 +257,38 @@ def logout(request: Request):
     return resp
 
 
+def _guest_chat_page(request: Request) -> HTMLResponse:
+    """Пробный режим (09.10.2026): тот же чат без входа. Кука гостя ставится здесь, при первом
+    открытии страницы, — API без неё не отвечает (`app/api/guest.py`)."""
+    gid = trial.guest_id(request)
+    fresh = gid is None
+    if fresh:
+        gid = trial.new_guest_id()
+    with get_session() as db:
+        tv = trial.trial_view(db, gid)
+    resp = templates.TemplateResponse(
+        "chat.html", _ctx(request, user=None, guest=tv, kontur_719_url=kontur_719_url(),
+                          input_hint=followup.START_HINT, quota=None))
+    if fresh:
+        trial.set_guest_cookie(resp, gid)
+    return resp
+
+
 @router.get("/chat", response_class=HTMLResponse)
 def chat_page(request: Request):
+    # Вход был, но погас (блокировка, сброс пароля — `current_user` чистит сессию) — на вход, а не в
+    # пробный режим: иначе заблокированный продолжал бы спрашивать гостем, а эксперт после сброса
+    # пароля молча получал бы урезанные ответы (ревью PR #182). Признак — до `current_user`.
+    # `current_user` очистит сессию в этом же запросе — пометка `lapsed` держит признак до выхода
+    # или входа, иначе вход без «запомнить меня» уводился на вход лишь один раз (повторное ревью).
+    had_login = (bool(request.session.get("user_id")) or bool(request.session.get("lapsed"))
+                 or remember_from(request) is not None)
     user = current_user(request)
     if not user:
+        if settings.GUEST_TRIAL_ENABLED and not had_login:
+            return _guest_chat_page(request)
+        if had_login:
+            request.session["lapsed"] = True
         return RedirectResponse("/login", status_code=302)
     if needs_profile(user):  # жёсткий гейт: роль user не в чат, пока не заполнит профиль+согласие
         return RedirectResponse("/profile", status_code=302)
@@ -215,29 +304,67 @@ def chat_page(request: Request):
                           input_hint=followup.START_HINT, quota=qv))
 
 
-@router.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    prefill = user.region or region_from_username(user.username)
+# --------------------------------------------------------------------------- #
+# Личный кабинет (макет «Navigator 719 Service», экран account; решения владельца 09.10.2026)
+#
+# Две вкладки: «Профиль» и «Тариф». «Оплата» и «Документы» макета не показываются, пока нет
+# биллинга — иначе на странице были бы выдуманные счета и договоры. Вкладка — параметр `tab`
+# серверного рендера, а не скрипт: страница работает и без JS, и ссылку на тариф можно дать.
+# --------------------------------------------------------------------------- #
+PROFILE_TABS = ("profile", "plan")
+# Длины и правила контактов — те же, что у формы заявки лендинга (`app/api/leads.py`): одно
+# определение на сервис, иначе email, принятый в заявке, кабинет отверг бы (и наоборот).
+CONTACT_LIMITS = {"position": 128, "email": LEAD_LIMITS["email"], "phone": LEAD_LIMITS["phone"]}
+PROFILE_LIMITS = {"full_name": 200, "telegram": 128}   # telegram = колонке `User.telegram`
+ORG_LIMIT = LEAD_LIMITS["org"]
+
+
+def _profile_form(user: User, **over) -> dict:
+    """Значения полей формы: из учётки (GET) или из присланного (ре-рендер ошибки POST)."""
+    form = {"full_name": user.full_name or "", "telegram": user.telegram or "",
+            "region": user.region or region_from_username(user.username),
+            "position": user.position or "", "email": user.email or "", "phone": user.phone or "",
+            "consent": bool(user.consent)}
+    form.update(over)
+    return form
+
+
+def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
+                      saved: bool = False, error: str | None = None, status_code: int = 200):
+    """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
+    название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
+    же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
+    with get_session() as db:
+        pv = quota.plan_view(db, user)
     return templates.TemplateResponse(
         "profile.html",
-        _ctx(request, user=user, error=None, regions=REGIONS, prefill_region=prefill,
-             full_name=user.full_name or "", telegram=user.telegram or "",
-             consent=bool(user.consent), **_profile_extras(user)),
+        _ctx(request, user=user, form=form, regions=REGIONS, error=error, saved=saved,
+             tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
+             quota=pv["quota"] if pv else None,
+             can_leave=not needs_profile(user)),
+        status_code=status_code,
     )
 
 
-def _profile_extras(user: User) -> dict:
-    """Карточка тарифа и выход из профиля — для GET и для ре-рендера ошибки POST (ревью 08.10.2026:
-    без них страница с ошибкой теряла «Вернуться к сервису» и тариф). Расход считается ОДИН раз.
-    can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда же (`needs_profile`)."""
-    with get_session() as db:
-        qv = quota.quota_view(db, user)
-    plan_line = (f"Тариф «{qv['plan']}»: использовано {qv['used']} из {qv['limit']} запросов, "
-                 f"новый период начнётся {qv['renews']}.") if qv else ""
-    return {"quota": qv, "plan_line": plan_line, "can_leave": not needs_profile(user)}
+@router.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, tab: str = "profile", saved: str = ""):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved))
+
+
+def _contact_errors(position: str, email: str, phone: str) -> list[str]:
+    """Формат контактов — как в заявке лендинга. Пустые email и телефон здесь не ошибка: их
+    обязательность проверяет форма отдельно, одной строкой вместе с ФИО и регионом."""
+    errs = []
+    if len(position) > CONTACT_LIMITS["position"]:
+        errs.append("Слишком длинное название должности.")
+    if email and (not EMAIL_RE.match(email) or len(email) > CONTACT_LIMITS["email"]):
+        errs.append("Проверьте правильность email.")
+    if phone and (len(digits(phone)) != 11 or len(phone) > CONTACT_LIMITS["phone"]):
+        errs.append("Укажите телефон полностью — 11 цифр, например +7 900 000-00-00.")
+    return errs
 
 
 @router.post("/profile", response_class=HTMLResponse)
@@ -247,161 +374,42 @@ def profile_submit(
     full_name: str = Form(default=""),
     region: str = Form(default=""),
     telegram: str = Form(default=""),
+    position: str = Form(default=""),
+    email: str = Form(default=""),
+    phone: str = Form(default=""),
 ):
+    """Сохранение профиля. Организацию и ИНН форма не принимает вовсе: их ведёт admin
+    (`admin_set_org`), присланные в форме поля `org`/`inn` отбрасываются ещё на разборе."""
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     fn, rg, tg = full_name.strip(), region.strip(), telegram.strip()
-    # Все поля обязательны (решение заказчика: жёсткий гейт). Незаполненное → дружелюбный ре-рендер.
-    if not (consent and fn and rg and tg):
-        return templates.TemplateResponse(
-            "profile.html",
-            _ctx(request, user=user,
-                 error="Заполните ФИО, регион и Telegram и подтвердите согласие на обработку персональных данных.",
-                 regions=REGIONS, prefill_region=rg or region_from_username(user.username),
-                 full_name=fn, telegram=tg, consent=bool(consent), **_profile_extras(user)),
-            status_code=400,
-        )
+    pos, em, ph = position.strip(), email.strip(), phone.strip()
+    form = _profile_form(user, full_name=fn, region=rg or region_from_username(user.username),
+                         telegram=tg, position=pos, email=em, phone=ph, consent=bool(consent))
+    # Обязательны ФИО, регион, рабочий email, телефон и согласие; должность и Telegram — по
+    # желанию (решение владельца 09.10.2026). Ошибка → ре-рендер с введённым, а не потеря формы.
+    errs = []
+    if not (consent and fn and rg and em and ph):
+        errs.append("Заполните ФИО, регион, рабочий email и телефон и подтвердите согласие на "
+                    "обработку персональных данных.")
+    # Регион — только из справочника: поле с поиском выбирает из него, но форму можно прислать и
+    # в обход страницы, а по региону строятся срезы админки.
+    if rg and rg not in REGIONS:
+        errs.append("Выберите регион из списка.")
+    # Длины — по колонкам: SQLite их не держит, PostgreSQL (цель прода) ответил бы 500.
+    if len(fn) > PROFILE_LIMITS["full_name"] or len(tg) > PROFILE_LIMITS["telegram"]:
+        errs.append("Слишком длинное ФИО или ник в Telegram.")
+    errs += _contact_errors(pos, em, ph)
+    if errs:
+        return _profile_response(request, user, form, error=" ".join(errs), status_code=400)
+    first_fill = needs_profile(user)
     with get_session() as db:
-        q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True)
-    return RedirectResponse("/chat", status_code=302)
-
-
-@router.get("/admin", response_class=HTMLResponse)
-def admin_page(request: Request, date_from: str = "", date_to: str = "",
-               region: str = "", role: str = ""):
-    """Админ-панель: приёмочный скоркард, срез по регионам, триаж плохих ответов, логи.
-    Фильтры (query, опц.): date_from/date_to (YYYY-MM-DD), region, role. Только для admin.
-    Вся сборка данных — в app/api/admin_stats.build_admin_view (тестируемо + переиспользует экспорт)."""
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    if user.role != "admin":
-        return RedirectResponse("/chat", status_code=302)  # эксперт логи не видит
-    with get_session() as db:
-        view = build_admin_view(
-            db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
-            region=region, role=role,
-        )
-        # Заявки с лендинга — ПДн, поэтому только здесь, за ролью admin. Просроченные (срок из
-        # политики ПДн) удаляются при каждом открытии; на страницу — не больше LEADS_ON_PAGE.
-        q.purge_old_leads(db)
-        leads = q.list_leads(db, limit=LEADS_ON_PAGE)
-        leads_total = q.count_leads(db)
-        plan_rows = _plan_rows(db)
-    return templates.TemplateResponse(
-        "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads,
-                           leads_total=leads_total, plan_rows=plan_rows,
-                           plan_names=list(PLAN_LIMITS), today=plans.msk_today().isoformat(), **view))
-
-
-LEADS_ON_PAGE = 200
-
-
-def _plan_rows(db) -> list[dict]:
-    """Вкладка «Тарифы» (#160): тариф, дата подключения и расход текущего периода по каждому."""
-    rows = []
-    for u in q.list_users(db):
-        st = quota.quota_state(db, u)
-        rows.append({
-            "id": u.id, "username": u.username, "role": u.role,
-            "who": " · ".join(x for x in (u.full_name, u.region) if x),
-            "plan": u.plan or "",
-            # название не из PLAN_LIMITS молча снимает лимит (ревью PR #161, LOW-3) — показываем
-            "unknown": bool(u.plan) and u.plan not in PLAN_LIMITS,
-            "started": plans.msk_date(u.plan_started_at).isoformat() if u.plan_started_at else "",
-            "state": st,
-            "period": (f"{plans.msk_date(st.start):%d.%m.%Y} – "
-                       f"{plans.msk_date(st.end - timedelta(seconds=1)):%d.%m.%Y}") if st else "",
-        })
-    return rows
-
-
-@router.post("/api/admin/users/{user_id}/plan")
-def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Form(default=""),
-                   admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Назначить тариф и дату подключения (#160). Пустой тариф — снять лимит. Дата по умолчанию —
-    сегодня по Москве; в будущем нельзя: период, которого ещё нет, пользователь не увидит."""
-    plan = plan.strip()
-    if plan and plan not in PLAN_LIMITS:
-        raise HTTPException(status_code=422, detail=f"Неизвестный тариф «{plan}»")
-    started_at = None
-    if plan:
-        day = _parse_date(started.strip()) if started.strip() else plans.msk_today()
-        if day is None:
-            raise HTTPException(status_code=422, detail="Дата подключения — в формате ГГГГ-ММ-ДД")
-        if day > plans.msk_today():
-            raise HTTPException(status_code=422, detail="Дата подключения не может быть в будущем")
-        started_at = plans.anchor_from_date(day)
-    with get_session() as db:
-        if q.set_user_plan(db, user_id, plan or None, started_at) is None:
-            raise HTTPException(status_code=404, detail="Пользователь не найден")
-    logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
-                f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else ""))
-    return RedirectResponse("/admin", status_code=303)
-
-
-@router.post("/api/admin/leads/{lead_id}/delete")
-def admin_delete_lead(lead_id: int, admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Удалить заявку — по отзыву согласия или требованию субъекта ПДн (политика, раздел 9)."""
-    with get_session() as db:
-        q.delete_lead(db, lead_id)
-    return RedirectResponse("/admin", status_code=303)
-
-
-@router.get("/api/admin/export")
-def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
-                 region: str = "", role: str = "",
-                 admin: User = Depends(require_admin)) -> Response:
-    """Выгрузка данных панели (только admin). Учитывает те же фильтры, что и /admin.
-    fmt=csv — скоркард: одна строка на оценённый ответ (для Excel, разделитель «;», BOM для кириллицы);
-    fmt=json — полная структура (скоркард + разбивки по регионам/пользователям + все оценки + исправления).
-    Заменяет ручной SSH-дамп таблиц с VM.
-
-    R27: проверка роли — через зависимость `require_admin`, а не ручным `if` в теле. Хелпер
-    существовал с самого начала и не использовался нигде, хотя ROADMAP заявлял его как часть
-    ролевого гейтинга; ручная проверка при этом дублировала его логику. `/admin` (страница)
-    осознанно оставлена на ручной проверке: там не-админа надо РЕДИРЕКТИТЬ в чат, а не отдавать
-    403 — зависимость такого не умеет."""
-    with get_session() as db:
-        view = build_admin_view(db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
-                                region=region, role=role)
-    st = view["stats"]
-    stamp = datetime.now().strftime("%Y%m%d")
-
-    if fmt == "csv":
-        import csv
-        import io
-
-        buf = io.StringIO()
-        w = csv.writer(buf, delimiter=";")
-        w.writerow(["Дата", "Пользователь", "Регион", "Роль", "Оценка", "Вопрос", "Ответ ИИ",
-                    "Непроверенные числа", "Низкая релевантность", "Комментарий", "Исправление"])
-        for r in st["answer_rows"]:
-            w.writerow([r["ts"], r["user"], r["region"], r["role"], r["rating"],
-                        r["question"], r["answer"], r["unverified"] or "",
-                        "да" if r["low_relevance"] else "", r["comment"], r["correction"]])
-        body = chr(0xFEFF) + buf.getvalue()  # BOM → Excel корректно читает кириллицу
-        return _download(body, "text/csv; charset=utf-8", f"navigator719-scorecard-{stamp}.csv")
-
-    scalar = ("users_total", "users", "experts", "admins", "conversations", "requests", "answers",
-              "tokens", "cost", "answer_ratings", "avg_stars", "accept_pct", "accept_user",
-              "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
-              "demand_product", "demand_procedural", "orphan_ratings")
-    payload = {
-        # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
-        "disclaimer": EXPERT_DISCLAIMER,
-        "corpus": corpus_line(),  # E1: редакция рядом с дисклеймером
-        "generated_at": st["generated_at"],
-        "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
-                    "region": st["filter_region"] or None, "role": st["filter_role"] or None},
-        "scorecard": {k: st[k] for k in scalar},
-        "regions": st["regions"],
-        "per_user": st["per_user"],
-        "answer_ratings": st["answer_rows"],
-        "corrections": st["corrections"],
-    }
-    return _json_download(payload, f"navigator719-admin-{stamp}.json")
+        q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True,
+                         position=pos, email=em, phone=ph)
+    # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
+    # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
+    return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)
 
 
 class FeedbackIn(BaseModel):

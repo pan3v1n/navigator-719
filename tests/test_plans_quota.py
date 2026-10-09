@@ -103,7 +103,7 @@ class _MetaAns(_Ans):
     metered = False
 
 
-class TestQuotaInChat(unittest.TestCase):
+class _ChatQuotaBase(unittest.TestCase):
     """Подключение — СЕГОДНЯ по Москве: эндпоинт списывает ответ настоящим временем, и период
     обязан его содержать в любой день прогона (зашитая дата покраснела бы через месяц)."""
 
@@ -152,6 +152,8 @@ class TestQuotaInChat(unittest.TestCase):
             return chat_mod.chat(chat_mod.ChatRequest(message="Требования к станкам?", session_id=sid),
                                  user=user)
 
+
+class TestQuotaInChat(_ChatQuotaBase):
     def test_last_unit_passes_then_blocked_before_the_engine(self):
         u = self._user()
         self._spend(u, 99)
@@ -347,32 +349,49 @@ class TestNavigateClosedForPlans(unittest.TestCase):
         self.assertEqual(cm.exception.status_code, 500)
 
 
-class TestAdminSetsPlan(unittest.TestCase):
+class _AdminPlanBase(unittest.TestCase):
     def setUp(self):
-        from app.api import web
+        from app.api import admin, web
 
-        self.web = web
+        self.web, self.adm = web, admin   # кабинет — web, панель — admin (пересборка 09.10.2026)
         self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
                                     poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
-        p = mock.patch.object(web, "get_session", self.Session)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.object(web, "get_session", self.Session),
+                  mock.patch.object(admin, "get_session", self.Session),
+                  mock.patch.object(admin, "system_health", return_value={})):
+            p.start()
+            self.addCleanup(p.stop)
         with self.Session() as db:
             self.uid = q.create_user(db, "client1", "h", role="user").id
         self.admin = mock.Mock(id=1)
 
-    def _set(self, plan, started=""):
-        return self.web.admin_set_plan(self.uid, plan=plan, started=started, admin=self.admin)
+    def _set(self, plan, started="", expires=""):
+        return self.adm.admin_set_plan(self.uid, plan=plan, started=started, expires=expires,
+                                       admin=self.admin)
+
+    def _admin_get(self, view, *args, **kw):
+        """Страница панели от имени admin'а."""
+        admin = mock.Mock(id=99, role="admin", username="adm")
+        with mock.patch.object(self.adm, "current_user", return_value=admin):
+            return view(self._request("/admin"), *args, **kw).body.decode("utf-8")
 
     def _row(self):
         with self.Session() as db:
             return q.get_user(db, self.uid)
 
+    def _request(self, path):
+        from starlette.requests import Request
+
+        return Request({"type": "http", "method": "GET", "path": path, "headers": [],
+                        "query_string": b"", "session": {}, "app": None})
+
+
+class TestAdminSetsPlan(_AdminPlanBase):
     def test_assign_and_clear(self):
         r = self._set("Стандарт", "2026-10-01")
-        self.assertEqual(r.status_code, 303)
+        self.assertEqual((r.status_code, r.headers["location"]), (303, f"/admin/users/{self.uid}?ok=plan"))
         u = self._row()
         self.assertEqual((u.plan, u.plan_started_at), ("Стандарт", msk(2026, 10, 1)))
         self._set("")
@@ -393,14 +412,8 @@ class TestAdminSetsPlan(unittest.TestCase):
 
     def test_missing_user_is_404(self):
         with self.assertRaises(HTTPException) as cm:
-            self.web.admin_set_plan(999, plan="Старт", started="", admin=self.admin)
+            self.adm.admin_set_plan(999, plan="Старт", started="", expires="", admin=self.admin)
         self.assertEqual(cm.exception.status_code, 404)
-
-    def _request(self, path):
-        from starlette.requests import Request
-
-        return Request({"type": "http", "method": "GET", "path": path, "headers": [],
-                        "query_string": b"", "session": {}, "app": None})
 
     def test_admin_page_and_profile_show_usage(self):
         self._set("Старт")
@@ -409,27 +422,21 @@ class TestAdminSetsPlan(unittest.TestCase):
             db.commit()
             client = q.get_user(db, self.uid)
             db.expunge(client)
-        admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(self.web, "current_user", return_value=admin), \
-             mock.patch.object(self.web, "system_health", return_value={}):
-            html = self.web.admin_page(self._request("/admin")).body.decode("utf-8")
-        self.assertIn('data-tab="plans"', html)
-        panel = html[html.index('id="tab-plans"'):]
-        self.assertIn("<b>37 из 100</b>", panel)
-        self.assertIn('<option value="Старт" selected>', panel)
-        self.assertIn(f'value="{plans.msk_today().isoformat()}"', panel, "дата подключения в форме")
+        card = self._admin_get(self.adm.admin_user_card, self.uid)     # карточка учётки
+        self.assertIn("<b>37 из 100</b>", card)
+        self.assertIn('<option value="Старт" selected>', card)
+        self.assertIn(f'value="{plans.msk_today().isoformat()}"', card, "дата подключения в форме")
+        self.assertIn("37 из 100", self._admin_get(self.adm.admin_users), "расход в списке пользователей")
         with mock.patch.object(self.web, "current_user", return_value=client):
-            page = self.web.profile_page(self._request("/profile")).body.decode("utf-8")
-        self.assertIn("Тариф «Старт»: использовано 37 из 100 запросов", page)
+            # кабинет по макету (09.10.2026): расход — на вкладке «Тариф»
+            page = self.web.profile_page(self._request("/profile"), tab="plan").body.decode("utf-8")
+        self.assertIn("Использовано 37 из 100 запросов", page)
         self.assertNotIn("(http)", page, "сервис с test26 на HTTPS — прежняя пометка была ложной")
 
     def test_unknown_plan_is_flagged_in_admin(self):
         with self.Session() as db:
             q.set_user_plan(db, self.uid, "Безлимит", plans.anchor_from_date(plans.msk_today()))
-        admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(self.web, "current_user", return_value=admin),              mock.patch.object(self.web, "system_health", return_value={}):
-            html = self.web.admin_page(self._request("/admin")).body.decode("utf-8")
-        self.assertIn("тариф «Безлимит» неизвестен — лимит не действует", html)
+        self.assertIn("неизвестный тариф — лимит не действует", self._admin_get(self.adm.admin_users))
 
     def test_route_requires_admin(self):
         from fastapi.testclient import TestClient
@@ -439,6 +446,184 @@ class TestAdminSetsPlan(unittest.TestCase):
         r = TestClient(app).post(f"/api/admin/users/{self.uid}/plan", data={"plan": "Профи"},
                                  follow_redirects=False)
         self.assertIn(r.status_code, (401, 403), "назначение тарифа доступно без входа")
+
+
+# --------------------------------------------------------------------------- #
+# Внутренние тарифы и срок действия (решения владельца 09.10.2026)
+# --------------------------------------------------------------------------- #
+class TestInternalPlansAndExpiry(unittest.TestCase):
+    def _u(self, role="user", plan="Старт", expires=None):
+        return mock.Mock(role=role, plan=plan, plan_expires_at=expires)
+
+    def test_internal_plans(self):
+        self.assertEqual(plans.plan_limit(self._u(plan=plans.TRIAL_PLAN)), plans.PLAN_LIMITS["Старт"],
+                         "«Пробный режим» — права платного тарифа")
+        self.assertIsNone(plans.plan_limit(self._u(plan="Тестировщик")))
+        self.assertIsNone(plans.plan_limit(self._u(plan="Администратор")))
+        self.assertEqual(set(plans.PLAN_LIMITS), {"Старт", "Стандарт", "Профи"},
+                         "внутренние тарифы попали в таблицу, которую сверяют с лендингом")
+
+    def test_expiry_boundary_is_midnight_msk(self):
+        edge = msk(2026, 10, 16)
+        u = self._u(expires=edge)
+        self.assertFalse(plans.plan_expired(u, now=msk(2026, 10, 15, 23, 59, 59)), "последний день ещё действует")
+        self.assertTrue(plans.plan_expired(u, now=edge))
+        self.assertFalse(plans.plan_expired(self._u(expires=None), now=edge), "без даты — бессрочно")
+        self.assertFalse(plans.plan_expired(self._u(role="admin", expires=edge), now=edge), "admin не блокируется")
+        self.assertFalse(plans.plan_expired(self._u(plan=None, expires=edge), now=edge))
+
+
+class TestExpiredPlanBlocksPaidFeatures(_ChatQuotaBase):
+    def _expired(self, plan):
+        u = self._user(plan=plan)
+        with self.Session() as db:
+            q.set_user_plan(db, u.id, plan, plans.anchor_from_date(self.NOW_DAY - timedelta(days=8)),
+                            plans.anchor_from_date(self.NOW_DAY))     # действовал по вчерашний день
+            u = q.get_user(db, u.id)
+            db.expunge(u)
+        return u
+
+    def test_chat_and_stream_blocked_before_the_engine(self):
+        for plan in ("Старт", "Тестировщик"):     # и с лимитом, и без него
+            with self.subTest(plan=plan):
+                u = self._expired(plan)
+                with self.assertRaises(HTTPException) as cm:
+                    self._ask(u)
+                self.assertEqual(cm.exception.status_code, 402)
+                self.assertIn(f"Срок действия тарифа «{plan}» истёк {self.NOW_DAY:%d.%m.%Y}", cm.exception.detail)
+                with self.assertRaises(HTTPException):
+                    chat_mod.chat_stream(chat_mod.ChatRequest(message="Вопрос?"), user=u)
+        self.assertEqual(self.calls, 0, "на истёкшем тарифе движок не зовётся")
+
+    def test_unexpired_unlimited_plan_answers_without_metering(self):
+        u = self._user(plan="Тестировщик")
+        self._ask(u)
+        self.assertEqual((self.calls, self._used(u)), (1, 0))
+
+    def test_navigate_closed_for_expired_unlimited_plan(self):
+        from app.api import routes
+        from app.api.schemas import NavigateRequest
+
+        with mock.patch.object(routes, "navigate", side_effect=AssertionError("дошёл до движка")):
+            with self.assertRaises(HTTPException) as cm:
+                routes.navigate_endpoint(NavigateRequest(query="станки"), user=self._expired("Тестировщик"))
+        self.assertEqual(cm.exception.status_code, 403)
+
+
+class TestAdminSetsExpiry(_AdminPlanBase):
+    def test_internal_plan_and_explicit_term(self):
+        self._set("Тестировщик", "2026-10-01", "2026-12-31")
+        u = self._row()
+        self.assertEqual((u.plan, u.plan_expires_at), ("Тестировщик", msk(2026, 12, 31)))
+        self._set("Тестировщик", "2026-10-01")
+        self.assertIsNone(self._row().plan_expires_at, "пусто — бессрочно")
+        self._set("")
+        self.assertIsNone(self._row().plan_expires_at, "снятый тариф оставил срок")
+
+    def test_trial_defaults_to_a_week(self):
+        today = plans.msk_today()
+        self._set(plans.TRIAL_PLAN, f"{today:%Y-%m-%d}")
+        self.assertEqual(self._row().plan_expires_at, plans.anchor_from_date(today + timedelta(days=plans.TRIAL_DAYS)))
+
+    def test_trial_over_a_spent_plan_starts_fresh(self):
+        """Повторное ревью PR #182: перевод в пробу с нетронутой датой прежнего тарифа вёл период
+        лимита от неё, расход «Старта» засчитывался пробе — она начиналась исчерпанной (402)."""
+        today = plans.msk_today()
+        old = today - timedelta(days=45)
+        self._set("Старт", f"{old:%Y-%m-%d}")
+        with self.Session() as db:
+            yesterday = plans.anchor_from_date(today) - timedelta(hours=1)   # расход прежнего тарифа
+            db.add_all([AnswerUsage(user_id=self.uid, ts=yesterday) for _ in range(100)])
+            db.commit()
+            self.assertTrue(quota.quota_state(db, self._row()).exhausted)
+        self._set(plans.TRIAL_PLAN, f"{old:%Y-%m-%d}")            # дата предзаполнена карточкой
+        u = self._row()
+        self.assertEqual(plans.msk_date(u.plan_started_at), today, "проба не с сегодняшнего дня")
+        with self.Session() as db:
+            st = quota.quota_state(db, u)
+        self.assertEqual((st.used, st.exhausted), (0, False), "проба началась с расходом прежнего тарифа")
+        mine = today - timedelta(days=2)                          # дату admin ввёл сам — уважаем
+        self._set("")
+        self._set(plans.TRIAL_PLAN, f"{mine:%Y-%m-%d}")
+        self.assertEqual(plans.msk_date(self._row().plan_started_at), mine)
+
+    def test_trial_from_a_stale_start_is_not_born_expired(self):
+        """Ревью PR #182: поле «С» в карточке предзаполнено подключением прежнего тарифа. Перевод
+        давнего пользователя в пробу давал срок в прошлом — «Тариф сохранён», а вопросы сразу 402."""
+        today = plans.msk_today()
+        self._set(plans.TRIAL_PLAN, f"{today - timedelta(days=60):%Y-%m-%d}")
+        u = self._row()
+        self.assertFalse(plans.plan_expired(u), "проба родилась истёкшей")
+        self.assertEqual(u.plan_expires_at, plans.anchor_from_date(today + timedelta(days=plans.TRIAL_DAYS)))
+
+    def test_past_term_allowed_bad_term_rejected(self):
+        self._set("Старт", "2026-09-01", "2026-09-15")            # срок в прошлом — так закрывают доступ
+        self.assertTrue(plans.plan_expired(self._row()))
+        for expires in ("2026-09-01", "2026-08-31", "15.09.2026"):
+            with self.subTest(expires=expires), self.assertRaises(HTTPException) as cm:
+                self._set("Старт", "2026-09-01", expires)
+            self.assertEqual(cm.exception.status_code, 422)
+
+    def test_admin_page_and_cabinet_show_the_term(self):
+        users = {}
+        with self.Session() as db:
+            for name, plan, term in (("a1", "Старт", plans.msk_today() + timedelta(days=30)),
+                                     ("a2", "Тестировщик", None),
+                                     ("a3", "Профи", plans.msk_today())):
+                u = q.create_user(db, name, "h", role="user")
+                q.set_user_plan(db, u.id, plan, plans.anchor_from_date(plans.msk_today() - timedelta(days=1)),
+                                plans.anchor_from_date(term) if term else None)
+                users[name] = (q.get_user(db, u.id), term)
+                db.expunge(users[name][0])
+        listing = self._admin_get(self.adm.admin_users)
+        self.assertIn(f"до {users['a1'][1]:%d.%m.%Y}", listing)
+        self.assertIn("бессрочно", listing)
+        self.assertIn(f"истёк {users['a3'][1]:%d.%m.%Y}", listing)
+        card = self._admin_get(self.adm.admin_user_card, users["a1"][0].id)
+        self.assertIn('<optgroup label="Внутренние">', card)
+        self.assertIn('<option value="Пробный режим"', card)
+        self.assertIn(f'name="expires" value="{users["a1"][1].isoformat()}"', card)
+        self.assertIn(f"срок истёк {users['a3'][1]:%d.%m.%Y}",
+                      self._admin_get(self.adm.admin_user_card, users["a3"][0].id))
+        cabinet = {}
+        for name, (u, term) in users.items():
+            with mock.patch.object(self.web, "current_user", return_value=u):
+                cabinet[name] = self.web.profile_page(self._request("/profile"), tab="plan").body.decode("utf-8")
+        self.assertIn(f"Активен до {users['a1'][1]:%d.%m.%Y}", cabinet["a1"])
+        self.assertIn("Бессрочно", cabinet["a2"])
+        self.assertIn("Тестировщик", cabinet["a2"], "тариф без лимита в кабинете без названия")
+        self.assertIn(f"Срок истёк {users['a3'][1]:%d.%m.%Y}", cabinet["a3"])
+        self.assertIn("новые вопросы недоступны", cabinet["a3"])
+
+    def test_short_term_does_not_promise_a_renewal(self):
+        """Неделя «Пробного режима» кончается раньше нового периода: «Лимит обновится 09.11» —
+        обещание периода, которого не будет. Показываем дату окончания тарифа."""
+        today = plans.msk_today()
+        self._set(plans.TRIAL_PLAN, today.isoformat())
+        u = self._row()
+        with self.Session() as db:
+            qv = quota.quota_view(db, u)
+        self.assertIs(qv["renews_first"], False)
+        with mock.patch.object(self.web, "current_user", return_value=u):
+            page = self.web.profile_page(self._request("/profile"), tab="plan").body.decode("utf-8")
+        end = today + timedelta(days=plans.TRIAL_DAYS)
+        self.assertIn(f"Запросы действуют до окончания тарифа — {end:%d.%m.%Y}", page)
+        self.assertNotIn("Лимит обновится", page)
+        self._set("Старт", today.isoformat(), (today + timedelta(days=90)).isoformat())
+        with self.Session() as db:
+            self.assertIs(quota.quota_view(db, self._row())["renews_first"], True, "долгий тариф — лимит обновится")
+        js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertIn('const until = qv.renews_first === false ? qv.expires : qv.renews;', js)
+
+    def test_sidebar_card_speaks_of_expiry(self):
+        js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertIn('"Срок действия тарифа истёк " + qv.expires', js)
+        with self.Session() as db:
+            q.set_user_plan(db, self.uid, "Старт", plans.anchor_from_date(plans.msk_today() - timedelta(days=3)),
+                            plans.anchor_from_date(plans.msk_today()))
+            qv = quota.quota_view(db, q.get_user(db, self.uid))
+        self.assertTrue(qv["expired"])
+        self.assertEqual(qv["expires"], f"{plans.msk_today():%d.%m.%Y}")
 
 
 class TestPlanColumnsMigrate(unittest.TestCase):
@@ -459,7 +644,7 @@ class TestPlanColumnsMigrate(unittest.TestCase):
                 cols = {r[1] for r in c.exec_driver_sql("PRAGMA table_info(users)")}
                 tables = {r[0] for r in c.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")}
             old.dispose()
-        self.assertTrue({"plan", "plan_started_at"} <= cols, cols)
+        self.assertTrue({"plan", "plan_started_at", "plan_expires_at"} <= cols, cols)
         self.assertIn("answer_usage", tables, "журнал расхода создаётся на старте")
 
 

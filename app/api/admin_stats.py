@@ -22,6 +22,7 @@ from collections import defaultdict
 from datetime import date, datetime, timedelta
 
 from app.core.costs import cost_rub
+from app.core.plans import MSK_OFFSET
 from app.db import queries as q
 from app.rag import procedural
 
@@ -31,8 +32,14 @@ BAD_RATING_MAX = 2
 GATE_PCT = 70
 
 
+def _msk(ts):
+    """База хранит наивное UTC; панель показывает и фильтрует по Москве (как Сводка, тарифы и
+    расход, 09.10.2026) — иначе один вопрос в «Качестве» и в «Сводке» стоял бы с разницей в 3 часа."""
+    return ts + MSK_OFFSET if ts else ts
+
+
 def _fmt(ts) -> str:
-    return ts.strftime("%d.%m.%Y %H:%M") if ts else ""
+    return _msk(ts).strftime("%d.%m.%Y %H:%M") if ts else ""
 
 
 def _in_window(ts, date_from: date | None, date_to: date | None) -> bool:
@@ -40,7 +47,7 @@ def _in_window(ts, date_from: date | None, date_to: date | None) -> bool:
     Без даты — учитываем только когда окно вовсе не задано (иначе не спутаем с когортой)."""
     if ts is None:
         return date_from is None and date_to is None
-    d = ts.date()
+    d = _msk(ts).date()
     if date_from and d < date_from:
         return False
     if date_to and d > date_to:
@@ -198,7 +205,7 @@ def build_admin_view(
             })
             s["prompt"] += m.prompt_tokens or 0
             s["completion"] += m.completion_tokens or 0
-            day = m.ts.strftime("%Y-%m-%d") if m.ts else None  # ISO-ключ → корректная сортировка
+            day = _msk(m.ts).strftime("%Y-%m-%d") if m.ts else None  # ISO-ключ (МСК) → сортировка
             if m.role == "user":
                 u_req += 1
                 if day:
@@ -266,7 +273,7 @@ def build_admin_view(
                         "unverified": orig.unverified_json,
                         "low_relevance": bool(orig.low_relevance),
                         "comment": f.comment or "", "correction": f.correction or "",
-                        "session_id": f.session_id,
+                        "session_id": f.session_id, "owner_id": orig.user_id,
                     })
                 if f.correction:
                     corrections.append({"user": u.username, "region": u_region,
