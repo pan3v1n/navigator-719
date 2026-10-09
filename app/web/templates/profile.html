@@ -59,7 +59,7 @@
         <div class="plan-usage">
           <div class="plan-use"><span>Использовано {{ quota.used }} из {{ quota.limit }} запросов</span><span>{{ pct }}%</span></div>
           <div class="plan-track"><div style="width:{{ pct }}%"></div></div>
-          <div class="plan-note">Лимит обновится {{ quota.renews }}</div>
+          <div class="plan-note">{% if quota.renews_first is false %}Запросы действуют до окончания тарифа — {{ quota.expires }}{% else %}Лимит обновится {{ quota.renews }}{% endif %}</div>
         </div>
         {% else %}
         <div class="plan-title">

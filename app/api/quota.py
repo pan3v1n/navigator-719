@@ -61,9 +61,13 @@ def quota_view(db: Session, user) -> dict | None:
     st = quota_state(db, user)
     if st is None:
         return None
+    # Тариф, который кончится раньше нового периода (неделя «Пробного режима»), не «обновит лимит»:
+    # интерфейс тогда называет дату окончания тарифа, а не начало периода, которого не будет.
+    exp = getattr(user, "plan_expires_at", None)
+    renews_first = not isinstance(exp, datetime) or st.end < plans.naive_utc(exp)
     return {"plan": st.plan, "limit": st.limit, "used": min(st.used, st.limit),
             "remaining": st.remaining, "renews": f"{plans.msk_date(st.end):%d.%m.%Y}",
-            **validity(user)}
+            "renews_first": renews_first, **validity(user)}
 
 
 def validity(user) -> dict:

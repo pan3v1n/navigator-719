@@ -563,6 +563,26 @@ class TestAdminSetsExpiry(_AdminPlanBase):
         self.assertIn(f"Срок истёк {users['a3'][1]:%d.%m.%Y}", cabinet["a3"])
         self.assertIn("новые вопросы недоступны", cabinet["a3"])
 
+    def test_short_term_does_not_promise_a_renewal(self):
+        """Неделя «Пробного режима» кончается раньше нового периода: «Лимит обновится 09.11» —
+        обещание периода, которого не будет. Показываем дату окончания тарифа."""
+        today = plans.msk_today()
+        self._set(plans.TRIAL_PLAN, today.isoformat())
+        u = self._row()
+        with self.Session() as db:
+            qv = quota.quota_view(db, u)
+        self.assertIs(qv["renews_first"], False)
+        with mock.patch.object(self.web, "current_user", return_value=u):
+            page = self.web.profile_page(self._request("/profile"), tab="plan").body.decode("utf-8")
+        end = today + timedelta(days=plans.TRIAL_DAYS)
+        self.assertIn(f"Запросы действуют до окончания тарифа — {end:%d.%m.%Y}", page)
+        self.assertNotIn("Лимит обновится", page)
+        self._set("Старт", today.isoformat(), (today + timedelta(days=90)).isoformat())
+        with self.Session() as db:
+            self.assertIs(quota.quota_view(db, self._row())["renews_first"], True, "долгий тариф — лимит обновится")
+        js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertIn('const until = qv.renews_first === false ? qv.expires : qv.renews;', js)
+
     def test_sidebar_card_speaks_of_expiry(self):
         js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
         self.assertIn('"Срок действия тарифа истёк " + qv.expires', js)
