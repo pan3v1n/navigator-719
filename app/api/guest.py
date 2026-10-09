@@ -59,6 +59,9 @@ IP_OVER = ("С этого адреса сегодня задано слишко�
 # Окно повтора — как у тарифов: фолбэк фронта ждёт стрим 120 с.
 REPEAT_WINDOW = timedelta(minutes=5)
 _ip_limit = SlidingWindow(settings.GUEST_IP_PER_DAY, window=24 * 3600.0)
+# Бронь неотвеченного вопроса переиспользуется ОДИН раз (см. `_reserve`): больше — и обрыв стрима
+# в цикле снова давал бы бесплатные вызовы движка.
+_retry_once = SlidingWindow(1, window=REPEAT_WINDOW.total_seconds())
 
 
 def _msk_day_start(now: datetime | None = None) -> datetime:
@@ -76,21 +79,24 @@ def _require_guest(request: Request) -> str:
     return gid
 
 
-def _stored_repeat(gid: str, req: ChatRequest):
-    """Повтор отвеченного вопроса (фолбэк фронта после стрима, дошедшего до конца на сервере) —
-    СОХРАНЁННЫЙ ответ: движок не зовётся, строк не прибавляется, потолки не нужны.
+def _last_same(gid: str, req: ChatRequest):
+    """(вопрос, ответ) — если ПОСЛЕДНИЙ вопрос беседы тот же и задан в окне повтора, иначе (None, None).
 
-    ⚠ Ревью PR #182: прежде повтор лишь не засчитывался, а движок звался заново — тот же вопрос в
-    цикле давал безлимитные вызовы DeepSeek мимо всех трёх потолков."""
+    Есть ответ — это фолбэк фронта после стрима, дошедшего до конца на сервере: отдаём СОХРАНЁННЫЙ
+    ответ, движок не зовётся, строк не прибавляется (ревью PR #182: прежде движок звался заново, и
+    тот же вопрос в цикле давал безлимитные вызовы DeepSeek мимо всех потолков). Ответа нет —
+    стрим оборвался у клиента, и `_reserve` переиспользует бронь этого вопроса."""
     if not req.session_id:
-        return None
+        return None, None
     with get_session() as db:
-        return q.guest_answered_repeat(
-            db, gid, req.session_id, req.message,
-            since=plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW)
+        question, answer = q.guest_last_question(db, gid, req.session_id)
+    since = plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW
+    if question is None or question.content != req.message or plans.naive_utc(question.ts) < since:
+        return None, None
+    return question, answer
 
 
-def _reserve(request: Request, gid: str, session_id: str, message: str) -> int:
+def _reserve(request: Request, gid: str, session_id: str, message: str, unanswered=None) -> int:
     """Бронь пробного вопроса ДО движка: строка вопроса пишется сразу засчитанной, и лишь затем
     считаются потолки — ВМЕСТЕ с ней. Не прошла — бронь снимается. Возвращает id строки.
 
@@ -100,7 +106,16 @@ def _reserve(request: Request, gid: str, session_id: str, message: str) -> int:
     лишь тот, кто увидел счёт со своей строкой в пределах потолка, — больше потолка их не бывает.
 
     Порядок: личный счёт гостя (402 — фронт ведёт на вход), общий суточный потолок (429) и
-    последним — IP: `check` занимает слот, тратить его на отклонённый вопрос нельзя."""
+    последним — IP: `check` занимает слот, тратить его на отклонённый вопрос нельзя.
+
+    `unanswered` — засчитанный вопрос беседы без ответа, тот же и свежий: клиент оборвал стрим
+    (сеть, таймаут фронта 120 с), и фолбэк переспрашивает. Такой вопрос уже оплачен — бронь берётся
+    его, второй раз он не засчитывается (повторное ревью PR #182: гость на плохой сети терял два
+    вопроса из трёх за один ответ). Один раз: иначе обрыв в цикле давал бы бесплатный движок."""
+    if (unanswered is not None and unanswered.charged
+            and _retry_once.check(f"{gid}:{session_id}:{unanswered.id}")):
+        logger.info("гость: тот же вопрос после оборванного стрима — бронь та же, засчитан один раз")
+        return unanswered.id
     with get_session() as db:
         row = q.log_guest_message(db, guest_id=gid, session_id=session_id, role="user",
                                   content=message, charged=True)
@@ -146,8 +161,17 @@ def _load_history(gid: str, session_id: str, max_msgs: int = 12) -> list[dict]:
             prev = q.get_guest_session_messages(db, gid, session_id)
     except Exception:  # noqa: BLE001 — история не критична
         return []
+    # Только отвеченные пары: вопрос оборванного стрима (бронь без ответа) в историю не идёт —
+    # иначе фолбэк того же вопроса видел бы его дважды подряд.
+    pairs, pending = [], None
+    for m in prev:
+        if m.role == "user":
+            pending = m
+        elif pending is not None:
+            pairs += [pending, m]
+            pending = None
     return [{"role": m.role, "content": m.content if m.role == "user" else m.content[:600]}
-            for m in prev[-max_msgs:]]
+            for m in pairs[-max_msgs:]]
 
 
 def _guest_sources(ans) -> list:
@@ -193,12 +217,13 @@ def _stored_payload(row, gid: str, session_id: str) -> dict:
 def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     gid = _require_guest(request)
     _reject_sensitive(req.message, "guest")   # до счёта: отклонённый вопрос пробу не тратит
-    if (stored := _stored_repeat(gid, req)) is not None:
+    last, stored = _last_same(gid, req)
+    if stored is not None:
         logger.info("гость: повтор отвеченного вопроса — сохранённый ответ, без движка")
         return GuestChatResponse(**_stored_payload(stored, gid, req.session_id))
     session_id = req.session_id or uuid.uuid4().hex
-    history = _load_history(gid, session_id)   # до брони: своя строка в историю не попадает
-    question_id = _reserve(request, gid, session_id, req.message)   # R26: вопрос — до движка
+    history = _load_history(gid, session_id)
+    question_id = _reserve(request, gid, session_id, req.message, unanswered=last)   # R26: до движка
     try:
         ans = answer(req.message, **_engine_kwargs(req, history))
     except Exception:  # noqa: BLE001
@@ -225,7 +250,8 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     gid = _require_guest(request)
     _reject_sensitive(req.message, "guest")
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
-    if (stored := _stored_repeat(gid, req)) is not None:
+    last, stored = _last_same(gid, req)
+    if stored is not None:
         logger.info("гость: повтор отвеченного вопроса — сохранённый ответ, без движка")
         done = {"type": "done", **_stored_payload(stored, gid, req.session_id)}
         done.pop("answer")
@@ -233,7 +259,7 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                                  media_type="text/event-stream", headers=headers)
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(gid, session_id)
-    question_id = _reserve(request, gid, session_id, req.message)
+    question_id = _reserve(request, gid, session_id, req.message, unanswered=last)
 
     def gen():
         try:

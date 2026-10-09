@@ -154,6 +154,9 @@ class TestEpochAndBlocking(_PanelDB):
         remembered.cookies.pop("session", None)                 # осталась только «запомнить меня»
         self.assertEqual(chat(remembered), (302, "/login"))
         self.assertEqual(chat(self.TestClient(self.app))[0], 200, "аноним без входа — пробный режим")
+        self.assertEqual(chat(blocked), (302, "/login"), "со второго открытия заблокированный — в пробе")
+        blocked.get("/logout")
+        self.assertEqual(chat(blocked)[0], 200, "после выхода — обычный аноним, проба открыта")
 
 
 class TestUsersList(_PanelDB):
@@ -611,6 +614,9 @@ class TestDialogs(_PanelDB):
         self.assertNotIn("Заявка через ГИСП.", mine)
         bare = self.as_admin.get("/admin/dialogs/mid").text      # старая ссылка без владельца
         self.assertNotIn("Чужой вопрос", bare, "без владельца — беседа первого автора, не склейка")
+        for junk in ("²", "99999999999999999999", "-1"):
+            with self.subTest(u=junk):
+                self.assertEqual(self.as_admin.get(f"/admin/dialogs/mid?u={junk}").status_code, 200)
 
 
 class TestQualityInMoscowTime(_PanelDB):

@@ -102,6 +102,7 @@ class _GuestBase(unittest.TestCase):
                    mock.patch.object(web, "get_session", self.Session),
                    mock.patch.object(admin_mod, "get_session", self.Session),
                    mock.patch.object(guest, "_ip_limit", SlidingWindow(1000, window=86400.0)),
+                   mock.patch.object(guest, "_retry_once", SlidingWindow(1, window=300.0)),
                    mock.patch.object(guest, "answer", self._engine(_Ans)),
                    mock.patch.object(guest, "answer_stream", self._stream(_Ans))]
         for p in patches:
@@ -312,6 +313,39 @@ class TestGuestTrialLimits(_GuestBase):
         self.assertEqual([start(f"p{i}") for i in range(5)], [200, 200, 200, 402, 402])
         self.assertEqual(self.calls, [], "до чтения стрима движок не стартует — а вопросы уже засчитаны")
         self.assertEqual(self.charged(), 3)
+
+    def _start_stream(self, message, sid):
+        """Старт стрима без чтения — клиент оборвал соединение до финала: бронь уже стоит."""
+        from starlette.requests import Request
+
+        cookie = f"{trial.GUEST_COOKIE}={self.client.cookies[trial.GUEST_COOKIE]}".encode()
+        req = Request({"type": "http", "method": "POST", "path": "/", "headers": [(b"cookie", cookie)],
+                       "client": ("testclient", 0)})
+        return guest.guest_chat_stream(guest.ChatRequest(message=message, session_id=sid), req)
+
+    def test_fallback_after_a_dropped_stream_is_charged_once(self):
+        """Повторное ревью PR #182: обрыв стрима оставлял засчитанную бронь без ответа, и фолбэк
+        фронта засчитывал вопрос второй раз — гость на плохой сети терял два вопроса из трёх."""
+        self._start_stream("Вопрос", "d1")                 # оборван: ответа нет, бронь есть
+        r = self.ask("Вопрос", sid="d1")                   # фолбэк фронта
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(r.json()["trial"]["used"], 1, "один ответ засчитан дважды")
+        self.assertEqual(self.calls[0]["history"], [], "неотвеченный вопрос попал в историю")
+        self.assertEqual(self.charged(), 1)
+
+    def test_dropped_stream_reuse_is_bounded(self):
+        """Переиспользование брони — один раз: обрыв в цикле не даёт бесплатных вызовов движка."""
+        for _ in range(3):
+            self._start_stream("Вопрос", "d2")
+        self.assertEqual(self.charged(), 2, "бронь переиспользуется больше одного раза")
+
+    def test_only_the_last_question_is_a_repeat(self):
+        """Повторное ревью PR #182: тот же вопрос ПОСЛЕ другого вопроса — уточнение, а не фолбэк:
+        ему нужен новый ответ, а не сохранённый из другого контекста."""
+        self.ask("Какие документы нужны?", sid="r1")
+        self.ask("Бульдозеры 28.92.21", sid="r1")
+        self.ask("Какие документы нужны?", sid="r1")
+        self.assertEqual(len(self.calls), 3, "прежний вопрос беседы получил старый ответ")
 
     def test_stream_failure_drops_the_reservation(self):
         def broken(message, **kw):

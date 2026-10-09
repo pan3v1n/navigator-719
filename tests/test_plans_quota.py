@@ -525,6 +525,28 @@ class TestAdminSetsExpiry(_AdminPlanBase):
         self._set(plans.TRIAL_PLAN, f"{today:%Y-%m-%d}")
         self.assertEqual(self._row().plan_expires_at, plans.anchor_from_date(today + timedelta(days=plans.TRIAL_DAYS)))
 
+    def test_trial_over_a_spent_plan_starts_fresh(self):
+        """Повторное ревью PR #182: перевод в пробу с нетронутой датой прежнего тарифа вёл период
+        лимита от неё, расход «Старта» засчитывался пробе — она начиналась исчерпанной (402)."""
+        today = plans.msk_today()
+        old = today - timedelta(days=45)
+        self._set("Старт", f"{old:%Y-%m-%d}")
+        with self.Session() as db:
+            yesterday = plans.anchor_from_date(today) - timedelta(hours=1)   # расход прежнего тарифа
+            db.add_all([AnswerUsage(user_id=self.uid, ts=yesterday) for _ in range(100)])
+            db.commit()
+            self.assertTrue(quota.quota_state(db, self._row()).exhausted)
+        self._set(plans.TRIAL_PLAN, f"{old:%Y-%m-%d}")            # дата предзаполнена карточкой
+        u = self._row()
+        self.assertEqual(plans.msk_date(u.plan_started_at), today, "проба не с сегодняшнего дня")
+        with self.Session() as db:
+            st = quota.quota_state(db, u)
+        self.assertEqual((st.used, st.exhausted), (0, False), "проба началась с расходом прежнего тарифа")
+        mine = today - timedelta(days=2)                          # дату admin ввёл сам — уважаем
+        self._set("")
+        self._set(plans.TRIAL_PLAN, f"{mine:%Y-%m-%d}")
+        self.assertEqual(plans.msk_date(self._row().plan_started_at), mine)
+
     def test_trial_from_a_stale_start_is_not_born_expired(self):
         """Ревью PR #182: поле «С» в карточке предзаполнено подключением прежнего тарифа. Перевод
         давнего пользователя в пробу давал срок в прошлом — «Тариф сохранён», а вопросы сразу 402."""

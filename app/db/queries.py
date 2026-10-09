@@ -601,19 +601,18 @@ def get_guest_session_messages(db: Session, guest_id: str, session_id: str) -> l
         .order_by(GuestMessage.id)).scalars())
 
 
-def guest_answered_repeat(db: Session, guest_id: str, session_id: str, content: str,
-                          since) -> GuestMessage | None:
-    """Тот же вопрос в той же беседе уже получил ответ в окне `since` — фолбэк фронта после стрима,
-    дошедшего до конца на сервере. Возвращает строку ЭТОГО ответа (свежайшего), чтобы отдать её
-    без движка. Признак — из базы, не от клиента; ответ — первая строка ассистента после вопроса
-    и до следующего вопроса беседы."""
-    found, waiting = None, False
+def guest_last_question(db: Session, guest_id: str, session_id: str
+                        ) -> tuple[GuestMessage | None, GuestMessage | None]:
+    """Последний вопрос беседы гостя и ответ на него (None — ответа нет). Фолбэк фронта всегда
+    переспрашивает ПОСЛЕДНИЙ вопрос — по нему и решается повтор; прежний такой же вопрос беседы
+    повтором не считается: на уточнение после другого вопроса нужен новый ответ (ревью PR #182)."""
+    question = answer = None
     for m in get_guest_session_messages(db, guest_id, session_id):
         if m.role == "user":
-            waiting = m.content == content and m.ts >= since
-        elif waiting:
-            found, waiting = m, False
-    return found
+            question, answer = m, None
+        elif question is not None and answer is None:
+            answer = m
+    return question, answer
 
 
 def list_guest_messages(db: Session, limit: int = 200) -> list[GuestMessage]:

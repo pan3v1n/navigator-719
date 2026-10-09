@@ -345,11 +345,22 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
     plan = plan.strip()
     if plan and plan not in plans.ALL_PLANS:
         raise HTTPException(status_code=422, detail=f"Неизвестный тариф «{plan}»")
+    with get_session() as db:
+        cur = q.get_user(db, user_id)
+    if cur is None:
+        raise HTTPException(status_code=404, detail="Пользователь не найден")
     started_at = expires_at = None
     if plan:
         day = _parse_date(started.strip()) if started.strip() else plans.msk_today()
         if day is None:
             raise HTTPException(status_code=422, detail="Дата подключения — в формате ГГГГ-ММ-ДД")
+        # Перевод в пробу с НЕТРОНУТОЙ датой прежнего тарифа (карточка её предзаполняет) — проба с
+        # сегодняшнего дня. Иначе период лимита шёл от старой даты, расход прежнего тарифа в нём
+        # засчитывался пробе, и она начиналась исчерпанной (повторное ревью PR #182). Дату, которую
+        # admin ввёл сам (она отличается от прежней), уважаем.
+        if (plan == plans.TRIAL_PLAN and cur.plan != plans.TRIAL_PLAN and cur.plan_started_at is not None
+                and day == plans.msk_date(cur.plan_started_at)):
+            day = plans.msk_today()
         if day > plans.msk_today():
             raise HTTPException(status_code=422, detail="Дата подключения не может быть в будущем")
         started_at = plans.anchor_from_date(day)
@@ -676,9 +687,10 @@ def admin_dialog(request: Request, session_id: str):
     # session_id присылает клиент. Без `u` — беседа первого автора, а не склейка чужих реплик под
     # его логином (ревью PR #182).
     uid = request.query_params.get("u", "")
+    owner = int(uid) if re.fullmatch(r"[0-9]{1,18}", uid) else None   # «²» и 20 цифр — не 500
     with get_session() as db:
-        msgs = q.get_dialog(db, session_id, int(uid) if uid.isdigit() else None)
-        if msgs and not uid.isdigit():
+        msgs = q.get_dialog(db, session_id, owner)
+        if msgs and owner is None:
             msgs = [m for m in msgs if m.user_id == msgs[0].user_id]
         if not msgs:
             raise HTTPException(status_code=404, detail="Беседа не найдена")
