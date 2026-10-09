@@ -14,6 +14,7 @@ IP используется ограничителем частоты в пам�
 from __future__ import annotations
 
 import re
+from typing import Any
 
 from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
@@ -21,6 +22,7 @@ from loguru import logger
 from pydantic import BaseModel
 
 from app.api.ratelimit import SlidingWindow, client_ip
+from app.core import pricing
 from app.db import queries as q
 from app.db.engine import get_session
 
@@ -53,6 +55,30 @@ class LeadIn(BaseModel):
     promo: str = ""
     consent: bool = False
     nav719_hp: str = ""  # поле-ловушка: скрыто от людей, заполняют только боты
+    # Опции с витрины тарифов (09.10.2026, `app/core/pricing.py`). По умолчанию — как у формы до
+    # витрины: старый скрипт из кэша браузера их не шлёт, и заявка от этого не ломается.
+    # ⚠ `Any`, а не строгие типы (ревью PR #184): несовпадение типа FastAPI отвергал бы своим ответом
+    # `{"detail": [...]}`, которого форма не понимает, — разбор и ошибки делает `lead_options`.
+    kind: Any = "individual"
+    addon: Any = False
+    period: Any = "month"
+    seats: Any = 1
+    trial: Any = False
+
+
+def lead_options(f: LeadIn) -> tuple[str | None, dict[str, str]]:
+    """Опции витрины из заявки — ОДИН разбор и для проверки, и для записи (ревью PR #184). Типам
+    чужого скрипта не верим: флаги — только true/false, пользователей — целое число, вид и период —
+    строки; иное — ошибка опций тем же ответом `errors`, что понимает форма."""
+    kind = f.kind if isinstance(f.kind, str) else "?"
+    period = f.period if isinstance(f.period, str) else "?"
+    seats = f.seats if isinstance(f.seats, int) and not isinstance(f.seats, bool) else 0
+    opts, e = pricing.parse_options(f.tariff, kind=kind, addon=f.addon is True, period=period,
+                                    seats=seats, trial=f.trial is True)
+    for k in ("addon", "trial"):
+        if not isinstance(getattr(f, k), bool):
+            e[k] = "Опция — да или нет"
+    return (None if e else opts), e
 
 
 def _digits(s: str) -> str:
@@ -84,6 +110,9 @@ def validate_lead(f: LeadIn) -> dict[str, str]:
         e["promo"] = "Слишком длинный промокод"
     if not f.consent:
         e["consent"] = "Необходимо согласие на обработку данных"
+    _, opt_errors = lead_options(f)
+    if opt_errors:   # своего поля в форме у опций нет — фронт покажет их общей строкой
+        e["options"] = "; ".join(opt_errors.values())
     return e
 
 
@@ -100,10 +129,11 @@ def submit_lead(lead: LeadIn, request: Request) -> JSONResponse:
     if not _lead_limit.check(ip):
         return JSONResponse({"ok": False, "error": "Слишком много заявок с этого адреса, попробуйте позже"},
                             status_code=429, headers={"Retry-After": str(_lead_limit.retry_after(ip))})
+    options, _ = lead_options(lead)
     with get_session() as db:
         row = q.create_lead(db, tariff=lead.tariff, name=lead.name.strip(), org=lead.org.strip(),
                             inn=lead.inn.strip(), email=lead.email.strip(), phone=lead.phone.strip(),
-                            promo=lead.promo.strip())
+                            promo=lead.promo.strip(), options=options)
         purged = q.purge_old_leads(db)
     logger.info("lead: сохранена заявка #{} (тариф «{}»){}", row.id, row.tariff,
                 f"; удалено просроченных: {purged}" if purged else "")

@@ -20,7 +20,7 @@
   <div class="adm-lead-head">
     <div>
       <h2>№{{ l.id }} · {{ l.org }}</h2>
-      <div class="muted">{{ r.created }} · тариф «{{ l.tariff }}»{% if l.promo %} · промокод {{ l.promo }}{% endif %}</div>
+      <div class="muted">{{ r.created }} · тариф «{{ l.tariff }}»{% if l.options %} · {{ l.options }}{% endif %}{% if l.promo %} · промокод {{ l.promo }}{% endif %}</div>
     </div>
     <span class="badge st-{{ l.status }}">{{ statuses.get(l.status, l.status) }}</span>
   </div>

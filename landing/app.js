@@ -111,16 +111,67 @@
   document.getElementById('aud-prev').addEventListener('click', function () { goTab(cur - 1); });
   document.getElementById('aud-next').addEventListener('click', function () { goTab(cur + 1); });
 
+  // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; суммы — плейсхолдеры «X XXX») ----
+  var ptabs = document.querySelectorAll('#price-tabs [role="tab"]'), ptitle = document.getElementById('pricing-h');
+  function showPlans(kind) {
+    ptabs.forEach(function (t) {
+      var on = t.getAttribute('data-kind') === kind;
+      t.setAttribute('aria-selected', String(on)); t.tabIndex = on ? 0 : -1;
+      if (on) ptitle.textContent = t.getAttribute('data-title');
+    });
+    document.querySelectorAll('#pricing [data-panel]').forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== kind; });
+  }
+  ptabs.forEach(function (t) { t.addEventListener('click', function () { showPlans(t.getAttribute('data-kind')); }); });
+  document.querySelectorAll('[data-goto]').forEach(function (b) {
+    b.addEventListener('click', function () { showPlans(b.getAttribute('data-goto')); ptitle.scrollIntoView({ block: 'start' }); });
+  });
+  document.querySelectorAll('#pricing .plan').forEach(function (card) {
+    // суммы — плейсхолдеры, пересчитывать нечего: период меняет только подпись «/мес» ↔ «/год»
+    card.querySelectorAll('.mini-seg input').forEach(function (r) {
+      r.addEventListener('change', function () {
+        card.querySelectorAll('.per').forEach(function (s) { s.textContent = r.value === 'year' ? 'год' : 'мес'; });
+      });
+    });
+    var seats = card.querySelector('[data-seats]');
+    if (!seats) return;
+    card.querySelectorAll('.seat-btn').forEach(function (b) {
+      b.addEventListener('click', function () {
+        var n = (parseInt(seats.value, 10) || 1) + parseInt(b.getAttribute('data-d'), 10);
+        seats.value = Math.max(1, Math.min(n, parseInt(seats.max, 10)));
+      });
+    });
+  });
+
   // ---- тариф: карточки и переключатель в форме ----
-  var chips = document.querySelectorAll('#tariff-chips button'), tariff = 'Стандарт';
-  function setTariff(name) {
-    tariff = name;
+  // Опции карточки (вид, период, пользователи, проба за 1 ₽, «Проверка ответов экспертом ТПП») едут
+  // в заявку; выбор тарифа чипом в форме — заявка без опций.
+  var chips = document.querySelectorAll('#tariff-chips button'), tariff = 'Стандарт', opts = null,
+      optsEl = document.getElementById('tariff-opts');
+  function optsText(o) {
+    if (!o) return '';
+    var parts = [];
+    if (o.kind === 'corporate') parts.push('корпоративный', o.period === 'year' ? 'год' : 'месяц', o.seats + ' польз.');
+    if (o.trial) parts.push('пробная неделя за 1 ₽');
+    if (o.addon) parts.push('проверка ответов экспертом ТПП');
+    return parts.join(' · ');
+  }
+  function setTariff(name, o) {
+    tariff = name; opts = o || null;
     chips.forEach(function (c) { c.setAttribute('aria-pressed', String(c.textContent === name)); });
+    var t = optsText(opts);
+    optsEl.textContent = t ? 'Выбрано: ' + t : ''; optsEl.hidden = !t;
   }
   chips.forEach(function (c) { c.addEventListener('click', function () { setTariff(c.textContent); }); });
   document.querySelectorAll('[data-pick]').forEach(function (b) {
     b.addEventListener('click', function () {
-      setTariff(b.getAttribute('data-pick'));
+      var card = b.closest('.plan'), o = null, name = b.getAttribute('data-pick');
+      if (name !== 'Для организаций') {
+        var corp = card.hasAttribute('data-corp'), add = card.querySelector('[data-addon]'),
+            per = card.querySelector('.mini-seg input:checked'), seats = card.querySelector('[data-seats]');
+        o = { kind: corp ? 'corporate' : 'individual', addon: !!(add && add.checked), trial: b.hasAttribute('data-trial'),
+              period: per ? per.value : 'month', seats: seats ? Math.max(1, Math.min(parseInt(seats.value, 10) || 1, 500)) : 1 };
+      }
+      setTariff(name, o);
       showForm();
       var el = document.getElementById('form');
       window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 88, behavior: reduce ? 'auto' : 'smooth' });
@@ -191,14 +242,17 @@
       return;
     }
     var payload = { tariff: tariff, consent: true, nav719_hp: input('nav719_hp').value };
+    if (opts) { payload.kind = opts.kind; payload.addon = opts.addon; payload.trial = opts.trial;
+                payload.period = opts.period; payload.seats = opts.seats; }
     ['name', 'org', 'inn', 'email', 'phone', 'promo'].forEach(function (n) { payload[n] = input(n).value.trim(); });
     submitBtn.disabled = true;
     fetch('/api/leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, j: j }; }); })
       .then(function (res) {
         if (res.status === 200 && res.j.ok) {
-          document.getElementById('sent-d').textContent = 'Тариф «' + tariff + '». Специалист свяжется с вами по адресу ' +
-            payload.email + ' в течение одного рабочего дня.';
+          var chosen = optsText(opts);
+          document.getElementById('sent-d').textContent = 'Тариф «' + tariff + '»' + (chosen ? ' (' + chosen + ')' : '') +
+            '. Специалист свяжется с вами по адресу ' + payload.email + ' в течение одного рабочего дня.';
           form.hidden = true; sent.hidden = false; tried = false;
         } else if (res.status === 422 && res.j.errors) {
           tried = true; showErrors(res.j.errors);
@@ -210,7 +264,7 @@
       .then(function () { submitBtn.disabled = false; });
   });
   document.getElementById('lead-again').addEventListener('click', function () {
-    form.reset(); setTariff(tariff); showErrors({}); showForm(); input('name').focus();
+    form.reset(); setTariff(tariff, opts); showErrors({}); showForm(); input('name').focus();
   });
 
   // ---- отзывы: прокрутка ----

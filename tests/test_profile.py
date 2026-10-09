@@ -229,7 +229,7 @@ class TestCabinetPage(_CabinetDB):
             html = self._page(u, tab="plan")
         self.assertIn("Использовано 37 из 100 запросов", html)
         self.assertIn("Лимит обновится", html)
-        self.assertIn('href="https://xn--719--83dani8b8bqyy.xn--p1ai/#pricing"', html)
+        self.assertIn('href="#tariffs">Сменить тариф', html, "витрина тарифов — на этой же вкладке (09.10.2026)")
         self.assertNotIn("Данные пользователя", html, "вкладка «Тариф» не рисует форму профиля")
         for absent in ("Автопродление", "Документы", "Скачать PDF", "Изменить реквизиты"):
             self.assertNotIn(absent, html, "биллинга нет — заглушек макета быть не должно")
