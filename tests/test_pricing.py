@@ -53,8 +53,11 @@ def _cards(panel: str) -> list[tuple[str, str]]:
         r'class="(?:plan|tcard)-name">(.*?)</div>\s*<div class="(?:plan|tcard)-desc">(.*?)</div>', panel, re.S)]
 
 
-def _request():
-    return Request({"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": b"",
+def _request(query: str = ""):
+    from urllib.parse import quote
+
+    qs = "&".join(f"{k}={quote(v)}" for k, v in (part.split("=", 1) for part in query.split("&") if part))
+    return Request({"type": "http", "method": "POST", "path": "/", "headers": [], "query_string": qs.encode(),
                     "session": {}, "app": None})
 
 
@@ -202,12 +205,13 @@ class TestCabinetShowcase(_Db):
             db.expunge(u)
             return u
 
-    def _page(self, user, **kw):
+    def _page(self, user, query="", **kw):
         with mock.patch.object(web, "current_user", return_value=user):
-            return web.profile_page(_request(), tab="plan", **kw).body.decode("utf-8")
+            return web.profile_page(_request(query), tab="plan", **kw).body.decode("utf-8")
 
     def _ask(self, user, **form):
-        fields = dict(tariff="Стандарт", kind="individual", addon="", period="month", seats="1", trial_flag="")
+        fields = dict(tariff="Стандарт", kind="individual", addon="", period="month", seats="1", trial_flag="",
+                      consent="1")
         fields.update(form)
         with mock.patch.object(web, "current_user", return_value=user):
             return web.plan_request(_request(), **fields)
@@ -258,28 +262,68 @@ class TestCabinetShowcase(_Db):
                           (dict(tariff="Профи", kind="corporate", seats="²"), "options")):   # «²».isdigit() — 500
             with self.subTest(**form):
                 r = self._ask(u, **form)
-                # ревью PR #184: ошибка — редирект на вкладку (post/redirect/get), не страница на адресе API
-                self.assertEqual((r.status_code, r.headers["location"]), (303, f"/profile?tab=plan&err={err}#tariffs"))
+                # ревью PR #184: ошибка — редирект на вкладку (post/redirect/get), не страница на адресе API;
+                # корпоративная возвращается на свою вкладку
+                tab = "&kind=corporate" if form.get("kind") == "corporate" else ""
+                self.assertEqual((r.status_code, r.headers["location"]), (303, f"/profile?tab=plan&err={err}{tab}#tariffs"))
                 self.assertIn(web.PLAN_REQUEST_ERRORS[err], self._page(u, err=err))
         self.assertEqual(len(self.leads()), 1, "неверная заявка записана")
         self.assertNotIn('role="alert"', self._page(u, err="<script>"), "ошибка — только из списка кодов")
 
+    def _without(self, **profile):
+        u = self._user()
+        with self.Session() as db:
+            row = q.get_user(db, u.id)
+            for k, v in profile.items():      # анкета согласие не снимает — ставим напрямую
+                setattr(row, k, v)
+            db.commit()
+            u = q.get_user(db, u.id)
+            db.expunge(u)
+        return u
+
     def test_no_consent_or_contacts_no_lead(self):
-        """Ревью PR #184 (152-ФЗ): заявка ставит время согласия — без согласия в анкете и без контактов
-        её не создаём, иначе в «Заявках» лежало бы согласие, которого человек не давал."""
-        for profile in (dict(consent=False), dict(email=""), dict(phone="")):
+        """Ревью PR #184 (152-ФЗ): заявка ставит время согласия. Согласие — галочкой на подтверждении
+        (согласие анкеты дано на другую цель — тестирование); без контактов с человеком не связаться."""
+        u = self._user()
+        self.assertEqual(self._ask(u, consent="").headers["location"], "/profile?tab=plan&err=consent#tariffs")
+        for profile in (dict(email=""), dict(phone="")):
             with self.subTest(**profile):
-                u = self._user()
-                with self.Session() as db:
-                    row = q.get_user(db, u.id)
-                    for k, v in profile.items():      # анкета согласие не снимает — ставим напрямую
-                        setattr(row, k, v)
-                    db.commit()
-                    u = q.get_user(db, u.id)
-                    db.expunge(u)
-                r = self._ask(u)
+                r = self._ask(self._without(**profile))
                 self.assertEqual(r.headers["location"], "/profile?tab=plan&err=profile#tariffs")
         self.assertEqual(self.leads(), [])
+        self._ask(self._without(consent=False))      # согласие на заявку — своё, анкетное не нужно
+        self.assertEqual(len(self.leads()), 1)
+
+    def test_connect_opens_a_confirmation_with_consent(self):
+        """«Подключить» — подтверждение: условия, данные из профиля, обязательная галочка согласия; заявку
+        создаёт только оно. Ошибка и подтверждение — внутри витрины, к которой ведёт `#tariffs`."""
+        u = self._user()
+        html = self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5&addon=1")
+        box = html[html.index('class="tconfirm"'):html.index("</form>", html.index('class="tconfirm"'))]
+        self.assertIn("Заявка на тариф «Профи»", box)
+        self.assertIn("Корпоративный · год · 5 польз. · проверка ответов экспертом ТПП", box)
+        self.assertIn("ООО «Станкозавод», ИНН 4632000000, i.petrov@tpp.ru, +7 900 000-00-00", _text(box))
+        self.assertIn('name="consent" value="1" required', box)
+        for k, v in (("tariff", "Профи"), ("kind", "corporate"), ("period", "year"), ("seats", "5"), ("addon", "1")):
+            self.assertIn(f'name="{k}" value="{v}"', box)
+        self.assertLess(html.index('id="tariffs"'), html.index('class="tconfirm"'), "подтверждение вне витрины")
+        self.assertIn('data-panel="corporate" role="tabpanel">', html, "корпоративная вкладка не открыта")
+        self.assertEqual(self.leads(), [], "подтверждение само заявку не создаёт")
+        self.assertEqual(html.count('method="get" action="/profile#tariffs"'), 8, "карточка ведёт не на подтверждение")
+        self.assertEqual(html.count('action="/api/plan-request"'), 1, "заявку шлёт что-то кроме подтверждения")
+
+    def test_bad_choice_or_no_contacts_show_the_error_in_the_showcase(self):
+        u = self._user()
+        for query, err in (("confirm=1&tariff=Профи&kind=corporate&seats=", "options"),      # пустое поле — не «1»
+                           ("confirm=1&tariff=Профи&trial=1", "options"), ("confirm=1&tariff=Безлимит", "tariff")):
+            with self.subTest(query=query):
+                html = self._page(u, query)
+                self.assertNotIn('class="tconfirm"', html)
+                self.assertLess(html.index('id="tariffs"'), html.index(web.PLAN_REQUEST_ERRORS[err]),
+                                "ошибка над карточкой тарифа — за краем экрана при переходе к витрине")
+        html = self._page(self._without(phone=""), "confirm=1&tariff=Старт&trial=1")
+        self.assertNotIn('class="tconfirm"', html)
+        self.assertIn(web.PLAN_REQUEST_ERRORS["profile"], html)
 
     def test_cabinet_lead_keeps_the_retention_promise(self):
         """Ревью PR #184: срок хранения заявок (12 месяцев) исполняется и на пути заявки из кабинета."""

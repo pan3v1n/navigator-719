@@ -41,7 +41,6 @@
     {% if tab == 'plan' %}
     {% if requested %}<div class="plan-flash" role="status">Заявка на тариф «{{ requested }}» отправлена. Администратор
       свяжется с вами{% if user.email %} по адресу {{ user.email }}{% endif %} и подключит тариф.</div>{% endif %}
-    {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
     {# Б4: расход тарифа — те же данные, что у карточки в сайдбаре (`quota.quota_view`) #}
     {% set pct = ((100 * quota.used / quota.limit) | round | int) if (quota and quota.limit) else 0 %}
     <div class="grid2" style="align-items:start">
@@ -80,22 +79,45 @@
     </div>
     {# Витрина тарифов (решение владельца 09.10.2026: «как у Нейроюриста, но с плейсхолдерами вместо
        сумм»). Описание — `app/core/pricing.py`, лендинг повторяет его (сверяет тест). Оплаты нет:
-       «Подключить» — заявка, привязанная к учётке (`/api/plan-request`), её видит admin в «Заявках». #}
+       «Подключить» открывает подтверждение — условия, данные из профиля и галочка согласия на обработку
+       ПДн (152-ФЗ, как в форме лендинга); только оно отправляет заявку (`/api/plan-request`), её видит
+       admin в «Заявках». Ошибки и подтверждение — внутри витрины: к ней ведёт `#tariffs`. #}
+    {% set titles = {'individual': 'Тарифы для индивидуального использования', 'corporate': 'Тарифы для организаций'} %}
     <section class="tariffs" id="tariffs" aria-labelledby="tariffs-h">
+      {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+      {% if confirm %}
+      <form class="tconfirm" method="post" action="/api/plan-request">
+        <h2>Заявка на тариф «{{ confirm.tariff }}»</h2>
+        <p class="tconfirm-opts">{% if confirm.summary %}{{ confirm.summary[0] | upper }}{{ confirm.summary[1:] }}{% else %}Без дополнительных условий{% endif %}.
+          Окончательную стоимость сообщит специалист после заявки.</p>
+        <p class="tconfirm-who">В заявку попадут данные из профиля: {{ user.full_name or user.username }}{% if user.org %},
+          {{ user.org }}{% endif %}{% if user.inn %}, ИНН {{ user.inn }}{% endif %}, {{ user.email }}, {{ user.phone }}.</p>
+        {% for k, v in confirm.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+        <label class="tconfirm-consent"><input type="checkbox" name="consent" value="1" required>
+          <span>Даю согласие на обработку моих персональных данных — ФИО, организации, ИНН, рабочего email и
+            телефона из профиля — чтобы со мной связались по заявке и подключили тариф, в соответствии с
+            <a class="ds-link" href="/privacy" target="_blank" rel="noopener">политикой обработки персональных данных</a>
+            (раздел 9).</span></label>
+        <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить заявку</button>
+          <a class="ds-link" href="/profile?tab=plan#tariffs">Отменить</a></div>
+      </form>
+      {% endif %}
       <div class="tariffs-head">
-        <h2 id="tariffs-h">Тарифы для индивидуального использования</h2>
+        <h2 id="tariffs-h">{{ titles[tariff_kind] }}</h2>
         <div class="seg" role="tablist" aria-label="Вид тарифа">
-          <button type="button" role="tab" class="seg-item on" aria-selected="true" data-kind="individual"
-                  data-title="Тарифы для индивидуального использования">Индивидуальные</button>
-          <button type="button" role="tab" class="seg-item" aria-selected="false" data-kind="corporate" tabindex="-1"
-                  data-title="Тарифы для организаций">Корпоративные</button>
+          {% for k, label in (('individual', 'Индивидуальные'), ('corporate', 'Корпоративные')) %}
+          <button type="button" role="tab" class="seg-item{% if k == tariff_kind %} on{% endif %}"
+                  aria-selected="{{ 'true' if k == tariff_kind else 'false' }}" data-kind="{{ k }}"
+                  {% if k != tariff_kind %}tabindex="-1" {% endif %}data-title="{{ titles[k] }}">{{ label }}</button>
+          {% endfor %}
         </div>
       </div>
       {% for kind in ('individual', 'corporate') %}
-      <div class="tcards" data-panel="{{ kind }}" role="tabpanel"{% if kind == 'corporate' %} hidden{% endif %}>
+      <div class="tcards" data-panel="{{ kind }}" role="tabpanel"{% if kind != tariff_kind %} hidden{% endif %}>
         {% for p in pricing.PLANS %}{% set promo = p.trial and kind == 'individual' %}
-        <form class="tcard{% if promo %} promo{% endif %}" method="post" action="/api/plan-request">
+        <form class="tcard{% if promo %} promo{% endif %}" method="get" action="/profile#tariffs">
           {% if promo %}<span class="tcard-badge">Предложение ограничено</span>{% endif %}
+          <input type="hidden" name="tab" value="plan"><input type="hidden" name="confirm" value="1">
           <input type="hidden" name="tariff" value="{{ p.name }}"><input type="hidden" name="kind" value="{{ kind }}">
           {% if promo %}<input type="hidden" name="trial" value="1">{% endif %}
           <div class="tcard-name">{{ p.name }}</div>
@@ -108,7 +130,7 @@
             </div>
             <div class="seats">
               <button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button>
-              <input name="seats" type="number" value="1" min="1" max="{{ pricing.MAX_SEATS }}" inputmode="numeric" aria-label="Число пользователей">
+              <input name="seats" type="number" value="1" min="1" max="{{ pricing.MAX_SEATS }}" inputmode="numeric" required aria-label="Число пользователей">
               <button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button>
               <span class="seats-l">польз.</span>
             </div>
@@ -126,8 +148,9 @@
             {% else %}Подключить<small>за {{ pricing.PRICE }} ₽/<span class="per">мес</span></small>{% endif %}</button>
         </form>
         {% endfor %}
-        <form class="tcard org" method="post" action="/api/plan-request">
-          <input type="hidden" name="tariff" value="{{ pricing.ORG_TARIFF }}">
+        <form class="tcard org" method="get" action="/profile#tariffs">
+          <input type="hidden" name="tab" value="plan"><input type="hidden" name="confirm" value="1">
+          <input type="hidden" name="tariff" value="{{ pricing.ORG_TARIFF }}"><input type="hidden" name="kind" value="{{ kind }}">
           <div class="tcard-name">{{ 'Для организаций' if kind == 'individual' else 'Особые условия' }}</div>
           <div class="tcard-desc">{{ pricing.ORG_DESC if kind == 'individual' else pricing.SPECIAL_DESC }}</div>
           <ul class="tcard-list">{% for b in pricing.ORG_BULLETS %}<li>{{ b }}</li>{% endfor %}</ul>
@@ -139,7 +162,7 @@
       </div>
       {% endfor %}
       {% for kind, notes in pricing.FOOTNOTES.items() %}
-      <div class="tariffs-fine" data-panel="{{ kind }}"{% if kind == 'corporate' %} hidden{% endif %}>
+      <div class="tariffs-fine" data-panel="{{ kind }}"{% if kind != tariff_kind %} hidden{% endif %}>
         {% for n in notes %}<p>{{ n }}</p>{% endfor %}</div>
       {% endfor %}
     </section>

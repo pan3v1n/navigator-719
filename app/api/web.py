@@ -337,7 +337,7 @@ def _profile_form(user: User, **over) -> dict:
 
 def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
                       saved: bool = False, error: str | None = None, status_code: int = 200,
-                      requested: str = ""):
+                      requested: str = "", confirm: dict | None = None, tariff_kind: str = ""):
     """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
@@ -349,6 +349,7 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
              tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
              quota=pv["quota"] if pv else None,
              requested=requested if requested in LEAD_TARIFFS else "",
+             confirm=confirm, tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
              can_leave=not needs_profile(user)),
         status_code=status_code,
     )
@@ -360,8 +361,25 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
+    # «Подключить» на карточке — GET сюда же с выбранными условиями: панель подтверждения с данными
+    # из профиля и галочкой согласия; заявку создаёт только она (`/api/plan-request`). Поля читаются из
+    # адреса, а не параметрами функции: имя `trial` занято модулем.
+    qp, confirm = request.query_params, None
+    error = PLAN_REQUEST_ERRORS.get(err)
+    if tab == "plan" and qp.get("confirm") == "1":
+        seats = qp.get("seats")
+        fields, summary, code = _plan_choice(qp.get("tariff", ""), qp.get("kind") or "individual",
+                                             qp.get("addon", ""), qp.get("period") or "month",
+                                             "1" if seats is None else seats, qp.get("trial", ""))
+        if code is None and not (user.email and user.phone):
+            code = "profile"
+        if code is None:
+            confirm = {"tariff": fields["tariff"], "summary": summary, "fields": fields}
+        else:
+            error = PLAN_REQUEST_ERRORS[code]
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
-                             requested=requested, error=PLAN_REQUEST_ERRORS.get(err))
+                             requested=requested, error=error, confirm=confirm,
+                             tariff_kind=qp.get("kind", ""))
 
 
 # «Подключить» на витрине тарифов кабинета (09.10.2026). Оплаты в сервисе нет — это заявка,
@@ -377,35 +395,54 @@ PLAN_REQUEST_ERRORS = {
     "tariff": "Выберите тариф.",
     "options": "Проверьте условия на карточке: пробная неделя — только у «Старта», пользователей — от 1 до "
                f"{pricing.MAX_SEATS}, период — месяц или год.",
-    "profile": "Чтобы отправить заявку, заполните во вкладке «Профиль» рабочий email и телефон и дайте "
-               "согласие на обработку данных — по ним с вами свяжутся.",
+    "profile": "Чтобы отправить заявку, заполните во вкладке «Профиль» рабочий email и телефон — по ним с "
+               "вами свяжутся.",
+    "consent": "Отметьте согласие на обработку персональных данных — без него заявку не отправить.",
     "limit": "Слишком много заявок подряд — попробуйте через час.",
 }
+
+
+def _plan_choice(tariff: str, kind: str, addon: str, period: str, seats: str, trial: str):
+    """Выбор на карточке → (поля заявки, строка условий, код ошибки). Один разбор и для панели
+    подтверждения, и для самой заявки. Пользователей — только ASCII-цифры: «²».isdigit() — True, а
+    int("²") роняет обработчик в 500 (ревью PR #184); пустое поле — ошибка, а не молча «1»."""
+    if tariff not in LEAD_TARIFFS:
+        return None, None, "tariff"
+    n = int(seats) if seats.isascii() and seats.isdigit() and len(seats) <= 4 else 0
+    summary, errs = pricing.parse_options(tariff, kind=kind, addon=bool(addon), period=period,
+                                          seats=n, trial=bool(trial))
+    if errs:
+        return None, None, "options"
+    fields = {"tariff": tariff, "kind": kind, "period": period, "seats": str(n)}
+    fields.update({k: "1" for k, on in (("addon", addon), ("trial", trial)) if on})
+    return fields, summary, None
 
 
 @router.post("/api/plan-request", response_class=HTMLResponse)
 def plan_request(request: Request, tariff: str = Form(default=""), kind: str = Form(default="individual"),
                  addon: str = Form(default=""), period: str = Form(default="month"),
-                 seats: str = Form(default="1"), trial_flag: str = Form(default="", alias="trial")):
+                 seats: str = Form(default="1"), trial_flag: str = Form(default="", alias="trial"),
+                 consent: str = Form(default="")):
     # `trial_flag`, а не `trial`: имя занято модулем `app.api.trial` (ревью PR #184)
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
     def back(err: str):
-        return RedirectResponse(f"/profile?tab=plan&err={err}#tariffs", status_code=303)
+        # Ошибка — внутри витрины и на той вкладке, с которой пришла заявка (повторное ревью PR #184:
+        # над карточкой тарифа она уезжала за край экрана, а корпоративная возвращалась на «Индивидуальные»)
+        tab_kind = "&kind=corporate" if kind == "corporate" else ""
+        return RedirectResponse(f"/profile?tab=plan&err={err}{tab_kind}#tariffs", status_code=303)
 
-    if tariff not in LEAD_TARIFFS:
-        return back("tariff")
-    # Только ASCII-цифры: «²».isdigit() — True, а int("²") роняет обработчик в 500 (ревью PR #184)
-    n = int(seats) if seats.isascii() and seats.isdigit() and len(seats) <= 4 else 0
-    options, errs = pricing.parse_options(tariff, kind=kind, addon=bool(addon), period=period,
-                                          seats=n, trial=bool(trial_flag))
-    if errs:
-        return back("options")
-    # Заявка — ПДн со временем согласия (152-ФЗ): без согласия в анкете и без контактов её не создаём,
-    # иначе в «Заявках» лежала бы строка с согласием, которого человек не давал (ревью PR #184).
-    if not (user.consent and user.email and user.phone):
+    _, options, code = _plan_choice(tariff, kind, addon, period, seats, trial_flag)
+    if code:
+        return back(code)
+    # Заявка — ПДн со временем согласия (152-ФЗ). Согласие — галочкой на панели подтверждения, как в
+    # форме лендинга (политика, раздел 9): согласие анкеты дано на другую цель — тестирование сервиса
+    # (повторное ревью PR #184). Контакты обязательны: без них с человеком не связаться.
+    if consent != "1":
+        return back("consent")
+    if not (user.email and user.phone):
         return back("profile")
     if not _plan_request_limit.check(f"user:{user.id}"):
         return back("limit")
