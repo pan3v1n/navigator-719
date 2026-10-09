@@ -202,7 +202,8 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         `okpd2_codes` и по посегментным префиксам, `must` и `should`), а не отвечает заготовкой:
         иначе тест проверял бы подмену. Катализаторы класса «20» — score выше, чем у подкатегории.
         `hidden` — позиции, которые текстом пул не находит; `fail_must` — новые доборы (фильтр
-        `must`) падают, как упал бы Qdrant."""
+        `must`) падают, как упал бы Qdrant; функция от значений фильтра — падают только те, на
+        которых она истинна."""
         calls = []
         corpus = corpus or [(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)] + \
             [(CAT, ["20.14.11.110"], 0.05)]
@@ -221,7 +222,8 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None):
             conds = (getattr(qfilter, "should", None) or []) + (getattr(qfilter, "must", None) or [])
             calls.append([v for cond in conds for v in cond.match.any])
-            if fail_must and getattr(qfilter, "must", None):
+            if fail_must and getattr(qfilter, "must", None) and (
+                    fail_must is True or fail_must(calls[-1])):
                 raise RuntimeError("Qdrant недоступен")
             rows = [r for r in corpus if ok(r[1], qfilter)]
             if qfilter is None and not pool_has_category:
@@ -236,7 +238,7 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         """Ревью PR #177, раунд 4 (HIGH), замер 09.10: «Мониторы» 26.40.34 — потомок 26.40.34.110 в
         выдаче есть, а добор новых предков приносил «Гидрофоны» 26.40.3 с высоким score маленькой
         выдачи (#179), и они становились целевой вместо мониторов. Предков добирают, только когда
-        потомков среди совпавших нет — у широкого кода окно по рангу, как на бою."""
+        потомков среди совпавших нет — у широкого кода новых предков в окне нет, как на бою."""
         corpus = [("Гидрофоны", ["26.40.3"], 0.95), ("Мониторы", ["26.40.34.110"], 0.5),
                   ("Прочее", ["28.13.14.110"], 0.7)]
         hits, calls = self._run("26.40.34", corpus=corpus, hidden=("Гидрофоны",),
@@ -282,12 +284,76 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
 
     def test_exact_position_crowded_out_is_recovered(self):
         """Прежний добор делит лимит 12 между предками и потомками: 14 катализаторов класса «20» с
-        большим score вытесняли из него точную позицию. Запрос потомков (в его формах — сам код)
-        её возвращает, и предков после этого не спрашиваем."""
+        большим score вытесняли из него точную позицию. Запрос ТОЧНЫХ форм кода её возвращает, и
+        предков после этого не спрашиваем."""
         hits, calls = self._run("20.14.11.110")
         self.assertEqual(hits[0].source_anchor, CAT)
         self.assertEqual(hits[0].code_tier, 0)
         self.assertEqual(len(calls), 3)
+
+    def test_odd_key_code_gets_no_descendant_fetch(self):
+        """Ревью PR #177, раунд 4 (второй ревьюер, MED-1): запрет «потомков новых уровней не
+        добираем» проверялся только на «20.14» — у ключа ЧЁТНОЙ длины поразрядные формы потомков
+        совпадают с прежним посегментным добором, и третий добор раунда 3 тест не различал. У
+        21.20.10.110 (ключ нечётной длины, своей позиции нет) медизделие VII/73 «Рассасывающиеся
+        гемостатические материалы» (21.20.10.111) приходит ТОЛЬКО таким добором — и с высоким score
+        маленькой выдачи становилось целевой вместо VIII/1 «Препараты лекарственные» (отчёт §5.1)."""
+        corpus = [("Препараты лекарственные", ["21.20.1"], 0.6),
+                  ("Рассасывающиеся гемостатические материалы", ["21.20.10.111"], 0.9)]
+        hits, _calls = self._run("21.20.10.110", corpus=corpus,
+                                 hidden=("Рассасывающиеся гемостатические материалы",),
+                                 query="Препараты для лечения заболеваний пищеварительного тракта")
+        self.assertNotIn("Рассасывающиеся гемостатические материалы", [h.source_anchor for h in hits])
+        self.assertEqual(hits[0].source_anchor, "Препараты лекарственные")
+
+    def test_descendant_from_prefix_fetch_also_blocks_ancestors(self):
+        """Раунд 4 (LOW-1): у 26.40.34 и 28.13.14 на бою потомков приносит ПРЕЖНИЙ добор, а не пул.
+        Условие «предков без потомков» обязано видеть и их: пул из 40 посторонних, мониторы — только
+        прежним добором, и «Гидрофоны» всё равно не добираются."""
+        corpus = [(f"посторонняя {i}", ["99.99"], 0.99 - i / 1000) for i in range(40)] + [
+            ("Гидрофоны", ["26.40.3"], 0.95), ("Мониторы", ["26.40.34.110"], 0.5)]
+        hits, calls = self._run("26.40.34", corpus=corpus, hidden=("Гидрофоны", "Мониторы"),
+                                query="Мониторы и проекторы")
+        self.assertEqual(hits[0].source_anchor, "Мониторы")
+        self.assertNotIn("Гидрофоны", [h.source_anchor for h in hits])
+        self.assertTrue(all("26.40.3" not in c for c in calls[2:]), calls)
+
+    def test_failed_exact_fetch_skips_ancestors(self):
+        """Раунд 4 (LOW-3): упал только запрос ТОЧНЫХ форм — предков не спрашиваем. Иначе своя
+        позиция кода могла не дойти, а группировка-предок стала бы целевой со строкой «входит в
+        группировку» (`_group_notes` полагается на добор точных форм)."""
+        hits, calls = self._run("20.14.11.112", fail_must=lambda vals: "20.14.11.112" in vals)
+        self.assertEqual(len(calls), 3, calls)            # пул, прежний добор, упавший точный
+        self.assertNotIn(CAT, [h.source_anchor for h in hits])
+
+
+class TestHasExactPosition(unittest.TestCase):
+    """Раунд 4 (MED-3): барьер раунда 2 «у кода из прошлого хода своя позиция» тестами подменялся
+    целиком, сама проверка не тестировалась. Подмена `_client` считает записи по фильтру, как Qdrant."""
+
+    def _check(self, code, rec_codes=("27.12.31",), fail=False):
+        def count(collection_name, exact, count_filter):
+            if fail:
+                raise RuntimeError("Qdrant недоступен")
+            forms = set(count_filter.must[0].match.any)
+            return SimpleNamespace(count=sum(bool(forms & set(c)) for c in [list(rec_codes)]))
+
+        client = SimpleNamespace(count=count)
+        with mock.patch.object(retriever, "_client", return_value=client):
+            return retriever.has_exact_position(code)
+
+    def test_finds_position_by_key_not_string(self):
+        """«27.12.31.000» и «27.12.31» — один вид (раунд 3: по ключу, а не по строке)."""
+        self.assertTrue(self._check("27.12.31.000"))
+        self.assertTrue(self._check("27.12.31", rec_codes=("27.12.31.000",)))
+
+    def test_other_code_has_no_position(self):
+        self.assertFalse(self._check("27.12.32"))
+        self.assertFalse(self._check("27.12.31.190"))      # подкод — не тот же вид
+
+    def test_qdrant_failure_means_true(self):
+        """Сбой → True: вызывающий тогда строку о группировке не печатает."""
+        self.assertTrue(self._check("27.12.32", fail=True))
 
 
 class TestGroupNoteInContext(unittest.TestCase):
@@ -303,6 +369,23 @@ class TestGroupNoteInContext(unittest.TestCase):
     def test_subcode_in_question_gets_note(self):
         ctx = self._ctx("20.14.11.112")
         self.assertIn("20.14.11.112 ВХОДИТ В ГРУППИРОВКУ ОКПД2 20.14.11.110", ctx)
+
+    def test_note_only_for_target(self):
+        """Раунд 4 (MED-2): строка «входит в группировку» — только у ЦЕЛЕВОЙ. У кода со своей
+        позицией группировка-предок в окне — не целевая, и строка «её требования применяются»
+        противоречила бы своей позиции (в корпусе таких кодов 163 из 1040: 20.16.10.111 и
+        «Полиэтилен» 20.16.10.110).
+        ⚠ Свойство держат ДВА механизма: условие `is_target` у `_group_notes` и свёрнутый хвост
+        нецелевых (K6: имя, код, якорь — без строк блока). Снятие одного условия (мутация M7) тест
+        не красит: строка блока нецелевого до контекста не доходит. Условие решает только у «строки
+        той же расколотой ячейки», а её код группировкой кода вопроса не бывает."""
+        own = _hit("Приложение, Раздел XXI, позиция 1", ["20.14.11.112"], 0.3, name="Н-бутан")
+        group = _hit("Приложение, Раздел XXI, позиция 142", ["20.14.11.110"], 0.9,
+                     name="Углеводороды ациклические насыщенные")
+        with mock.patch.object(retriever, "has_exact_position", lambda code: True):
+            ctx = pipeline.format_context([own, group], "вопрос", "20.14.11.112")
+        self.assertIn("позиция 142", ctx)                  # группировка в контексте есть
+        self.assertNotIn("ГРУППИРОВКУ", ctx)
 
     def test_dialog_code_gets_note(self):
         ctx = self._ctx("20.14.11.110", dialog=["20.14.11.112"])
