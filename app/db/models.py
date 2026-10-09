@@ -37,6 +37,14 @@ class User(Base):
     full_name: Mapped[str | None] = mapped_column(Text, nullable=True)            # ФИО
     region: Mapped[str | None] = mapped_column(String(128), nullable=True)
     telegram: Mapped[str | None] = mapped_column(String(128), nullable=True)      # ник в Telegram
+    # Кабинет по макету (09.10.2026): необязательные контакты — пользователь правит сам.
+    position: Mapped[str | None] = mapped_column(String(128), nullable=True)      # должность
+    email: Mapped[str | None] = mapped_column(String(255), nullable=True)         # рабочий email
+    phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    # Организация и ИНН — ТОЛЬКО admin сервиса (`/admin`, решение владельца 09.10.2026): по ним
+    # учитывается подключение организации, и пользователь не должен переписывать их сам.
+    org: Mapped[str | None] = mapped_column(Text, nullable=True)
+    inn: Mapped[str | None] = mapped_column(String(12), nullable=True)
     # Тариф (#160): None — без лимита. Лимиты и период — `app/core/plans.py`; назначает admin.
     plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
     plan_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # дата подключения

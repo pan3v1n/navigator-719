@@ -419,8 +419,9 @@ class TestAdminSetsPlan(unittest.TestCase):
         self.assertIn('<option value="Старт" selected>', panel)
         self.assertIn(f'value="{plans.msk_today().isoformat()}"', panel, "дата подключения в форме")
         with mock.patch.object(self.web, "current_user", return_value=client):
-            page = self.web.profile_page(self._request("/profile")).body.decode("utf-8")
-        self.assertIn("Тариф «Старт»: использовано 37 из 100 запросов", page)
+            # кабинет по макету (09.10.2026): расход — на вкладке «Тариф»
+            page = self.web.profile_page(self._request("/profile"), tab="plan").body.decode("utf-8")
+        self.assertIn("Использовано 37 из 100 запросов", page)
         self.assertNotIn("(http)", page, "сервис с test26 на HTTPS — прежняя пометка была ложной")
 
     def test_unknown_plan_is_flagged_in_admin(self):

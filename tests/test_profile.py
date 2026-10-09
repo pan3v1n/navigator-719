@@ -87,6 +87,316 @@ class TestUpdateProfile(unittest.TestCase):
             self.assertEqual(u.consent_at, first_ts)
             self.assertEqual(u.telegram, "@ivan2")
 
+    def test_contacts_none_keeps_empty_clears(self):
+        """Контакты кабинета: None — не трогать (старые вызовы без них ничего не стирают),
+        пустая строка — очистить (пользователь стёр поле в форме)."""
+        with self.Session() as db:
+            u = q.create_user(db, "kursk.user1", "h", role="user")
+            base = dict(full_name="Иван Иванов", region="Курская область", telegram="@ivan", consent=True)
+            u = q.update_profile(db, u.id, position="Эксперт", email="i@tpp.ru",
+                                 phone="+7 900 000-00-00", **base)
+            self.assertEqual((u.position, u.email, u.phone), ("Эксперт", "i@tpp.ru", "+7 900 000-00-00"))
+            u = q.update_profile(db, u.id, **base)            # вызов без контактов — как до кабинета
+            self.assertEqual((u.position, u.email, u.phone), ("Эксперт", "i@tpp.ru", "+7 900 000-00-00"))
+            u = q.update_profile(db, u.id, position="", email=" ", phone="", **base)
+            self.assertEqual((u.position, u.email, u.phone), (None, None, None))
+
+    def test_profile_update_never_touches_org(self):
+        with self.Session() as db:
+            u = q.create_user(db, "kursk.user2", "h", role="user")
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
+            u = q.update_profile(db, u.id, full_name="Иван Иванов", region="Курская область",
+                                 telegram="@ivan", consent=True, email="i@tpp.ru")
+            self.assertEqual((u.org, u.inn), ("Союз «Курская ТПП»", "4632000000"))
+            u = q.set_user_org(db, u.id, "  ", "")
+            self.assertEqual((u.org, u.inn), (None, None))
+            self.assertIsNone(q.set_user_org(db, 999, "X", ""))
+
+
+# --------------------------------------------------------------------------- #
+# Личный кабинет (макет account, решения владельца 09.10.2026): страница, сохранение, admin.
+# --------------------------------------------------------------------------- #
+from datetime import timedelta  # noqa: E402
+from unittest import mock  # noqa: E402
+
+from fastapi import HTTPException  # noqa: E402
+from sqlalchemy.pool import StaticPool  # noqa: E402
+from starlette.requests import Request  # noqa: E402
+
+from app.api import web  # noqa: E402
+from app.core import plans  # noqa: E402
+from app.db.models import AnswerUsage  # noqa: E402
+
+COMPLETE = dict(full_name="Иван Петров", region="Курская область", telegram="@ivan", consent=True)
+
+
+def _request(path="/profile"):
+    return Request({"type": "http", "method": "GET", "path": path, "headers": [],
+                    "query_string": b"", "session": {}, "app": None})
+
+
+class _CabinetDB(unittest.TestCase):
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
+                                    poolclass=StaticPool)
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        p = mock.patch.object(web, "get_session", self.Session)
+        p.start()
+        self.addCleanup(p.stop)
+
+    def _user(self, role="user", complete=True, plan=None, **profile):
+        with self.Session() as db:
+            u = q.create_user(db, f"kursk.{role}{len(q.list_users(db))}", "h", role=role)
+            if complete:
+                q.update_profile(db, u.id, **{**COMPLETE, **profile})
+            if plan:
+                q.set_user_plan(db, u.id, plan, plans.anchor_from_date(plans.msk_today()))
+            return self._fresh(u.id)
+
+    def _fresh(self, uid):
+        with self.Session() as db:
+            u = q.get_user(db, uid)
+            db.expunge(u)
+            return u
+
+    def _page(self, user, **kw):
+        with mock.patch.object(web, "current_user", return_value=user):
+            return web.profile_page(_request(), **kw).body.decode("utf-8")
+
+    def _submit(self, user, **form):
+        fields = dict(consent="1", full_name=COMPLETE["full_name"], region=COMPLETE["region"],
+                      telegram=COMPLETE["telegram"], position="", email="", phone="")
+        fields.update(form)
+        with mock.patch.object(web, "current_user", return_value=user):
+            return web.profile_submit(_request(), **fields)
+
+
+class TestCabinetPage(_CabinetDB):
+    def test_every_role_gets_the_cabinet(self):
+        """Кабинет — у всех трёх ролей (раньше ссылка была только у `user`)."""
+        for role in ("user", "expert", "admin"):
+            with self.subTest(role=role):
+                html = self._page(self._user(role=role))
+                self.assertIn("Данные пользователя", html)
+                self.assertIn('href="/logout"', html, "кнопка «Выйти» из макета")
+                self.assertIn('href="/profile?tab=plan"', html)
+                self.assertIn("Сохранить изменения", html)
+
+    def test_org_and_inn_are_read_only(self):
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
+        html = self._page(self._fresh(u.id))
+        self.assertIn("Союз «Курская ТПП» · ИНН 4632000000", html, "организация под именем, как в макете")
+        for value in ("Союз «Курская ТПП»", "4632000000"):
+            tag = html[html.rindex("<input", 0, html.index(f'value="{value}"')):]
+            tag = tag[:tag.index(">")]
+            self.assertIn("disabled", tag, f"поле «{value}» редактируемо")
+            self.assertNotIn("name=", tag, f"поле «{value}» уходит с формой")
+        self.assertEqual(html.count("Меняется через администратора сервиса"), 2)
+
+    def test_first_fill_keeps_the_gate_wording(self):
+        """Пока профиль не заполнен, кабинет — это гейт: уйти к сервису некуда."""
+        html = self._page(self._user(complete=False))
+        self.assertIn("Сохранить и продолжить", html)
+        self.assertNotIn("Вернуться к сервису", html)
+
+    def test_plan_tab_shows_usage_and_change_link(self):
+        u = self._user(plan="Старт")
+        with self.Session() as db:
+            ts = plans.anchor_from_date(plans.msk_today()) + timedelta(minutes=1)
+            db.add_all([AnswerUsage(user_id=u.id, ts=ts) for _ in range(37)])
+            db.commit()
+        with mock.patch.object(web.settings, "PUBLIC_DOMAIN", "xn--719--83dani8b8bqyy.xn--p1ai"):
+            html = self._page(u, tab="plan")
+        self.assertIn("Использовано 37 из 100 запросов", html)
+        self.assertIn("Лимит обновится", html)
+        self.assertIn('href="https://xn--719--83dani8b8bqyy.xn--p1ai/#pricing"', html)
+        self.assertNotIn("Данные пользователя", html, "вкладка «Тариф» не рисует форму профиля")
+        for absent in ("Автопродление", "Документы", "Скачать PDF", "Изменить реквизиты"):
+            self.assertNotIn(absent, html, "биллинга нет — заглушек макета быть не должно")
+
+    def test_plan_tab_without_plan(self):
+        # домен задан явно: без него ссылки на лендинг нет вовсе, и тест не зависел бы от тарифа
+        with mock.patch.object(web.settings, "PUBLIC_DOMAIN", "xn--719--83dani8b8bqyy.xn--p1ai"):
+            html = self._page(self._user(role="expert"), tab="plan")
+        self.assertIn("Без тарифа", html)
+        self.assertNotIn("Сменить тариф", html)
+
+    def test_unknown_tab_falls_back_to_profile(self):
+        self.assertIn("Данные пользователя", self._page(self._user(), tab="<script>"))
+
+
+class TestCabinetSave(_CabinetDB):
+    def test_first_fill_goes_to_chat_edit_stays(self):
+        u = self._user(complete=False)
+        r = self._submit(u)
+        self.assertEqual((r.status_code, r.headers["location"]), (302, "/chat"), "гейт: после анкеты — в работу")
+        r = self._submit(self._fresh(u.id), position="Эксперт", email="i@tpp.ru", phone="+7 (900) 000-00-00")
+        self.assertEqual(r.headers["location"], "/profile?saved=1", "правка в кабинете — остаёмся на месте")
+        u = self._fresh(u.id)
+        self.assertEqual((u.position, u.email, u.phone), ("Эксперт", "i@tpp.ru", "+7 (900) 000-00-00"))
+        self.assertIn("Изменения сохранены", self._page(u, saved="1"))
+
+    def test_internal_roles_stay_in_cabinet(self):
+        for role in ("expert", "admin"):
+            with self.subTest(role=role):
+                r = self._submit(self._user(role=role, complete=False))
+                self.assertEqual(r.headers["location"], "/profile?saved=1")
+
+    def test_required_fields_still_gate(self):
+        u = self._user(complete=False)
+        for missing in ("consent", "full_name", "region", "telegram"):
+            with self.subTest(missing=missing):
+                r = self._submit(u, **{missing: ""})
+                self.assertEqual(r.status_code, 400)
+        self.assertFalse(profile_complete(self._fresh(u.id)), "непрошедшая форма ничего не сохранила")
+
+    def test_bad_contacts_rerender_with_input(self):
+        u = self._user()
+        for field, value, msg in (("email", "не-почта", "Проверьте правильность email"),
+                                  ("phone", "12345", "Укажите телефон полностью"),
+                                  ("position", "д" * 129, "Слишком длинное название должности"),
+                                  ("telegram", "@" + "t" * 128, "Слишком длинное ФИО или ник")):
+            with self.subTest(field=field):
+                r = self._submit(u, **{field: value})
+                body = r.body.decode("utf-8")
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(msg, body)
+                self.assertIn(f'value="{value}"', body, "введённое не должно теряться")
+                self.assertIn("Вернуться к сервису", body, "ре-рендер ошибки теряет выход (ревью 08.10)")
+        self.assertIsNone(self._fresh(u.id).email)
+
+    def test_form_cannot_write_org(self):
+        """Организацию и ИНН ведёт admin: поля `org`/`inn` в POST /profile отбрасываются."""
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
+        u = self._fresh(u.id)
+        with mock.patch.object(web, "current_user", return_value=u):
+            r = TestClient(app).post("/profile", follow_redirects=False, data={
+                "consent": "1", **{k: v for k, v in COMPLETE.items() if k != "consent"},
+                "org": "ООО «Чужая»", "inn": "7700000000"})
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual((self._fresh(u.id).org, self._fresh(u.id).inn), ("Союз «Курская ТПП»", "4632000000"))
+
+
+class TestAdminSetsOrg(_CabinetDB):
+    def setUp(self):
+        super().setUp()
+        self.uid = self._user().id
+        self.admin = mock.Mock(id=1)
+
+    def _set(self, org, inn, uid=None):
+        return web.admin_set_org(uid or self.uid, org=org, inn=inn, admin=self.admin)
+
+    def test_assign_and_clear(self):
+        self.assertEqual(self._set(" Союз «Курская ТПП» ", "4632000000").status_code, 303)
+        self.assertEqual((self._fresh(self.uid).org, self._fresh(self.uid).inn), ("Союз «Курская ТПП»", "4632000000"))
+        self._set("ИП Петров", "463200000000")                       # 12 цифр — ИНН ИП
+        self.assertEqual(self._fresh(self.uid).inn, "463200000000")
+        self._set("", "")
+        self.assertEqual((self._fresh(self.uid).org, self._fresh(self.uid).inn), (None, None))
+
+    def test_rejects_bad_input(self):
+        for org, inn in (("ТПП", "12345"), ("ТПП", "46320000001"), ("ТПП", "463200000a"), ("x" * 301, "")):
+            with self.subTest(org=org[:10], inn=inn), self.assertRaises(HTTPException) as cm:
+                self._set(org, inn)
+            self.assertEqual(cm.exception.status_code, 422)
+        self.assertIsNone(self._fresh(self.uid).org)
+
+    def test_missing_user_is_404(self):
+        with self.assertRaises(HTTPException) as cm:
+            self._set("ТПП", "", uid=999)
+        self.assertEqual(cm.exception.status_code, 404)
+
+    def test_route_requires_admin(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        client = TestClient(app)
+        r = client.post(f"/api/admin/users/{self.uid}/org", data={"org": "X"}, follow_redirects=False)
+        self.assertIn(r.status_code, (401, 403), "смена организации доступна без входа")
+        from app.api import auth
+        for role in ("user", "expert"):   # вошёл, но не admin — ровно тот, кто захочет «поправить» себе ИНН
+            with self.subTest(role=role), \
+                 mock.patch.object(auth, "current_user", return_value=self._fresh(self.uid) if role == "user"
+                                   else self._user(role="expert")):
+                r = client.post(f"/api/admin/users/{self.uid}/org", data={"org": "X", "inn": ""},
+                                follow_redirects=False)
+                self.assertEqual(r.status_code, 403)
+        self.assertIsNone(self._fresh(self.uid).org)
+
+    def test_admin_page_has_org_form(self):
+        self._set("Союз «Курская ТПП»", "4632000000")
+        admin = mock.Mock(id=99, role="admin", username="adm")
+        with mock.patch.object(web, "current_user", return_value=admin), \
+             mock.patch.object(web, "system_health", return_value={}):
+            html = web.admin_page(_request("/admin")).body.decode("utf-8")
+        panel = html[html.index('id="tab-plans"'):]
+        self.assertIn(f'action="/api/admin/users/{self.uid}/org"', panel)
+        self.assertIn('value="Союз «Курская ТПП»"', panel)
+        self.assertIn('value="4632000000"', panel)
+
+
+class TestCabinetLinksAndPolicy(unittest.TestCase):
+    def _render(self, name, **kw):
+        return web.templates.get_template(name).render(**web._ctx(_request(), **kw))
+
+    def test_chat_links_cabinet_for_every_role(self):
+        for role in ("user", "expert", "admin"):
+            with self.subTest(role=role):
+                html = self._render("chat.html", user=User(username=f"kursk.{role}", role=role, org="Союз «Курская ТПП»"),
+                                    kontur_719_url="#", input_hint="")
+                self.assertIn('class="user-chip" href="/profile"', html)
+                self.assertIn('class="avatar head-avatar" href="/profile"', html)
+                self.assertIn('<span class="urole">Союз «Курская ТПП»</span>', html, "под именем — организация")
+
+    def test_policy_lists_every_cabinet_field(self):
+        """Две таблицы про одно: поля кабинета и категории в политике. Новое поле без строки
+        в политике — обработка ПДн без названного состава."""
+        policy = self._render("privacy.html", page_title="", active="privacy", updated="", user=None)
+
+        def row(title):  # строка таблицы категорий: «email» и «телефон» есть и у заявок лендинга
+            start = policy.index(f"<tr><td>{title}</td>")
+            return policy[start:policy.index("</tr>", start)]
+
+        participant = row("Данные участника")
+        consent = self._render("profile.html", user=User(username="u", role="user"),
+                               form={"region": ""}, regions=[], tab="profile", can_leave=True)
+        consent = consent[consent.index('name="consent"'):]
+        for term in ("ФИО", "регион", "Telegram", "должность", "email", "телефон"):
+            with self.subTest(term=term):
+                self.assertIn(term, participant, "категория «Данные участника» не называет поле кабинета")
+                self.assertIn(term, consent, "текст согласия не называет поле кабинета")
+        self.assertIn("организация и её ИНН", row("Учётные данные"))
+
+
+class TestCabinetColumnsMigrate(unittest.TestCase):
+    def test_old_users_table_gets_cabinet_columns(self):
+        import tempfile
+
+        from app.db import engine as engine_mod
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old = create_engine(f"sqlite:///{tmp}/old.db")
+            with old.begin() as c:
+                c.exec_driver_sql("CREATE TABLE users (id INTEGER PRIMARY KEY, username VARCHAR(64))")
+                c.exec_driver_sql("CREATE TABLE messages (id INTEGER PRIMARY KEY)")
+                c.exec_driver_sql("CREATE TABLE feedback (id INTEGER PRIMARY KEY)")
+            with mock.patch.object(engine_mod, "engine", old):
+                engine_mod.init_db()                      # как на старте боевого процесса
+            with old.connect() as c:
+                cols = {r[1] for r in c.exec_driver_sql("PRAGMA table_info(users)")}
+            old.dispose()
+        self.assertTrue({"position", "email", "phone", "org", "inn"} <= cols, cols)
+
 
 if __name__ == "__main__":
     unittest.main()

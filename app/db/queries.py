@@ -33,19 +33,39 @@ def create_user(db: Session, username: str, password_hash: str, role: str = "exp
 
 
 def update_profile(
-    db: Session, user_id: int, *, full_name: str, region: str, telegram: str, consent: bool
+    db: Session, user_id: int, *, full_name: str, region: str, telegram: str, consent: bool,
+    position: str | None = None, email: str | None = None, phone: str | None = None,
 ) -> User | None:
     """Сохраняет профиль пользователя (ФИО/регион/Telegram) и согласие на ПДн. Момент согласия
-    (consent_at) фиксируем ОДИН раз при первой отметке — след 152-ФЗ. Возвращает User или None."""
+    (consent_at) фиксируем ОДИН раз при первой отметке — след 152-ФЗ. Возвращает User или None.
+
+    Контакты кабинета (должность, email, телефон) необязательны: None — поле не трогаем, пустая
+    строка — очищаем. Организацию и ИНН эта функция не пишет вовсе — их ведёт admin
+    (`set_user_org`), и форма кабинета не должна иметь пути их переписать."""
     u = db.get(User, user_id)
     if not u:
         return None
     u.full_name = (full_name or "").strip()
     u.region = (region or "").strip()
     u.telegram = (telegram or "").strip()
+    for field, value in (("position", position), ("email", email), ("phone", phone)):
+        if value is not None:
+            setattr(u, field, value.strip() or None)
     if consent and not u.consent:
         u.consent = True
         u.consent_at = _utcnow()
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def set_user_org(db: Session, user_id: int, org: str, inn: str) -> User | None:
+    """Организация и ИНН пользователя — пишет только admin. Пустая строка — очистить."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.org = (org or "").strip() or None
+    u.inn = (inn or "").strip() or None
     db.commit()
     db.refresh(u)
     return u

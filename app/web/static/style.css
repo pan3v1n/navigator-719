@@ -133,6 +133,22 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 .plan-note { font: 400 12px/1.35 var(--font); color: var(--ink-60); }
 .tag { display: inline-flex; align-items: center; height: 36px; padding: 0 10px; border-radius: 4px; background: var(--gray);
   font: 500 14px/1.2 var(--font); color: var(--ink); white-space: nowrap; }
+/* кабинет: шапка с «Выйти», переключатель вкладок, строка сохранения, карточка тарифа (макет account) */
+.acct-head { display: flex; align-items: center; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.seg { display: flex; gap: 4px; background: var(--gray); border-radius: 8px; padding: 4px; flex-wrap: wrap; align-self: flex-start; }
+.seg-item { padding: 14px 22px; border-radius: 6px; color: var(--ink-60); font: 600 16px/1.1 var(--font); }
+.seg-item:hover { color: var(--ink); }
+.seg-item.on { background: var(--grad-btn); color: #fff; }
+.save-row { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; }
+.saved-note { font: 500 14px/1.3 var(--font); color: var(--blue); }
+.plan-title { display: flex; flex-direction: column; gap: 6px; }
+.plan-sub { font: 400 16px/1.4 var(--font); color: var(--ink-80); }
+.plan-usage { display: flex; flex-direction: column; gap: 10px; }
+.plan-feature { background: var(--gray); border-radius: 12px; padding: 16px; display: flex; gap: 12px; align-items: flex-start; }
+.plan-feature > span:last-child { display: flex; flex-direction: column; gap: 4px; font: 400 14px/1.3 var(--font); color: var(--ink-60); }
+.plan-feature b { font: 500 16px/1.3 var(--font); color: var(--ink); }
+.plan-check { flex: none; width: 16px; height: 16px; margin-top: 3px; border-radius: 4px; background: var(--blue); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; }
 
 /* ---------- каркас приложения ---------- */
 .app { display: flex; height: 100vh; min-height: 560px; overflow: hidden; }
@@ -745,6 +761,10 @@ a.head-avatar:hover { opacity: .9; }
   .who .avatar { width: 56px; height: 56px; font-size: 20px; }
   .who h1 { font-size: 28px; }
   .panel { padding: 24px 16px; }
+  .seg { align-self: stretch; }
+  .seg-item { flex: 1; text-align: center; padding: 12px 14px; }
+  .plan-card { padding: 24px 16px; }
+  .plan-name { font-size: 30px; }
 }
 @media (max-width: 420px) {
   .edition-tag { display: none; }

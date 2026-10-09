@@ -31,6 +31,10 @@ from app.api.auth import (
 )
 from app.api import quota
 from app.api.admin_stats import build_admin_view, system_health
+from app.api.leads import LIMITS as LEAD_LIMITS
+from app.api.leads import _EMAIL_RE as EMAIL_RE
+from app.api.leads import _INN_RE as INN_RE
+from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
 from app.core import plans
 from app.core.config import settings
@@ -129,7 +133,7 @@ def login_page(request: Request):
 # а согласие даётся именно на её условиях. Дата редакции задаётся здесь и показывается на
 # странице: молча меняющийся правовой документ хуже отсутствующего.
 # --------------------------------------------------------------------------- #
-DOCS_UPDATED = "13.08.2026"
+DOCS_UPDATED = "09.10.2026"  # кабинет: должность, email, телефон, организация и ИНН в политике
 
 
 def _doc(request: Request, template: str, page_title: str, active: str) -> HTMLResponse:
@@ -215,29 +219,65 @@ def chat_page(request: Request):
                           input_hint=followup.START_HINT, quota=qv))
 
 
-@router.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request):
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    prefill = user.region or region_from_username(user.username)
+# --------------------------------------------------------------------------- #
+# Личный кабинет (макет «Navigator 719 Service», экран account; решения владельца 09.10.2026)
+#
+# Две вкладки: «Профиль» и «Тариф». «Оплата» и «Документы» макета не показываются, пока нет
+# биллинга — иначе на странице были бы выдуманные счета и договоры. Вкладка — параметр `tab`
+# серверного рендера, а не скрипт: страница работает и без JS, и ссылку на тариф можно дать.
+# --------------------------------------------------------------------------- #
+PROFILE_TABS = ("profile", "plan")
+# Длины и правила контактов — те же, что у формы заявки лендинга (`app/api/leads.py`): одно
+# определение на сервис, иначе email, принятый в заявке, кабинет отверг бы (и наоборот).
+CONTACT_LIMITS = {"position": 128, "email": LEAD_LIMITS["email"], "phone": LEAD_LIMITS["phone"]}
+PROFILE_LIMITS = {"full_name": 200, "telegram": 128}   # telegram = колонке `User.telegram`
+ORG_LIMIT = LEAD_LIMITS["org"]
+
+
+def _profile_form(user: User, **over) -> dict:
+    """Значения полей формы: из учётки (GET) или из присланного (ре-рендер ошибки POST)."""
+    form = {"full_name": user.full_name or "", "telegram": user.telegram or "",
+            "region": user.region or region_from_username(user.username),
+            "position": user.position or "", "email": user.email or "", "phone": user.phone or "",
+            "consent": bool(user.consent)}
+    form.update(over)
+    return form
+
+
+def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
+                      saved: bool = False, error: str | None = None, status_code: int = 200):
+    """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
+    название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
+    же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
+    with get_session() as db:
+        qv = quota.quota_view(db, user)
     return templates.TemplateResponse(
         "profile.html",
-        _ctx(request, user=user, error=None, regions=REGIONS, prefill_region=prefill,
-             full_name=user.full_name or "", telegram=user.telegram or "",
-             consent=bool(user.consent), **_profile_extras(user)),
+        _ctx(request, user=user, form=form, regions=REGIONS, error=error, saved=saved,
+             tab=tab if tab in PROFILE_TABS else "profile", quota=qv,
+             can_leave=not needs_profile(user)),
+        status_code=status_code,
     )
 
 
-def _profile_extras(user: User) -> dict:
-    """Карточка тарифа и выход из профиля — для GET и для ре-рендера ошибки POST (ревью 08.10.2026:
-    без них страница с ошибкой теряла «Вернуться к сервису» и тариф). Расход считается ОДИН раз.
-    can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда же (`needs_profile`)."""
-    with get_session() as db:
-        qv = quota.quota_view(db, user)
-    plan_line = (f"Тариф «{qv['plan']}»: использовано {qv['used']} из {qv['limit']} запросов, "
-                 f"новый период начнётся {qv['renews']}.") if qv else ""
-    return {"quota": qv, "plan_line": plan_line, "can_leave": not needs_profile(user)}
+@router.get("/profile", response_class=HTMLResponse)
+def profile_page(request: Request, tab: str = "profile", saved: str = ""):
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved))
+
+
+def _contact_errors(position: str, email: str, phone: str) -> list[str]:
+    """Необязательные контакты: пустое — можно, заполненное — проверяем как в заявке лендинга."""
+    errs = []
+    if len(position) > CONTACT_LIMITS["position"]:
+        errs.append("Слишком длинное название должности.")
+    if email and (not EMAIL_RE.match(email) or len(email) > CONTACT_LIMITS["email"]):
+        errs.append("Проверьте правильность email.")
+    if phone and (len(digits(phone)) != 11 or len(phone) > CONTACT_LIMITS["phone"]):
+        errs.append("Укажите телефон полностью — 11 цифр, например +7 900 000-00-00.")
+    return errs
 
 
 @router.post("/profile", response_class=HTMLResponse)
@@ -247,24 +287,38 @@ def profile_submit(
     full_name: str = Form(default=""),
     region: str = Form(default=""),
     telegram: str = Form(default=""),
+    position: str = Form(default=""),
+    email: str = Form(default=""),
+    phone: str = Form(default=""),
 ):
+    """Сохранение профиля. Организацию и ИНН форма не принимает вовсе: их ведёт admin
+    (`admin_set_org`), присланные в форме поля `org`/`inn` отбрасываются ещё на разборе."""
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     fn, rg, tg = full_name.strip(), region.strip(), telegram.strip()
-    # Все поля обязательны (решение заказчика: жёсткий гейт). Незаполненное → дружелюбный ре-рендер.
+    pos, em, ph = position.strip(), email.strip(), phone.strip()
+    form = _profile_form(user, full_name=fn, region=rg or region_from_username(user.username),
+                         telegram=tg, position=pos, email=em, phone=ph, consent=bool(consent))
+    # ФИО, регион, Telegram и согласие обязательны (решение заказчика: жёсткий гейт), контакты —
+    # нет. Ошибка → ре-рендер с введённым, а не потеря формы.
+    errs = []
     if not (consent and fn and rg and tg):
-        return templates.TemplateResponse(
-            "profile.html",
-            _ctx(request, user=user,
-                 error="Заполните ФИО, регион и Telegram и подтвердите согласие на обработку персональных данных.",
-                 regions=REGIONS, prefill_region=rg or region_from_username(user.username),
-                 full_name=fn, telegram=tg, consent=bool(consent), **_profile_extras(user)),
-            status_code=400,
-        )
+        errs.append("Заполните ФИО, регион и Telegram и подтвердите согласие на обработку "
+                    "персональных данных.")
+    # Длины — по колонкам: SQLite их не держит, PostgreSQL (цель прода) ответил бы 500.
+    if len(fn) > PROFILE_LIMITS["full_name"] or len(tg) > PROFILE_LIMITS["telegram"]:
+        errs.append("Слишком длинное ФИО или ник в Telegram.")
+    errs += _contact_errors(pos, em, ph)
+    if errs:
+        return _profile_response(request, user, form, error=" ".join(errs), status_code=400)
+    first_fill = needs_profile(user)
     with get_session() as db:
-        q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True)
-    return RedirectResponse("/chat", status_code=302)
+        q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True,
+                         position=pos, email=em, phone=ph)
+    # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
+    # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
+    return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)
 
 
 @router.get("/admin", response_class=HTMLResponse)
@@ -307,6 +361,7 @@ def _plan_rows(db) -> list[dict]:
             "id": u.id, "username": u.username, "role": u.role,
             "who": " · ".join(x for x in (u.full_name, u.region) if x),
             "plan": u.plan or "",
+            "org": u.org or "", "inn": u.inn or "",
             # название не из PLAN_LIMITS молча снимает лимит (ревью PR #161, LOW-3) — показываем
             "unknown": bool(u.plan) and u.plan not in PLAN_LIMITS,
             "started": plans.msk_date(u.plan_started_at).isoformat() if u.plan_started_at else "",
@@ -338,6 +393,23 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
             raise HTTPException(status_code=404, detail="Пользователь не найден")
     logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
                 f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else ""))
+    return RedirectResponse("/admin", status_code=303)
+
+
+@router.post("/api/admin/users/{user_id}/org")
+def admin_set_org(user_id: int, org: str = Form(default=""), inn: str = Form(default=""),
+                  admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Организация и ИНН пользователя (решение владельца 09.10.2026: заполняет только admin
+    сервиса; в кабинете пользователь их видит, но не правит). Пустые — очистить."""
+    org, inn = org.strip(), inn.strip()
+    if len(org) > ORG_LIMIT:
+        raise HTTPException(status_code=422, detail="Слишком длинное название организации")
+    if inn and not INN_RE.match(inn):
+        raise HTTPException(status_code=422, detail="ИНН должен содержать 10 или 12 цифр")
+    with get_session() as db:
+        if q.set_user_org(db, user_id, org, inn) is None:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+    logger.info(f"организация: admin_id={admin.id} изменил user_id={user_id}")
     return RedirectResponse("/admin", status_code=303)
 
 

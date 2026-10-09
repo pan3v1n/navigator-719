@@ -243,7 +243,9 @@ class TestConversationGivesAnswerIds(_DB):
 
 class TestProfileErrorKeepsContext(_DB):
     def test_error_rerender_keeps_exit_and_plan(self):
-        """Ревью: ре-рендер ошибки POST /profile терял «Вернуться к сервису» и карточку тарифа."""
+        """Ревью: ре-рендер ошибки POST /profile терял «Вернуться к сервису» и карточку тарифа.
+        С кабинетом по макету (09.10.2026) тариф — на своей вкладке: ре-рендер обязан сохранить
+        выход и переключатель вкладок."""
         from app.api import web
         u = self._user("p1", plan="Старт")
         with self.Session() as db:
@@ -253,11 +255,12 @@ class TestProfileErrorKeepsContext(_DB):
             db.expunge(u)
         with mock.patch.object(web, "get_session", self.Session), \
              mock.patch.object(web, "current_user", lambda request: u):
-            resp = web.profile_submit(_Req(), consent="", full_name="", region="", telegram="")
+            resp = web.profile_submit(_Req(), consent="", full_name="", region="", telegram="",
+                                      position="", email="", phone="")
         body = resp.body.decode("utf-8")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Вернуться к сервису", body)
-        self.assertIn("Использовано 0 из 100 запросов", body)
+        self.assertIn('href="/profile?tab=plan"', body)
 
 
 class _Req:  # Jinja-шаблону от запроса нужен только объект в контексте
@@ -294,13 +297,15 @@ class TestTemplates(unittest.TestCase):
 
     def test_profile_keeps_explicit_consent_and_shows_plan(self):
         user = {"username": "u", "full_name": "Иван Петров", "region": "Курская область", "role": "user"}
+        form = {"full_name": "Иван Петров", "region": "Курская область", "consent": False}
         qv = {"plan": "Старт", "limit": 100, "used": 25, "remaining": 75, "renews": "08.11.2026"}
-        html = self._render("profile.html", user=user, error=None, regions=["Курская область"],
-                            prefill_region="Курская область", quota=qv, plan_line="", can_leave=True)
+        kw = dict(user=user, form=form, error=None, regions=["Курская область"], quota=qv, can_leave=True)
+        html = self._render("profile.html", tab="profile", **kw)
         self.assertIn('name="consent"', html, "явное согласие на ПДн пропало")
         self.assertIn("required", html.split('name="consent"')[1][:80])
-        self.assertIn("Использовано 25 из 100 запросов", html)
         self.assertIn("Вернуться к сервису", html)
+        # кабинет по макету (09.10.2026): расход — на вкладке «Тариф»
+        self.assertIn("Использовано 25 из 100 запросов", self._render("profile.html", tab="plan", **kw))
 
     def test_login_demo_answer_matches_the_cited_point(self):
         """Публичная страница: пример ответа со ссылкой «п. 7 Правил» обязан совпадать с п. 7.

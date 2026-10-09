@@ -46,6 +46,11 @@ def _ensure_columns() -> None:
             ("telegram", "VARCHAR(128)"),
             ("plan", "VARCHAR(32)"),          # тариф (#160); у старых строк NULL — без лимита
             ("plan_started_at", "DATETIME"),
+            ("position", "VARCHAR(128)"),     # кабинет (09.10.2026): контакты пользователя
+            ("email", "VARCHAR(255)"),
+            ("phone", "VARCHAR(32)"),
+            ("org", "TEXT"),                  # организация и ИНН — заполняет admin
+            ("inn", "VARCHAR(12)"),
         ],
     }
     with engine.begin() as conn:

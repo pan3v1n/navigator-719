@@ -13,8 +13,9 @@
 {% set who = (user.full_name or user.username or "?") %}
 {% set parts = who.split() %}
 {% set initials = (parts[0][0] ~ (parts[1][0] if parts|length > 1 else ""))|upper %}
-{% set role_line = user.region if (user.role == 'user' and user.region) else
-   ({'admin': 'Администратор', 'expert': 'Эксперт ТПП'}.get(user.role) or 'Участник') %}
+{# Под именем — организация, как в макете; пока admin её не указал — регион или роль #}
+{% set role_line = user.org or (user.region if (user.role == 'user' and user.region) else
+   ({'admin': 'Администратор', 'expert': 'Эксперт ТПП'}.get(user.role) or 'Участник')) %}
 <div class="app" id="app">
   <aside class="sidebar">
     <div class="side-top">
@@ -101,17 +102,14 @@
     </nav>
 
     <div class="side-bottom">
-      {% if user.role == 'user' %}
-      <a class="user-chip" href="/profile" title="Профиль">
-      {% else %}
-      <div class="user-chip">
-      {% endif %}
+      {# Личный кабинет — у всех ролей (09.10.2026): контакты правит и эксперт, и admin #}
+      <a class="user-chip" href="/profile" title="Личный кабинет">
         <span class="avatar">{{ initials }}</span>
         <span class="uinfo nc-text">
           <span class="uname">{{ who }}</span>
           <span class="urole">{{ role_line }}</span>
         </span>
-      {% if user.role == 'user' %}</a>{% else %}</div>{% endif %}
+      </a>
       <a class="logout nc-text" href="/logout" title="Выйти">Выйти</a>
     </div>
   </aside>
@@ -126,11 +124,7 @@
       <div class="head-right">
         {# E1: редакция корпуса видна всегда — тегом в шапке, как в макете #}
         <span class="edition-tag" title="Редакция ПП №719, по которой собрана база ответов">ПП № 719 · {{ corpus_edition }}</span>
-        {% if user.role == 'user' %}
-        <a class="avatar head-avatar" href="/profile" title="Профиль" aria-label="Профиль">{{ initials }}</a>
-        {% else %}
-        <span class="avatar head-avatar" title="{{ who }}">{{ initials }}</span>
-        {% endif %}
+        <a class="avatar head-avatar" href="/profile" title="Личный кабинет" aria-label="Личный кабинет">{{ initials }}</a>
       </div>
     </header>
 
