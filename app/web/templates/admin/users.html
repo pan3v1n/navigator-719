@@ -30,7 +30,8 @@
   </select>
   <select name="status" aria-label="Состояние">
     {% for key, label in (("", "Любое состояние"), ("active", "Активные"), ("blocked", "Заблокированные"),
-                         ("no_profile", "Без анкеты"), ("expired", "Тариф истёк")) %}
+                         ("no_profile", "Без анкеты"), ("expired", "Тариф истёк"),
+                         ("org_unverified", "Организация не подтверждена")) %}
     <option value="{{ key }}"{% if key == filters.status %} selected{% endif %}>{{ label }}</option>
     {% endfor %}
   </select>
@@ -52,7 +53,8 @@
         <td><a class="adm-strong" href="/admin/users/{{ r.id }}">{{ r.username }}</a>
           <div class="muted">{{ r.full_name or '—' }} · {{ r.role_label }}</div>
           {% if r.blocked %}<span class="badge bad">заблокирована</span>{% endif %}
-          {% if r.no_profile %}<span class="badge warn">без анкеты</span>{% endif %}</td>
+          {% if r.no_profile %}<span class="badge warn">без анкеты</span>{% endif %}
+          {% if r.org_unverified %}<span class="badge warn">организация не подтверждена</span>{% endif %}</td>
         <td>{{ r.org or '—' }}{% if r.inn %}<div class="muted">ИНН {{ r.inn }}</div>{% endif %}
           {% if r.region %}<div class="muted">{{ r.region }}</div>{% endif %}</td>
         <td>{% if r.plan %}{{ r.plan }}

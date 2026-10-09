@@ -183,7 +183,7 @@ class _CabinetDB(unittest.TestCase):
     def _submit(self, user, **form):
         fields = dict(consent="1", full_name=COMPLETE["full_name"], region=COMPLETE["region"],
                       telegram=COMPLETE["telegram"], position="", email=COMPLETE["email"],
-                      phone=COMPLETE["phone"])
+                      phone=COMPLETE["phone"], org=user.org or "", inn=user.inn or "")   # как предзаполняет форма
         fields.update(form)
         with mock.patch.object(web, "current_user", return_value=user):
             return web.profile_submit(_request(), **fields)
@@ -198,20 +198,45 @@ class TestCabinetPage(_CabinetDB):
                 self.assertIn("Данные пользователя", html)
                 self.assertIn('href="/logout"', html, "кнопка «Выйти» из макета")
                 self.assertIn('href="/profile?tab=plan"', html)
-                self.assertIn("Сохранить изменения", html)
+                self.assertIn('href="/profile?edit=1">Редактировать', html)
 
-    def test_org_and_inn_are_read_only(self):
+    def test_filled_profile_is_locked_until_edit(self):
+        """Просьба владельца 09.10.2026: форма — просмотр, правка по «Редактировать»; обязательные поля и
+        согласие — со звёздочкой, согласие обязательно."""
+        u = self._user()
+        locked = self._page(u)
+        self.assertIn('<fieldset class="fields-lock" disabled>', locked)
+        self.assertNotIn('type="submit"', locked[locked.index('<form class="panel"'):], "в просмотре форму можно отправить")
+        edit = self._page(u, edit="1")
+        self.assertIn('<fieldset class="fields-lock">', edit)
+        self.assertIn("Сохранить изменения", edit)
+        self.assertIn('<a class="ds-link" href="/profile">Отменить</a>', edit)
+        for label in ("ФИО", "Рабочий email", "Телефон", "Регион"):
+            self.assertRegex(edit, label + r' <b class="req" aria-hidden="true">\*</b></span>')
+        self.assertNotRegex(edit, r'Должность <b class="req"', "необязательное поле со звёздочкой")
+        consent = edit[edit.index('name="consent"'):]
+        self.assertIn('value="1"  required>', consent[:80].replace("checked", ""))
+        self.assertIn('<b class="req" aria-hidden="true">*</b> Я даю согласие', consent)
+
+    def test_form_opens_by_itself_when_there_is_something_to_fix(self):
+        self.assertIn('<fieldset class="fields-lock">', self._page(self._user(complete=False)), "гейт до чата закрыт")
+        r = self._submit(self._user(), consent="")
+        self.assertIn('<fieldset class="fields-lock">', r.body.decode("utf-8"), "ошибка сохранения в закрытой форме")
+
+    def test_org_and_inn_editable_with_verification_status(self):
+        """Вечер 09.10.2026: организацию и ИНН вписывает пользователь, статус — «подтверждено / не
+        подтверждено», подтверждает admin. Утром их вёл только admin — решение пересмотрено владельцем."""
         u = self._user()
         with self.Session() as db:
-            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
-        html = self._page(self._fresh(u.id))
-        self.assertIn("Союз «Курская ТПП» · ИНН 4632000000", html, "организация под именем, как в макете")
-        for value in ("Союз «Курская ТПП»", "4632000000"):
-            tag = html[html.rindex("<input", 0, html.index(f'value="{value}"')):]
-            tag = tag[:tag.index(">")]
-            self.assertIn("disabled", tag, f"поле «{value}» редактируемо")
-            self.assertNotIn("name=", tag, f"поле «{value}» уходит с формой")
-        self.assertEqual(html.count("Меняется через администратора сервиса"), 2)
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "7707083893")
+        html = self._page(self._fresh(u.id), edit="1")
+        self.assertIn('name="org" value="Союз «Курская ТПП»"', html)
+        self.assertIn('name="inn" value="7707083893"', html)
+        self.assertIn("не подтверждены — их проверит администратор", html)
+        self.assertNotIn("Меняется через администратора сервиса", html)
+        with self.Session() as db:
+            q.verify_org(db, u.id, 99)
+        self.assertIn("подтверждены администратором", self._page(self._fresh(u.id)))
 
     def test_first_fill_keeps_the_gate_wording(self):
         """Пока профиль не заполнен, кабинет — это гейт: уйти к сервису некуда."""
@@ -330,25 +355,101 @@ class TestCabinetSave(_CabinetDB):
         hint = hint[:hint.index('"')]
         self.assertLessEqual(len(hint), 20, hint)
 
-    def test_form_cannot_write_org(self):
-        """Организацию и ИНН ведёт admin: поля `org`/`inn` в POST /profile отбрасываются."""
+    def test_user_writes_org_and_change_drops_verification(self):
+        """Пользователь вписывает организацию и ИНН сам; правка снимает подтверждение admin'а (иначе
+        под подтверждённой меткой оказалась бы чужая организация). ИНН — по контрольным цифрам ФНС."""
+        u = self._user()
+        r = self._submit(u, org="ООО «Станкозавод»", inn="7707083893")
+        self.assertEqual(r.status_code, 302)
+        u = self._fresh(u.id)
+        self.assertEqual((u.org, u.inn, u.org_verified_at), ("ООО «Станкозавод»", "7707083893", None))
+        with self.Session() as db:
+            q.verify_org(db, u.id, 99)
+        u = self._fresh(u.id)
+        self.assertIsNotNone(u.org_verified_at)
+        self._submit(u, org="ООО «Станкозавод»", inn="7707083893")          # без изменений — статус цел
+        self.assertIsNotNone(self._fresh(u.id).org_verified_at)
+        self._submit(self._fresh(u.id), org="ООО «Другая»", inn="7707083893")
+        self.assertIsNone(self._fresh(u.id).org_verified_at, "правка организации не сняла подтверждение")
+        for bad in ("7707083894", "123", "77070838931"):
+            with self.subTest(inn=bad):
+                r = self._submit(self._fresh(u.id), org="ООО «Другая»", inn=bad)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("Проверьте ИНН", r.body.decode("utf-8"))
+        self.assertEqual(self._fresh(u.id).inn, "7707083893")
+        with self.Session() as db:
+            q.update_profile(db, u.id, full_name=u.full_name, region=u.region, telegram="", consent=True,
+                             org="ООО «Станкозавод»", inn="7707083893")
+            q.verify_org(db, u.id, 99)
+        body = self._submit(self._fresh(u.id), org="ООО «Чужая»", inn="1").body.decode("utf-8")
+        self.assertIn("не подтверждены", body, "ошибочная правка показана под подтверждённой меткой")
+
+    def test_inn_from_lead_or_admin_does_not_lock_the_form(self):
+        """Ревью PR #186: ИНН из заявки или от admin'а проверялся только на длину; контрольные цифры
+        формы заперли бы человека на анкете (гейт до чата) из-за ИНН, который вписывал не он."""
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")      # контрольные цифры не сходятся
+        r = self._submit(self._fresh(u.id), phone="+7 900 111-22-33")
+        self.assertEqual(r.status_code, 302, "анкета не сохраняется из-за чужого ИНН")
+        self.assertEqual(self._fresh(u.id).inn, "4632000000")
+        r = self._submit(self._fresh(u.id), inn="4632000001")               # а свой новый — проверяется
+        self.assertEqual(r.status_code, 400)
+
+    def test_missing_fields_and_spacing_keep_the_verification(self):
+        """Ревью PR #186: POST без полей организации (страница до выкатки) стирал её и подтверждение;
+        двойной пробел в названии от admin'а считался правкой и снимал подтверждение."""
+        from app.db.models import User as UserRow
+
+        u = self._user()
+        with self.Session() as db:
+            row = db.get(UserRow, u.id)
+            row.org, row.inn = "ООО  «Ромашка»", "7707083893"               # старая запись с двойным пробелом
+            db.commit()
+            q.verify_org(db, u.id, 99)
+        self._submit(self._fresh(u.id), org=None, inn=None)                 # полей нет в POST
+        fresh = self._fresh(u.id)
+        self.assertEqual((fresh.org, fresh.inn), ("ООО  «Ромашка»", "7707083893"))
+        self.assertIsNotNone(fresh.org_verified_at, "POST без полей снял подтверждение")
+        self._submit(fresh, org="ООО «Ромашка»", inn="7707083893")          # форма отдала одинарный пробел
+        self.assertIsNotNone(self._fresh(u.id).org_verified_at, "пробел снял подтверждение")
+        self.assertIn("подтверждены администратором", self._page(self._fresh(u.id), edit="1"))
+
+    def test_real_form_clears_org_with_empty_fields(self):
+        """Через разбор формы FastAPI: пустые поля — «очистить», отсутствующие — «не трогать» (повторное
+        ревью PR #186: прямой вызов обработчика разбор формы минует)."""
         from fastapi.testclient import TestClient
 
         from main import app
 
         u = self._user()
         with self.Session() as db:
-            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
-        u = self._fresh(u.id)
-        with mock.patch.object(web, "current_user", return_value=u):
-            r = TestClient(app).post("/profile", follow_redirects=False, data={
-                "consent": "1", **{k: v for k, v in COMPLETE.items() if k != "consent"},
-                "org": "ООО «Чужая»", "inn": "7700000000"})
+            q.set_user_org(db, u.id, "ООО «Ромашка»", "7707083893", verified_by=99)
+        base = {"consent": "1", **{k: v for k, v in COMPLETE.items() if k != "consent"}}
+        with mock.patch.object(web, "current_user", return_value=self._fresh(u.id)):
+            TestClient(app).post("/profile", data=base, follow_redirects=False)
+        self.assertEqual(self._fresh(u.id).org, "ООО «Ромашка»", "POST без полей стёр организацию")
+        with mock.patch.object(web, "current_user", return_value=self._fresh(u.id)):
+            r = TestClient(app).post("/profile", data={**base, "org": "", "inn": ""}, follow_redirects=False)
         self.assertEqual(r.status_code, 302)
-        self.assertEqual((self._fresh(u.id).org, self._fresh(u.id).inn), ("Союз «Курская ТПП»", "4632000000"))
+        fresh = self._fresh(u.id)
+        self.assertEqual((fresh.org, fresh.inn, fresh.org_verified_at), (None, None, None))
 
+    def test_org_without_inn_asks_for_inn(self):
+        u = self._user()
+        self._submit(u, org="ООО «Ромашка»", inn="")
+        html = self._page(self._fresh(u.id))
+        self.assertIn("Укажите и организацию, и ИНН", html)
+        self.assertFalse(q.org_unverified(self._fresh(u.id)), "без ИНН — подтверждать нечего, в фильтре не висит")
 
-class TestAdminSetsOrg(_CabinetDB):
+    def test_inn_checksum(self):
+        from app.core.inn import inn_valid
+
+        for good in ("7707083893", "500100732259", "4632000002"):
+            self.assertTrue(inn_valid(good), good)
+        for bad in ("7707083894", "500100732258", "4632000000", "770708389", "77070838９3", ""):
+            self.assertFalse(inn_valid(bad), bad)
+
     def setUp(self):
         super().setUp()
         self.uid = self._user().id
@@ -519,11 +620,13 @@ class TestCabinetLinksAndPolicy(unittest.TestCase):
         consent = self._render("profile.html", user=User(username="u", role="user"),
                                form={"region": ""}, regions=[], tab="profile", can_leave=True)
         consent = consent[consent.index('name="consent"'):]
-        for term in ("ФИО", "регион", "Telegram", "должность", "email", "телефон"):
+        for term in ("ФИО", "регион", "Telegram", "должность", "email", "телефон", "организация и её ИНН"):
             with self.subTest(term=term):
                 self.assertIn(term, participant, "категория «Данные участника» не называет поле кабинета")
                 self.assertIn(term, consent, "текст согласия не называет поле кабинета")
-        self.assertIn("организация и её ИНН", row("Учётные данные"))
+        # вечер 09.10.2026: организацию и ИНН вписывает пользователь — это данные участника, а не учётные
+        self.assertNotIn("ИНН", row("Учётные данные"))
+        self.assertIn("администратор", row("Подтверждение организации"))
 
 
 class TestCabinetColumnsMigrate(unittest.TestCase):

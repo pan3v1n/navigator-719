@@ -41,6 +41,11 @@ def _text(fragment: str) -> str:
     return " ".join(unescape(re.sub(r"<[^>]+>", " ", fragment)).split())
 
 
+def _inline(fragment: str) -> str:
+    """Текст строки со строчными тегами (`₽/<span class="per">мес</span>`): теги — без пробела."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", "", fragment)).split())
+
+
 def _panel(html: str, kind: str) -> str:
     """Карточки одной вкладки: от её `data-panel` до следующего `data-panel`."""
     i = html.index(f'data-panel="{kind}"')
@@ -71,9 +76,9 @@ class TestCatalog(unittest.TestCase):
     def test_options_summary_and_rules(self):
         cases = [
             (dict(tariff="Стандарт"), None),
-            (dict(tariff="Старт", trial=True, addon=True), "пробная неделя за 1 ₽ · проверка ответов экспертом ТПП"),
+            (dict(tariff="Старт", trial=True), "пробная неделя за 1 ₽"),
             (dict(tariff="Профи", kind="corporate", period="year", seats=12), "корпоративный · год · 12 польз."),
-            (dict(tariff="Для организаций", addon=True), None),
+            (dict(tariff="Для организаций", kind="corporate"), None),
         ]
         for kw, want in cases:
             with self.subTest(**kw):
@@ -95,7 +100,7 @@ class TestLandingShowcase(unittest.TestCase):
         self.assertEqual(_cards(_panel(LANDING, "individual")), want + [("Для организаций", pricing.ORG_DESC)])
         self.assertEqual(_cards(_panel(LANDING, "corporate")), want + [("Особые условия", pricing.SPECIAL_DESC)])
         self.assertIn('data-goto="corporate">Посмотреть тарифы', LANDING)
-        self.assertEqual(LANDING.count(f"<b>{pricing.ADDON}</b>"), 6, "опция — на каждой тарифной карточке")
+        self.assertEqual(LANDING.count(f"<b>{pricing.SOURCES}</b>"), 6, "источники — на каждой тарифной карточке")
         self.assertEqual(LANDING.count("data-seats"), 3, "число пользователей — у корпоративных")
 
     def test_trial_only_on_individual_start(self):
@@ -105,6 +110,14 @@ class TestLandingShowcase(unittest.TestCase):
         self.assertIn(f'data-pick="Старт" data-trial="1">Подключить за {pricing.TRIAL_PRICE}', ind)
         self.assertNotIn("data-trial", corp)
         self.assertNotIn(pricing.TRIAL_TEXT, corp)
+
+    def test_sources_are_free_on_every_card(self):
+        """Решение владельца 09.10.2026: доступ к источникам — бесплатно во всех тарифах (у Нейроюриста это
+        платная опция «за Гарант Лайт»): строка включённого, без галочки и цены; «Гарант» не упоминается."""
+        notes = [_inline(n) for n in re.findall(r"<b>" + re.escape(pricing.SOURCES) + r"</b><small>(.*?)</small>", LANDING, re.S)]
+        self.assertEqual(notes, [pricing.SOURCES_NOTE] * 6)
+        self.assertNotIn("data-addon", LANDING)
+        self.assertNotIn("Гарант", LANDING)
 
     def test_footnotes_per_tab(self):
         for kind in ("individual", "corporate"):
@@ -127,14 +140,27 @@ class TestLandingShowcase(unittest.TestCase):
         `pricing`; держим их равными описанию, как карточки."""
         js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
         for piece in (f"'{pricing.KINDS['corporate']}'", f"'пробная неделя за {pricing.TRIAL_PRICE}'",
-                      f"'{pricing.ADDON[0].lower() + pricing.ADDON[1:]}'", f", {pricing.MAX_SEATS})) : 1"):
+                      f", {pricing.MAX_SEATS})) : 1"):
             self.assertIn(piece, js)
         self.assertEqual(LANDING.count(f'max="{pricing.MAX_SEATS}"'), 3)
+
+    def test_corporate_cards_open_the_form_in_a_popup(self):
+        """Вечер 09.10.2026: корпоративный тариф — только через связь с заказчиком, формой в попапе. Та же
+        форма переезжает в <dialog> и возвращается на место при закрытии; без showModal — форма внизу."""
+        js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('<dialog class="lead-dialog" id="lead-dialog"', LANDING)
+        self.assertIn("if ((o && o.kind === 'corporate') || name === 'Для организаций') { if (openDialog()) return; }", js)
+        self.assertIn("slot.appendChild(formbox); dlg.showModal();", js)
+        self.assertIn("dlg.addEventListener('close', function () { home.appendChild(formbox); });", js)
+        self.assertIn("if (!dlg || typeof dlg.showModal !== 'function') return false;", js)
+        self.assertIn('<textarea name="message" rows="3" maxlength="1000"', LANDING)
+        self.assertIn("'promo', 'message'].forEach(function (n) { payload[n] = input(n).value.trim(); });", js)
 
     def test_card_options_reach_the_lead_form(self):
         js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="tariff-opts"', LANDING)
-        self.assertIn("if (opts) { payload.kind = opts.kind; payload.addon = opts.addon; payload.trial = opts.trial;", js)
+        self.assertIn("if (opts) { payload.kind = opts.kind; payload.trial = opts.trial;", js)
+        self.assertNotIn("addon", re.sub(r"/\*.*?\*/|//[^\n]*", "", js, flags=re.S), "скрипт ещё шлёт снятую опцию")
         self.assertIn("payload.period = opts.period; payload.seats = opts.seats;", js)
         self.assertIn("chips.forEach(function (c) { c.addEventListener('click', function () { setTariff(c.textContent); }); });",
                       js, "чип в форме — тариф без опций карточки")
@@ -168,9 +194,29 @@ class TestLandingLeadOptions(_Db):
         return TestClient(app).post("/api/leads", json={**GOOD, **extra})
 
     def test_options_are_stored_with_the_lead(self):
-        r = self.post(tariff="Профи", kind="corporate", period="year", seats=7, addon=True)
+        r = self.post(tariff="Профи", kind="corporate", period="year", seats=7, addon=True)   # старый скрипт: addon не читаем
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.leads()[0].options, "корпоративный · год · 7 польз. · проверка ответов экспертом ТПП")
+        self.assertEqual(self.leads()[0].options, "корпоративный · год · 7 польз.")
+
+    def test_comment_is_stored_and_bounded(self):
+        self.assertEqual(self.post(message="  Нужно 20 мест  ").status_code, 200)
+        self.assertEqual(self.leads()[0].message, "Нужно 20 мест")
+        r = self.post(message="x" * 1001)
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("message", r.json()["errors"])
+
+    def test_comment_line_breaks_count_as_in_the_browser(self):
+        """Ревью PR #186: браузер считает перевод строки одним знаком (maxlength), а шлёт CRLF."""
+        text = ("a" * 99 + "\r\n") * 10                                        # 1000 видимых знаков
+        self.assertEqual(self.post(message=text).status_code, 200)
+        self.assertEqual(len(self.leads()[0].message), 999)
+
+    def test_corporate_kind_is_stored_as_data(self):
+        """Ревью PR #186: вид заявки — полем, а не поиском по тексту условий."""
+        self.post(tariff="Профи", kind="corporate", period="year", seats=3)
+        self.post(tariff="Для организаций")
+        self.post(tariff="Стандарт")
+        self.assertEqual([lead.kind for lead in self.leads()], [None, "corporate", "corporate"])
 
     def test_old_form_without_options_still_works(self):
         self.assertEqual(self.post().status_code, 200)
@@ -185,7 +231,7 @@ class TestLandingLeadOptions(_Db):
     def test_foreign_option_types_get_the_form_error_shape(self):
         """Ревью PR #184: строгие типы отдавали стандартный 422 FastAPI `{"detail": …}`, которого форма
         не понимает. Чужие типы — ошибка опций тем же ответом `errors`."""
-        for extra in (dict(seats="abc"), dict(seats=None), dict(addon="yes"), dict(trial=1),
+        for extra in (dict(seats="abc"), dict(seats=None), dict(trial="yes"), dict(trial=1),
                       dict(kind=["corporate"]), dict(period={"x": 1}), dict(seats=True)):
             with self.subTest(**{k: repr(v) for k, v in extra.items()}):
                 r = self.post(**extra)
@@ -210,14 +256,17 @@ class TestCabinetShowcase(_Db):
             return web.profile_page(_request(query), tab="plan", **kw).body.decode("utf-8")
 
     def _ask(self, user, **form):
-        fields = dict(tariff="Стандарт", kind="individual", addon="", period="month", seats="1", trial_flag="",
-                      consent="1")
+        fields = dict(tariff="Стандарт", kind="individual", period="month", seats="1", trial_flag="",
+                      consent="1", renew="", message="")
         fields.update(form)
         with mock.patch.object(web, "current_user", return_value=user):
             return web.plan_request(_request(), **fields)
 
     def test_plan_tab_shows_the_same_catalog(self):
         html = self._page(self._user())
+        notes = [_inline(n) for n in re.findall(r"<b>" + re.escape(pricing.SOURCES) + r"</b><small>(.*?)</small>", html, re.S)]
+        self.assertEqual(notes, [pricing.SOURCES_NOTE] * 6, "источники в кабинете — не как на лендинге")
+        self.assertNotIn('name="addon"', html)
         want = [(p["name"], p["desc"]) for p in pricing.PLANS]
         self.assertEqual(_cards(_panel(html, "individual")), want + [("Для организаций", pricing.ORG_DESC)])
         self.assertEqual(_cards(_panel(html, "corporate")), want + [("Особые условия", pricing.SPECIAL_DESC)])
@@ -239,14 +288,13 @@ class TestCabinetShowcase(_Db):
 
     def test_request_becomes_a_lead_linked_to_the_account(self):
         u = self._user()
-        r = self._ask(u, tariff="Профи", kind="corporate", period="year", seats="5", addon="1")
+        r = self._ask(u, tariff="Профи", kind="corporate", period="year", seats="5")
         self.assertEqual((r.status_code, r.headers["location"]), (303, "/profile?tab=plan&requested=%D0%9F%D1%80%D0%BE%D1%84%D0%B8"))
         lead = self.leads()[0]
         self.assertEqual((lead.tariff, lead.user_id, lead.org, lead.inn, lead.email, lead.phone, lead.name),
                          ("Профи", u.id, "ООО «Станкозавод»", "4632000000", "i.petrov@tpp.ru", "+7 900 000-00-00",
                           "Иван Петров"))
-        self.assertEqual(lead.options, "из личного кабинета · корпоративный · год · 5 польз. · "
-                                       "проверка ответов экспертом ТПП")
+        self.assertEqual(lead.options, "из личного кабинета · корпоративный · год · 5 польз.")
         page = self._page(u, requested="Профи")
         self.assertIn("Заявка на тариф «Профи» отправлена", page)
         self.assertNotIn("Заявка на тариф «", self._page(u, requested="Безлимит"),
@@ -298,19 +346,111 @@ class TestCabinetShowcase(_Db):
         """«Подключить» — подтверждение: условия, данные из профиля, обязательная галочка согласия; заявку
         создаёт только оно. Ошибка и подтверждение — внутри витрины, к которой ведёт `#tariffs`."""
         u = self._user()
-        html = self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5&addon=1")
+        html = self._page(u, "confirm=1&tariff=Стандарт&kind=individual")
         box = html[html.index('class="tconfirm"'):html.index("</form>", html.index('class="tconfirm"'))]
-        self.assertIn("Заявка на тариф «Профи»", box)
-        self.assertIn("Корпоративный · год · 5 польз. · проверка ответов экспертом ТПП", box)
+        self.assertIn("Заявка на тариф «Стандарт»", box)
         self.assertIn("ООО «Станкозавод», ИНН 4632000000, i.petrov@tpp.ru, +7 900 000-00-00", _text(box))
         self.assertIn('name="consent" value="1" required', box)
-        for k, v in (("tariff", "Профи"), ("kind", "corporate"), ("period", "year"), ("seats", "5"), ("addon", "1")):
-            self.assertIn(f'name="{k}" value="{v}"', box)
+        self.assertNotIn('class="pop-back"', html, "личный тариф — не попапом")
         self.assertLess(html.index('id="tariffs"'), html.index('class="tconfirm"'), "подтверждение вне витрины")
-        self.assertIn('data-panel="corporate" role="tabpanel">', html, "корпоративная вкладка не открыта")
         self.assertEqual(self.leads(), [], "подтверждение само заявку не создаёт")
+        html = self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5")
         self.assertEqual(html.count('method="get" action="/profile#tariffs"'), 8, "карточка ведёт не на подтверждение")
         self.assertEqual(html.count('action="/api/plan-request"'), 1, "заявку шлёт что-то кроме подтверждения")
+
+    def test_corporate_goes_through_a_contact_popup(self):
+        """Решение владельца 09.10.2026, вечер: корпоративный тариф — только через связь с заказчиком,
+        форма обратной связи попапом. Попап рисует сервер (работает без скрипта); комментарий едет в заявку."""
+        u = self._user()
+        for query in ("confirm=1&tariff=Профи&kind=corporate&period=year&seats=5",
+                      "confirm=1&tariff=Для организаций&kind=individual"):
+            with self.subTest(query=query):
+                html = self._page(u, query)
+                pop = html[html.index('class="pop-back"'):]
+                pop = pop[:pop.index("</form>")]
+                self.assertIn('role="dialog" aria-modal="true"', pop)
+                self.assertIn("Связаться с нами", pop)
+                self.assertIn('name="message"', pop)
+                self.assertIn('name="consent" value="1" required', pop)
+                self.assertNotIn('class="tconfirm"', html)
+        self.assertIn("Корпоративный тариф\n            подключается через связь с заказчиком".replace("\n            ", " "),
+                      " ".join(self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5").split()))
+        r = self._ask(u, tariff="Профи", kind="corporate", period="year", seats="5", message="  20 сотрудников, звонить после 14:00  ")
+        self.assertEqual(r.status_code, 303)
+        lead = self.leads()[0]
+        self.assertEqual((lead.message, lead.options), ("20 сотрудников, звонить после 14:00",
+                                                         "из личного кабинета · корпоративный · год · 5 польз."))
+        r = self._ask(u, tariff="Профи", kind="corporate", message="x" * 1001)
+        self.assertEqual(r.headers["location"], "/profile?tab=plan&err=message&kind=corporate#tariffs")
+
+    def test_cabinet_lead_kind_and_crlf_comment(self):
+        u = self._user()
+        self._ask(u, tariff="Профи", kind="corporate", period="year", seats="5", message=("b" * 99 + "\r\n") * 10)
+        self._ask(u, tariff="Стандарт")
+        leads = self.leads()
+        self.assertEqual([lead.kind for lead in leads], [None, "corporate"])
+        self.assertEqual(len(leads[1].message), 999, "перевод строки посчитан двумя знаками")
+
+    def _planned(self, plan="Стандарт", kind=None, expires=None):
+        from app.core import plans
+
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_plan(db, u.id, plan, plans.anchor_from_date(plans.msk_today()),
+                            plans.anchor_from_date(expires) if expires else None, kind=kind)
+            u = q.get_user(db, u.id)
+            db.expunge(u)
+        return u
+
+    def test_renew_personal_plan(self):
+        """«Продлить» (вечер 09.10.2026): личный тариф — панель с новым сроком и стоимостью, заявкой
+        (оплата картой — позже). Срок — на месяц от конца текущего."""
+        from datetime import date
+
+        u = self._planned(expires=date(2026, 12, 31))
+        card = self._page(u)
+        self.assertIn('href="/profile?tab=plan&amp;renew=1#renew">Продлить</a>', card)
+        html = self._page(u, "renew=1")
+        panel = html[html.index('id="renew"'):html.index("</form>", html.index('id="renew"'))]
+        self.assertIn("Продление тарифа «Стандарт»", panel)
+        self.assertIn("до 31.12.2026", _text(panel))
+        self.assertIn("до 31.01.2027", _text(panel))
+        self.assertIn(f"{pricing.PRICE} ₽/мес", panel)
+        self.assertIn('name="consent" value="1" required', panel)
+        self.assertNotIn('class="pop-back"', html)
+        r = self._ask(u, tariff="Стандарт", renew="1")
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self.leads()[0].options, "из личного кабинета · продление до 31.01.2027")
+        self.assertEqual(self._ask(u, tariff="Профи", renew="1").headers["location"],
+                         "/profile?tab=plan&renew=1&err=renew#renew", "продлить чужой тариф")
+        self.assertEqual(self._ask(u, tariff="Стандарт", renew="1", consent="").headers["location"],
+                         "/profile?tab=plan&renew=1&err=consent#renew")
+
+    def test_renew_corporate_plan_is_a_popup(self):
+        from datetime import date
+
+        u = self._planned(kind="corporate", expires=date(2026, 12, 31))
+        html = self._page(u, "renew=1")
+        pop = html[html.index('class="pop-back" id="renew"'):]
+        self.assertIn("через связь с заказчиком", pop[:pop.index("</form>")])
+        self.assertIn('name="message"', pop)
+        self._ask(u, tariff="Стандарт", renew="1", message="продлить на год")
+        lead = self.leads()[0]
+        self.assertTrue(lead.options.startswith("из личного кабинета · корпоративный · продление до "))
+        self.assertEqual(lead.message, "продлить на год")
+
+    def test_no_renew_for_trial_internal_or_no_plan(self):
+        """И у бессрочного платного: «продление до …» поставило бы срок там, где его не было (ревью PR #186)."""
+        from app.core import plans
+
+        for plan in (plans.TRIAL_PLAN, "Тестировщик", None, "Стандарт"):   # «Стандарт» — бессрочный
+            with self.subTest(plan=plan):
+                u = self._planned(plan=plan) if plan else self._user()
+                self.assertNotIn(">Продлить</a>", self._page(u))
+                html = self._page(u, "renew=1")
+                self.assertNotIn('id="renew"', html)
+                key = "renew_unlimited" if plan == "Стандарт" else "renew"
+                self.assertIn(web.PLAN_REQUEST_ERRORS[key], html)
 
     def test_bad_choice_or_no_contacts_show_the_error_in_the_showcase(self):
         u = self._user()
@@ -352,10 +492,29 @@ class TestCabinetShowcase(_Db):
 
     def test_admin_sees_the_options(self):
         u = self._user()
-        self._ask(u, tariff="Старт", trial_flag="1", addon="1")
+        self._ask(u, tariff="Старт", trial_flag="1")
         admin = mock.Mock(id=99, role="admin", username="adm")
         with mock.patch.object(adm, "current_user", return_value=admin):
             html = adm.admin_leads_page(Request({"type": "http", "method": "GET", "path": "/admin/leads", "headers": [],
                                                  "query_string": b"", "session": {}, "app": None})).body.decode("utf-8")
-        self.assertIn("тариф «Старт» · из личного кабинета · пробная неделя за 1 ₽ · проверка ответов экспертом ТПП", html)
+        self.assertIn("тариф «Старт» · из личного кабинета · пробная неделя за 1 ₽", html)
         self.assertIn(f'href="/admin/users/{u.id}">kursk.user1</a>', html, "заявка из кабинета — уже с учёткой")
+
+    def test_admin_sees_the_message_and_corporate_lead_gives_corporate_plan(self):
+        u = self._user()
+        self._ask(u, tariff="Профи", kind="corporate", period="year", seats="5", message="Нужно 20 мест")
+        admin = mock.Mock(id=99, role="admin", username="adm")
+        req = Request({"type": "http", "method": "GET", "path": "/admin/leads", "headers": [],
+                       "query_string": b"", "session": {}, "app": None})
+        with mock.patch.object(adm, "current_user", return_value=admin):
+            html = adm.admin_leads_page(req).body.decode("utf-8")
+        self.assertIn("<dt>Комментарий</dt><dd class=\"adm-msg-text\">Нужно 20 мест</dd>", html)
+        with self.Session() as db:          # заявка с лендинга с корпоративной карточки → учётка
+            lead = q.create_lead(db, tariff="Профи", name="Анна", org="АО «Прибор»", inn="7707083893",
+                                 email="anna@pribor.ru", phone="+7 900 111-11-11", options="корпоративный · год · 3 польз.")
+        with mock.patch.object(adm, "current_user", return_value=admin):
+            adm.admin_lead_account(req, lead.id, username="anna.pribor", role="user", plan="Профи", admin=admin)
+        with self.Session() as db:
+            made = q.get_user_by_username(db, "anna.pribor")
+        self.assertEqual(made.plan_kind, "corporate")
+        self.assertIsNone(made.org_verified_at, "организация из заявки — не подтверждена")

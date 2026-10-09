@@ -52,8 +52,11 @@ def _ensure_columns() -> None:
             ("position", "VARCHAR(128)"),     # кабинет (09.10.2026): контакты пользователя
             ("email", "VARCHAR(255)"),
             ("phone", "VARCHAR(32)"),
-            ("org", "TEXT"),                  # организация и ИНН — заполняет admin
+            ("org", "TEXT"),                  # организация и ИНН — вписывает пользователь (вечер 09.10.2026)
             ("inn", "VARCHAR(12)"),
+            ("org_verified_at", "DATETIME"),  # подтверждение организации admin'ом; NULL — не подтверждена
+            ("org_verified_by", "INTEGER"),
+            ("plan_kind", "VARCHAR(16)"),     # личный / корпоративный тариф; NULL — личный
         ],
         "leads": [  # работа с заявкой в админке (09.10.2026); старые заявки — «новые»
             ("status", "VARCHAR(16) NOT NULL DEFAULT 'new'"),
@@ -61,6 +64,8 @@ def _ensure_columns() -> None:
             ("note", "TEXT"),
             ("user_id", "INTEGER"),
             ("options", "VARCHAR(200)"),   # опции с витрины тарифов (09.10.2026)
+            ("message", "TEXT"),           # комментарий заявителя (09.10.2026)
+            ("kind", "VARCHAR(16)"),       # вид заявки: corporate / NULL (ревью PR #186)
         ],
     }
     with engine.begin() as conn:

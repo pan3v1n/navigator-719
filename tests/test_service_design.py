@@ -256,7 +256,7 @@ class TestProfileErrorKeepsContext(_DB):
         with mock.patch.object(web, "get_session", self.Session), \
              mock.patch.object(web, "current_user", lambda request: u):
             resp = web.profile_submit(_Req(), consent="", full_name="", region="", telegram="",
-                                      position="", email="", phone="")
+                                      position="", email="", phone="", org="", inn="")
         body = resp.body.decode("utf-8")
         self.assertEqual(resp.status_code, 400)
         self.assertIn("Вернуться к сервису", body)

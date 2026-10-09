@@ -42,7 +42,7 @@ HONEYPOT = "nav719_hp"
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _INN_RE = re.compile(r"^\d{10}(\d{2})?$")
-LIMITS = {"name": 200, "org": 300, "email": 255, "phone": 32, "promo": 64}   # = колонкам `Lead`
+LIMITS = {"name": 200, "org": 300, "email": 255, "phone": 32, "promo": 64, "message": 1000}   # = колонкам `Lead`
 
 
 class LeadIn(BaseModel):
@@ -53,6 +53,7 @@ class LeadIn(BaseModel):
     email: str = ""
     phone: str = ""
     promo: str = ""
+    message: str = ""   # комментарий (вечер 09.10.2026): попап корпоративных тарифов, по желанию
     consent: bool = False
     nav719_hp: str = ""  # поле-ловушка: скрыто от людей, заполняют только боты
     # Опции с витрины тарифов (09.10.2026, `app/core/pricing.py`). По умолчанию — как у формы до
@@ -60,7 +61,7 @@ class LeadIn(BaseModel):
     # ⚠ `Any`, а не строгие типы (ревью PR #184): несовпадение типа FastAPI отвергал бы своим ответом
     # `{"detail": [...]}`, которого форма не понимает, — разбор и ошибки делает `lead_options`.
     kind: Any = "individual"
-    addon: Any = False
+    addon: Any = False   # опция витрины снята (источники бесплатны, 09.10.2026) — старый скрипт её шлёт, не читаем
     period: Any = "month"
     seats: Any = 1
     trial: Any = False
@@ -73,12 +74,16 @@ def lead_options(f: LeadIn) -> tuple[str | None, dict[str, str]]:
     kind = f.kind if isinstance(f.kind, str) else "?"
     period = f.period if isinstance(f.period, str) else "?"
     seats = f.seats if isinstance(f.seats, int) and not isinstance(f.seats, bool) else 0
-    opts, e = pricing.parse_options(f.tariff, kind=kind, addon=f.addon is True, period=period,
-                                    seats=seats, trial=f.trial is True)
-    for k in ("addon", "trial"):
-        if not isinstance(getattr(f, k), bool):
-            e[k] = "Опция — да или нет"
+    opts, e = pricing.parse_options(f.tariff, kind=kind, period=period, seats=seats, trial=f.trial is True)
+    if not isinstance(f.trial, bool):
+        e["trial"] = "Проба — да или нет"
     return (None if e else opts), e
+
+
+def _message(s: str) -> str:
+    """Комментарий: перевод строки браузер считает одним знаком (maxlength), а шлёт как CRLF — меряем
+    после нормализации, иначе 1000 видимых знаков отклонялись бы как 1010 (ревью PR #186)."""
+    return s.replace("\r\n", "\n").strip()
 
 
 def _digits(s: str) -> str:
@@ -108,6 +113,8 @@ def validate_lead(f: LeadIn) -> dict[str, str]:
         e["phone"] = "Укажите телефон полностью"
     if len(promo) > LIMITS["promo"]:
         e["promo"] = "Слишком длинный промокод"
+    if len(_message(f.message)) > LIMITS["message"]:
+        e["message"] = "Комментарий — не длиннее 1000 знаков"
     if not f.consent:
         e["consent"] = "Необходимо согласие на обработку данных"
     _, opt_errors = lead_options(f)
@@ -133,7 +140,8 @@ def submit_lead(lead: LeadIn, request: Request) -> JSONResponse:
     with get_session() as db:
         row = q.create_lead(db, tariff=lead.tariff, name=lead.name.strip(), org=lead.org.strip(),
                             inn=lead.inn.strip(), email=lead.email.strip(), phone=lead.phone.strip(),
-                            promo=lead.promo.strip(), options=options)
+                            promo=lead.promo.strip(), options=options, message=_message(lead.message),
+                            kind="corporate" if lead.kind == "corporate" or lead.tariff == pricing.ORG_TARIFF else None)
         purged = q.purge_old_leads(db)
     logger.info("lead: сохранена заявка #{} (тариф «{}»){}", row.id, row.tariff,
                 f"; удалено просроченных: {purged}" if purged else "")
