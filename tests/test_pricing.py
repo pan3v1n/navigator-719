@@ -144,6 +144,18 @@ class TestLandingShowcase(unittest.TestCase):
             self.assertIn(piece, js)
         self.assertEqual(LANDING.count(f'max="{pricing.MAX_SEATS}"'), 3)
 
+    def test_corporate_cards_open_the_form_in_a_popup(self):
+        """Вечер 09.10.2026: корпоративный тариф — только через связь с заказчиком, формой в попапе. Та же
+        форма переезжает в <dialog> и возвращается на место при закрытии; без showModal — форма внизу."""
+        js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('<dialog class="lead-dialog" id="lead-dialog"', LANDING)
+        self.assertIn("if ((o && o.kind === 'corporate') || name === 'Для организаций') { if (openDialog()) return; }", js)
+        self.assertIn("slot.appendChild(formbox); dlg.showModal();", js)
+        self.assertIn("dlg.addEventListener('close', function () { home.appendChild(formbox); });", js)
+        self.assertIn("if (!dlg || typeof dlg.showModal !== 'function') return false;", js)
+        self.assertIn('<textarea name="message" rows="3" maxlength="1000"', LANDING)
+        self.assertIn("'promo', 'message'].forEach(function (n) { payload[n] = input(n).value.trim(); });", js)
+
     def test_card_options_reach_the_lead_form(self):
         js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="tariff-opts"', LANDING)
@@ -185,6 +197,13 @@ class TestLandingLeadOptions(_Db):
         r = self.post(tariff="Профи", kind="corporate", period="year", seats=7, addon=True)   # старый скрипт: addon не читаем
         self.assertEqual(r.status_code, 200, r.text)
         self.assertEqual(self.leads()[0].options, "корпоративный · год · 7 польз.")
+
+    def test_comment_is_stored_and_bounded(self):
+        self.assertEqual(self.post(message="  Нужно 20 мест  ").status_code, 200)
+        self.assertEqual(self.leads()[0].message, "Нужно 20 мест")
+        r = self.post(message="x" * 1001)
+        self.assertEqual(r.status_code, 422)
+        self.assertIn("message", r.json()["errors"])
 
     def test_old_form_without_options_still_works(self):
         self.assertEqual(self.post().status_code, 200)

@@ -172,10 +172,25 @@
       }
       setTariff(name, o);
       showForm();
+      // корпоративный тариф — только через связь с заказчиком: форма в попапе (вечер 09.10.2026)
+      if ((o && o.kind === 'corporate') || name === 'Для организаций') { if (openDialog()) return; }
       var el = document.getElementById('form');
       window.scrollTo({ top: el.getBoundingClientRect().top + window.scrollY - 88, behavior: reduce ? 'auto' : 'smooth' });
     });
   });
+
+  // ---- попап «Связаться с нами»: та же форма переезжает в <dialog> и возвращается при закрытии ----
+  var dlg = document.getElementById('lead-dialog'), formbox = document.querySelector('#form .formbox'),
+      home = formbox.parentNode, slot = document.getElementById('lead-dialog-slot');
+  function openDialog() {
+    if (!dlg || typeof dlg.showModal !== 'function') return false;   // старый браузер — форма внизу
+    slot.appendChild(formbox); dlg.showModal();
+    var first = formbox.querySelector('textarea[name="message"]'); if (first) first.focus();
+    return true;
+  }
+  dlg.addEventListener('close', function () { home.appendChild(formbox); });
+  document.getElementById('lead-dialog-close').addEventListener('click', function () { dlg.close(); });
+  dlg.addEventListener('click', function (e) { if (e.target === dlg) dlg.close(); });   // клик по фону
 
   // ---- форма заявки ----
   var form = document.getElementById('lead-form'), sent = document.getElementById('lead-sent'),
@@ -217,7 +232,7 @@
       var k = f.getAttribute('data-f'), msg = e[k] || '';
       f.classList.toggle('err', !!msg);
       f.querySelector('.ferr').textContent = msg;
-      f.querySelector('input').setAttribute('aria-invalid', String(!!msg));
+      f.querySelector('input, textarea').setAttribute('aria-invalid', String(!!msg));
     });
     consentL.classList.toggle('err', !!e.consent);
     consentErr.textContent = e.consent || '';
@@ -237,13 +252,13 @@
     var e = validate();
     if (Object.keys(e).length) {
       tried = true; showErrors(e);
-      var first = form.querySelector('.field.err input') || consent; first.focus();
+      var first = form.querySelector('.field.err input, .field.err textarea') || consent; first.focus();
       return;
     }
     var payload = { tariff: tariff, consent: true, nav719_hp: input('nav719_hp').value };
     if (opts) { payload.kind = opts.kind; payload.trial = opts.trial;
                 payload.period = opts.period; payload.seats = opts.seats; }
-    ['name', 'org', 'inn', 'email', 'phone', 'promo'].forEach(function (n) { payload[n] = input(n).value.trim(); });
+    ['name', 'org', 'inn', 'email', 'phone', 'promo', 'message'].forEach(function (n) { payload[n] = input(n).value.trim(); });
     submitBtn.disabled = true;
     fetch('/api/leads', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       .then(function (r) { return r.json().catch(function () { return {}; }).then(function (j) { return { status: r.status, j: j }; }); })

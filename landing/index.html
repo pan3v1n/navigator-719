@@ -222,6 +222,7 @@
             <label class="field" data-f="email"><span class="fl">Email</span><input name="email" type="email" inputmode="email" placeholder="name@company.ru" autocomplete="email" maxlength="255"><span class="ferr"></span></label>
             <label class="field" data-f="phone"><span class="fl">Телефон</span><input name="phone" type="tel" inputmode="tel" placeholder="+7 (XXX) XXX-XX-XX" autocomplete="tel"><span class="ferr"></span></label>
             <label class="field" data-f="promo"><span class="fl">Промокод</span><input name="promo" type="text" placeholder="Если есть" maxlength="64"><span class="ferr"></span></label>
+            <label class="field field-wide" data-f="message"><span class="fl">Комментарий</span><textarea name="message" rows="3" maxlength="1000" placeholder="Сколько сотрудников подключить, удобное время для звонка"></textarea><span class="ferr"></span></label>
           </div>
           <div class="hp" aria-hidden="true"><label>Оставьте это поле пустым <input name="nav719_hp" type="text" tabindex="-1" autocomplete="off"></label></div>
           <div class="form-foot">
@@ -244,6 +245,16 @@
         </div>
       </div>
     </section>
+
+    <!-- Корпоративный тариф — только через связь с заказчиком (решение владельца 09.10.2026, вечер): карточки
+         корпоративной вкладки и «Свяжитесь со мной» открывают форму заявки в попапе — та же форма переезжает
+         сюда и возвращается на место при закрытии. Без скрипта — обычная форма ниже. -->
+    <dialog class="lead-dialog" id="lead-dialog" aria-labelledby="lead-dialog-h">
+      <div class="lead-dialog-head"><h2 id="lead-dialog-h">Связаться с нами</h2>
+        <button class="ibtn gray" type="button" id="lead-dialog-close" aria-label="Закрыть"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M5 5l10 10M15 5 5 15" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg></button></div>
+      <p class="lead-dialog-sub">Корпоративный тариф подключается через связь с заказчиком: оставьте контакты и комментарий — менеджер свяжется с вами и согласует условия.</p>
+      <div id="lead-dialog-slot"></div>
+    </dialog>
 
     <section class="sec" aria-labelledby="rev-h">
       <div class="rev-head">
