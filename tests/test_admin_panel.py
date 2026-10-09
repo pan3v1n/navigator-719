@@ -412,8 +412,70 @@ class TestLeadsToAccounts(_PanelDB):
             self.assertEqual(admin_summary.summary_view(db)["leads"]["new"], 1)
 
 
+class TestOrganizations(_PanelDB):
+    """Организации (этап 4): учётки по ИНН, без ИНН — по названию; суммы и заявки с тем же ИНН."""
+
+    def setUp(self):
+        super().setUp()
+        from datetime import timedelta
+
+        self.a = self._mk("kursk.a")
+        self.b = self._mk("kursk.b")
+        self.c = self._mk("orel.c")
+        self.d = self._mk("perm.d")
+        self.e = self._mk("kursk.e")
+        today = plans.msk_today()
+        with self.Session() as db:
+            q.set_user_org(db, self.a.id, "ООО «Станкозавод»", "4632000000")
+            q.set_user_org(db, self.b.id, "Станкозавод", "4632000000")         # другое написание, тот же ИНН
+            q.set_user_org(db, self.c.id, "АО «Прибор»", "")
+            q.set_user_plan(db, self.a.id, "Старт", plans.anchor_from_date(today),
+                            plans.anchor_from_date(today + timedelta(days=20)))
+            q.set_user_plan(db, self.b.id, "Старт", plans.anchor_from_date(today),
+                            plans.anchor_from_date(today + timedelta(days=5)))
+            q.set_blocked(db, self.b.id, True)
+            q.set_user_org(db, self.e.id, "ООО «Станкозавод»", "4632000000")
+            q.set_user_plan(db, self.e.id, "Тестировщик", plans.anchor_from_date(today - timedelta(days=9)),
+                            plans.anchor_from_date(today - timedelta(days=1)))      # истёк: не «ближайший»
+            db.add_all([AnswerUsage(user_id=self.a.id) for _ in range(7)])
+            q.log_message(db, user_id=self.a.id, session_id="s", role="user", content="вопрос 1")
+            q.log_message(db, user_id=self.b.id, session_id="t", role="user", content="вопрос 2")
+            q.log_message(db, user_id=self.a.id, session_id="s", role="assistant", content="ответ — не вопрос")
+            db.commit()
+            self.lead = q.create_lead(db, tariff="Старт", name="Секретный Контакт", org="Станкозавод",
+                                      inn="4632000000", email="secret@zavod.ru", phone="+7 999").id
+
+    def test_grouping_and_totals(self):
+        from datetime import timedelta
+
+        with self.Session() as db:
+            rows = adm._org_rows(db)
+        by_name = {r["name"]: r for r in rows}
+        plant = next(r for r in rows if r["inn"] == "4632000000")
+        self.assertEqual({p["username"] for p in plant["people"]}, {"kursk.a", "kursk.b", "kursk.e"},
+                         "ИНН не склеил учётки")
+        self.assertEqual((plant["asked_month"], plant["used"], plant["limit"], plant["blocked"]), (2, 7, 200, 1))
+        self.assertEqual(plant["plans"], [("Старт", 2), ("Тестировщик", 1)])
+        self.assertEqual(plant["soonest"], f"{plans.msk_today() + timedelta(days=5):%d.%m.%Y}")
+        self.assertEqual(plant["leads"], [{"id": self.lead, "status": "Новая"}])
+        self.assertIn("АО «Прибор»", by_name, "без ИНН — по названию")
+        self.assertEqual(rows[-1]["kind"], "none", "учётки без организации — в конце")
+        self.assertEqual({p["username"] for p in rows[-1]["people"]}, {"perm.d", "boss"})
+
+    def test_page_search_and_no_lead_pii(self):
+        html = self.as_admin.get("/admin/orgs").text
+        self.assertIn("ИНН 4632000000", html)
+        self.assertIn(f'href="/admin/leads#lead-{self.lead}">№{self.lead} · Новая</a>', html)
+        for pii in ("Секретный Контакт", "secret@zavod.ru", "+7 999"):
+            self.assertNotIn(pii, html, "ПДн заявки вне раздела «Заявки»")
+        found = self.as_admin.get("/admin/orgs?q=прибор").text
+        self.assertIn("АО «Прибор»", found)
+        self.assertNotIn("ИНН 4632000000", found)
+
+
 class TestAccessAndNavigation(_PanelDB):
-    PAGES = ("/admin", "/admin/users", "/admin/leads", "/admin/quality", "/admin/dialogs", "/admin/trial")
+    PAGES = ("/admin", "/admin/users", "/admin/orgs", "/admin/leads", "/admin/quality", "/admin/dialogs",
+             "/admin/trial")
 
     def test_only_admin(self):
         anon = self.TestClient(self.app)

@@ -22,7 +22,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
@@ -57,6 +57,7 @@ router = APIRouter()
 SECTIONS = [
     ("summary", "/admin", "Сводка"),
     ("users", "/admin/users", "Пользователи"),
+    ("orgs", "/admin/orgs", "Организации"),
     ("leads", "/admin/leads", "Заявки"),
     ("quality", "/admin/quality", "Качество"),
     ("dialogs", "/admin/dialogs", "Диалоги"),
@@ -379,6 +380,85 @@ def admin_set_org(user_id: int, org: str = Form(default=""), inn: str = Form(def
             raise HTTPException(status_code=404, detail="Пользователь не найден")
     logger.info(f"организация: admin_id={admin.id} изменил user_id={user_id}")
     return _back(user_id, "org")
+
+
+# --------------------------------------------------------------------------- #
+# Организации (этап 4): учётки по ИНН — задел под выставление счетов организациям
+# --------------------------------------------------------------------------- #
+def _org_key(u: User) -> tuple[str, str]:
+    """Ключ группы: ИНН, если задан; иначе название (без регистра); иначе — «без организации»."""
+    if u.inn:
+        return ("inn", u.inn)
+    if u.org:
+        return ("name", " ".join(u.org.lower().replace("ё", "е").split()))
+    return ("none", "")
+
+
+def _org_rows(db, now=None) -> list[dict]:
+    from app.api.admin_summary import _month_start
+
+    now = now or datetime.now(timezone.utc)
+    month_rows = q.message_rows_since(db, _month_start(now))
+    asked_month: dict[int, int] = {}
+    for r in month_rows:
+        if r.role == "user":
+            asked_month[r.user_id] = asked_month.get(r.user_id, 0) + 1
+    activity = q.user_activity(db)
+    leads_by_inn = q.lead_statuses_by_inn(db)
+    groups: dict[tuple[str, str], list[User]] = {}
+    for u in q.list_users(db):
+        groups.setdefault(_org_key(u), []).append(u)
+    rows = []
+    for (kind, key), members in groups.items():
+        names = [m.org for m in members if m.org]
+        name = max(set(names), key=names.count) if names else ""
+        people, used, limit, last, soonest = [], 0, 0, None, None
+        plan_count: dict[str, int] = {}
+        for m in members:
+            st = quota.quota_state(db, m, now)
+            if st is not None:
+                used, limit = used + min(st.used, st.limit), limit + st.limit
+            m_last = activity.get(m.id, (None, 0))[0]
+            last = max(filter(None, (last, m_last)), default=None)
+            if m.plan:
+                plan_count[m.plan] = plan_count.get(m.plan, 0) + 1
+                if m.plan_expires_at is not None and not plans.plan_expired(m, now):
+                    soonest = min(filter(None, (soonest, m.plan_expires_at)))
+            people.append({"id": m.id, "username": m.username, "full_name": m.full_name or "",
+                           "role": ACCOUNT_ROLES.get(m.role, m.role), "plan": m.plan or "",
+                           "blocked": m.blocked_at is not None, "expired": plans.plan_expired(m, now),
+                           "asked": asked_month.get(m.id, 0), "last": _msk(m_last)})
+        leads = leads_by_inn.get(key, []) if kind == "inn" else []
+        rows.append({
+            "kind": kind, "key": key, "name": name or ("Без организации" if kind == "none" else key),
+            "inn": key if kind == "inn" else "", "people": sorted(people, key=lambda p: p["username"]),
+            "blocked": sum(p["blocked"] for p in people),
+            "plans": sorted(plan_count.items()), "used": used, "limit": limit,
+            "asked_month": sum(p["asked"] for p in people), "last_ts": last, "last": _msk(last),
+            "soonest": f"{plans.msk_date(soonest):%d.%m.%Y}" if soonest else "",
+            "leads": [{"id": lid, "status": LEAD_STATUSES.get(s, s)} for lid, s in leads],
+        })
+    # без организации — в конец; остальные — свежая активность сверху
+    rows.sort(key=lambda r: (r["kind"] != "none", r["last_ts"] is not None, r["last_ts"] or datetime.min),
+              reverse=True)
+    return rows
+
+
+@router.get("/admin/orgs", response_class=HTMLResponse)
+def admin_orgs(request: Request):
+    """Организации: сотрудники, тарифы и ближайший срок, вопросы за месяц, расход лимитов за
+    период, последняя активность, заявки с тем же ИНН. Поиск — ?q= по названию и ИНН."""
+    gate = _gate(request)
+    if isinstance(gate, RedirectResponse):
+        return gate
+    text = request.query_params.get("q", "").strip()
+    with get_session() as db:
+        rows = _org_rows(db)
+    total = sum(1 for r in rows if r["kind"] != "none")
+    if text:
+        words = text.lower().replace("ё", "е").split()
+        rows = [r for r in rows if all(w in f"{r['name']} {r['inn']}".lower().replace("ё", "е") for w in words)]
+    return _page(request, gate, "orgs", "orgs", "Организации", rows=rows, total=total, q_text=text)
 
 
 # --------------------------------------------------------------------------- #

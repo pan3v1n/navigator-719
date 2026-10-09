@@ -405,6 +405,15 @@ def count_leads(db: Session, status: str | None = None) -> int:
     return db.execute(stmt).scalar_one()
 
 
+def lead_statuses_by_inn(db: Session) -> dict[str, list[tuple[int, str]]]:
+    """{ИНН: [(номер заявки, статус)]} — для раздела «Организации». Только номер и статус: имена,
+    почта и телефоны заявок (ПДн) читаются в одном месте — разделе «Заявки»."""
+    out: dict[str, list[tuple[int, str]]] = {}
+    for lid, inn, status in db.execute(select(Lead.id, Lead.inn, Lead.status).order_by(Lead.id.desc())):
+        out.setdefault(inn, []).append((lid, status))
+    return out
+
+
 def get_lead(db: Session, lead_id: int) -> Lead | None:
     return db.get(Lead, lead_id)
 

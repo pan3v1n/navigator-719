@@ -760,6 +760,7 @@ a.head-avatar:hover { opacity: .9; }
 .adm-tile { background: var(--gray); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 4px; }
 .adm-tile-v { font: 500 28px/1.15 var(--font); color: var(--ink); }
 .adm-tile-l { font: 500 14px/1.3 var(--font); color: var(--ink-80); }
+.adm-tile-small { font-size: 18px; }
 .adm-tile.bad { background: rgba(216, 51, 50, .08); }
 .adm-tile.bad .adm-tile-v { color: var(--red); }
 .adm-h3 { margin: 4px 0 0; font: 500 14px/1.3 var(--font); color: var(--ink-60); }
