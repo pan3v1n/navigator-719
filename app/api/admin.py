@@ -43,7 +43,7 @@ from app.api.web import (
     _parse_date,
     templates,
 )
-from app.core import plans
+from app.core import plans, pricing
 from app.core.config import settings
 from app.core.costs import cost_rub
 from app.core.plans import PLAN_LIMITS
@@ -139,7 +139,7 @@ def _user_row(db, u: User, activity: dict) -> dict:
         # гейта чата, а не копия: копии расходятся при первой правке гейта (ревью PR #182).
         "no_profile": needs_profile(u),
         # Организацию вписывает пользователь (вечер 09.10.2026): вписал, но admin ещё не подтвердил
-        "org_unverified": bool(u.org or u.inn) and u.org_verified_at is None,
+        "org_unverified": q.org_unverified(u),
         "plan_kind": u.plan_kind or "individual",
         "last": _msk(last), "last_ts": last, "asked": asked,
     }
@@ -609,7 +609,9 @@ def admin_lead_account(request: Request, lead_id: int, username: str = Form(defa
                 until = day + timedelta(days=plans.TRIAL_DAYS) if plan == plans.TRIAL_PLAN else None
                 # заявка с корпоративной карточки или «Для организаций» — корпоративный тариф (продление —
                 # через связь с заказчиком, вечер 09.10.2026); организация из заявки — не подтверждена
-                corporate = "корпоративный" in (lead.options or "") or lead.tariff == "Для организаций"
+                corporate = lead.kind == "corporate" or (    # старые заявки — без поля вида
+                    lead.kind is None and (pricing.KINDS["corporate"] in (lead.options or "")
+                                           or lead.tariff == pricing.ORG_TARIFF))
                 q.set_user_plan(db, uid, plan, plans.anchor_from_date(day),
                                 plans.anchor_from_date(until) if until else None,
                                 kind="corporate" if corporate else None)

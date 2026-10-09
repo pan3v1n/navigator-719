@@ -94,8 +94,8 @@ def main() -> int:
                        "session": {}, "app": None})
         with mock.patch.object(web, "get_session", S), mock.patch.object(web, "current_user", return_value=u):
             page = web.profile_page(req, tab="plan").body.decode("utf-8")
-            r = web.plan_request(req, tariff="Профи", kind="corporate", period="year", seats="5",
-                                 trial_flag="", consent="1", renew="", message="")
+            r = web.plan_request(req, tariff="Профи", kind="corporate", addon="1", period="year", seats="5",
+                                 trial_flag="", consent="1")
         check('id="tariffs"' in page and page.count(f"{pricing.PRICE} ₽") >= 6 and "Корпоративные" in page,
               "вкладка «Тариф»: витрина с плейсхолдерами и вкладкой «Корпоративные»", "витрины в кабинете нет")
         with S() as db:

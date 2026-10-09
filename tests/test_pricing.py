@@ -205,6 +205,19 @@ class TestLandingLeadOptions(_Db):
         self.assertEqual(r.status_code, 422)
         self.assertIn("message", r.json()["errors"])
 
+    def test_comment_line_breaks_count_as_in_the_browser(self):
+        """Ревью PR #186: браузер считает перевод строки одним знаком (maxlength), а шлёт CRLF."""
+        text = ("a" * 99 + "\r\n") * 10                                        # 1000 видимых знаков
+        self.assertEqual(self.post(message=text).status_code, 200)
+        self.assertEqual(len(self.leads()[0].message), 999)
+
+    def test_corporate_kind_is_stored_as_data(self):
+        """Ревью PR #186: вид заявки — полем, а не поиском по тексту условий."""
+        self.post(tariff="Профи", kind="corporate", period="year", seats=3)
+        self.post(tariff="Для организаций")
+        self.post(tariff="Стандарт")
+        self.assertEqual([lead.kind for lead in self.leads()], [None, "corporate", "corporate"])
+
     def test_old_form_without_options_still_works(self):
         self.assertEqual(self.post().status_code, 200)
         self.assertIsNone(self.leads()[0].options)
@@ -370,6 +383,14 @@ class TestCabinetShowcase(_Db):
         r = self._ask(u, tariff="Профи", kind="corporate", message="x" * 1001)
         self.assertEqual(r.headers["location"], "/profile?tab=plan&err=message&kind=corporate#tariffs")
 
+    def test_cabinet_lead_kind_and_crlf_comment(self):
+        u = self._user()
+        self._ask(u, tariff="Профи", kind="corporate", period="year", seats="5", message=("b" * 99 + "\r\n") * 10)
+        self._ask(u, tariff="Стандарт")
+        leads = self.leads()
+        self.assertEqual([lead.kind for lead in leads], [None, "corporate"])
+        self.assertEqual(len(leads[1].message), 999, "перевод строки посчитан двумя знаками")
+
     def _planned(self, plan="Стандарт", kind=None, expires=None):
         from app.core import plans
 
@@ -406,7 +427,9 @@ class TestCabinetShowcase(_Db):
                          "/profile?tab=plan&renew=1&err=consent#renew")
 
     def test_renew_corporate_plan_is_a_popup(self):
-        u = self._planned(kind="corporate")
+        from datetime import date
+
+        u = self._planned(kind="corporate", expires=date(2026, 12, 31))
         html = self._page(u, "renew=1")
         pop = html[html.index('class="pop-back" id="renew"'):]
         self.assertIn("через связь с заказчиком", pop[:pop.index("</form>")])
@@ -417,9 +440,10 @@ class TestCabinetShowcase(_Db):
         self.assertEqual(lead.message, "продлить на год")
 
     def test_no_renew_for_trial_internal_or_no_plan(self):
+        """И у бессрочного платного: «продление до …» поставило бы срок там, где его не было (ревью PR #186)."""
         from app.core import plans
 
-        for plan in (plans.TRIAL_PLAN, "Тестировщик", None):
+        for plan in (plans.TRIAL_PLAN, "Тестировщик", None, "Стандарт"):   # «Стандарт» — бессрочный
             with self.subTest(plan=plan):
                 u = self._planned(plan=plan) if plan else self._user()
                 self.assertNotIn(">Продлить</a>", self._page(u))

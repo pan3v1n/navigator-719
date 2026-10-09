@@ -384,6 +384,44 @@ class TestCabinetSave(_CabinetDB):
         body = self._submit(self._fresh(u.id), org="ООО «Чужая»", inn="1").body.decode("utf-8")
         self.assertIn("не подтверждены", body, "ошибочная правка показана под подтверждённой меткой")
 
+    def test_inn_from_lead_or_admin_does_not_lock_the_form(self):
+        """Ревью PR #186: ИНН из заявки или от admin'а проверялся только на длину; контрольные цифры
+        формы заперли бы человека на анкете (гейт до чата) из-за ИНН, который вписывал не он."""
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")      # контрольные цифры не сходятся
+        r = self._submit(self._fresh(u.id), phone="+7 900 111-22-33")
+        self.assertEqual(r.status_code, 302, "анкета не сохраняется из-за чужого ИНН")
+        self.assertEqual(self._fresh(u.id).inn, "4632000000")
+        r = self._submit(self._fresh(u.id), inn="4632000001")               # а свой новый — проверяется
+        self.assertEqual(r.status_code, 400)
+
+    def test_missing_fields_and_spacing_keep_the_verification(self):
+        """Ревью PR #186: POST без полей организации (страница до выкатки) стирал её и подтверждение;
+        двойной пробел в названии от admin'а считался правкой и снимал подтверждение."""
+        from app.db.models import User as UserRow
+
+        u = self._user()
+        with self.Session() as db:
+            row = db.get(UserRow, u.id)
+            row.org, row.inn = "ООО  «Ромашка»", "7707083893"               # старая запись с двойным пробелом
+            db.commit()
+            q.verify_org(db, u.id, 99)
+        self._submit(self._fresh(u.id), org=None, inn=None)                 # полей нет в POST
+        fresh = self._fresh(u.id)
+        self.assertEqual((fresh.org, fresh.inn), ("ООО  «Ромашка»", "7707083893"))
+        self.assertIsNotNone(fresh.org_verified_at, "POST без полей снял подтверждение")
+        self._submit(fresh, org="ООО «Ромашка»", inn="7707083893")          # форма отдала одинарный пробел
+        self.assertIsNotNone(self._fresh(u.id).org_verified_at, "пробел снял подтверждение")
+        self.assertIn("подтверждены администратором", self._page(self._fresh(u.id), edit="1"))
+
+    def test_org_without_inn_asks_for_inn(self):
+        u = self._user()
+        self._submit(u, org="ООО «Ромашка»", inn="")
+        html = self._page(self._fresh(u.id))
+        self.assertIn("Укажите и организацию, и ИНН", html)
+        self.assertFalse(q.org_unverified(self._fresh(u.id)), "без ИНН — подтверждать нечего, в фильтре не висит")
+
     def test_inn_checksum(self):
         from app.core.inn import inn_valid
 

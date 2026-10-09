@@ -275,7 +275,8 @@
         </label>
         {# Организацию и ИНН вписывает пользователь (вечер 09.10.2026), по желанию. Статус — по записи в
            базе: подтверждает admin, правка подтверждение снимает. В будущем — профиль работника на Госуслугах. #}
-        {% set org_ok = user.org_verified_at and user.org and user.inn and form.org == user.org and form.inn == user.inn %}
+        {% set org_ok = user.org_verified_at and user.org and user.inn
+                        and form.org.split()|join(' ') == user.org.split()|join(' ') and form.inn == user.inn %}
         <label class="field"><span>Организация</span>
           <input name="org" value="{{ form.org }}" placeholder="ООО «Предприятие»" autocomplete="organization" maxlength="300">
         </label>
@@ -285,6 +286,7 @@
         {% if form.org or form.inn %}
         <div class="org-status {{ 'ok' if org_ok else 'wait' }}" role="status">
           {% if org_ok %}Организация и ИНН подтверждены администратором
+          {% elif not (form.org and form.inn) %}Укажите и организацию, и ИНН — без них администратор не сможет подтвердить организацию
           {% else %}Организация и ИНН не подтверждены — их проверит администратор сервиса{% endif %}</div>
         {% endif %}
       </div>

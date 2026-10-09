@@ -80,6 +80,12 @@ def lead_options(f: LeadIn) -> tuple[str | None, dict[str, str]]:
     return (None if e else opts), e
 
 
+def _message(s: str) -> str:
+    """Комментарий: перевод строки браузер считает одним знаком (maxlength), а шлёт как CRLF — меряем
+    после нормализации, иначе 1000 видимых знаков отклонялись бы как 1010 (ревью PR #186)."""
+    return s.replace("\r\n", "\n").strip()
+
+
 def _digits(s: str) -> str:
     return re.sub(r"\D", "", s or "")
 
@@ -107,7 +113,7 @@ def validate_lead(f: LeadIn) -> dict[str, str]:
         e["phone"] = "Укажите телефон полностью"
     if len(promo) > LIMITS["promo"]:
         e["promo"] = "Слишком длинный промокод"
-    if len(f.message.strip()) > LIMITS["message"]:
+    if len(_message(f.message)) > LIMITS["message"]:
         e["message"] = "Комментарий — не длиннее 1000 знаков"
     if not f.consent:
         e["consent"] = "Необходимо согласие на обработку данных"
@@ -134,7 +140,8 @@ def submit_lead(lead: LeadIn, request: Request) -> JSONResponse:
     with get_session() as db:
         row = q.create_lead(db, tariff=lead.tariff, name=lead.name.strip(), org=lead.org.strip(),
                             inn=lead.inn.strip(), email=lead.email.strip(), phone=lead.phone.strip(),
-                            promo=lead.promo.strip(), options=options, message=lead.message)
+                            promo=lead.promo.strip(), options=options, message=_message(lead.message),
+                            kind="corporate" if lead.kind == "corporate" or lead.tariff == pricing.ORG_TARIFF else None)
         purged = q.purge_old_leads(db)
     logger.info("lead: сохранена заявка #{} (тариф «{}»){}", row.id, row.tariff,
                 f"; удалено просроченных: {purged}" if purged else "")

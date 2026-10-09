@@ -117,7 +117,7 @@ def summary_view(db, now: datetime | None = None) -> dict:
             "blocked": sum(1 for u in users if u.blocked_at is not None),
             "no_profile": sum(1 for u in users if needs_profile(u)),   # правило гейта чата, не копия
             # организацию вписал пользователь, admin ещё не подтвердил (вечер 09.10.2026)
-            "org_unverified": sum(1 for u in users if (u.org or u.inn) and u.org_verified_at is None),
+            "org_unverified": sum(1 for u in users if q.org_unverified(u)),   # одно правило со списком
         },
         "leads": {"total": q.count_leads(db), "week": q.count_leads_since(db, today - timedelta(days=7)),
                   "new": q.count_leads(db, "new")},

@@ -65,6 +65,7 @@ def _ensure_columns() -> None:
             ("user_id", "INTEGER"),
             ("options", "VARCHAR(200)"),   # опции с витрины тарифов (09.10.2026)
             ("message", "TEXT"),           # комментарий заявителя (09.10.2026)
+            ("kind", "VARCHAR(16)"),       # вид заявки: corporate / NULL (ревью PR #186)
         ],
     }
     with engine.begin() as conn:

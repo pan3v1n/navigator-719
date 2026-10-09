@@ -352,7 +352,7 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
              tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
              quota=pv["quota"] if pv else None,
              requested=requested if requested in LEAD_TARIFFS else "",
-             confirm=confirm, renew=renew, renewable=user.plan in PLAN_LIMITS,
+             confirm=confirm, renew=renew, renewable=_renewal(user) is not None,
              tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
              # Форма профиля — просмотр, правка по «Редактировать» (просьба владельца 09.10.2026). Открыта
              # сразу, пока профиль не заполнен (гейт до чата) и когда сохранение вернуло ошибку — иначе
@@ -425,14 +425,16 @@ def _renewal(user: User) -> dict | None:
     """«Продлить» (решение владельца 09.10.2026, вечер): только платный тариф. Новый срок — на месяц от
     конца текущего, а если срока нет или он истёк — от сегодня. Личный продлевается заявкой (позже —
     оплатой с личной карты), корпоративный — только через связь с заказчиком (попап)."""
-    if user.plan not in PLAN_LIMITS:
+    # Бессрочный тариф продлевать нечего: «продление до …» поставило бы срок там, где его не было (ревью
+    # PR #186) — кнопки нет, пока admin не задал срок.
+    if user.plan not in PLAN_LIMITS or not user.plan_expires_at:
         return None
     today = plans.msk_today()
-    until = plans.msk_date(user.plan_expires_at) if user.plan_expires_at else None
-    base = max(today, until) if until else today
+    until = plans.msk_date(user.plan_expires_at)
+    base = max(today, until)
     new = plans.add_months(datetime(base.year, base.month, base.day), 1).date()
     return {"tariff": user.plan, "corporate": user.plan_kind == "corporate",
-            "now_until": f"{until:%d.%m.%Y}" if until else "", "new_until": f"{new:%d.%m.%Y}"}
+            "now_until": f"{until:%d.%m.%Y}", "new_until": f"{new:%d.%m.%Y}"}
 
 
 def _plan_choice(tariff: str, kind: str, period: str, seats: str, trial: str):
@@ -470,7 +472,7 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         tab_kind = "&kind=corporate" if kind == "corporate" else ""
         return RedirectResponse(f"/profile?tab=plan&err={err}{tab_kind}#tariffs", status_code=303)
 
-    msg = message.strip()
+    msg = message.replace("\r\n", "\n").strip()   # перевод строки — один знак, как считает браузер
     if len(msg) > MESSAGE_LIMIT:
         return back("message")
     if renew == "1":
@@ -478,6 +480,7 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         if r is None or tariff != r["tariff"]:
             return back("renew")
         options = ("корпоративный · " if r["corporate"] else "") + f"продление до {r['new_until']}"
+        kind = "corporate" if r["corporate"] else "individual"
     else:
         _, options, code = _plan_choice(tariff, kind, period, seats, trial_flag)
         if code:
@@ -495,7 +498,8 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         lead = q.create_lead(db, tariff=tariff, name=user.full_name or user.username, org=user.org or "",
                              inn=user.inn or "", email=user.email, phone=user.phone,
                              options=" · ".join(filter(None, ("из личного кабинета", options))),
-                             user_id=user.id, message=msg)
+                             user_id=user.id, message=msg,
+                             kind="corporate" if kind == "corporate" or tariff == pricing.ORG_TARIFF else None)
         q.purge_old_leads(db)   # срок хранения политики — и на этом пути новой заявки (ревью PR #184)
     logger.info(f"заявка #{lead.id} из кабинета: user_id={user.id}, тариф «{tariff}»")
     return RedirectResponse(f"/profile?tab=plan&requested={quote(tariff)}", status_code=303)
@@ -524,8 +528,8 @@ def profile_submit(
     position: str = Form(default=""),
     email: str = Form(default=""),
     phone: str = Form(default=""),
-    org: str = Form(default=""),
-    inn: str = Form(default=""),
+    org: str | None = Form(default=None),
+    inn: str | None = Form(default=None),
 ):
     """Сохранение профиля. Организацию и ИНН вписывает сам пользователь (решение владельца 09.10.2026,
     вечер; утром их вёл только admin) — по желанию; ИНН проверяется по контрольным цифрам. Правка
@@ -535,7 +539,10 @@ def profile_submit(
         return RedirectResponse("/login", status_code=302)
     fn, rg, tg = full_name.strip(), region.strip(), telegram.strip()
     pos, em, ph = position.strip(), email.strip(), phone.strip()
-    og, nn = " ".join(org.split()), inn.strip()
+    # Нет поля в POST (страница, открытая до выкатки) — не трогаем: None; иначе пустая форма стёрла бы
+    # организацию и подтверждение (ревью PR #186).
+    og = q.norm_org(org) or "" if org is not None else (user.org or "")
+    nn = q.norm_org(inn) or "" if inn is not None else (user.inn or "")
     form = _profile_form(user, full_name=fn, region=rg or region_from_username(user.username),
                          telegram=tg, position=pos, email=em, phone=ph, org=og, inn=nn,
                          consent=bool(consent))
@@ -555,14 +562,17 @@ def profile_submit(
     errs += _contact_errors(pos, em, ph)
     if len(og) > ORG_LIMIT:
         errs.append("Слишком длинное название организации.")
-    if nn and not inn_valid(nn):
+    # Контрольные цифры — только у ИНН, который пользователь ввёл сам: ИНН из заявки или от admin'а мог
+    # пройти лишь проверку длины, и без этого человек не сохранил бы анкету (гейт до чата) — ревью PR #186.
+    if nn and nn != (user.inn or "") and not inn_valid(nn):
         errs.append("Проверьте ИНН: 10 цифр у организации или 12 у ИП, контрольные цифры не сходятся.")
     if errs:
         return _profile_response(request, user, form, error=" ".join(errs), status_code=400)
     first_fill = needs_profile(user)
     with get_session() as db:
         q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True,
-                         position=pos, email=em, phone=ph, org=og, inn=nn)
+                         position=pos, email=em, phone=ph,
+                         org=None if org is None else og, inn=None if inn is None else nn)
     # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
     # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
     return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)

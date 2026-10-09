@@ -180,6 +180,9 @@ class Lead(Base):
     options: Mapped[str | None] = mapped_column(String(200), nullable=True)
     # Комментарий заявителя (09.10.2026): попап «Связаться с нами» корпоративных тарифов и форма лендинга.
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Вид заявки (ревью PR #186): «corporate» — с корпоративной карточки, «Для организаций» или продление
+    # корпоративного тарифа; учётка из неё получает корпоративный тариф. Данными, а не поиском по `options`.
+    kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # логическая ссылка на users.id

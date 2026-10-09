@@ -56,11 +56,12 @@ def update_profile(
             setattr(u, field, value.strip() or None)
     changed = False
     for field, value in (("org", org), ("inn", inn)):
-        if value is not None and (value.strip() or None) != getattr(u, field):
-            setattr(u, field, value.strip() or None)
+        # сравнение — нормализованных: двойной пробел в названии, вписанном admin'ом, не «правка»
+        if value is not None and norm_org(value) != norm_org(getattr(u, field)):
+            setattr(u, field, norm_org(value))
             changed = True
     if changed:
-        u.org_verified_at = u.org_verified_by = None
+        _stamp_verified(u, None)
     if consent and not u.consent:
         u.consent = True
         u.consent_at = _utcnow()
@@ -69,15 +70,33 @@ def update_profile(
     return u
 
 
+def norm_org(s: str | None) -> str | None:
+    """Организация и ИНН — без лишних пробелов, пустое — None. Одно место нормализации для кабинета,
+    админки и заявки: иначе «ООО  «Ромашка»» и «ООО «Ромашка»» считались разными и сохранение профиля
+    снимало подтверждение (ревью PR #186)."""
+    return " ".join((s or "").split()) or None
+
+
+def org_unverified(u: User) -> bool:
+    """Организация ждёт admin'а: вписаны и название, и ИНН, а подтверждения нет. Без ИНН подтверждать
+    нечего — такая учётка в «не подтверждена» не висит (ревью PR #186). Одно правило для списка и Сводки."""
+    return bool(u.org and u.inn) and u.org_verified_at is None
+
+
+def _stamp_verified(u: User, admin_id: int | None) -> None:
+    """Подтверждение ставится, только если есть что подтверждать (название и ИНН); иначе — снимается."""
+    if admin_id and u.org and u.inn:
+        u.org_verified_at, u.org_verified_by = _utcnow(), admin_id
+    else:
+        u.org_verified_at = u.org_verified_by = None
+
+
 def verify_org(db: Session, user_id: int, admin_id: int | None) -> User | None:
     """Подтвердить организацию и ИНН (admin_id) или снять подтверждение (None). Подтвердить пустое нельзя."""
     u = db.get(User, user_id)
     if not u:
         return None
-    if admin_id and u.org and u.inn:
-        u.org_verified_at, u.org_verified_by = _utcnow(), admin_id
-    else:
-        u.org_verified_at = u.org_verified_by = None
+    _stamp_verified(u, admin_id)
     db.commit()
     db.refresh(u)
     return u
@@ -89,12 +108,8 @@ def set_user_org(db: Session, user_id: int, org: str, inn: str, verified_by: int
     u = db.get(User, user_id)
     if not u:
         return None
-    u.org = (org or "").strip() or None
-    u.inn = (inn or "").strip() or None
-    if verified_by and u.org and u.inn:
-        u.org_verified_at, u.org_verified_by = _utcnow(), verified_by
-    else:
-        u.org_verified_at = u.org_verified_by = None
+    u.org, u.inn = norm_org(org), norm_org(inn)
+    _stamp_verified(u, verified_by)
     db.commit()
     db.refresh(u)
     return u
@@ -482,14 +497,15 @@ def get_all_feedback(db: Session) -> list[Feedback]:
 def create_lead(
     db: Session, *, tariff: str, name: str, org: str, inn: str, email: str, phone: str,
     promo: str | None = None, options: str | None = None, user_id: int | None = None,
-    message: str | None = None,
+    message: str | None = None, kind: str | None = None,
 ) -> Lead:
     """Сохранить заявку. Момент согласия ставится здесь: эндпоинт зовёт функцию только после того,
     как согласие проверено, — отдельного поля «согласен» в строке нет, есть время согласия.
     `user_id` — заявка из личного кабинета: учётка уже есть, «Создать учётку» ей не нужна."""
     lead = Lead(tariff=tariff, name=name, org=org, inn=inn, email=email, phone=phone,
                 promo=promo or None, options=options or None, user_id=user_id,
-                message=(message or "").strip() or None, consent_at=_utcnow())
+                message=(message or "").strip() or None, consent_at=_utcnow(),
+                kind="corporate" if kind == "corporate" else None)
     db.add(lead)
     db.commit()
     db.refresh(lead)
