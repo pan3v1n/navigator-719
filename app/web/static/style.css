@@ -83,6 +83,13 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 .field input:focus, .field select:focus { outline: none; box-shadow: inset 0 0 0 1px var(--blue); }
 .field input[disabled] { opacity: .6; }
 .field .hint { font: 400 12px/1.3 var(--font); color: var(--ink-60); }
+/* форма профиля: просмотр по умолчанию, правка по «Редактировать» (09.10.2026) */
+.fields-lock { border: 0; padding: 0; margin: 0; min-width: 0; display: flex; flex-direction: column; gap: 32px; }
+.fields-lock:disabled .field input, .fields-lock:disabled .field select { opacity: 1; color: var(--ink);
+  background: rgba(255, 255, 255, .5); cursor: default; }
+.fields-lock:disabled .check { cursor: default; }
+.req { color: var(--red); font-weight: 600; }
+.req-note { margin: -16px 0 0; font: 400 12px/1.3 var(--font); color: var(--ink-60); }
 .check { display: flex; align-items: flex-start; gap: 12px; font: 400 14px/1.45 var(--font); color: var(--ink-80); cursor: pointer; }
 .check input { width: 16px; height: 16px; margin: 2px 0 0; accent-color: var(--blue); flex: none; }
 .check a { color: var(--blue); text-decoration: underline; }

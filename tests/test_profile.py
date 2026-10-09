@@ -198,7 +198,30 @@ class TestCabinetPage(_CabinetDB):
                 self.assertIn("Данные пользователя", html)
                 self.assertIn('href="/logout"', html, "кнопка «Выйти» из макета")
                 self.assertIn('href="/profile?tab=plan"', html)
-                self.assertIn("Сохранить изменения", html)
+                self.assertIn('href="/profile?edit=1">Редактировать', html)
+
+    def test_filled_profile_is_locked_until_edit(self):
+        """Просьба владельца 09.10.2026: форма — просмотр, правка по «Редактировать»; обязательные поля и
+        согласие — со звёздочкой, согласие обязательно."""
+        u = self._user()
+        locked = self._page(u)
+        self.assertIn('<fieldset class="fields-lock" disabled>', locked)
+        self.assertNotIn('type="submit"', locked[locked.index('<form class="panel"'):], "в просмотре форму можно отправить")
+        edit = self._page(u, edit="1")
+        self.assertIn('<fieldset class="fields-lock">', edit)
+        self.assertIn("Сохранить изменения", edit)
+        self.assertIn('<a class="ds-link" href="/profile">Отменить</a>', edit)
+        for label in ("ФИО", "Рабочий email", "Телефон", "Регион"):
+            self.assertRegex(edit, label + r' <b class="req" aria-hidden="true">\*</b></span>')
+        self.assertNotRegex(edit, r'Должность <b class="req"', "необязательное поле со звёздочкой")
+        consent = edit[edit.index('name="consent"'):]
+        self.assertIn('value="1"  required>', consent[:80].replace("checked", ""))
+        self.assertIn('<b class="req" aria-hidden="true">*</b> Я даю согласие', consent)
+
+    def test_form_opens_by_itself_when_there_is_something_to_fix(self):
+        self.assertIn('<fieldset class="fields-lock">', self._page(self._user(complete=False)), "гейт до чата закрыт")
+        r = self._submit(self._user(), consent="")
+        self.assertIn('<fieldset class="fields-lock">', r.body.decode("utf-8"), "ошибка сохранения в закрытой форме")
 
     def test_org_and_inn_are_read_only(self):
         u = self._user()

@@ -337,7 +337,8 @@ def _profile_form(user: User, **over) -> dict:
 
 def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
                       saved: bool = False, error: str | None = None, status_code: int = 200,
-                      requested: str = "", confirm: dict | None = None, tariff_kind: str = ""):
+                      requested: str = "", confirm: dict | None = None, tariff_kind: str = "",
+                      editing: bool = False):
     """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
@@ -350,6 +351,10 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
              quota=pv["quota"] if pv else None,
              requested=requested if requested in LEAD_TARIFFS else "",
              confirm=confirm, tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
+             # Форма профиля — просмотр, правка по «Редактировать» (просьба владельца 09.10.2026). Открыта
+             # сразу, пока профиль не заполнен (гейт до чата) и когда сохранение вернуло ошибку — иначе
+             # нечего было бы исправлять.
+             editing=editing or needs_profile(user) or bool(error),
              can_leave=not needs_profile(user)),
         status_code=status_code,
     )
@@ -357,7 +362,7 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
 
 @router.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, tab: str = "profile", saved: str = "", requested: str = "",
-                 err: str = ""):
+                 err: str = "", edit: str = ""):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
@@ -379,7 +384,7 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
             error = PLAN_REQUEST_ERRORS[code]
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
                              requested=requested, error=error, confirm=confirm,
-                             tariff_kind=qp.get("kind", ""))
+                             tariff_kind=qp.get("kind", ""), editing=edit == "1")
 
 
 # «Подключить» на витрине тарифов кабинета (09.10.2026). Оплаты в сервисе нет — это заявка,

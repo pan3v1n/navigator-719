@@ -174,8 +174,12 @@
       </div>
       {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
+      {# Просмотр по умолчанию, правка — по «Редактировать» (просьба владельца 09.10.2026): весь набор
+         полей и согласие — в fieldset, который в просмотре disabled (поля не уходят с формой и не
+         правятся). «Редактировать» — ссылка `?edit=1`: работает и без скрипта. #}
+      <fieldset class="fields-lock"{% if not editing %} disabled{% endif %}>
       <div class="grid2">
-        <label class="field"><span>ФИО</span>
+        <label class="field"><span>ФИО <b class="req" aria-hidden="true">*</b></span>
           <input name="full_name" value="{{ form.full_name }}" placeholder="Фамилия Имя Отчество"
                  autocomplete="name" maxlength="200" required{% if not can_leave %} autofocus{% endif %}>
         </label>
@@ -183,17 +187,17 @@
           <input name="position" value="{{ form.position }}" placeholder="Например, эксперт"
                  autocomplete="organization-title" maxlength="128">
         </label>
-        <label class="field"><span>Рабочий email</span>
+        <label class="field"><span>Рабочий email <b class="req" aria-hidden="true">*</b></span>
           <input name="email" type="email" value="{{ form.email }}" placeholder="name@tpp.ru"
                  autocomplete="email" maxlength="255" required>
         </label>
-        <label class="field"><span>Телефон</span>
+        <label class="field"><span>Телефон <b class="req" aria-hidden="true">*</b></span>
           <input name="phone" type="tel" value="{{ form.phone }}" placeholder="+7 900 000-00-00"
                  autocomplete="tel" maxlength="32" required>
         </label>
         {# Регион — список с поиском по совпадению (просьба владельца 09.10.2026). Обычный <select>
            остаётся: без JS работает он, со скриптом его подменяет поле ввода с фильтром (ниже). #}
-        <div class="field"><span id="region-label">Регион</span>
+        <div class="field"><span id="region-label">Регион <b class="req" aria-hidden="true">*</b></span>
           <select name="region" id="region-select" aria-labelledby="region-label" required>
             <option value="" disabled {% if not form.region %}selected{% endif %}>— выберите регион —</option>
             {% for r in regions %}
@@ -223,17 +227,24 @@
 
       <label class="check">
         <input type="checkbox" name="consent" value="1" {% if form.consent %}checked{% endif %} required>
-        <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, рабочий email, телефон,
+        <span><b class="req" aria-hidden="true">*</b> Я даю согласие на обработку моих персональных данных (ФИО, регион, рабочий email, телефон,
           а если я их укажу — должность и ник в Telegram; содержание диалогов с сервисом) оператором —
           {{ org }} — в целях проведения тестирования и улучшения сервиса «Навигатор ПП №719», на условиях
           <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
           Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
       </label>
+      </fieldset>
+      <p class="req-note"><b class="req" aria-hidden="true">*</b> — обязательные поля и согласие</p>
       <p class="plan-note" style="margin:0">Не вводите данные ограниченного доступа: вопросы обрабатывает
         внешняя языковая модель.</p>
 
       <div class="save-row">
+        {% if editing %}
         <button class="ds-btn" type="submit">{% if can_leave %}Сохранить изменения{% else %}Сохранить и продолжить{% endif %}</button>
+        {% if can_leave %}<a class="ds-link" href="/profile">Отменить</a>{% endif %}
+        {% else %}
+        <a class="ds-btn secondary" href="/profile?edit=1">Редактировать</a>
+        {% endif %}
         {% if saved %}<span class="saved-note" role="status">Изменения сохранены</span>{% endif %}
       </div>
     </form>
