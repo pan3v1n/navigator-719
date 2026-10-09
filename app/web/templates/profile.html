@@ -81,7 +81,7 @@
                  autocomplete="name" maxlength="200" required{% if not can_leave %} autofocus{% endif %}>
         </label>
         <label class="field"><span>Должность</span>
-          <input name="position" value="{{ form.position }}" placeholder="Например, эксперт отдела экспертизы"
+          <input name="position" value="{{ form.position }}" placeholder="Например, эксперт"
                  autocomplete="organization-title" maxlength="128">
         </label>
         <label class="field"><span>Рабочий email</span>
@@ -92,14 +92,22 @@
           <input name="phone" type="tel" value="{{ form.phone }}" placeholder="+7 900 000-00-00"
                  autocomplete="tel" maxlength="32">
         </label>
-        <label class="field"><span>Регион</span>
-          <select name="region" required>
+        {# Регион — список с поиском по совпадению (просьба владельца 09.10.2026). Обычный <select>
+           остаётся: без JS работает он, со скриптом его подменяет поле ввода с фильтром (ниже). #}
+        <div class="field"><span id="region-label">Регион</span>
+          <select name="region" id="region-select" aria-labelledby="region-label" required>
             <option value="" disabled {% if not form.region %}selected{% endif %}>— выберите регион —</option>
             {% for r in regions %}
             <option value="{{ r }}" {% if r == form.region %}selected{% endif %}>{{ r }}</option>
             {% endfor %}
           </select>
-        </label>
+          <div class="combo hidden" id="region-combo">
+            <input id="region-input" type="text" role="combobox" aria-labelledby="region-label"
+                   aria-autocomplete="list" aria-expanded="false" aria-controls="region-list"
+                   autocomplete="off" spellcheck="false" placeholder="Начните вводить регион">
+            <ul class="combo-list hidden" id="region-list" role="listbox" aria-labelledby="region-label"></ul>
+          </div>
+        </div>
         <label class="field"><span>Ник в Telegram</span>
           <input name="telegram" value="{{ form.telegram }}" placeholder="@username" maxlength="128" required>
         </label>
@@ -133,4 +141,113 @@
     {% endif %}
   </div>
 </div>
+{% if tab != 'plan' %}
+<script>
+  // Регион с поиском по совпадению. Значение по-прежнему уходит в <select name="region">: поле ввода
+  // только выбирает в нём вариант, поэтому на сервер попадает лишь регион из справочника (его
+  // проверяет и сервер). Совпадение — по каждому слову запроса в любом месте названия, «ё» = «е»:
+  // «курск» → Курская область, «моск обл» → Московская область.
+  (function () {
+    var sel = document.getElementById("region-select"), combo = document.getElementById("region-combo");
+    var input = document.getElementById("region-input"), list = document.getElementById("region-list");
+    if (!sel || !combo) return;
+    var regions = Array.prototype.filter.call(sel.options, function (o) { return o.value; })
+      .map(function (o) { return o.value; });
+    var norm = function (s) { return s.toLowerCase().replace(/ё/g, "е").replace(/\s+/g, " ").trim(); };
+    var shown = [], active = -1;
+
+    sel.classList.add("hidden");
+    sel.required = false;          // скрытое обязательное поле браузер не может подсветить
+    combo.classList.remove("hidden");
+    input.required = true;
+    input.value = sel.value;
+
+    function match(q) {
+      var words = norm(q).split(" ").filter(Boolean);
+      return regions.filter(function (r) {
+        var n = norm(r);
+        return words.every(function (w) { return n.indexOf(w) !== -1; });
+      });
+    }
+    function render() {
+      list.innerHTML = "";
+      if (!shown.length) {
+        var empty = document.createElement("li");
+        empty.className = "combo-empty";
+        empty.textContent = "Ничего не найдено";
+        list.appendChild(empty);
+      }
+      shown.forEach(function (r, i) {
+        var li = document.createElement("li");
+        li.id = "region-opt-" + i;
+        li.setAttribute("role", "option");
+        li.setAttribute("aria-selected", r === sel.value ? "true" : "false");
+        li.textContent = r;
+        if (i === active) li.classList.add("active");
+        li.addEventListener("mousedown", function (e) { e.preventDefault(); pick(r); });
+        list.appendChild(li);
+      });
+      input.setAttribute("aria-activedescendant", active >= 0 ? "region-opt-" + active : "");
+      var cur = list.querySelector(".active");
+      if (cur) cur.scrollIntoView({ block: "nearest" });
+    }
+    function open(q) {
+      shown = match(q);
+      active = shown.length ? 0 : -1;
+      list.classList.remove("hidden");
+      input.setAttribute("aria-expanded", "true");
+      render();
+    }
+    function close() {
+      list.classList.add("hidden");
+      input.setAttribute("aria-expanded", "false");
+    }
+    function pick(r) {
+      sel.value = r;
+      input.value = r;
+      input.setCustomValidity("");
+      close();
+    }
+    // Точное название (без учёта регистра и «ё») выбирает регион и без клика по списку.
+    function syncExact() {
+      var hit = regions.filter(function (r) { return norm(r) === norm(input.value); })[0];
+      sel.value = hit || "";
+      if (hit) input.setCustomValidity("");
+    }
+
+    input.addEventListener("focus", function () { open(input.value === sel.value ? "" : input.value); });
+    input.addEventListener("input", function () { syncExact(); open(input.value); });
+    input.addEventListener("keydown", function (e) {
+      var isOpen = !list.classList.contains("hidden");
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        if (!isOpen) { open(input.value === sel.value ? "" : input.value); return; }
+        if (!shown.length) return;
+        active = (active + (e.key === "ArrowDown" ? 1 : -1) + shown.length) % shown.length;
+        render();
+      } else if (e.key === "Enter" && isOpen && active >= 0) {
+        e.preventDefault();       // Enter выбирает регион, а не отправляет форму
+        pick(shown[active]);
+      } else if (e.key === "Escape" && isOpen) {
+        e.preventDefault();
+        close();
+      }
+    });
+    input.addEventListener("blur", function () {
+      syncExact();
+      var only = match(input.value);
+      if (!sel.value && input.value.trim() && only.length === 1) pick(only[0]);   // «курск» → единственный вариант
+      close();
+    });
+    input.form.addEventListener("submit", function (e) {
+      syncExact();
+      if (!sel.value) {
+        e.preventDefault();
+        input.setCustomValidity("Выберите регион из списка");
+        input.reportValidity();
+      }
+    });
+  })();
+</script>
+{% endif %}
 {% endblock %}

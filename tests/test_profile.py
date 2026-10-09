@@ -268,6 +268,34 @@ class TestCabinetSave(_CabinetDB):
                 self.assertIn("Вернуться к сервису", body, "ре-рендер ошибки теряет выход (ревью 08.10)")
         self.assertIsNone(self._fresh(u.id).email)
 
+    def test_region_only_from_the_list(self):
+        u = self._user()
+        r = self._submit(u, region="Курская обл")
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("Выберите регион из списка", r.body.decode("utf-8"))
+        self.assertEqual(self._fresh(u.id).region, COMPLETE["region"], "регион вне справочника сохранён")
+
+    def test_region_combobox_keeps_select_fallback(self):
+        """Поиск по региону (просьба владельца 09.10.2026) — поверх обычного <select>: без JS
+        работает он, и значение формы всегда уходит из него."""
+        html = self._page(self._user())
+        self.assertIn('<select name="region" id="region-select"', html)
+        self.assertIn('id="region-input" type="text" role="combobox"', html)
+        self.assertIn('<option value="Курская область" selected>', html)
+        script = html[html.index('getElementById("region-select")'):]
+        self.assertIn('replace(/ё/g, "е")', script, "«ё» и «е» в поиске различаются")
+        self.assertIn("words.every", script, "совпадение не по каждому слову запроса")
+        self.assertIn('sel.required = false', script, "скрытый обязательный select блокирует отправку")
+        self.assertNotIn('id="region-input"', self._page(self._user(), tab="plan"))
+
+    def test_position_hint_fits_the_field(self):
+        """Замечание владельца: подсказка «Должности» не помещалась в поле (ширина колонки ~220 px)."""
+        html = self._page(self._user())
+        tag = html[html.index('name="position"'):]
+        hint = tag[tag.index('placeholder="') + 13:]
+        hint = hint[:hint.index('"')]
+        self.assertLessEqual(len(hint), 20, hint)
+
     def test_form_cannot_write_org(self):
         """Организацию и ИНН ведёт admin: поля `org`/`inn` в POST /profile отбрасываются."""
         from fastapi.testclient import TestClient

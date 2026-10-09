@@ -133,6 +133,47 @@ class _GuestBase(unittest.TestCase):
         return sum(1 for m in self.rows() if m.charged)
 
 
+class TestLoginDemo(unittest.TestCase):
+    """Демо-чат на синей панели входа (как на лендинге, 09.10.2026). Страница публичная: каждый
+    пример ссылается на пункт и обязан стоять на его тексте — цитату ищем в корпусе внутри ЭТОГО
+    пункта, а не во всём документе."""
+
+    KB = ROOT / "knowledge_base" / "pp719"
+
+    @staticmethod
+    def _norm(s):
+        return " ".join(s.replace("ё", "е").split())
+
+    def test_every_quote_is_in_its_point(self):
+        import re
+
+        for d in web.LOGIN_DEMO:
+            with self.subTest(ref=d["ref"]):
+                text = (self.KB / d["src"]).read_text(encoding="utf-8")
+                start = text.index(d["start"])
+                # пункт кончается на следующем номере («\n8. », «\n4.2. ») или строке позиции приложения
+                nxt = re.compile(r"\n(\d+(\.\d+)*\.? |(из )?\d{2}\.\d{2}[\d.]*\|)").search(text, start + 1)
+                point = text[start:nxt.start() if nxt else len(text)]
+                self.assertIn(self._norm(d["quote"]), self._norm(point), "цитата не из этого пункта")
+
+    def test_no_phrases_the_points_do_not_have(self):
+        for d in web.LOGIN_DEMO:
+            self.assertNotIn("территориальн", d["a"], "«через территориальные палаты» в пунктах нет")
+            self.assertNotIn("конструкторск", d["a"], "перечня документов к заявке в пунктах нет")
+
+    def test_page_starts_with_the_checked_example_and_animates(self):
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        html = TestClient(app).get("/login").text
+        self.assertIn('id="auth-demo-ref">п. 7 Правил</span>', html, "без JS — первый, сверенный пример")
+        self.assertIn("var DEMO = ", html)
+        self.assertIn("prefers-reduced-motion", html, "анимация не уважает «уменьшить движение»")
+        self.assertEqual(html.count('<span class="on"></span>') + html.count("<span></span>") >= len(web.LOGIN_DEMO), True)
+        self.assertNotIn("quote", html, "служебные поля сверки ушли на страницу")
+
+
 class TestGuestCookie(unittest.TestCase):
     def _req(self, value):
         return SimpleNamespace(cookies={trial.GUEST_COOKIE: value} if value is not None else {})
@@ -188,6 +229,13 @@ class TestGuestPage(_GuestBase):
         self.assertNotIn("пробный доступ", html)
         self.assertIn("window.GUEST = null", html)
         self.assertIn('id="fb-open"', html)
+
+    def test_login_page_has_no_tariff_lead(self):
+        """Решение владельца 09.10.2026: подзаголовка «Для сотрудников организаций с подключённым
+        тарифом» на входе нет — его не было и в макете, а с пробным режимом он ещё и неправда."""
+        html = self.client.get("/login").text
+        self.assertIn("Вход в Навигатор", html)
+        self.assertNotIn("подключённым тарифом", html)
 
     def test_login_page_knows_the_trial(self):
         html = self.client.get("/login").text
