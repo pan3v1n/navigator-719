@@ -143,6 +143,9 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
   cursor: pointer; font: 400 14px/1.35 var(--font); color: var(--text-80); }
 .plan.org .addon { background: var(--white); }
 .addon input { margin: 2px 0 0; width: 16px; height: 16px; accent-color: var(--blue); flex: none; }
+.addon .incl-check { width: 16px; height: 16px; margin-top: 2px; border-radius: 4px; flex: none; display: inline-flex;
+  align-items: center; justify-content: center; background: var(--blue); color: #fff; }
+.addon.incl { cursor: default; }
 .addon b { display: block; font-weight: 500; color: var(--text); }
 .addon small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-60); }
 .btn-2l { flex-direction: column; gap: 3px; line-height: 1.1; }

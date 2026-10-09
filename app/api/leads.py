@@ -60,7 +60,7 @@ class LeadIn(BaseModel):
     # ⚠ `Any`, а не строгие типы (ревью PR #184): несовпадение типа FastAPI отвергал бы своим ответом
     # `{"detail": [...]}`, которого форма не понимает, — разбор и ошибки делает `lead_options`.
     kind: Any = "individual"
-    addon: Any = False
+    addon: Any = False   # опция витрины снята (источники бесплатны, 09.10.2026) — старый скрипт её шлёт, не читаем
     period: Any = "month"
     seats: Any = 1
     trial: Any = False
@@ -73,11 +73,9 @@ def lead_options(f: LeadIn) -> tuple[str | None, dict[str, str]]:
     kind = f.kind if isinstance(f.kind, str) else "?"
     period = f.period if isinstance(f.period, str) else "?"
     seats = f.seats if isinstance(f.seats, int) and not isinstance(f.seats, bool) else 0
-    opts, e = pricing.parse_options(f.tariff, kind=kind, addon=f.addon is True, period=period,
-                                    seats=seats, trial=f.trial is True)
-    for k in ("addon", "trial"):
-        if not isinstance(getattr(f, k), bool):
-            e[k] = "Опция — да или нет"
+    opts, e = pricing.parse_options(f.tariff, kind=kind, period=period, seats=seats, trial=f.trial is True)
+    if not isinstance(f.trial, bool):
+        e["trial"] = "Проба — да или нет"
     return (None if e else opts), e
 
 

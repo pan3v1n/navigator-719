@@ -140,9 +140,8 @@
             {% if promo %}<s class="price-old">{{ pricing.PRICE }} ₽/мес</s><div class="price">{{ pricing.TRIAL_TEXT }}</div>
             {% else %}<div class="price">{{ pricing.PRICE }} ₽/<span class="per">мес</span></div>{% endif %}
           </div>
-          <label class="addon"><input type="checkbox" name="addon" value="1">
-            <span><b>{{ pricing.ADDON }}</b>
-              <small>{% if promo %}{{ pricing.ADDON_FREE }}, далее + {{ pricing.PRICE }} ₽/мес за {{ pricing.ADDON_SOURCE }}{% else %}+ {{ pricing.PRICE }} ₽/<span class="per">мес</span> за {{ pricing.ADDON_SOURCE }}{% endif %}</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
+            <span><b>{{ pricing.SOURCES }}</b><small>{{ pricing.SOURCES_NOTE }}</small></span></div>
           <button class="ds-btn block tcard-btn" type="submit">
             {% if promo %}Подключить за {{ pricing.TRIAL_PRICE }}<small>далее {{ pricing.PRICE }} ₽/мес</small>
             {% else %}Подключить<small>за {{ pricing.PRICE }} ₽/<span class="per">мес</span></small>{% endif %}</button>

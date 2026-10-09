@@ -76,21 +76,21 @@
           <div class="plan-head"><div class="plan-name">Старт</div></div>
           <div class="plan-desc">До 100 запросов в месяц для редких обращений или знакомства с сервисом</div>
           <div class="plan-price"><div class="price-old">X XXX ₽/мес</div><div class="price">1 ₽ первая неделя</div></div>
-          <label class="addon"><input type="checkbox" data-addon><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно первый месяц, далее + X XXX ₽/мес за Гарант Лайт</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
           <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Старт" data-trial="1">Подключить за 1 ₽<small>далее X XXX ₽/мес</small></button>
         </div>
         <div class="plan" data-plan="Стандарт">
           <div class="plan-head"><div class="plan-name">Стандарт</div></div>
           <div class="plan-desc">До 200 запросов в месяц для регулярной работы с постановлением</div>
           <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
-          <label class="addon"><input type="checkbox" data-addon><span><b>Доступ к источникам в ответах Навигатора</b><small>+ X XXX ₽/<span class="per">мес</span> за Гарант Лайт</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
           <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Стандарт">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan" data-plan="Профи">
           <div class="plan-head"><div class="plan-name">Профи</div></div>
           <div class="plan-desc">До 400 запросов в месяц для ежедневной работы эксперта</div>
           <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
-          <label class="addon"><input type="checkbox" data-addon><span><b>Доступ к источникам в ответах Навигатора</b><small>+ X XXX ₽/<span class="per">мес</span> за Гарант Лайт</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
           <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Профи">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan org">
@@ -113,7 +113,7 @@
           <div class="plan-desc">До 100 запросов в месяц для редких обращений или знакомства с сервисом</div>
           <div class="plan-ctl"><div class="mini-seg" role="radiogroup" aria-label="Период оплаты"><label><input type="radio" name="period-start" value="month" checked><span>месяц</span></label><label><input type="radio" name="period-start" value="year"><span>год</span></label></div><div class="seats"><button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button><input type="number" value="1" min="1" max="500" inputmode="numeric" aria-label="Число пользователей" data-seats><button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button><span class="seats-l">польз.</span></div></div>
           <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
-          <label class="addon"><input type="checkbox" data-addon><span><b>Доступ к источникам в ответах Навигатора</b><small>+ X XXX ₽/<span class="per">мес</span> за Гарант Лайт</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
           <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Старт">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan" data-plan="Стандарт" data-corp>
@@ -121,7 +121,7 @@
           <div class="plan-desc">До 200 запросов в месяц для регулярной работы с постановлением</div>
           <div class="plan-ctl"><div class="mini-seg" role="radiogroup" aria-label="Период оплаты"><label><input type="radio" name="period-standard" value="month" checked><span>месяц</span></label><label><input type="radio" name="period-standard" value="year"><span>год</span></label></div><div class="seats"><button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button><input type="number" value="1" min="1" max="500" inputmode="numeric" aria-label="Число пользователей" data-seats><button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button><span class="seats-l">польз.</span></div></div>
           <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
-          <label class="addon"><input type="checkbox" data-addon><span><b>Доступ к источникам в ответах Навигатора</b><small>+ X XXX ₽/<span class="per">мес</span> за Гарант Лайт</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
           <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Стандарт">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan" data-plan="Профи" data-corp>
@@ -129,7 +129,7 @@
           <div class="plan-desc">До 400 запросов в месяц для ежедневной работы эксперта</div>
           <div class="plan-ctl"><div class="mini-seg" role="radiogroup" aria-label="Период оплаты"><label><input type="radio" name="period-pro" value="month" checked><span>месяц</span></label><label><input type="radio" name="period-pro" value="year"><span>год</span></label></div><div class="seats"><button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button><input type="number" value="1" min="1" max="500" inputmode="numeric" aria-label="Число пользователей" data-seats><button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button><span class="seats-l">польз.</span></div></div>
           <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
-          <label class="addon"><input type="checkbox" data-addon><span><b>Доступ к источникам в ответах Навигатора</b><small>+ X XXX ₽/<span class="per">мес</span> за Гарант Лайт</small></span></label>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
           <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Профи">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan org">
@@ -148,12 +148,12 @@
       <div class="fine" data-panel="individual">
         <p>Лицензия на месяц предоставляется для 1 пользователя.</p>
         <p>Акция до ДД.ММ.ГГГГ: первая неделя тарифа «Старт» — за 1 ₽, далее — по цене тарифа.</p>
-        <p>При выборе опции «Доступ к источникам в ответах Навигатора» формируется заявка на тариф с доступом к источникам «Гарант Лайт». Окончательную стоимость тарифа сообщит специалист после заявки.</p>
+        <p>Доступ к источникам в ответах Навигатора — бесплатно во всех тарифах. Окончательную стоимость тарифа сообщит специалист после заявки.</p>
         <p>Стоимость не включает проведение экспертизы ТПП и оформление акта экспертизы.</p>
       </div>
       <div class="fine" data-panel="corporate" hidden>
         <p>Лицензия предоставляется на выбранное число пользователей и период.</p>
-        <p>При выборе опции «Доступ к источникам в ответах Навигатора» формируется заявка на тариф с доступом к источникам «Гарант Лайт». Окончательную стоимость тарифа сообщит специалист после заявки.</p>
+        <p>Доступ к источникам в ответах Навигатора — бесплатно во всех тарифах. Окончательную стоимость тарифа сообщит специалист после заявки.</p>
         <p>Стоимость не включает проведение экспертизы ТПП и оформление акта экспертизы.</p>
       </div>
     </section>

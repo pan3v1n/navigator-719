@@ -1075,6 +1075,9 @@ body.tour-on { overflow: hidden; }
 .tcard .addon { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border-radius: 10px; background: var(--gray);
   cursor: pointer; font: 400 13px/1.35 var(--font); color: var(--ink-80); }
 .tcard .addon input { margin: 2px 0 0; width: 16px; height: 16px; accent-color: var(--blue); flex: none; }
+.tcard .addon .incl-check { width: 16px; height: 16px; margin-top: 2px; border-radius: 4px; flex: none; display: inline-flex;
+  align-items: center; justify-content: center; background: var(--blue); color: #fff; }
+.tcard .addon.incl { cursor: default; }
 .tcard .addon b { display: block; font-weight: 500; color: var(--ink); }
 .tcard .addon small { display: block; font-size: 12px; color: var(--ink-60); }
 .tcard-btn { height: auto; min-height: 56px; padding: 8px 12px; flex-direction: column; gap: 2px; line-height: 1.15; }

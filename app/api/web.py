@@ -369,7 +369,7 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
     if tab == "plan" and qp.get("confirm") == "1":
         seats = qp.get("seats")
         fields, summary, code = _plan_choice(qp.get("tariff", ""), qp.get("kind") or "individual",
-                                             qp.get("addon", ""), qp.get("period") or "month",
+                                             qp.get("period") or "month",
                                              "1" if seats is None else seats, qp.get("trial", ""))
         if code is None and not (user.email and user.phone):
             code = "profile"
@@ -402,25 +402,25 @@ PLAN_REQUEST_ERRORS = {
 }
 
 
-def _plan_choice(tariff: str, kind: str, addon: str, period: str, seats: str, trial: str):
+def _plan_choice(tariff: str, kind: str, period: str, seats: str, trial: str):
     """Выбор на карточке → (поля заявки, строка условий, код ошибки). Один разбор и для панели
     подтверждения, и для самой заявки. Пользователей — только ASCII-цифры: «²».isdigit() — True, а
     int("²") роняет обработчик в 500 (ревью PR #184); пустое поле — ошибка, а не молча «1»."""
     if tariff not in LEAD_TARIFFS:
         return None, None, "tariff"
     n = int(seats) if seats.isascii() and seats.isdigit() and len(seats) <= 4 else 0
-    summary, errs = pricing.parse_options(tariff, kind=kind, addon=bool(addon), period=period,
-                                          seats=n, trial=bool(trial))
+    summary, errs = pricing.parse_options(tariff, kind=kind, period=period, seats=n, trial=bool(trial))
     if errs:
         return None, None, "options"
     fields = {"tariff": tariff, "kind": kind, "period": period, "seats": str(n)}
-    fields.update({k: "1" for k, on in (("addon", addon), ("trial", trial)) if on})
+    if trial:
+        fields["trial"] = "1"
     return fields, summary, None
 
 
 @router.post("/api/plan-request", response_class=HTMLResponse)
 def plan_request(request: Request, tariff: str = Form(default=""), kind: str = Form(default="individual"),
-                 addon: str = Form(default=""), period: str = Form(default="month"),
+                 period: str = Form(default="month"),
                  seats: str = Form(default="1"), trial_flag: str = Form(default="", alias="trial"),
                  consent: str = Form(default="")):
     # `trial_flag`, а не `trial`: имя занято модулем `app.api.trial` (ревью PR #184)
@@ -434,7 +434,7 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         tab_kind = "&kind=corporate" if kind == "corporate" else ""
         return RedirectResponse(f"/profile?tab=plan&err={err}{tab_kind}#tariffs", status_code=303)
 
-    _, options, code = _plan_choice(tariff, kind, addon, period, seats, trial_flag)
+    _, options, code = _plan_choice(tariff, kind, period, seats, trial_flag)
     if code:
         return back(code)
     # Заявка — ПДн со временем согласия (152-ФЗ). Согласие — галочкой на панели подтверждения, как в

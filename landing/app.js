@@ -143,8 +143,8 @@
   });
 
   // ---- тариф: карточки и переключатель в форме ----
-  // Опции карточки (вид, период, пользователи, проба за 1 ₽, «Доступ к источникам в ответах Навигатора») едут
-  // в заявку; выбор тарифа чипом в форме — заявка без опций.
+  // Условия карточки (вид, период, пользователи, проба за 1 ₽) едут в заявку; выбор тарифа чипом в
+  // форме — заявка без условий. Доступ к источникам бесплатен во всех тарифах — выбирать нечего.
   var chips = document.querySelectorAll('#tariff-chips button'), tariff = 'Стандарт', opts = null,
       optsEl = document.getElementById('tariff-opts');
   function optsText(o) {
@@ -152,7 +152,6 @@
     var parts = [];
     if (o.kind === 'corporate') parts.push('корпоративный', o.period === 'year' ? 'год' : 'месяц', o.seats + ' польз.');
     if (o.trial) parts.push('пробная неделя за 1 ₽');
-    if (o.addon) parts.push('доступ к источникам в ответах Навигатора');
     return parts.join(' · ');
   }
   function setTariff(name, o) {
@@ -166,9 +165,9 @@
     b.addEventListener('click', function () {
       var card = b.closest('.plan'), o = null, name = b.getAttribute('data-pick');
       if (name !== 'Для организаций') {
-        var corp = card.hasAttribute('data-corp'), add = card.querySelector('[data-addon]'),
+        var corp = card.hasAttribute('data-corp'),
             per = card.querySelector('.mini-seg input:checked'), seats = card.querySelector('[data-seats]');
-        o = { kind: corp ? 'corporate' : 'individual', addon: !!(add && add.checked), trial: b.hasAttribute('data-trial'),
+        o = { kind: corp ? 'corporate' : 'individual', trial: b.hasAttribute('data-trial'),
               period: per ? per.value : 'month', seats: seats ? Math.max(1, Math.min(parseInt(seats.value, 10) || 1, 500)) : 1 };
       }
       setTariff(name, o);
@@ -242,7 +241,7 @@
       return;
     }
     var payload = { tariff: tariff, consent: true, nav719_hp: input('nav719_hp').value };
-    if (opts) { payload.kind = opts.kind; payload.addon = opts.addon; payload.trial = opts.trial;
+    if (opts) { payload.kind = opts.kind; payload.trial = opts.trial;
                 payload.period = opts.period; payload.seats = opts.seats; }
     ['name', 'org', 'inn', 'email', 'phone', 'promo'].forEach(function (n) { payload[n] = input(n).value.trim(); });
     submitBtn.disabled = true;
