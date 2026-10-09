@@ -607,8 +607,12 @@ def admin_lead_account(request: Request, lead_id: int, username: str = Form(defa
             if plan:
                 day = plans.msk_today()
                 until = day + timedelta(days=plans.TRIAL_DAYS) if plan == plans.TRIAL_PLAN else None
+                # заявка с корпоративной карточки или «Для организаций» — корпоративный тариф (продление —
+                # через связь с заказчиком, вечер 09.10.2026); организация из заявки — не подтверждена
+                corporate = "корпоративный" in (lead.options or "") or lead.tariff == "Для организаций"
                 q.set_user_plan(db, uid, plan, plans.anchor_from_date(day),
-                                plans.anchor_from_date(until) if until else None)
+                                plans.anchor_from_date(until) if until else None,
+                                kind="corporate" if corporate else None)
             q.set_lead_status(db, lead_id, "connected", user_id=uid)
     if error:
         return _leads_response(request, admin, error=error, error_lead=lead_id, form=form,

@@ -36,7 +36,8 @@ from app.api.leads import TARIFFS as LEAD_TARIFFS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import pricing
+from app.core import plans, pricing
+from app.core.plans import PLAN_LIMITS
 from app.core.inn import inn_valid
 from app.core.config import settings
 from app.core.release import release_label
@@ -339,7 +340,7 @@ def _profile_form(user: User, **over) -> dict:
 def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
                       saved: bool = False, error: str | None = None, status_code: int = 200,
                       requested: str = "", confirm: dict | None = None, tariff_kind: str = "",
-                      editing: bool = False):
+                      editing: bool = False, renew: dict | None = None):
     """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
@@ -351,7 +352,8 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
              tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
              quota=pv["quota"] if pv else None,
              requested=requested if requested in LEAD_TARIFFS else "",
-             confirm=confirm, tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
+             confirm=confirm, renew=renew, renewable=user.plan in PLAN_LIMITS,
+             tariff_kind=tariff_kind if tariff_kind in pricing.KINDS else "individual",
              # Форма профиля — просмотр, правка по «Редактировать» (просьба владельца 09.10.2026). Открыта
              # сразу, пока профиль не заполнен (гейт до чата) и когда сохранение вернуло ошибку — иначе
              # нечего было бы исправлять.
@@ -370,9 +372,15 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
     # «Подключить» на карточке — GET сюда же с выбранными условиями: панель подтверждения с данными
     # из профиля и галочкой согласия; заявку создаёт только она (`/api/plan-request`). Поля читаются из
     # адреса, а не параметрами функции: имя `trial` занято модулем.
-    qp, confirm = request.query_params, None
+    qp, confirm, renew = request.query_params, None, None
     error = PLAN_REQUEST_ERRORS.get(err)
-    if tab == "plan" and qp.get("confirm") == "1":
+    if tab == "plan" and qp.get("renew") == "1":
+        renew = _renewal(user)
+        if renew is None:
+            error = PLAN_REQUEST_ERRORS["renew"]
+        elif not (user.email and user.phone):
+            renew, error = None, PLAN_REQUEST_ERRORS["profile"]
+    elif tab == "plan" and qp.get("confirm") == "1":
         seats = qp.get("seats")
         fields, summary, code = _plan_choice(qp.get("tariff", ""), qp.get("kind") or "individual",
                                              qp.get("period") or "month",
@@ -380,11 +388,13 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
         if code is None and not (user.email and user.phone):
             code = "profile"
         if code is None:
-            confirm = {"tariff": fields["tariff"], "summary": summary, "fields": fields}
+            # Корпоративный тариф и «Для организаций» — только через связь с заказчиком: попап с комментарием
+            confirm = {"tariff": fields["tariff"], "summary": summary, "fields": fields,
+                       "popup": fields["kind"] == "corporate" or fields["tariff"] == pricing.ORG_TARIFF}
         else:
             error = PLAN_REQUEST_ERRORS[code]
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
-                             requested=requested, error=error, confirm=confirm,
+                             requested=requested, error=error, confirm=confirm, renew=renew,
                              tariff_kind=qp.get("kind", ""), editing=edit == "1")
 
 
@@ -405,7 +415,24 @@ PLAN_REQUEST_ERRORS = {
                "вами свяжутся.",
     "consent": "Отметьте согласие на обработку персональных данных — без него заявку не отправить.",
     "limit": "Слишком много заявок подряд — попробуйте через час.",
+    "renew": "Продлевается только текущий платный тариф — выберите тариф на витрине.",
+    "message": "Комментарий — не длиннее 1000 знаков.",
 }
+MESSAGE_LIMIT = 1000
+
+
+def _renewal(user: User) -> dict | None:
+    """«Продлить» (решение владельца 09.10.2026, вечер): только платный тариф. Новый срок — на месяц от
+    конца текущего, а если срока нет или он истёк — от сегодня. Личный продлевается заявкой (позже —
+    оплатой с личной карты), корпоративный — только через связь с заказчиком (попап)."""
+    if user.plan not in PLAN_LIMITS:
+        return None
+    today = plans.msk_today()
+    until = plans.msk_date(user.plan_expires_at) if user.plan_expires_at else None
+    base = max(today, until) if until else today
+    new = plans.add_months(datetime(base.year, base.month, base.day), 1).date()
+    return {"tariff": user.plan, "corporate": user.plan_kind == "corporate",
+            "now_until": f"{until:%d.%m.%Y}" if until else "", "new_until": f"{new:%d.%m.%Y}"}
 
 
 def _plan_choice(tariff: str, kind: str, period: str, seats: str, trial: str):
@@ -428,7 +455,8 @@ def _plan_choice(tariff: str, kind: str, period: str, seats: str, trial: str):
 def plan_request(request: Request, tariff: str = Form(default=""), kind: str = Form(default="individual"),
                  period: str = Form(default="month"),
                  seats: str = Form(default="1"), trial_flag: str = Form(default="", alias="trial"),
-                 consent: str = Form(default="")):
+                 consent: str = Form(default=""), renew: str = Form(default=""),
+                 message: str = Form(default="")):
     # `trial_flag`, а не `trial`: имя занято модулем `app.api.trial` (ревью PR #184)
     user = current_user(request)
     if not user:
@@ -437,12 +465,23 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
     def back(err: str):
         # Ошибка — внутри витрины и на той вкладке, с которой пришла заявка (повторное ревью PR #184:
         # над карточкой тарифа она уезжала за край экрана, а корпоративная возвращалась на «Индивидуальные»)
+        if renew == "1":    # продление — назад к его панели, а не к витрине
+            return RedirectResponse(f"/profile?tab=plan&renew=1&err={err}#renew", status_code=303)
         tab_kind = "&kind=corporate" if kind == "corporate" else ""
         return RedirectResponse(f"/profile?tab=plan&err={err}{tab_kind}#tariffs", status_code=303)
 
-    _, options, code = _plan_choice(tariff, kind, period, seats, trial_flag)
-    if code:
-        return back(code)
+    msg = message.strip()
+    if len(msg) > MESSAGE_LIMIT:
+        return back("message")
+    if renew == "1":
+        r = _renewal(user)
+        if r is None or tariff != r["tariff"]:
+            return back("renew")
+        options = ("корпоративный · " if r["corporate"] else "") + f"продление до {r['new_until']}"
+    else:
+        _, options, code = _plan_choice(tariff, kind, period, seats, trial_flag)
+        if code:
+            return back(code)
     # Заявка — ПДн со временем согласия (152-ФЗ). Согласие — галочкой на панели подтверждения, как в
     # форме лендинга (политика, раздел 9): согласие анкеты дано на другую цель — тестирование сервиса
     # (повторное ревью PR #184). Контакты обязательны: без них с человеком не связаться.
@@ -456,7 +495,7 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         lead = q.create_lead(db, tariff=tariff, name=user.full_name or user.username, org=user.org or "",
                              inn=user.inn or "", email=user.email, phone=user.phone,
                              options=" · ".join(filter(None, ("из личного кабинета", options))),
-                             user_id=user.id)
+                             user_id=user.id, message=msg)
         q.purge_old_leads(db)   # срок хранения политики — и на этом пути новой заявки (ревью PR #184)
     logger.info(f"заявка #{lead.id} из кабинета: user_id={user.id}, тариф «{tariff}»")
     return RedirectResponse(f"/profile?tab=plan&requested={quote(tariff)}", status_code=303)

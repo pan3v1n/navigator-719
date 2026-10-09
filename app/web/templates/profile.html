@@ -2,6 +2,17 @@
 {% from "_mark.html" import mark %}
 {% block title %}Личный кабинет — {{ app_title }}{% endblock %}
 {% block body %}
+{# Заявка из кабинета: какие данные уйдут и согласие на их обработку — общие для подтверждения, продления и попапа #}
+{% macro req_who() %}<p class="tconfirm-who">В заявку попадут данные из профиля: {{ user.full_name or user.username }}{% if user.org %},
+  {{ user.org }}{% endif %}{% if user.inn %}, ИНН {{ user.inn }}{% endif %}, {{ user.email }}, {{ user.phone }}.</p>{% endmacro %}
+{% macro req_consent() %}<label class="tconfirm-consent"><input type="checkbox" name="consent" value="1" required>
+  <span>Даю согласие на обработку моих персональных данных — ФИО, организации, ИНН, рабочего email и
+    телефона из профиля — чтобы со мной связались по заявке и подключили тариф, в соответствии с
+    <a class="ds-link" href="/privacy" target="_blank" rel="noopener">политикой обработки персональных данных</a>
+    (раздел 9).</span></label>{% endmacro %}
+{% macro req_message() %}<label class="field tconfirm-msg"><span>Комментарий</span>
+  <textarea name="message" maxlength="1000" rows="3" autofocus
+            placeholder="Сколько сотрудников подключить, удобное время для звонка"></textarea></label>{% endmacro %}
 {# Макет «Navigator 719 Service», экран «Личный кабинет» (account). Решения владельца 09.10.2026:
    * поля — макетные плюс наши: ФИО, регион, рабочий email и телефон обязательны, должность и
      Telegram — по желанию (уточнение того же дня; в гейт до чата входят ФИО и регион — см.
@@ -74,9 +85,45 @@
           <span class="plan-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
           <span><b>Доступ к источникам в ответах Навигатора</b><span>Подключено</span></span>
         </div>
-        {% if quota %}<a class="ds-btn block" href="#tariffs">Сменить тариф</a>{% endif %}
+        {% if renewable %}<a class="ds-btn block" href="/profile?tab=plan&amp;renew=1#renew">Продлить</a>{% endif %}
+        {% if quota %}<a class="ds-btn block{% if renewable %} secondary{% endif %}" href="#tariffs">Сменить тариф</a>{% endif %}
       </div>
     </div>
+    {# «Продлить» (решение владельца 09.10.2026, вечер): личный тариф — панель с новым сроком и стоимостью,
+       пока заявкой (позже — «Оплатить картой» с личной карты); корпоративный — только через связь с
+       заказчиком, попапом с комментарием. #}
+    {% if renew and not renew.corporate %}
+    <form class="tconfirm" id="renew" method="post" action="/api/plan-request">
+      <h2>Продление тарифа «{{ renew.tariff }}»</h2>
+      {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+      <dl class="renew-facts">
+        <div><dt>Сейчас</dt><dd>{{ 'до ' ~ renew.now_until if renew.now_until else 'бессрочно' }}</dd></div>
+        <div><dt>После продления</dt><dd>до {{ renew.new_until }}</dd></div>
+        <div><dt>Стоимость</dt><dd>{{ pricing.PRICE }} ₽/мес</dd></div>
+      </dl>
+      <p>Оплата картой появится позже — пока отправьте заявку: специалист свяжется с вами и продлит тариф.</p>
+      {{ req_who() }}
+      <input type="hidden" name="tariff" value="{{ renew.tariff }}"><input type="hidden" name="renew" value="1">
+      {{ req_consent() }}
+      <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить заявку на продление</button>
+        <a class="ds-link" href="/profile?tab=plan">Отменить</a></div>
+    </form>
+    {% elif renew %}
+    <div class="modal-back" id="renew">
+      <form class="modal" role="dialog" aria-modal="true" aria-labelledby="renew-h" method="post" action="/api/plan-request">
+        <h2 id="renew-h">Продление тарифа «{{ renew.tariff }}»</h2>
+        {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+        <p>Корпоративный тариф продлевается через связь с заказчиком: оставьте комментарий — менеджер
+          свяжется с вами и согласует условия. Сейчас: {{ 'до ' ~ renew.now_until if renew.now_until else 'бессрочно' }}.</p>
+        {{ req_message() }}
+        {{ req_who() }}
+        <input type="hidden" name="tariff" value="{{ renew.tariff }}"><input type="hidden" name="renew" value="1">
+        {{ req_consent() }}
+        <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить</button>
+          <a class="ds-link modal-close" href="/profile?tab=plan">Отменить</a></div>
+      </form>
+    </div>
+    {% endif %}
     {# Витрина тарифов (решение владельца 09.10.2026: «как у Нейроюриста, но с плейсхолдерами вместо
        сумм»). Описание — `app/core/pricing.py`, лендинг повторяет его (сверяет тест). Оплаты нет:
        «Подключить» открывает подтверждение — условия, данные из профиля и галочка согласия на обработку
@@ -84,23 +131,35 @@
        admin в «Заявках». Ошибки и подтверждение — внутри витрины: к ней ведёт `#tariffs`. #}
     {% set titles = {'individual': 'Тарифы для индивидуального использования', 'corporate': 'Тарифы для организаций'} %}
     <section class="tariffs" id="tariffs" aria-labelledby="tariffs-h">
-      {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
-      {% if confirm %}
+      {% if error and not renew %}<div class="error" role="alert">{{ error }}</div>{% endif %}
+      {% if confirm and not confirm.popup %}
       <form class="tconfirm" method="post" action="/api/plan-request">
         <h2>Заявка на тариф «{{ confirm.tariff }}»</h2>
         <p class="tconfirm-opts">{% if confirm.summary %}{{ confirm.summary[0] | upper }}{{ confirm.summary[1:] }}{% else %}Без дополнительных условий{% endif %}.
           Окончательную стоимость сообщит специалист после заявки.</p>
-        <p class="tconfirm-who">В заявку попадут данные из профиля: {{ user.full_name or user.username }}{% if user.org %},
-          {{ user.org }}{% endif %}{% if user.inn %}, ИНН {{ user.inn }}{% endif %}, {{ user.email }}, {{ user.phone }}.</p>
+        {{ req_who() }}
         {% for k, v in confirm.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
-        <label class="tconfirm-consent"><input type="checkbox" name="consent" value="1" required>
-          <span>Даю согласие на обработку моих персональных данных — ФИО, организации, ИНН, рабочего email и
-            телефона из профиля — чтобы со мной связались по заявке и подключили тариф, в соответствии с
-            <a class="ds-link" href="/privacy" target="_blank" rel="noopener">политикой обработки персональных данных</a>
-            (раздел 9).</span></label>
+        {{ req_consent() }}
         <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить заявку</button>
           <a class="ds-link" href="/profile?tab=plan#tariffs">Отменить</a></div>
       </form>
+      {% elif confirm %}
+      {# Корпоративный тариф — только через связь с заказчиком (решение владельца 09.10.2026, вечер): попап с
+         комментарием. Рисует его сервер — работает и без скрипта; «Отменить» и Esc возвращают к витрине. #}
+      <div class="modal-back">
+        <form class="modal" role="dialog" aria-modal="true" aria-labelledby="contact-h" method="post" action="/api/plan-request">
+          <h2 id="contact-h">Связаться с нами</h2>
+          <p>{% if confirm.tariff == pricing.ORG_TARIFF %}Расскажите, что нужно организации, — менеджер свяжется с вами
+            и подготовит условия.{% else %}Тариф «{{ confirm.tariff }}», {{ confirm.summary }}. Корпоративный тариф
+            подключается через связь с заказчиком — менеджер свяжется с вами и согласует условия и оплату.{% endif %}</p>
+          {{ req_message() }}
+          {{ req_who() }}
+          {% for k, v in confirm.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
+          {{ req_consent() }}
+          <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить</button>
+            <a class="ds-link modal-close" href="/profile?tab=plan&amp;kind={{ confirm.fields.kind }}#tariffs">Отменить</a></div>
+        </form>
+      </div>
       {% endif %}
       <div class="tariffs-head">
         <h2 id="tariffs-h">{{ titles[tariff_kind] }}</h2>
@@ -367,6 +426,11 @@
 {% endif %}
 {% if tab == 'plan' %}
 <script>
+  // Попап «Связаться с нами» рисует сервер; Esc — то же, что «Отменить».
+  document.addEventListener("keydown", function (e) {
+    var close = document.querySelector(".modal-close");
+    if (e.key === "Escape" && close) location.href = close.href;
+  });
   // Витрина тарифов: вкладки «Индивидуальные» / «Корпоративные», период и число пользователей.
   // Суммы — плейсхолдеры, считать нечего: период меняет только подпись «/мес» ↔ «/год».
   (function () {
