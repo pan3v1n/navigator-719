@@ -21,7 +21,7 @@
     <tbody>
     {% for d in items %}
       <tr>
-        <td><a class="adm-strong" href="/admin/dialogs/{{ d.sid }}">{{ d.title | truncate(110) }}</a>
+        <td><a class="adm-strong" href="/admin/dialogs/{{ d.sid }}?u={{ d.user_id }}">{{ d.title | truncate(110) }}</a>
           {% if d.lowrel %}<span class="badge warn">низкая релевантность</span>{% endif %}
           {% if d.unverified %}<span class="badge bad">непроверенные числа</span>{% endif %}</td>
         <td><a href="/admin/users/{{ d.user_id }}">{{ d.user }}</a></td>

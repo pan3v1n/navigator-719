@@ -84,7 +84,10 @@ def main() -> int:
           "/admin/users без входа → на вход (раздел панели существует)", f"/admin/users без входа → {code}")
     code, page, h = http("/chat")
     cookie = h.get("set-cookie", h.get("Set-Cookie", ""))
-    if settings.GUEST_TRIAL_ENABLED:
+    # Нет настройки — старый образ (положительный контроль): это провал проверки, а не падение.
+    trial_on = getattr(settings, "GUEST_TRIAL_ENABLED", None)
+    check(trial_on is not None, "в образе есть настройки пробного режима", "в образе нет пробного режима — образ старый")
+    if trial_on:
         check(code == 200 and 'id="guest-banner"' in page and "guest719=" in cookie,
               "/chat без входа — пробный режим, кука гостя ставится",
               f"/chat без входа → {code}, баннер пробы {'есть' if 'guest-banner' in page else 'нет'}")
@@ -93,7 +96,7 @@ def main() -> int:
               f"пробный режим выключен, а /chat без входа → {code}")
     code, body, _ = http("/api/guest/chat", data=b'{"message": "check"}',
                          headers={"Content-Type": "application/json"})
-    want = 403 if settings.GUEST_TRIAL_ENABLED else 404
+    want = 403 if trial_on else 404
     check(code == want, f"вопрос гостя без куки → {want} до движка", f"вопрос гостя без куки → {code} {body[:80]!r}")
     code, page, _ = http("/login")
     check(code == 200 and "подключенным тарифом" not in page and "подключённым тарифом" not in page,
@@ -165,14 +168,14 @@ def main() -> int:
               "истёкший срок тарифа → 402 до движка, причина названа",
               f"срок не держит: {status} {detail[:100]!r}, движок звался {len(called)} раз")
 
-        # 3в. потолки пробного режима — до движка: личный (402) и общий суточный (429)
+        # 3в. потолки пробного режима — бронью до движка: личный (402) и общий суточный (429)
         n, total = settings.GUEST_TRIAL_QUESTIONS, settings.GUEST_DAILY_TOTAL
         with S() as db:
             for i in range(n):
                 q.log_guest_message(db, guest_id="spent", session_id="s", role="assistant",
                                     content=f"ответ {i}", charged=True)
         try:
-            guest_mod._enforce_trial(req(), "spent", chat_mod.ChatRequest(message="ещё вопрос"))
+            guest_mod._reserve(req(), "spent", "s2", "ещё вопрос")
             status = 200
         except HTTPException as e:
             status = e.status_code
@@ -182,7 +185,7 @@ def main() -> int:
                 q.log_guest_message(db, guest_id=f"g{i}", session_id="s", role="assistant",
                                     content="ответ", charged=True)
         try:
-            guest_mod._enforce_trial(req(), "fresh", chat_mod.ChatRequest(message="первый вопрос"))
+            guest_mod._reserve(req(), "fresh", "f1", "первый вопрос")
             status = 200
         except HTTPException as e:
             status = e.status_code

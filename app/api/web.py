@@ -24,6 +24,7 @@ from app.api.auth import (
     login_session,
     logout_session,
     needs_profile,
+    remember_from,
     require_user_profiled,
     set_remember_cookie,
 )
@@ -275,9 +276,13 @@ def _guest_chat_page(request: Request) -> HTMLResponse:
 
 @router.get("/chat", response_class=HTMLResponse)
 def chat_page(request: Request):
+    # Вход был, но погас (блокировка, сброс пароля — `current_user` чистит сессию) — на вход, а не в
+    # пробный режим: иначе заблокированный продолжал бы спрашивать гостем, а эксперт после сброса
+    # пароля молча получал бы урезанные ответы (ревью PR #182). Признак — до `current_user`.
+    had_login = bool(request.session.get("user_id")) or remember_from(request) is not None
     user = current_user(request)
     if not user:
-        if settings.GUEST_TRIAL_ENABLED:
+        if settings.GUEST_TRIAL_ENABLED and not had_login:
             return _guest_chat_page(request)
         return RedirectResponse("/login", status_code=302)
     if needs_profile(user):  # жёсткий гейт: роль user не в чат, пока не заполнит профиль+согласие

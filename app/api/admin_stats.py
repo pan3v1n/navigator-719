@@ -273,7 +273,7 @@ def build_admin_view(
                         "unverified": orig.unverified_json,
                         "low_relevance": bool(orig.low_relevance),
                         "comment": f.comment or "", "correction": f.correction or "",
-                        "session_id": f.session_id,
+                        "session_id": f.session_id, "owner_id": orig.user_id,
                     })
                 if f.correction:
                     corrections.append({"user": u.username, "region": u_region,

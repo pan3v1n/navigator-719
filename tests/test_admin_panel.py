@@ -139,6 +139,22 @@ class TestEpochAndBlocking(_PanelDB):
             db.commit()
         self.assertFalse(self._signed_in(browser), "сессия заблокированного жива")
 
+    def test_lapsed_login_goes_to_login_not_to_the_trial(self):
+        """Ревью PR #182: `current_user` чистит погасшую сессию, и `/chat` открывал пробный режим —
+        заблокированный спрашивал гостем, эксперт после сброса пароля молча получал урезанные ответы."""
+        def chat(client):
+            r = client.get("/chat", follow_redirects=False)
+            return r.status_code, r.headers.get("location")
+
+        u = self._mk("kursk.expert5", role="expert")
+        blocked = self._login("kursk.expert5")
+        remembered = self._login("kursk.expert5", remember=True)
+        self.as_admin.post(f"/api/admin/users/{u.id}/block", data={"blocked": "1"})
+        self.assertEqual(chat(blocked), (302, "/login"), "заблокированный попал в пробный режим")
+        remembered.cookies.pop("session", None)                 # осталась только «запомнить меня»
+        self.assertEqual(chat(remembered), (302, "/login"))
+        self.assertEqual(chat(self.TestClient(self.app))[0], 200, "аноним без входа — пробный режим")
+
 
 class TestUsersList(_PanelDB):
     def setUp(self):
@@ -171,6 +187,16 @@ class TestUsersList(_PanelDB):
             with self.subTest(query=query):
                 self.assertEqual(self._logins(query), expect)
         self.assertEqual(len(self._logins()), 4)
+
+    def test_no_profile_follows_the_chat_gate(self):
+        """Ревью PR #182: «профиль не заполнен» в фильтре и в Сводке был копией правила гейта —
+        следующая правка гейта развела бы их. Меняем гейт — фильтр и счётчик идут за ним."""
+        from app.api import admin_summary
+
+        with mock.patch.object(auth, "profile_complete", lambda user: False):
+            self.assertEqual(self._logins("?status=no_profile"), ["kursk.expert1", "orel.expert1"])
+            with self.Session() as db:
+                self.assertEqual(admin_summary.summary_view(db)["accounts"]["no_profile"], 2)
 
     def test_recent_activity_first_and_badges(self):
         html = self.as_admin.get("/admin/users").text
@@ -314,7 +340,11 @@ class TestSummary(_PanelDB):
                              "реплика прошлого месяца попала в месяц или ранняя реплика месяца потерялась")
 
     def test_attention_lists(self):
-        with self.Session() as db:
+        from datetime import timedelta
+
+        with self.Session() as db:    # тариф admin'а не закрывается (plan_expired) — не «истекает»
+            q.set_user_plan(db, self.admin.id, "Администратор", plans.anchor_from_date(plans.msk_today()),
+                            plans.anchor_from_date(plans.msk_today() - timedelta(days=1)))
             s = self.summary.summary_view(db, self.now)
         self.assertEqual([u["username"] for u in s["expiring"]], ["kursk.a"])
         self.assertEqual([u["username"] for u in s["expired"]], ["kursk.b"])
@@ -385,6 +415,28 @@ class TestLeadsToAccounts(_PanelDB):
         self.assertEqual(again.status_code, 400)
         self.assertIn("уже создана: i.petrov", again.text)
         self.assertIn(f'href="/admin/users/{u.id}">i.petrov</a>', self.as_admin.get("/admin/leads").text)
+
+    def test_status_filter_reaches_past_the_page_limit(self):
+        """Ревью PR #182: фильтр статуса шёл ПОСЛЕ лимита страницы — старые новые заявки
+        были недостижимы, хотя счётчик на чипе их считал."""
+        self.as_admin.post(f"/api/admin/leads/{self.other}/status", data={"status": "in_work"})
+        with mock.patch.object(adm, "LEADS_ON_PAGE", 1):
+            page = self.as_admin.get("/admin/leads?status=new").text
+            everything = self.as_admin.get("/admin/leads").text
+        self.assertIn("ООО «Станкозавод»", page, "старая новая заявка не видна под фильтром")
+        self.assertIn("Новая · 1", page)
+        self.assertNotIn("показаны последние", page, "под фильтром показаны все новые")
+        self.assertIn("2 всего · показаны последние 1", everything)
+
+    def test_deleted_account_releases_its_lead(self):
+        """Ревью PR #182: заявка держала id удалённой учётки — «уже создана» навсегда, а id,
+        который SQLite отдаст следующей учётке, показал бы на заявке чужого человека."""
+        self.as_admin.post(f"/api/admin/leads/{self.lead}/account", data={"username": "i.petrov"})
+        uid = self._lead(self.lead).user_id
+        self.as_admin.post(f"/api/admin/users/{uid}/delete", data={"confirm": "i.petrov"})
+        self.assertIsNone(self._lead(self.lead).user_id, "заявка ссылается на удалённую учётку")
+        again = self.as_admin.post(f"/api/admin/leads/{self.lead}/account", data={"username": "i.petrov"})
+        self.assertEqual(again.status_code, 200, "из заявки нельзя создать учётку заново")
 
     def test_suggestion_avoids_taken_login_and_bad_input_keeps_the_lead(self):
         self._mk("i.petrov")
@@ -502,7 +554,7 @@ class TestDialogs(_PanelDB):
 
     def _sids(self, query=""):
         html = self.as_admin.get("/admin/dialogs" + query).text
-        return [s for s in ("new", "mid", "old") if f'href="/admin/dialogs/{s}"' in html], html
+        return [s for s in ("new", "mid", "old") if f'href="/admin/dialogs/{s}?u=' in html], html
 
     def test_order_and_pages(self):
         sids, html = self._sids()
@@ -533,7 +585,7 @@ class TestDialogs(_PanelDB):
         self.assertEqual(self._sids(f"?date_from={today.isoformat()}")[0], ["new"])
 
     def test_thread_page(self):
-        html = self.as_admin.get("/admin/dialogs/mid").text
+        html = self.as_admin.get(f"/admin/dialogs/mid?u={self.v.id}").text
         for piece in ("Какие документы для реестра?", "Заявка через ГИСП.", "непроверенные числа: 25",
                       "Оценка эксперта: <b>1★</b>", "Исправление: <b>Через ТПП, а не ГИСП</b>",
                       f'href="/admin/users/{self.v.id}">perm.expert1</a>'):
@@ -541,6 +593,24 @@ class TestDialogs(_PanelDB):
         self.assertEqual(self.as_admin.get("/admin/dialogs/нет-такой").status_code, 404)
         anon = self.TestClient(self.app)
         self.assertEqual(anon.get("/admin/dialogs/mid", follow_redirects=False).headers["location"], "/login")
+
+    def test_same_session_id_of_two_users_stays_apart(self):
+        """Ревью PR #182: список группирует по паре (session_id, пользователь), а страница беседы
+        брала всё по session_id — две беседы с одним id открывались склейкой под логином первого."""
+        with self.Session() as db:
+            q.log_message(db, user_id=self.u.id, session_id="mid", role="user", content="Чужой вопрос в той же беседе")
+        html = self.as_admin.get("/admin/dialogs").text
+        for uid in (self.u.id, self.v.id):
+            self.assertIn(f'href="/admin/dialogs/mid?u={uid}"', html)
+        theirs = self.as_admin.get(f"/admin/dialogs/mid?u={self.v.id}").text
+        mine = self.as_admin.get(f"/admin/dialogs/mid?u={self.u.id}").text
+        self.assertNotIn("Чужой вопрос", theirs, "реплики другого пользователя склеены в беседу")
+        self.assertIn("Заявка через ГИСП.", theirs)
+        self.assertIn("Чужой вопрос в той же беседе", mine)
+        self.assertIn(f'href="/admin/users/{self.u.id}">kursk.expert1</a>', mine)
+        self.assertNotIn("Заявка через ГИСП.", mine)
+        bare = self.as_admin.get("/admin/dialogs/mid").text      # старая ссылка без владельца
+        self.assertNotIn("Чужой вопрос", bare, "без владельца — беседа первого автора, не склейка")
 
 
 class TestQualityInMoscowTime(_PanelDB):

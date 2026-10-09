@@ -33,7 +33,7 @@ from loguru import logger
 from app.api import quota
 from app.api.admin_stats import build_admin_view, system_health
 from app.api.admin_summary import summary_view
-from app.api.auth import current_user, generate_password, hash_password, require_admin
+from app.api.auth import current_user, generate_password, hash_password, needs_profile, require_admin
 from app.api.leads import _INN_RE as INN_RE
 from app.api.web import (
     ORG_LIMIT,
@@ -133,8 +133,9 @@ def _user_row(db, u: User, activity: dict) -> dict:
         "plan": u.plan or "", "unknown_plan": bool(u.plan) and u.plan not in plans.ALL_PLANS,
         "expires": quota.validity(u)["expires"], "expired": plans.plan_expired(u),
         "state": st, "blocked": u.blocked_at is not None,
-        # Профиль обязателен только роли user — у остальных пустой профиль не сигнал
-        "no_profile": u.role == "user" and not (u.consent and u.full_name and u.region),
+        # Профиль обязателен только роли user — у остальных пустой профиль не сигнал. Правило —
+        # гейта чата, а не копия: копии расходятся при первой правке гейта (ревью PR #182).
+        "no_profile": needs_profile(u),
         "last": _msk(last), "last_ts": last, "asked": asked,
     }
 
@@ -338,7 +339,8 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
     """Назначить тариф, дату подключения и срок (#160; срок и внутренние тарифы — 09.10.2026).
     Пустой тариф — снять лимит. Дата подключения по умолчанию — сегодня по Москве; в будущем
     нельзя: период, которого ещё нет, пользователь не увидит. Срок — дата, с которой тариф уже не
-    действует («Активен до …»); пусто — бессрочно, у «Пробного режима» — TRIAL_DAYS дней.
+    действует («Активен до …»); пусто — бессрочно, у «Пробного режима» — TRIAL_DAYS дней (от
+    подключения, но не раньше сегодняшнего дня).
     Срок в прошлом допустим: так admin закрывает доступ, не снимая тариф."""
     plan = plan.strip()
     if plan and plan not in plans.ALL_PLANS:
@@ -355,7 +357,10 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
         if expires.strip() and until is None:
             raise HTTPException(status_code=422, detail="Срок действия — в формате ГГГГ-ММ-ДД")
         if until is None and plan == plans.TRIAL_PLAN:
-            until = day + timedelta(days=plans.TRIAL_DAYS)
+            # Неделя — от даты подключения, но не раньше сегодняшнего дня: поле «С» в карточке
+            # предзаполнено подключением ПРЕЖНЕГО тарифа, и перевод давнего пользователя в пробу
+            # сохранялся уже истёкшим — «Тариф сохранён», а вопросы сразу 402 (ревью PR #182).
+            until = max(day, plans.msk_today()) + timedelta(days=plans.TRIAL_DAYS)
         if until is not None and until <= day:
             raise HTTPException(status_code=422, detail="Срок действия должен быть позже даты подключения")
         expires_at = plans.anchor_from_date(until) if until else None
@@ -470,16 +475,18 @@ def admin_orgs(request: Request):
 LEAD_STATUSES = {"new": "Новая", "in_work": "В работе", "connected": "Подключена", "rejected": "Отказ"}
 
 
-def _suggest_login(db, lead) -> str:
-    """Логин по умолчанию для учётки из заявки — из email (часть до @), латиницей, свободный."""
+def _suggest_login(lead, taken: set[str]) -> str:
+    """Логин по умолчанию для учётки из заявки — из email (часть до @), латиницей, свободный.
+    Занятые логины — одним запросом на страницу (`taken`), а не запросом на каждую попытку."""
     base = re.sub(r"[^a-z0-9._-]", "", (lead.email or "").split("@")[0].lower()).strip("._-")
     base = (base or f"client{lead.id}")[:56]
     if len(base) < 3:
         base = f"{base}.client"
     login, n = base, 1
-    while q.get_user_by_username(db, login) is not None:
+    while login in taken:
         n += 1
         login = f"{base}{n}"
+    taken.add(login)    # две заявки с одним email не получат один и тот же логин
     return login
 
 
@@ -500,17 +507,17 @@ def _leads_response(request: Request, admin: User, *, status: str = "", error: s
     status = status if status in LEAD_STATUSES else ""
     with get_session() as db:
         q.purge_old_leads(db)
-        leads = q.list_leads(db, limit=LEADS_ON_PAGE)
+        leads = q.list_leads(db, limit=LEADS_ON_PAGE, status=status or None)
         counts = {s: q.count_leads(db, s) for s in LEAD_STATUSES}
         leads_total = q.count_leads(db)
+        linked_users = q.users_by_ids(db, (lead.user_id for lead in leads))
+        taken = q.all_usernames(db)
         rows = []
         for lead in leads:
-            if status and lead.status != status:
-                continue
-            linked = q.get_user(db, lead.user_id) if lead.user_id else None
+            linked = linked_users.get(lead.user_id)
             rows.append({"lead": lead, "linked": linked.username if linked else "",
                          "linked_id": linked.id if linked else None,
-                         "suggest": _suggest_login(db, lead) if not lead.user_id else "",
+                         "suggest": _suggest_login(lead, taken) if not lead.user_id else "",
                          "plan": lead.tariff if lead.tariff in plans.ALL_PLANS else "",
                          "created": _msk(lead.created_at)})
     return _page(request, admin, "leads", "leads", "Заявки", status_code=status_code, rows=rows,
@@ -665,8 +672,14 @@ def admin_dialog(request: Request, session_id: str):
     gate = _gate(request)
     if isinstance(gate, RedirectResponse):
         return gate
+    # Владелец — из ссылки (`?u=`): список группирует беседы по паре (session_id, пользователь), а
+    # session_id присылает клиент. Без `u` — беседа первого автора, а не склейка чужих реплик под
+    # его логином (ревью PR #182).
+    uid = request.query_params.get("u", "")
     with get_session() as db:
-        msgs = q.get_dialog(db, session_id)
+        msgs = q.get_dialog(db, session_id, int(uid) if uid.isdigit() else None)
+        if msgs and not uid.isdigit():
+            msgs = [m for m in msgs if m.user_id == msgs[0].user_id]
         if not msgs:
             raise HTTPException(status_code=404, detail="Беседа не найдена")
         owner = q.get_user(db, msgs[0].user_id)
@@ -743,13 +756,13 @@ def _guest_view(db) -> dict:
     rows, open_q = [], {}
     for m in reversed(q.list_guest_messages(db, limit=GUEST_ON_PAGE)):   # по времени
         if m.role == "user":
+            # засчитывается строка вопроса — бронь до движка (`guest._reserve`, ревью PR #182)
             row = {"ts": f"{plans.naive_utc(m.ts) + plans.MSK_OFFSET:%d.%m %H:%M}",
-                   "question": m.content, "answer": "", "tokens": 0, "charged": False}
+                   "question": m.content, "answer": "", "tokens": 0, "charged": bool(m.charged)}
             rows.append(row)
             open_q[m.session_id] = row
         elif (row := open_q.pop(m.session_id, None)) is not None:
-            row.update(answer=m.content, charged=m.charged,
-                       tokens=(m.prompt_tokens or 0) + (m.completion_tokens or 0))
+            row.update(answer=m.content, tokens=(m.prompt_tokens or 0) + (m.completion_tokens or 0))
     return {"rows": rows[::-1], "today": q.count_guest_answers_since(db, day_start),
             "cap": settings.GUEST_DAILY_TOTAL, "enabled": settings.GUEST_TRIAL_ENABLED,
             "per_guest": settings.GUEST_TRIAL_QUESTIONS, "per_ip": settings.GUEST_IP_PER_DAY}

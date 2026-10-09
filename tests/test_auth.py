@@ -273,6 +273,68 @@ class TestGuestTrialLimits(_GuestBase):
         self.assertEqual(self.charged(), 3)
         self.assertEqual(self.ask("Вопрос 2", sid="s7").status_code, 402, "повтор в ДРУГОЙ беседе — не повтор")
 
+    def test_repeat_is_served_from_storage_without_engine(self):
+        """Ревью PR #182: повтор лишь не засчитывался, а движок звался заново — тот же вопрос в
+        цикле давал безлимитные вызовы DeepSeek мимо всех потолков. Теперь — сохранённый ответ."""
+        first = self.ask("Вопрос", sid="s1").json()
+        rows = len(self.rows())
+        for _ in range(5):
+            r = self.ask("Вопрос", sid="s1")
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["answer"], first["answer"])
+            self.assertEqual(r.json()["sources"], first["sources"])
+        with self.client.stream("POST", "/api/guest/chat/stream",
+                                json={"message": "Вопрос", "session_id": "s1"}) as s:
+            body = "".join(s.iter_text())
+        self.assertIn('"type": "done"', body)
+        self.assertEqual(len(self.calls), 1, "повтор снова позвал движок")
+        self.assertEqual(len(self.rows()), rows, "повтор дописал строки в журнал")
+        self.assertEqual(self.charged(), 1)
+
+    def test_started_streams_count_at_once(self):
+        """Ревью PR #182: потолок проверялся по старому счёту, а вопрос стрима записывался на его
+        финале. Параллельные стримы (и оборванные после текста) проходили все — бронь до движка
+        засчитывает вопрос в момент старта, и пробу в 3 вопроса пять стартов не проходят."""
+        from fastapi import HTTPException
+        from starlette.requests import Request
+
+        cookie = f"{trial.GUEST_COOKIE}={self.client.cookies[trial.GUEST_COOKIE]}".encode()
+
+        def start(sid):
+            req = Request({"type": "http", "method": "POST", "path": "/", "headers": [(b"cookie", cookie)],
+                           "client": ("testclient", 0)})
+            try:
+                guest.guest_chat_stream(guest.ChatRequest(message="Вопрос", session_id=sid), req)
+                return 200
+            except HTTPException as e:
+                return e.status_code
+
+        self.assertEqual([start(f"p{i}") for i in range(5)], [200, 200, 200, 402, 402])
+        self.assertEqual(self.calls, [], "до чтения стрима движок не стартует — а вопросы уже засчитаны")
+        self.assertEqual(self.charged(), 3)
+
+    def test_stream_failure_drops_the_reservation(self):
+        def broken(message, **kw):
+            yield "delta", "Нача"
+            raise RuntimeError("обрыв DeepSeek")
+
+        with mock.patch.object(guest, "answer_stream", broken):
+            with self.client.stream("POST", "/api/guest/chat/stream",
+                                    json={"message": "Вопрос", "session_id": "f1"}) as s:
+                body = "".join(s.iter_text())
+        self.assertIn("stream_failed", body)
+        self.assertEqual((self.rows(), self.charged()), ([], 0), "фолбэк фронта запишет вопрос сам")
+        self.assertEqual(self.ask("Вопрос", sid="f1").json()["trial"]["used"], 1)
+
+    def test_engine_failure_returns_the_question(self):
+        def broken(message, **kw):
+            raise RuntimeError("DeepSeek недоступен")
+
+        with mock.patch.object(guest, "answer", broken):
+            self.assertEqual(self.ask().status_code, 503)
+        self.assertEqual([m.role for m in self.rows()], ["user"], "вопрос остаётся в журнале")
+        self.assertEqual(self.charged(), 0, "сбой движка потратил пробный вопрос")
+
     def test_daily_cap_for_all_guests(self):
         with self.Session() as db:
             for i in range(2):
@@ -336,7 +398,7 @@ class TestGuestAnswer(_GuestBase):
         self.assertEqual(self.rows(Message), [], "гостевая реплика попала в журнал пользователей")
         rows = self.rows()
         self.assertEqual([m.role for m in rows], ["user", "assistant"])
-        self.assertTrue(rows[1].charged)
+        self.assertEqual([m.charged for m in rows], [True, False], "засчитывается строка вопроса — бронь")
         self.assertIsNone(json.loads(rows[1].sources_json)[0]["text"])
         cols = {c["name"] for c in inspect(self.engine).get_columns("guest_messages")}
         self.assertFalse({"ip", "ip_address", "client_ip", "user_id"} & cols, cols)
@@ -415,6 +477,25 @@ class TestBriefGeneration(unittest.TestCase):
         cut, _, _ = self._answer(True, "length")
         self.assertTrue(cut.text.endswith(pipeline.BRIEF_CUT_NOTE), "обрыв по потолку не помечен")
 
+    def test_procedural_branch_is_brief_too(self):
+        """Ревью PR #182: процедурная ветка звала модель сама, мимо `brief`, — у гостя самые частые
+        вопросы (с них начинается демо входа) шли полной длиной и ценой."""
+        seen = []
+        planned = (None, [RULE], "КОНТЕКСТ", "вопрос с контекстом", "КОНТЕКСТ")
+        question = "Как внести продукцию в реестр российской промышленной продукции?"
+        with mock.patch.object(settings, "PROCEDURAL_DEFLECT_ENABLED", True), \
+             mock.patch.object(settings, "PROCEDURAL_ANSWER_FROM_RULES", True), \
+             mock.patch.object(pipeline, "plan_procedural", return_value=planned), \
+             mock.patch.object(pipeline, "_client", return_value=self._client("length", seen)):
+            brief = pipeline.answer(question, brief=True)
+            full = pipeline.answer(question)
+        self.assertEqual(len(seen), 2, "вопрос не ушёл процедурной веткой")
+        self.assertEqual(seen[0]["max_tokens"], settings.GUEST_MAX_TOKENS)
+        self.assertTrue(seen[0]["messages"][0]["content"].endswith(pipeline.BRIEF_NOTE))
+        self.assertTrue(brief.text.endswith(pipeline.BRIEF_CUT_NOTE), "обрыв по потолку не помечен")
+        self.assertNotIn("max_tokens", seen[1], "пользователь получил потолок гостя")
+        self.assertNotIn("сокращён", full.text)
+
     def test_stream_marks_the_cut(self):
         seen = []
 
@@ -442,6 +523,8 @@ class TestGuestAdminAndPolicy(_GuestBase):
 
     def test_admin_sees_guest_questions_and_old_ones_purged(self):
         self.ask("Что такое акт экспертизы?")
+        with mock.patch.object(guest, "answer", self._engine(_MetaAns)):
+            self.ask("Привет", sid="hi")
         with self.Session() as db:
             q.log_guest_message(db, guest_id="a" * 32, session_id="old", role="user", content="Древний вопрос")
             db.query(GuestMessage).filter(GuestMessage.content == "Древний вопрос").update(
@@ -454,6 +537,7 @@ class TestGuestAdminAndPolicy(_GuestBase):
         self.assertIn("Что такое акт экспертизы?", panel)
         self.assertIn("Ответ движка", panel)
         self.assertIn("<b>1 из 300</b>", panel)
+        self.assertEqual(panel.count("не засчитан"), 1, "засчитанность — со строки вопроса, приветствие не засчитано")
         self.assertNotIn("Древний вопрос", panel)
         self.assertNotIn("Древний вопрос", [m.content for m in self.rows()], "срок хранения не исполняется")
 

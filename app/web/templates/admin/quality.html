@@ -211,7 +211,7 @@
         <span class="ts">{{ b.ts }}</span>
         {% if b.unverified %}<span class="flag">непроверенные числа: {{ b.unverified }}</span>{% endif %}
         {% if b.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
-        <a class="bad-link" href="/admin/dialogs/{{ b.session_id }}">открыть беседу →</a>
+        <a class="bad-link" href="/admin/dialogs/{{ b.session_id }}?u={{ b.owner_id }}">открыть беседу →</a>
       </div>
       <div class="bad-q"><span class="lbl">Вопрос</span>{{ b.question or '—' }}</div>
       <details class="bad-a">

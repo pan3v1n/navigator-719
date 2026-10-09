@@ -1208,7 +1208,7 @@ def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
 
 
 def _answer_procedural(query: str, search_query: str,
-                       history: list[dict] | None = None) -> Answer:
+                       history: list[dict] | None = None, brief: bool = False) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
 
     Фолбэк: порядок действий и сроки НЕ выдумываем ни при каких условиях. Две причины —
@@ -1235,11 +1235,15 @@ def _answer_procedural(query: str, search_query: str,
     messages.append({"role": "user", "content": user})
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
-        messages=messages,
         temperature=0,  # детерминизм (как товарный путь): стабильный набор шагов/сроков
+        # brief — пробный режим и здесь (ревью PR #182): процедурные вопросы у гостя — самые
+        # частые (с них начинается демо входа), и без флага они шли полной длиной и ценой.
+        **_generation_kwargs(messages, brief),
     )
     usage = resp.usage
     raw = _strip_emoji(resp.choices[0].message.content or "")
+    if brief and resp.choices[0].finish_reason == "length":
+        raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
     # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
     # Числа из вопроса источником считаются законным (см. `unverified_numbers`).
     asked = _user_text(query, history)
@@ -1440,7 +1444,7 @@ def product_low_relevance(search_query: str, qvec: list[float] | None,
 
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
-                 history: list[dict] | None = None) -> "Answer | _Plan":
+                 history: list[dict] | None = None, brief: bool = False) -> "Answer | _Plan":
     """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
     поиск/реранк/кейсы → out-of-scope guard → сборка messages. Возвращает либо ранний Answer
     (meta / процедурный / нет-позиции — модель уже не нужна или отработала), либо _Plan для
@@ -1480,7 +1484,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         if procedural.is_procedural(search_query, has_code=bool(okpd2)):
             # Раньше здесь был немедленный дефер. Теперь маршрутизируем на корпус Правил реестра;
             # дефер остаётся ФОЛБЭКОМ внутри _answer_procedural (корпус пуст / ничего не нашлось).
-            return _answer_procedural(query, search_query, history)
+            return _answer_procedural(query, search_query, history, brief=brief)
 
     # T6: якорь-код диалога — код текущего хода приоритетен; если его нет, а ход продолжает
     # установленную позицию, берём последний код пользователя из истории (не «уходим» в другие коды).
@@ -1732,7 +1736,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     финальная генерация DeepSeek + faithfulness-постпроверка. Поведение НЕ изменилось при
     выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения).
     brief — пробный режим гостя (см. `_generation_kwargs`)."""
-    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history)
+    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief)
     if isinstance(planned, Answer):  # ранний путь (meta / процедурный / нет-позиции)
         return planned
     resp = _client().chat.completions.create(
@@ -1784,7 +1788,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     текст одним 'delta' + 'done' (стрим для _answer_procedural — фолоу-ап). LLM-путь: stream=True,
     копим текст; эмодзи чистим по кускам (дисплей = финал), в КОНЦЕ — faithfulness-постпроверка.
     Исключения наружу НЕ глушим — эндпоинт ловит их и сигналит фронту фолбэк на /api/chat."""
-    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history)
+    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief)
     if isinstance(planned, Answer):  # ранний путь — генерация не нужна / уже сделана
         yield "delta", planned.text
         yield "done", planned

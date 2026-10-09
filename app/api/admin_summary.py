@@ -15,6 +15,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from app.api import quota
+from app.api.auth import needs_profile
 from app.core import plans
 from app.core.config import settings
 from app.core.costs import cost_rub
@@ -81,7 +82,7 @@ def summary_view(db, now: datetime | None = None) -> dict:
     by_id = {u.id: u for u in users}
     expiring, expired, exhausted = [], [], []
     for u in users:
-        if not u.plan:
+        if not u.plan or u.role == "admin":   # тариф admin'а не закрывается никогда (plan_expired)
             continue
         if plans.plan_expired(u, now):
             expired.append(u)
@@ -114,8 +115,7 @@ def summary_view(db, now: datetime | None = None) -> dict:
         "accounts": {
             "total": len(users),
             "blocked": sum(1 for u in users if u.blocked_at is not None),
-            "no_profile": sum(1 for u in users if u.role == "user"
-                              and not (u.consent and u.full_name and u.region)),
+            "no_profile": sum(1 for u in users if needs_profile(u)),   # правило гейта чата, не копия
         },
         "leads": {"total": q.count_leads(db), "week": q.count_leads_since(db, today - timedelta(days=7)),
                   "new": q.count_leads(db, "new")},

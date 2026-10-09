@@ -521,8 +521,18 @@ class TestAdminSetsExpiry(_AdminPlanBase):
         self.assertIsNone(self._row().plan_expires_at, "снятый тариф оставил срок")
 
     def test_trial_defaults_to_a_week(self):
-        self._set(plans.TRIAL_PLAN, "2026-10-01")
-        self.assertEqual(self._row().plan_expires_at, msk(2026, 10, 1 + plans.TRIAL_DAYS))
+        today = plans.msk_today()
+        self._set(plans.TRIAL_PLAN, f"{today:%Y-%m-%d}")
+        self.assertEqual(self._row().plan_expires_at, plans.anchor_from_date(today + timedelta(days=plans.TRIAL_DAYS)))
+
+    def test_trial_from_a_stale_start_is_not_born_expired(self):
+        """Ревью PR #182: поле «С» в карточке предзаполнено подключением прежнего тарифа. Перевод
+        давнего пользователя в пробу давал срок в прошлом — «Тариф сохранён», а вопросы сразу 402."""
+        today = plans.msk_today()
+        self._set(plans.TRIAL_PLAN, f"{today - timedelta(days=60):%Y-%m-%d}")
+        u = self._row()
+        self.assertFalse(plans.plan_expired(u), "проба родилась истёкшей")
+        self.assertEqual(u.plan_expires_at, plans.anchor_from_date(today + timedelta(days=plans.TRIAL_DAYS)))
 
     def test_past_term_allowed_bad_term_rejected(self):
         self._set("Старт", "2026-09-01", "2026-09-15")            # срок в прошлом — так закрывают доступ

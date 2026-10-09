@@ -68,7 +68,7 @@
   <section class="adm-card{% if s.failures %} adm-danger{% endif %}">
     <h2>Вопросы без ответа · {{ s.periods.month.unanswered_n }}</h2>
     {% for f in s.failures %}
-    <div class="adm-fail"><a href="/admin/dialogs/{{ f.session_id }}">{{ f.text | truncate(140) }}</a>
+    <div class="adm-fail"><a href="/admin/dialogs/{{ f.session_id }}?u={{ f.user_id }}">{{ f.text | truncate(140) }}</a>
       <div class="muted">{{ f.user }} · {{ f.ts }}</div></div>
     {% else %}<p class="muted">В этом месяце все вопросы получили ответ.</p>{% endfor %}
     {% if s.periods.month.unanswered_n > s.failures | length %}<p class="muted">Показаны последние {{ s.failures | length }}.</p>{% endif %}

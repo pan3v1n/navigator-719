@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, select, update
 from sqlalchemy.orm import Session
 
 from app.db.models import AnswerUsage, Feedback, GuestMessage, Lead, Message, User, _utcnow
@@ -113,10 +113,14 @@ def set_blocked(db: Session, user_id: int, blocked: bool) -> User | None:
 
 def delete_user(db: Session, user_id: int) -> bool:
     """Удалить учётку вместе с профилем, диалогами, оценками и журналом расхода (каскады модели) —
-    по требованию субъекта ПДн (ст. 21 152-ФЗ). Необратимо."""
+    по требованию субъекта ПДн (ст. 21 152-ФЗ). Необратимо.
+
+    Заявка, из которой учётка создана, отвязывается (ревью PR #182): иначе она навсегда «уже
+    создана», а SQLite отдаёт освободившийся id следующей учётке — и заявка показала бы чужого."""
     u = db.get(User, user_id)
     if not u:
         return False
+    db.execute(update(Lead).where(Lead.user_id == user_id).values(user_id=None))
     db.delete(u)
     db.commit()
     return True
@@ -199,10 +203,13 @@ def dialog_texts(db: Session, *, user_id=None, since=None, until=None):
                                       user_id=user_id, since=since, until=until)).all()
 
 
-def get_dialog(db: Session, session_id: str) -> list[Message]:
-    """Беседа целиком (любого пользователя) — для просмотра в админке."""
-    return list(db.execute(select(Message).where(Message.session_id == session_id)
-                           .order_by(Message.id)).scalars())
+def get_dialog(db: Session, session_id: str, user_id: int | None = None) -> list[Message]:
+    """Беседа целиком — для просмотра в админке. Ключ беседы — пара (session_id, пользователь),
+    как в списке диалогов: `session_id` присылает клиент, и у двух людей он может совпасть."""
+    stmt = select(Message).where(Message.session_id == session_id)
+    if user_id is not None:
+        stmt = stmt.where(Message.user_id == user_id)
+    return list(db.execute(stmt.order_by(Message.id)).scalars())
 
 
 def feedback_for_messages(db: Session, message_ids: list[int]) -> dict[int, list[Feedback]]:
@@ -457,12 +464,28 @@ def create_lead(
     return lead
 
 
-def list_leads(db: Session, limit: int | None = None) -> list[Lead]:
-    """Заявки, свежие сверху; `limit` — сколько показать (админка не тянет все ПДн разом)."""
+def list_leads(db: Session, limit: int | None = None, status: str | None = None) -> list[Lead]:
+    """Заявки, свежие сверху; `limit` — сколько показать (админка не тянет все ПДн разом).
+    Фильтр статуса — в запросе, ДО лимита: иначе на странице «Новые» были бы лишь новые среди
+    последних `limit`, а старые новые недостижимы (ревью PR #182)."""
     stmt = select(Lead).order_by(Lead.created_at.desc(), Lead.id.desc())
+    if status:
+        stmt = stmt.where(Lead.status == status)
     if limit:
         stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def users_by_ids(db: Session, ids) -> dict[int, User]:
+    """Учётки по id одним запросом — для списков, где у каждой строки своя ссылка на учётку."""
+    ids = {i for i in ids if i}
+    if not ids:
+        return {}
+    return {u.id: u for u in db.execute(select(User).where(User.id.in_(ids))).scalars()}
+
+
+def all_usernames(db: Session) -> set[str]:
+    return set(db.execute(select(User.username)).scalars())
 
 
 def count_leads(db: Session, status: str | None = None) -> int:
@@ -542,14 +565,30 @@ def log_guest_message(
     return m
 
 
+def delete_guest_message(db: Session, message_id: int) -> None:
+    """Снять бронь пробного вопроса: потолок отказал или стрим упал (фолбэк фронта запишет вопрос заново)."""
+    db.execute(delete(GuestMessage).where(GuestMessage.id == message_id))
+    db.commit()
+
+
+def set_guest_charged(db: Session, message_id: int, charged: bool) -> None:
+    """Вернуть пробный вопрос: ответ не засчитывается (приветствие, сбой движка)."""
+    db.execute(update(GuestMessage).where(GuestMessage.id == message_id).values(charged=charged))
+    db.commit()
+
+
 def count_guest_answers(db: Session, guest_id: str) -> int:
-    """Сколько пробных вопросов гость уже потратил — засчитанные ответы за всё время."""
+    """Сколько пробных вопросов гость уже потратил — засчитанные строки за всё время.
+
+    ⚠ Засчитывается строка ВОПРОСА (ревью PR #182): она пишется бронью до движка, и потолок
+    считается вместе с ней — параллельные запросы не проскакивают его по старому счёту, а
+    оборванный стрим остаётся засчитанным, хотя строки ответа так и не появилось."""
     return db.execute(select(func.count(GuestMessage.id)).where(
         GuestMessage.guest_id == guest_id, GuestMessage.charged.is_(True))).scalar_one()
 
 
 def count_guest_answers_since(db: Session, since) -> int:
-    """Засчитанные ответы ВСЕМ гостям с момента `since` (наивное UTC) — общий суточный потолок."""
+    """Засчитанные вопросы ВСЕХ гостей с момента `since` (наивное UTC) — общий суточный потолок."""
     return db.execute(select(func.count(GuestMessage.id)).where(
         GuestMessage.charged.is_(True), GuestMessage.ts >= since)).scalar_one()
 
@@ -562,22 +601,19 @@ def get_guest_session_messages(db: Session, guest_id: str, session_id: str) -> l
         .order_by(GuestMessage.id)).scalars())
 
 
-def is_guest_answered_repeat(db: Session, guest_id: str, session_id: str, content: str,
-                             since) -> bool:
-    """Как `is_answered_repeat`: тот же вопрос в той же беседе уже получил ответ — это фолбэк
-    фронта после стрима, дошедшего до конца на сервере. Признак — из базы, не от клиента."""
-    first = db.execute(
-        select(func.min(GuestMessage.id)).where(
-            GuestMessage.guest_id == guest_id, GuestMessage.session_id == session_id,
-            GuestMessage.role == "user", GuestMessage.content == content, GuestMessage.ts >= since)
-    ).scalar()
-    if first is None:
-        return False
-    return db.execute(
-        select(GuestMessage.id).where(GuestMessage.guest_id == guest_id,
-                                      GuestMessage.session_id == session_id,
-                                      GuestMessage.role == "assistant", GuestMessage.id > first)
-        .limit(1)).first() is not None
+def guest_answered_repeat(db: Session, guest_id: str, session_id: str, content: str,
+                          since) -> GuestMessage | None:
+    """Тот же вопрос в той же беседе уже получил ответ в окне `since` — фолбэк фронта после стрима,
+    дошедшего до конца на сервере. Возвращает строку ЭТОГО ответа (свежайшего), чтобы отдать её
+    без движка. Признак — из базы, не от клиента; ответ — первая строка ассистента после вопроса
+    и до следующего вопроса беседы."""
+    found, waiting = None, False
+    for m in get_guest_session_messages(db, guest_id, session_id):
+        if m.role == "user":
+            waiting = m.content == content and m.ts >= since
+        elif waiting:
+            found, waiting = m, False
+    return found
 
 
 def list_guest_messages(db: Session, limit: int = 200) -> list[GuestMessage]:
