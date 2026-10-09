@@ -17,6 +17,7 @@
     <button class="tab" data-tab="logs">Логи</button>
     <button class="tab" data-tab="leads">Заявки<span class="tab-badge">{{ leads_total }}</span></button>
     <button class="tab" data-tab="plans">Тарифы</button>
+    <button class="tab" data-tab="guests">Пробный режим<span class="tab-badge">{{ guest_view.today }}</span></button>
   </div>
 
   <!-- Панель фильтров: единый срез для всех вкладок (изоляция когорты, сравнение регионов). -->
@@ -358,6 +359,27 @@
             </form></span>
         </div>
         {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <!-- ===== ПРОБНЫЙ РЕЖИМ (09.10.2026): вопросы без входа, обезличенно ===== -->
+  <section id="tab-guests" class="tab-panel hidden">
+    <div class="card">
+      <h3>Пробный режим без входа</h3>
+      <p class="muted">{% if guest_view.enabled %}Включён{% else %}<span class="warn">Выключен</span> (GUEST_TRIAL_ENABLED){% endif %}:
+        {{ guest_view.per_guest }} {{ guest_view.per_guest | plural('вопрос', 'вопроса', 'вопросов') }} на браузер,
+        не больше {{ guest_view.per_ip }} в сутки с одного адреса.
+        Сегодня засчитано <b>{{ guest_view.today }} из {{ guest_view.cap }}</b> ответов — общий суточный потолок
+        (по Москве); на нём пробный режим до полуночи закрывается для всех. Гости обезличены: ни учётки,
+        ни IP-адреса — только текст, время и токены. Реплики хранятся не дольше 6 месяцев.</p>
+      <div class="feed">
+        {% for r in guest_view.rows %}
+        <div class="feed-row">
+          <span class="feed-q"><b>{{ r.question }}</b>{% if r.answer %}<br><span class="muted">{{ r.answer | truncate(400) }}</span>{% else %} · <span class="warn">без ответа</span>{% endif %}</span>
+          <span class="feed-meta">{{ r.ts }}{% if r.tokens %} · {{ r.tokens | spaced }} ток.{% endif %}{% if r.answer and not r.charged %} · не засчитан{% endif %}</span>
+        </div>
+        {% else %}<p class="empty">Вопросов в пробном режиме пока нет.</p>{% endfor %}
       </div>
     </div>
   </section>

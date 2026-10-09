@@ -1707,26 +1707,48 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)))
 
 
+# Пробный режим без входа (решение владельца 09.10.2026): ответ гостю дешевле — та же постановка
+# и тот же контекст, но просьба отвечать кратко и потолок длины (`GUEST_MAX_TOKENS`). Просьба —
+# утвердительная: запрет в промпте модель пересказывает пользователю. Ранние пути (meta,
+# процедурный, «нет позиции») режим не меняет — там своя генерация или её нет вовсе.
+BRIEF_NOTE = ("Отвечай кратко: главное — в 3–6 предложениях или коротком списке, "
+              "со ссылками на пункты, как обычно.")
+BRIEF_CUT_NOTE = ("\n\n*Ответ сокращён: в пробном режиме ответы короче. "
+                  "Войдите, чтобы получить полный ответ.*")
+
+
+def _generation_kwargs(messages: list[dict], brief: bool) -> dict:
+    """Параметры финальной генерации. brief — пробный режим: просьба о краткости дописывается к
+    системному промпту (копия — `planned.messages` не трогаем) и ставится потолок токенов."""
+    if not brief:
+        return {"messages": messages}
+    head = {**messages[0], "content": messages[0]["content"] + "\n\n" + BRIEF_NOTE}
+    return {"messages": [head, *messages[1:]], "max_tokens": settings.GUEST_MAX_TOKENS}
+
+
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
-           history: list[dict] | None = None) -> Answer:
+           history: list[dict] | None = None, brief: bool = False) -> Answer:
     """Синхронный ответ навигатора (non-stream). Пред-работа — в _plan_answer; здесь только
     финальная генерация DeepSeek + faithfulness-постпроверка. Поведение НЕ изменилось при
-    выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения)."""
+    выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения).
+    brief — пробный режим гостя (см. `_generation_kwargs`)."""
     planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history)
     if isinstance(planned, Answer):  # ранний путь (meta / процедурный / нет-позиции)
         return planned
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
-        messages=planned.messages,
         temperature=0,  # детерминизм (INTERIM-фикс P2): при 0.1 модель на мега-продуктах
         # перечисляла РАЗНЫЕ подмножества операций → числа баллов «плавали» (eval_determinism
         # 0.60). 0 стабилизирует набор чисел; реранкер и так temp=0.
+        **_generation_kwargs(planned.messages, brief),
     )
     usage = resp.usage
     # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с контекстом. Незаземлённые
     # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
     # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
     raw = _strip_emoji(resp.choices[0].message.content or "")
+    if brief and resp.choices[0].finish_reason == "length":  # оборван потолком — говорим об этом
+        raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
     if planned.points_table:  # P4: длинный перечень баллов печатает код — дословно и одинаково
         raw = raw.rstrip() + "\n" + planned.points_table
     asked = _user_text(query, history)
@@ -1754,7 +1776,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
 
 
 def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
-                  history: list[dict] | None = None):
+                  history: list[dict] | None = None, brief: bool = False):
     """Стриминг ответа (T18): генератор — yield ('delta', str) по мере генерации, затем
     ('done', Answer) с финальными метаданными (hits→sources / флаги / токены).
 
@@ -1769,13 +1791,14 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         return
     resp = _client().chat.completions.create(
         model=settings.DEEPSEEK_MODEL,
-        messages=planned.messages,
         temperature=0,  # тот же детерминизм, что и non-stream answer()
         stream=True,
         stream_options={"include_usage": True},  # usage приходит финальным чанком (choices пуст)
+        **_generation_kwargs(planned.messages, brief),
     )
     parts: list[str] = []
     prompt_tokens = completion_tokens = 0
+    finish = None
     for chunk in resp:
         usage = getattr(chunk, "usage", None)
         if usage:
@@ -1783,11 +1806,16 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
             completion_tokens = usage.completion_tokens
         if not chunk.choices:
             continue
+        finish = getattr(chunk.choices[0], "finish_reason", None) or finish
         piece = _strip_emoji(chunk.choices[0].delta.content or "")
         if piece:
             parts.append(piece)
             yield "delta", piece
     raw = "".join(parts)
+    if brief and finish == "length":  # как в answer(): оборванный потолком ответ помечаем
+        cut = "…" + BRIEF_CUT_NOTE
+        raw = raw.rstrip() + cut
+        yield "delta", cut
     if planned.points_table:
         # Таблицу отдаём последним куском потока: фронт дорисует её тем же рендером markdown,
         # что и остальной ответ, а копирование/экспорт заберут её вместе с текстом.

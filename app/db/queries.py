@@ -12,7 +12,7 @@ from datetime import timedelta
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from app.db.models import AnswerUsage, Feedback, Lead, Message, User, _utcnow
+from app.db.models import AnswerUsage, Feedback, GuestMessage, Lead, Message, User, _utcnow
 
 
 # --- users ---------------------------------------------------------------
@@ -324,3 +324,77 @@ def delete_lead(db: Session, lead_id: int) -> bool:
     res = db.execute(delete(Lead).where(Lead.id == lead_id))
     db.commit()
     return bool(res.rowcount)
+
+
+# --- пробный режим без входа (обезличенно: ни учётки, ни IP) ---------------------
+def log_guest_message(
+    db: Session, *, guest_id: str, session_id: str, role: str, content: str,
+    sources: list | None = None, low_relevance: bool = False, prompt_tokens: int | None = None,
+    completion_tokens: int | None = None, charged: bool = False,
+) -> GuestMessage:
+    m = GuestMessage(
+        guest_id=guest_id, session_id=session_id, role=role, content=content,
+        sources_json=json.dumps(sources, ensure_ascii=False) if sources is not None else None,
+        low_relevance=low_relevance, prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens, charged=charged,
+    )
+    db.add(m)
+    db.commit()
+    db.refresh(m)
+    return m
+
+
+def count_guest_answers(db: Session, guest_id: str) -> int:
+    """Сколько пробных вопросов гость уже потратил — засчитанные ответы за всё время."""
+    return db.execute(select(func.count(GuestMessage.id)).where(
+        GuestMessage.guest_id == guest_id, GuestMessage.charged.is_(True))).scalar_one()
+
+
+def count_guest_answers_since(db: Session, since) -> int:
+    """Засчитанные ответы ВСЕМ гостям с момента `since` (наивное UTC) — общий суточный потолок."""
+    return db.execute(select(func.count(GuestMessage.id)).where(
+        GuestMessage.charged.is_(True), GuestMessage.ts >= since)).scalar_one()
+
+
+def get_guest_session_messages(db: Session, guest_id: str, session_id: str) -> list[GuestMessage]:
+    """Реплики беседы гостя. Ключ — пара (гость, беседа): чужой session_id даёт пустую историю."""
+    return list(db.execute(
+        select(GuestMessage).where(GuestMessage.guest_id == guest_id,
+                                   GuestMessage.session_id == session_id)
+        .order_by(GuestMessage.id)).scalars())
+
+
+def is_guest_answered_repeat(db: Session, guest_id: str, session_id: str, content: str,
+                             since) -> bool:
+    """Как `is_answered_repeat`: тот же вопрос в той же беседе уже получил ответ — это фолбэк
+    фронта после стрима, дошедшего до конца на сервере. Признак — из базы, не от клиента."""
+    first = db.execute(
+        select(func.min(GuestMessage.id)).where(
+            GuestMessage.guest_id == guest_id, GuestMessage.session_id == session_id,
+            GuestMessage.role == "user", GuestMessage.content == content, GuestMessage.ts >= since)
+    ).scalar()
+    if first is None:
+        return False
+    return db.execute(
+        select(GuestMessage.id).where(GuestMessage.guest_id == guest_id,
+                                      GuestMessage.session_id == session_id,
+                                      GuestMessage.role == "assistant", GuestMessage.id > first)
+        .limit(1)).first() is not None
+
+
+def list_guest_messages(db: Session, limit: int = 200) -> list[GuestMessage]:
+    """Последние реплики гостей, свежие сверху — для вкладки «Пробный режим» в админке."""
+    return list(db.execute(
+        select(GuestMessage).order_by(GuestMessage.id.desc()).limit(limit)).scalars())
+
+
+# Срок хранения реплик пробного режима — обещание политики («не дольше 6 месяцев»). Исполняется
+# кодом при открытии админки, как у заявок.
+GUEST_RETENTION_DAYS = 183
+
+
+def purge_old_guest_messages(db: Session, days: int = GUEST_RETENTION_DAYS, now=None) -> int:
+    edge = (now or _utcnow()) - timedelta(days=days)
+    res = db.execute(delete(GuestMessage).where(GuestMessage.ts < edge.replace(tzinfo=None)))
+    db.commit()
+    return res.rowcount or 0

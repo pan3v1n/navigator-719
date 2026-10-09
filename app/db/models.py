@@ -117,6 +117,30 @@ class AnswerUsage(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
 
 
+class GuestMessage(Base):
+    """Реплика пробного режима без входа (решение владельца 09.10.2026).
+
+    ⚠ Обезличенно: ни учётки, ни IP-адреса. `guest_id` — случайный идентификатор из подписанной
+    куки браузера; по нему считаются пробные вопросы и собирается мультитёрн беседы. Отдельно от
+    `messages`, а не под техническим пользователем: иначе гостевые реплики попали бы в приёмочный
+    скоркард, срезы по ролям и регионам и в расход тарифов. Видит только admin (`/admin`).
+    `charged` — ответ засчитан в пробные вопросы (приветствия и повторы — нет)."""
+
+    __tablename__ = "guest_messages"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    guest_id: Mapped[str] = mapped_column(String(32), index=True)
+    session_id: Mapped[str] = mapped_column(String(36), index=True)
+    ts: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, index=True)
+    role: Mapped[str] = mapped_column(String(16))  # user | assistant
+    content: Mapped[str] = mapped_column(Text)
+    sources_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    low_relevance: Mapped[bool] = mapped_column(Boolean, default=False)
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    charged: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
 class Lead(Base):
     """Заявка на подключение с лендинга 719-навигатор.рф (форма «Оставить заявку»).
 

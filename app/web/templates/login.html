@@ -17,6 +17,7 @@
           <p class="auth-lead">Для сотрудников организаций с подключённым тарифом.</p>
         </div>
         <form class="auth-form" method="post" action="/login">
+          {% if trial_over %}<div class="note-box">Пробные вопросы закончились. Войдите, чтобы продолжить работу.</div>{% endif %}
           {% if error %}<div class="error">{{ error }}</div>{% endif %}
           <label class="field"><span>Логин</span>
             <input name="username" autocomplete="username" required autofocus>
@@ -27,6 +28,11 @@
           <label class="check"><input type="checkbox" name="remember"> Запомнить меня</label>
           <button class="ds-btn block" type="submit">Войти</button>
         </form>
+        {# Пробный режим (09.10.2026): пока гость не исчерпал вопросы, ему есть куда вернуться #}
+        {% if guest_trial and not trial_over %}
+        <a class="ds-link" href="/chat">Попробовать без входа — {{ guest_questions }}
+          {{ guest_questions | plural('вопрос', 'вопроса', 'вопросов') }}</a>
+        {% endif %}
         {% if landing_url %}
         <div class="auth-alt">
           <span>Организация ещё не подключена?</span>

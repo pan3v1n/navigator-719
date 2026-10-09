@@ -29,7 +29,7 @@ from app.api.auth import (
     require_user_profiled,
     set_remember_cookie,
 )
-from app.api import quota
+from app.api import quota, trial
 from app.api.admin_stats import build_admin_view, system_health
 from app.api.leads import LIMITS as LEAD_LIMITS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
@@ -53,6 +53,17 @@ _WEB = Path(__file__).resolve().parents[1] / "web"
 templates = Jinja2Templates(directory=str(_WEB / "templates"))
 # Разряды числа с неразрывным пробелом (12345 → «12 345») — для читабельных токенов/₽ в админке.
 templates.env.filters["spaced"] = lambda n: f"{int(n or 0):,}".replace(",", " ")
+
+
+def plural(n: int, one: str, few: str, many: str) -> str:
+    """Форма слова по числу: 1 вопрос, 3 вопроса, 5 вопросов (11–14 — «многие»)."""
+    n = abs(int(n))
+    if n % 10 == 1 and n % 100 != 11:
+        return one
+    return few if n % 10 in (2, 3, 4) and n % 100 not in (12, 13, 14) else many
+
+
+templates.env.filters["plural"] = plural
 
 
 @lru_cache(maxsize=1)
@@ -84,7 +95,10 @@ def _ctx(request: Request, **kw) -> dict:
     landing = f"https://{settings.PUBLIC_DOMAIN}" if settings.PUBLIC_DOMAIN else ""
     return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
             "corpus_edition": corpus_edition(), "release_label": release_label(),
-            "landing_url": landing, "asset_v": asset_version(), **kw}
+            "landing_url": landing, "asset_v": asset_version(),
+            # пробный режим без входа — ссылка на него со страницы входа
+            "guest_trial": settings.GUEST_TRIAL_ENABLED,
+            "guest_questions": settings.GUEST_TRIAL_QUESTIONS, **kw}
 
 
 def _parse_date(s: str):
@@ -119,10 +133,12 @@ def root(request: Request):
 
 
 @router.get("/login", response_class=HTMLResponse)
-def login_page(request: Request):
+def login_page(request: Request, trial_over: str = ""):
     if current_user(request):
         return RedirectResponse("/", status_code=302)
-    return templates.TemplateResponse("login.html", _ctx(request, error=None))
+    # trial_over — гость исчерпал пробные вопросы (фронт ведёт сюда по 402 пробного режима)
+    return templates.TemplateResponse("login.html", _ctx(request, error=None,
+                                                         trial_over=bool(trial_over)))
 
 
 # --------------------------------------------------------------------------- #
@@ -200,10 +216,29 @@ def logout(request: Request):
     return resp
 
 
+def _guest_chat_page(request: Request) -> HTMLResponse:
+    """Пробный режим (09.10.2026): тот же чат без входа. Кука гостя ставится здесь, при первом
+    открытии страницы, — API без неё не отвечает (`app/api/guest.py`)."""
+    gid = trial.guest_id(request)
+    fresh = gid is None
+    if fresh:
+        gid = trial.new_guest_id()
+    with get_session() as db:
+        tv = trial.trial_view(db, gid)
+    resp = templates.TemplateResponse(
+        "chat.html", _ctx(request, user=None, guest=tv, kontur_719_url=kontur_719_url(),
+                          input_hint=followup.START_HINT, quota=None))
+    if fresh:
+        trial.set_guest_cookie(resp, gid)
+    return resp
+
+
 @router.get("/chat", response_class=HTMLResponse)
 def chat_page(request: Request):
     user = current_user(request)
     if not user:
+        if settings.GUEST_TRIAL_ENABLED:
+            return _guest_chat_page(request)
         return RedirectResponse("/login", status_code=302)
     if needs_profile(user):  # жёсткий гейт: роль user не в чат, пока не заполнит профиль+согласие
         return RedirectResponse("/profile", status_code=302)
@@ -343,13 +378,35 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
         leads = q.list_leads(db, limit=LEADS_ON_PAGE)
         leads_total = q.count_leads(db)
         plan_rows = _plan_rows(db)
+        q.purge_old_guest_messages(db)  # срок хранения — обещание политики, как у заявок
+        guest_view = _guest_view(db)
     return templates.TemplateResponse(
         "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads,
-                           leads_total=leads_total, plan_rows=plan_rows,
+                           leads_total=leads_total, plan_rows=plan_rows, guest_view=guest_view,
                            plan_names=list(PLAN_LIMITS), today=plans.msk_today().isoformat(), **view))
 
 
 LEADS_ON_PAGE = 200
+GUEST_ON_PAGE = 400  # реплик пробного режима на вкладке (≈ 200 вопросов с ответами)
+
+
+def _guest_view(db) -> dict:
+    """Вкладка «Пробный режим»: расход за сутки против общего потолка и последние вопросы гостей
+    с ответами. Гости обезличены — показываем только текст, время и токены."""
+    day_start = plans.anchor_from_date(plans.msk_today())
+    rows, open_q = [], {}
+    for m in reversed(q.list_guest_messages(db, limit=GUEST_ON_PAGE)):   # по времени
+        if m.role == "user":
+            row = {"ts": f"{plans.naive_utc(m.ts) + plans.MSK_OFFSET:%d.%m %H:%M}",
+                   "question": m.content, "answer": "", "tokens": 0, "charged": False}
+            rows.append(row)
+            open_q[m.session_id] = row
+        elif (row := open_q.pop(m.session_id, None)) is not None:
+            row.update(answer=m.content, charged=m.charged,
+                       tokens=(m.prompt_tokens or 0) + (m.completion_tokens or 0))
+    return {"rows": rows[::-1], "today": q.count_guest_answers_since(db, day_start),
+            "cap": settings.GUEST_DAILY_TOTAL, "enabled": settings.GUEST_TRIAL_ENABLED,
+            "per_guest": settings.GUEST_TRIAL_QUESTIONS, "per_ip": settings.GUEST_IP_PER_DAY}
 
 
 def _plan_rows(db) -> list[dict]:
