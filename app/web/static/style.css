@@ -1127,12 +1127,12 @@ body.tour-on { overflow: hidden; }
 .renew-facts div { padding: 12px 14px; border-radius: 10px; background: var(--gray); }
 .renew-facts dt { font: 400 13px/1.3 var(--font); color: var(--ink-60); }
 .renew-facts dd { margin: 4px 0 0; font: 600 18px/1.3 var(--font); color: var(--ink); }
-.modal-back { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
+.pop-back { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center;
   padding: 16px; background: rgba(3, 5, 12, .45); }
-.modal { width: 100%; max-width: 560px; max-height: calc(100vh - 32px); overflow: auto; display: flex; flex-direction: column;
+.pop { width: 100%; max-width: 560px; max-height: calc(100vh - 32px); overflow: auto; display: flex; flex-direction: column;
   gap: 14px; padding: 28px; border-radius: 16px; background: #fff; box-shadow: var(--shadow); }
-.modal h2 { margin: 0; font: 600 22px/1.25 var(--font); color: var(--ink); }
-.modal p { margin: 0; font: 400 15px/1.45 var(--font); color: var(--ink-80); }
+.pop h2 { margin: 0; font: 600 22px/1.25 var(--font); color: var(--ink); }
+.pop p { margin: 0; font: 400 15px/1.45 var(--font); color: var(--ink-80); }
 .tconfirm-msg textarea { min-height: 84px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 8px;
   font: 400 15px/1.4 var(--font); color: var(--ink); resize: vertical; }
 .plan-flash { background: var(--blue-07); color: var(--blue); padding: 12px 16px; border-radius: 8px; font: 500 14px/1.4 var(--font); }

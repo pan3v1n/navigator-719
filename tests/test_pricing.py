@@ -338,7 +338,7 @@ class TestCabinetShowcase(_Db):
         self.assertIn("Заявка на тариф «Стандарт»", box)
         self.assertIn("ООО «Станкозавод», ИНН 4632000000, i.petrov@tpp.ru, +7 900 000-00-00", _text(box))
         self.assertIn('name="consent" value="1" required', box)
-        self.assertNotIn('class="modal-back"', html, "личный тариф — не попапом")
+        self.assertNotIn('class="pop-back"', html, "личный тариф — не попапом")
         self.assertLess(html.index('id="tariffs"'), html.index('class="tconfirm"'), "подтверждение вне витрины")
         self.assertEqual(self.leads(), [], "подтверждение само заявку не создаёт")
         html = self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5")
@@ -353,7 +353,7 @@ class TestCabinetShowcase(_Db):
                       "confirm=1&tariff=Для организаций&kind=individual"):
             with self.subTest(query=query):
                 html = self._page(u, query)
-                pop = html[html.index('class="modal-back"'):]
+                pop = html[html.index('class="pop-back"'):]
                 pop = pop[:pop.index("</form>")]
                 self.assertIn('role="dialog" aria-modal="true"', pop)
                 self.assertIn("Связаться с нами", pop)
@@ -396,7 +396,7 @@ class TestCabinetShowcase(_Db):
         self.assertIn("до 31.01.2027", _text(panel))
         self.assertIn(f"{pricing.PRICE} ₽/мес", panel)
         self.assertIn('name="consent" value="1" required', panel)
-        self.assertNotIn('class="modal-back"', html)
+        self.assertNotIn('class="pop-back"', html)
         r = self._ask(u, tariff="Стандарт", renew="1")
         self.assertEqual(r.status_code, 303)
         self.assertEqual(self.leads()[0].options, "из личного кабинета · продление до 31.01.2027")
@@ -408,7 +408,7 @@ class TestCabinetShowcase(_Db):
     def test_renew_corporate_plan_is_a_popup(self):
         u = self._planned(kind="corporate")
         html = self._page(u, "renew=1")
-        pop = html[html.index('class="modal-back" id="renew"'):]
+        pop = html[html.index('class="pop-back" id="renew"'):]
         self.assertIn("через связь с заказчиком", pop[:pop.index("</form>")])
         self.assertIn('name="message"', pop)
         self._ask(u, tariff="Стандарт", renew="1", message="продлить на год")

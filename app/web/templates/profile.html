@@ -109,8 +109,8 @@
         <a class="ds-link" href="/profile?tab=plan">Отменить</a></div>
     </form>
     {% elif renew %}
-    <div class="modal-back" id="renew">
-      <form class="modal" role="dialog" aria-modal="true" aria-labelledby="renew-h" method="post" action="/api/plan-request">
+    <div class="pop-back" id="renew">
+      <form class="pop" role="dialog" aria-modal="true" aria-labelledby="renew-h" method="post" action="/api/plan-request">
         <h2 id="renew-h">Продление тарифа «{{ renew.tariff }}»</h2>
         {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
         <p>Корпоративный тариф продлевается через связь с заказчиком: оставьте комментарий — менеджер
@@ -120,7 +120,7 @@
         <input type="hidden" name="tariff" value="{{ renew.tariff }}"><input type="hidden" name="renew" value="1">
         {{ req_consent() }}
         <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить</button>
-          <a class="ds-link modal-close" href="/profile?tab=plan">Отменить</a></div>
+          <a class="ds-link pop-close" href="/profile?tab=plan">Отменить</a></div>
       </form>
     </div>
     {% endif %}
@@ -146,18 +146,18 @@
       {% elif confirm %}
       {# Корпоративный тариф — только через связь с заказчиком (решение владельца 09.10.2026, вечер): попап с
          комментарием. Рисует его сервер — работает и без скрипта; «Отменить» и Esc возвращают к витрине. #}
-      <div class="modal-back">
-        <form class="modal" role="dialog" aria-modal="true" aria-labelledby="contact-h" method="post" action="/api/plan-request">
+      <div class="pop-back">
+        <form class="pop" role="dialog" aria-modal="true" aria-labelledby="contact-h" method="post" action="/api/plan-request">
           <h2 id="contact-h">Связаться с нами</h2>
           <p>{% if confirm.tariff == pricing.ORG_TARIFF %}Расскажите, что нужно организации, — менеджер свяжется с вами
-            и подготовит условия.{% else %}Тариф «{{ confirm.tariff }}», {{ confirm.summary }}. Корпоративный тариф
+            и подготовит условия.{% else %}Тариф «{{ confirm.tariff }}»: {{ confirm.summary }} Корпоративный тариф
             подключается через связь с заказчиком — менеджер свяжется с вами и согласует условия и оплату.{% endif %}</p>
           {{ req_message() }}
           {{ req_who() }}
           {% for k, v in confirm.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
           {{ req_consent() }}
           <div class="tconfirm-actions"><button class="ds-btn" type="submit">Отправить</button>
-            <a class="ds-link modal-close" href="/profile?tab=plan&amp;kind={{ confirm.fields.kind }}#tariffs">Отменить</a></div>
+            <a class="ds-link pop-close" href="/profile?tab=plan&amp;kind={{ confirm.fields.kind }}#tariffs">Отменить</a></div>
         </form>
       </div>
       {% endif %}
@@ -307,7 +307,7 @@
         <button class="ds-btn" type="submit">{% if can_leave %}Сохранить изменения{% else %}Сохранить и продолжить{% endif %}</button>
         {% if can_leave %}<a class="ds-link" href="/profile">Отменить</a>{% endif %}
         {% else %}
-        <a class="ds-btn secondary" href="/profile?edit=1">Редактировать</a>
+        <a class="ds-btn" href="/profile?edit=1">Редактировать</a>
         {% endif %}
         {% if saved %}<span class="saved-note" role="status">Изменения сохранены</span>{% endif %}
       </div>
@@ -428,7 +428,7 @@
 <script>
   // Попап «Связаться с нами» рисует сервер; Esc — то же, что «Отменить».
   document.addEventListener("keydown", function (e) {
-    var close = document.querySelector(".modal-close");
+    var close = document.querySelector(".pop-close");
     if (e.key === "Escape" && close) location.href = close.href;
   });
   // Витрина тарифов: вкладки «Индивидуальные» / «Корпоративные», период и число пользователей.
