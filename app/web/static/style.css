@@ -1046,3 +1046,6 @@ body.tour-on { overflow: hidden; }
                   border-radius: 9px; background: #fff; color: #7a5c12; font-size: 12.5px;
                   cursor: pointer; white-space: nowrap; transition: background .15s; }
 .input-block-go:hover { background: #fbf0d6; }
+/* карточка учётки: длинные названия организаций и подтверждение удаления не обрезаются */
+.adm-form input[name="org"] { min-width: 300px; }
+.adm-row input[name="confirm"] { flex: 1 1 280px; }

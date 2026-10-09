@@ -543,6 +543,27 @@ class TestDialogs(_PanelDB):
         self.assertEqual(anon.get("/admin/dialogs/mid", follow_redirects=False).headers["location"], "/login")
 
 
+class TestQualityInMoscowTime(_PanelDB):
+    """«Качество» показывает и фильтрует по Москве, как Сводка и Диалоги: один и тот же вопрос не
+    должен стоять в разделах панели с разницей в три часа (найдено на скриншоте 09.10.2026)."""
+
+    def test_late_utc_evening_is_next_moscow_day(self):
+        from datetime import date, datetime
+
+        from app.api.admin_stats import build_admin_view
+
+        u = self._mk("kursk.late")
+        with self.Session() as db:
+            m = q.log_message(db, user_id=u.id, session_id="late", role="user", content="Поздний вопрос")
+            m.ts = datetime(2026, 7, 20, 22, 30)              # UTC → 21.07 01:30 МСК
+            db.commit()
+            st = build_admin_view(db)["stats"]
+            self.assertEqual([r["ts"] for r in st["recent"]], ["21.07.2026 01:30"])
+            self.assertEqual([d["iso"] for d in st["per_day"]], ["2026-07-21"])
+            on_21 = build_admin_view(db, date_from=date(2026, 7, 21), date_to=date(2026, 7, 21))["stats"]
+            self.assertEqual(on_21["requests"], 1, "фильтр периода — не по московской дате")
+
+
 class TestAccessAndNavigation(_PanelDB):
     PAGES = ("/admin", "/admin/users", "/admin/orgs", "/admin/leads", "/admin/quality", "/admin/dialogs",
              "/admin/trial")
