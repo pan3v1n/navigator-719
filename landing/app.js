@@ -143,7 +143,7 @@
   });
 
   // ---- тариф: карточки и переключатель в форме ----
-  // Опции карточки (вид, период, пользователи, проба за 1 ₽, «Проверка ответов экспертом ТПП») едут
+  // Опции карточки (вид, период, пользователи, проба за 1 ₽, «Доступ к источникам в ответах Навигатора») едут
   // в заявку; выбор тарифа чипом в форме — заявка без опций.
   var chips = document.querySelectorAll('#tariff-chips button'), tariff = 'Стандарт', opts = null,
       optsEl = document.getElementById('tariff-opts');
@@ -152,7 +152,7 @@
     var parts = [];
     if (o.kind === 'corporate') parts.push('корпоративный', o.period === 'year' ? 'год' : 'месяц', o.seats + ' польз.');
     if (o.trial) parts.push('пробная неделя за 1 ₽');
-    if (o.addon) parts.push('проверка ответов экспертом ТПП');
+    if (o.addon) parts.push('доступ к источникам в ответах Навигатора');
     return parts.join(' · ');
   }
   function setTariff(name, o) {

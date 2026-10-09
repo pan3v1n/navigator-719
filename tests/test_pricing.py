@@ -41,6 +41,11 @@ def _text(fragment: str) -> str:
     return " ".join(unescape(re.sub(r"<[^>]+>", " ", fragment)).split())
 
 
+def _inline(fragment: str) -> str:
+    """Текст строки со строчными тегами (`₽/<span class="per">мес</span>`): теги — без пробела."""
+    return " ".join(unescape(re.sub(r"<[^>]+>", "", fragment)).split())
+
+
 def _panel(html: str, kind: str) -> str:
     """Карточки одной вкладки: от её `data-panel` до следующего `data-panel`."""
     i = html.index(f'data-panel="{kind}"')
@@ -71,7 +76,7 @@ class TestCatalog(unittest.TestCase):
     def test_options_summary_and_rules(self):
         cases = [
             (dict(tariff="Стандарт"), None),
-            (dict(tariff="Старт", trial=True, addon=True), "пробная неделя за 1 ₽ · проверка ответов экспертом ТПП"),
+            (dict(tariff="Старт", trial=True, addon=True), "пробная неделя за 1 ₽ · доступ к источникам в ответах Навигатора"),
             (dict(tariff="Профи", kind="corporate", period="year", seats=12), "корпоративный · год · 12 польз."),
             (dict(tariff="Для организаций", addon=True), None),
         ]
@@ -105,6 +110,14 @@ class TestLandingShowcase(unittest.TestCase):
         self.assertIn(f'data-pick="Старт" data-trial="1">Подключить за {pricing.TRIAL_PRICE}', ind)
         self.assertNotIn("data-trial", corp)
         self.assertNotIn(pricing.TRIAL_TEXT, corp)
+
+    def test_addon_like_neurolegal(self):
+        """Опция — как у Нейроюриста (решение владельца 09.10.2026): «Доступ к источникам в ответах …»,
+        у «Старта» «Бесплатно первый месяц, далее + … за Гарант Лайт», у остальных «+ … за Гарант Лайт»."""
+        notes = [_inline(n) for n in re.findall(r"<b>" + re.escape(pricing.ADDON) + r"</b><small>(.*?)</small>", LANDING, re.S)]
+        free = f"{pricing.ADDON_FREE}, далее + {pricing.PRICE} ₽/мес за {pricing.ADDON_SOURCE}"
+        paid = f"+ {pricing.PRICE} ₽/мес за {pricing.ADDON_SOURCE}"
+        self.assertEqual(notes, [free, paid, paid, paid, paid, paid])
 
     def test_footnotes_per_tab(self):
         for kind in ("individual", "corporate"):
@@ -170,7 +183,7 @@ class TestLandingLeadOptions(_Db):
     def test_options_are_stored_with_the_lead(self):
         r = self.post(tariff="Профи", kind="corporate", period="year", seats=7, addon=True)
         self.assertEqual(r.status_code, 200, r.text)
-        self.assertEqual(self.leads()[0].options, "корпоративный · год · 7 польз. · проверка ответов экспертом ТПП")
+        self.assertEqual(self.leads()[0].options, "корпоративный · год · 7 польз. · доступ к источникам в ответах Навигатора")
 
     def test_old_form_without_options_still_works(self):
         self.assertEqual(self.post().status_code, 200)
@@ -218,6 +231,10 @@ class TestCabinetShowcase(_Db):
 
     def test_plan_tab_shows_the_same_catalog(self):
         html = self._page(self._user())
+        notes = [_inline(n) for n in re.findall(r"<b>" + re.escape(pricing.ADDON) + r"</b>\s*<small>(.*?)</small>", html, re.S)]
+        free = f"{pricing.ADDON_FREE}, далее + {pricing.PRICE} ₽/мес за {pricing.ADDON_SOURCE}"
+        paid = f"+ {pricing.PRICE} ₽/мес за {pricing.ADDON_SOURCE}"
+        self.assertEqual(notes, [free, paid, paid, paid, paid, paid], "опция в кабинете — не как на лендинге")
         want = [(p["name"], p["desc"]) for p in pricing.PLANS]
         self.assertEqual(_cards(_panel(html, "individual")), want + [("Для организаций", pricing.ORG_DESC)])
         self.assertEqual(_cards(_panel(html, "corporate")), want + [("Особые условия", pricing.SPECIAL_DESC)])
@@ -246,7 +263,7 @@ class TestCabinetShowcase(_Db):
                          ("Профи", u.id, "ООО «Станкозавод»", "4632000000", "i.petrov@tpp.ru", "+7 900 000-00-00",
                           "Иван Петров"))
         self.assertEqual(lead.options, "из личного кабинета · корпоративный · год · 5 польз. · "
-                                       "проверка ответов экспертом ТПП")
+                                       "доступ к источникам в ответах Навигатора")
         page = self._page(u, requested="Профи")
         self.assertIn("Заявка на тариф «Профи» отправлена", page)
         self.assertNotIn("Заявка на тариф «", self._page(u, requested="Безлимит"),
@@ -301,7 +318,7 @@ class TestCabinetShowcase(_Db):
         html = self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5&addon=1")
         box = html[html.index('class="tconfirm"'):html.index("</form>", html.index('class="tconfirm"'))]
         self.assertIn("Заявка на тариф «Профи»", box)
-        self.assertIn("Корпоративный · год · 5 польз. · проверка ответов экспертом ТПП", box)
+        self.assertIn("Корпоративный · год · 5 польз. · доступ к источникам в ответах Навигатора", box)
         self.assertIn("ООО «Станкозавод», ИНН 4632000000, i.petrov@tpp.ru, +7 900 000-00-00", _text(box))
         self.assertIn('name="consent" value="1" required', box)
         for k, v in (("tariff", "Профи"), ("kind", "corporate"), ("period", "year"), ("seats", "5"), ("addon", "1")):
@@ -357,5 +374,5 @@ class TestCabinetShowcase(_Db):
         with mock.patch.object(adm, "current_user", return_value=admin):
             html = adm.admin_leads_page(Request({"type": "http", "method": "GET", "path": "/admin/leads", "headers": [],
                                                  "query_string": b"", "session": {}, "app": None})).body.decode("utf-8")
-        self.assertIn("тариф «Старт» · из личного кабинета · пробная неделя за 1 ₽ · проверка ответов экспертом ТПП", html)
+        self.assertIn("тариф «Старт» · из личного кабинета · пробная неделя за 1 ₽ · доступ к источникам в ответах Навигатора", html)
         self.assertIn(f'href="/admin/users/{u.id}">kursk.user1</a>', html, "заявка из кабинета — уже с учёткой")

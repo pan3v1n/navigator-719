@@ -142,7 +142,7 @@
           </div>
           <label class="addon"><input type="checkbox" name="addon" value="1">
             <span><b>{{ pricing.ADDON }}</b>
-              <small>{% if promo %}Бесплатно первую неделю, далее + {{ pricing.PRICE }} ₽/мес{% else %}+ {{ pricing.PRICE }} ₽/<span class="per">мес</span>{% endif %}</small></span></label>
+              <small>{% if promo %}{{ pricing.ADDON_FREE }}, далее + {{ pricing.PRICE }} ₽/мес за {{ pricing.ADDON_SOURCE }}{% else %}+ {{ pricing.PRICE }} ₽/<span class="per">мес</span> за {{ pricing.ADDON_SOURCE }}{% endif %}</small></span></label>
           <button class="ds-btn block tcard-btn" type="submit">
             {% if promo %}Подключить за {{ pricing.TRIAL_PRICE }}<small>далее {{ pricing.PRICE }} ₽/мес</small>
             {% else %}Подключить<small>за {{ pricing.PRICE }} ₽/<span class="per">мес</span></small>{% endif %}</button>
