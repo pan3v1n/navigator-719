@@ -59,6 +59,7 @@
     <ul class="adm-list">
       <li>Учёток: <b>{{ s.accounts.total }}</b> · <a href="/admin/users">все</a></li>
       <li>Без анкеты: <b>{{ s.accounts.no_profile }}</b>{% if s.accounts.no_profile %} · <a href="/admin/users?status=no_profile">показать</a>{% endif %}</li>
+      <li>Организация не подтверждена: <b>{{ s.accounts.org_unverified }}</b>{% if s.accounts.org_unverified %} · <a href="/admin/users?status=org_unverified">показать</a>{% endif %}</li>
       <li>Заблокировано: <b>{{ s.accounts.blocked }}</b>{% if s.accounts.blocked %} · <a href="/admin/users?status=blocked">показать</a>{% endif %}</li>
       <li>Заявок с сайта: <b>{{ s.leads.total }}</b>, за 7 дней — <b>{{ s.leads.week }}</b>, новых —
         <b>{{ s.leads.new }}</b>{% if s.leads.new %} · <a href="/admin/leads?status=new">разобрать</a>{% else %} · <a href="/admin/leads">открыть</a>{% endif %}</li>

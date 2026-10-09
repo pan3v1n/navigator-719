@@ -262,6 +262,50 @@ class TestCardActions(_PanelDB):
         self.assertIn("удалена вместе с профилем и диалогами",
                       self.as_admin.get("/admin/users?ok=deleted&login=kursk.expert9").text)
 
+    def test_org_verification(self):
+        """Вечер 09.10.2026: организацию вписывает пользователь, admin подтверждает («чтобы не было
+        фейков»); вписанное самим admin'ом — сразу подтверждено; пустое подтвердить нельзя."""
+        from app.api import admin_summary
+
+        u = self._mk("kursk.expert7", full_name="Иван", region="Курская область", telegram="", consent=True)
+        with self.Session() as db:
+            q.update_profile(db, u.id, full_name="Иван", region="Курская область", telegram="", consent=True,
+                             org="ООО «Станкозавод»", inn="7707083893")
+        self.assertIsNone(self._fresh(u.id).org_verified_at)
+        self.assertIn(">kursk.expert7</a>", self.as_admin.get("/admin/users?status=org_unverified").text)
+        card = self.as_admin.get(f"/admin/users/{u.id}").text
+        self.assertIn("не подтверждена", card)
+        self.assertIn("Подтвердить организацию", card)
+        with self.Session() as db:
+            self.assertEqual(admin_summary.summary_view(db)["accounts"]["org_unverified"], 1)
+        r = self.as_admin.post(f"/api/admin/users/{u.id}/org-verify", data={"verified": "1"}, follow_redirects=False)
+        self.assertEqual(r.headers["location"], f"/admin/users/{u.id}?ok=verified")
+        u = self._fresh(u.id)
+        self.assertEqual(u.org_verified_by, self.admin.id)
+        self.assertIn("подтверждена</span>", self.as_admin.get(f"/admin/users/{u.id}").text)
+        self.assertNotIn(">kursk.expert7</a>", self.as_admin.get("/admin/users?status=org_unverified").text)
+        self.as_admin.post(f"/api/admin/users/{u.id}/org-verify", data={"verified": "0"})
+        self.assertIsNone(self._fresh(u.id).org_verified_at)
+        empty = self._mk("kursk.expert8")
+        self.assertEqual(self.as_admin.post(f"/api/admin/users/{empty.id}/org-verify",
+                                            data={"verified": "1"}).status_code, 422)
+        self.as_admin.post(f"/api/admin/users/{empty.id}/org", data={"org": "АО «Прибор»", "inn": "7707083893"})
+        self.assertEqual(self._fresh(empty.id).org_verified_by, self.admin.id, "вписанное admin'ом — не подтверждено")
+        self.assertEqual(self.as_admin.post(f"/api/admin/users/{u.id}/org-verify", data={"verified": "1"},
+                                            headers={"x": "1"}, cookies={}).status_code, 200)
+        anon = self.TestClient(self.app)
+        self.assertEqual(anon.post(f"/api/admin/users/{u.id}/org-verify", data={"verified": "0"}).status_code, 401)
+
+    def test_plan_kind(self):
+        u = self._mk("kursk.expert9")
+        self.as_admin.post(f"/api/admin/users/{u.id}/plan", data={"plan": "Профи", "kind": "corporate"})
+        self.assertEqual(self._fresh(u.id).plan_kind, "corporate")
+        self.assertIn('<option value="corporate" selected>', self.as_admin.get(f"/admin/users/{u.id}").text)
+        self.as_admin.post(f"/api/admin/users/{u.id}/plan", data={"plan": "Профи"})
+        self.assertIsNone(self._fresh(u.id).plan_kind, "без вида — личный")
+        self.as_admin.post(f"/api/admin/users/{u.id}/plan", data={"plan": "", "kind": "corporate"})
+        self.assertIsNone(self._fresh(u.id).plan_kind, "снятый тариф оставил вид")
+
     def test_card_shows_profile_plan_org_and_activity(self):
         u = self._mk("kursk.expert5", full_name="Анна Смирнова", region="Курская область", telegram="",
                      consent=True, email="a@tpp.ru", phone="+7 900 000-00-00", position="Эксперт")

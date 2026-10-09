@@ -75,7 +75,9 @@ GUEST_ON_PAGE = 400  # реплик пробного режима на стра�
 # в адрес не попадает ничего, кроме кода.
 DONE = {
     "plan": "Тариф сохранён.",
-    "org": "Организация и ИНН сохранены.",
+    "org": "Организация и ИНН сохранены и подтверждены.",
+    "verified": "Организация и ИНН подтверждены.",
+    "unverified": "Подтверждение организации снято.",
     "role": "Роль изменена.",
     "blocked": "Учётка заблокирована: вход закрыт, открытые сессии завершены.",
     "unblocked": "Учётка разблокирована.",
@@ -136,6 +138,9 @@ def _user_row(db, u: User, activity: dict) -> dict:
         # Профиль обязателен только роли user — у остальных пустой профиль не сигнал. Правило —
         # гейта чата, а не копия: копии расходятся при первой правке гейта (ревью PR #182).
         "no_profile": needs_profile(u),
+        # Организацию вписывает пользователь (вечер 09.10.2026): вписал, но admin ещё не подтвердил
+        "org_unverified": bool(u.org or u.inn) and u.org_verified_at is None,
+        "plan_kind": u.plan_kind or "individual",
         "last": _msk(last), "last_ts": last, "asked": asked,
     }
 
@@ -151,6 +156,8 @@ def _matches(row: dict, text: str, role: str, status: str, plan: str) -> bool:
     if status == "active" and row["blocked"] or status == "blocked" and not row["blocked"]:
         return False
     if status == "no_profile" and not row["no_profile"]:
+        return False
+    if status == "org_unverified" and not row["org_unverified"]:
         return False
     if status == "expired" and not row["expired"]:
         return False
@@ -225,6 +232,9 @@ def _card(request: Request, admin: User, user_id: int, *, password_shown: str | 
         activity = q.user_activity(db)
         row = _user_row(db, u, activity)
         sessions = q.get_user_sessions(db, u.id)[:10]
+        verifier = q.get_user(db, u.org_verified_by) if u.org_verified_by else None
+        org_verified = (f"{_msk(u.org_verified_at)}" + (f" · {verifier.username}" if verifier else "")
+                        if u.org_verified_at else "")
         db.expunge(u)
     return _page(
         request, admin, "user", "users", u.username, status_code=status_code, u=u, row=row,
@@ -236,7 +246,8 @@ def _card(request: Request, admin: User, user_id: int, *, password_shown: str | 
         period=(f"{plans.msk_date(row['state'].start):%d.%m.%Y} – "
                 f"{plans.msk_date(row['state'].end - timedelta(seconds=1)):%d.%m.%Y}") if row["state"] else "",
         consent_at=_msk(u.consent_at), created_at=_msk(u.created_at), blocked_at=_msk(u.blocked_at),
-        is_self=u.id == admin.id, password_shown=password_shown, notice=notice, error=error)
+        is_self=u.id == admin.id, password_shown=password_shown, notice=notice, error=error,
+        org_verified=org_verified)
 
 
 @router.get("/admin/users/{user_id}", response_class=HTMLResponse)
@@ -334,7 +345,7 @@ def admin_delete_user(request: Request, user_id: int, confirm: str = Form(defaul
 
 @router.post("/api/admin/users/{user_id}/plan")
 def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Form(default=""),
-                   expires: str = Form(default=""),
+                   expires: str = Form(default=""), kind: str = Form(default="individual"),
                    admin: User = Depends(require_admin)) -> RedirectResponse:
     """Назначить тариф, дату подключения и срок (#160; срок и внутренние тарифы — 09.10.2026).
     Пустой тариф — снять лимит. Дата подключения по умолчанию — сегодня по Москве; в будущем
@@ -376,7 +387,8 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
             raise HTTPException(status_code=422, detail="Срок действия должен быть позже даты подключения")
         expires_at = plans.anchor_from_date(until) if until else None
     with get_session() as db:
-        if q.set_user_plan(db, user_id, plan or None, started_at, expires_at) is None:
+        if q.set_user_plan(db, user_id, plan or None, started_at, expires_at,
+                           kind="corporate" if kind == "corporate" else None) is None:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
     logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
                 f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else "")
@@ -387,18 +399,35 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
 @router.post("/api/admin/users/{user_id}/org")
 def admin_set_org(user_id: int, org: str = Form(default=""), inn: str = Form(default=""),
                   admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Организация и ИНН пользователя (решение владельца 09.10.2026: заполняет только admin
-    сервиса; в кабинете пользователь их видит, но не правит). Пустые — очистить."""
+    """Организация и ИНН, вписанные admin'ом (пустые — очистить). С вечера 09.10.2026 их вписывает и сам
+    пользователь; вписанное admin'ом — сразу подтверждено: проверяющий — он сам."""
     org, inn = org.strip(), inn.strip()
     if len(org) > ORG_LIMIT:
         raise HTTPException(status_code=422, detail="Слишком длинное название организации")
     if inn and not INN_RE.match(inn):
         raise HTTPException(status_code=422, detail="ИНН должен содержать 10 или 12 цифр")
     with get_session() as db:
-        if q.set_user_org(db, user_id, org, inn) is None:
+        if q.set_user_org(db, user_id, org, inn, verified_by=admin.id) is None:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
     logger.info(f"организация: admin_id={admin.id} изменил user_id={user_id}")
     return _back(user_id, "org")
+
+
+@router.post("/api/admin/users/{user_id}/org-verify")
+def admin_verify_org(user_id: int, verified: str = Form(default="1"),
+                     admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Подтвердить организацию и ИНН, вписанные пользователем, или снять подтверждение (вечер 09.10.2026:
+    «чтобы не было фейков»). Подтвердить можно только заполненные оба поля. В будущем — профиль
+    работника на Госуслугах вместо ручной проверки."""
+    with get_session() as db:
+        u = q.get_user(db, user_id)
+        if u is None:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        if verified == "1" and not (u.org and u.inn):
+            raise HTTPException(status_code=422, detail="Подтвердить можно только заполненные организацию и ИНН")
+        q.verify_org(db, user_id, admin.id if verified == "1" else None)
+    logger.info(f"организация: admin_id={admin.id} {'подтвердил' if verified == '1' else 'снял подтверждение'} user_id={user_id}")
+    return _back(user_id, "verified" if verified == "1" else "unverified")
 
 
 # --------------------------------------------------------------------------- #

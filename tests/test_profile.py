@@ -183,7 +183,7 @@ class _CabinetDB(unittest.TestCase):
     def _submit(self, user, **form):
         fields = dict(consent="1", full_name=COMPLETE["full_name"], region=COMPLETE["region"],
                       telegram=COMPLETE["telegram"], position="", email=COMPLETE["email"],
-                      phone=COMPLETE["phone"])
+                      phone=COMPLETE["phone"], org=user.org or "", inn=user.inn or "")   # как предзаполняет форма
         fields.update(form)
         with mock.patch.object(web, "current_user", return_value=user):
             return web.profile_submit(_request(), **fields)
@@ -223,18 +223,20 @@ class TestCabinetPage(_CabinetDB):
         r = self._submit(self._user(), consent="")
         self.assertIn('<fieldset class="fields-lock">', r.body.decode("utf-8"), "ошибка сохранения в закрытой форме")
 
-    def test_org_and_inn_are_read_only(self):
+    def test_org_and_inn_editable_with_verification_status(self):
+        """Вечер 09.10.2026: организацию и ИНН вписывает пользователь, статус — «подтверждено / не
+        подтверждено», подтверждает admin. Утром их вёл только admin — решение пересмотрено владельцем."""
         u = self._user()
         with self.Session() as db:
-            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
-        html = self._page(self._fresh(u.id))
-        self.assertIn("Союз «Курская ТПП» · ИНН 4632000000", html, "организация под именем, как в макете")
-        for value in ("Союз «Курская ТПП»", "4632000000"):
-            tag = html[html.rindex("<input", 0, html.index(f'value="{value}"')):]
-            tag = tag[:tag.index(">")]
-            self.assertIn("disabled", tag, f"поле «{value}» редактируемо")
-            self.assertNotIn("name=", tag, f"поле «{value}» уходит с формой")
-        self.assertEqual(html.count("Меняется через администратора сервиса"), 2)
+            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "7707083893")
+        html = self._page(self._fresh(u.id), edit="1")
+        self.assertIn('name="org" value="Союз «Курская ТПП»"', html)
+        self.assertIn('name="inn" value="7707083893"', html)
+        self.assertIn("не подтверждены — их проверит администратор", html)
+        self.assertNotIn("Меняется через администратора сервиса", html)
+        with self.Session() as db:
+            q.verify_org(db, u.id, 99)
+        self.assertIn("подтверждены администратором", self._page(self._fresh(u.id)))
 
     def test_first_fill_keeps_the_gate_wording(self):
         """Пока профиль не заполнен, кабинет — это гейт: уйти к сервису некуда."""
@@ -353,25 +355,43 @@ class TestCabinetSave(_CabinetDB):
         hint = hint[:hint.index('"')]
         self.assertLessEqual(len(hint), 20, hint)
 
-    def test_form_cannot_write_org(self):
-        """Организацию и ИНН ведёт admin: поля `org`/`inn` в POST /profile отбрасываются."""
-        from fastapi.testclient import TestClient
-
-        from main import app
-
+    def test_user_writes_org_and_change_drops_verification(self):
+        """Пользователь вписывает организацию и ИНН сам; правка снимает подтверждение admin'а (иначе
+        под подтверждённой меткой оказалась бы чужая организация). ИНН — по контрольным цифрам ФНС."""
         u = self._user()
-        with self.Session() as db:
-            q.set_user_org(db, u.id, "Союз «Курская ТПП»", "4632000000")
-        u = self._fresh(u.id)
-        with mock.patch.object(web, "current_user", return_value=u):
-            r = TestClient(app).post("/profile", follow_redirects=False, data={
-                "consent": "1", **{k: v for k, v in COMPLETE.items() if k != "consent"},
-                "org": "ООО «Чужая»", "inn": "7700000000"})
+        r = self._submit(u, org="ООО «Станкозавод»", inn="7707083893")
         self.assertEqual(r.status_code, 302)
-        self.assertEqual((self._fresh(u.id).org, self._fresh(u.id).inn), ("Союз «Курская ТПП»", "4632000000"))
+        u = self._fresh(u.id)
+        self.assertEqual((u.org, u.inn, u.org_verified_at), ("ООО «Станкозавод»", "7707083893", None))
+        with self.Session() as db:
+            q.verify_org(db, u.id, 99)
+        u = self._fresh(u.id)
+        self.assertIsNotNone(u.org_verified_at)
+        self._submit(u, org="ООО «Станкозавод»", inn="7707083893")          # без изменений — статус цел
+        self.assertIsNotNone(self._fresh(u.id).org_verified_at)
+        self._submit(self._fresh(u.id), org="ООО «Другая»", inn="7707083893")
+        self.assertIsNone(self._fresh(u.id).org_verified_at, "правка организации не сняла подтверждение")
+        for bad in ("7707083894", "123", "77070838931"):
+            with self.subTest(inn=bad):
+                r = self._submit(self._fresh(u.id), org="ООО «Другая»", inn=bad)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("Проверьте ИНН", r.body.decode("utf-8"))
+        self.assertEqual(self._fresh(u.id).inn, "7707083893")
+        with self.Session() as db:
+            q.update_profile(db, u.id, full_name=u.full_name, region=u.region, telegram="", consent=True,
+                             org="ООО «Станкозавод»", inn="7707083893")
+            q.verify_org(db, u.id, 99)
+        body = self._submit(self._fresh(u.id), org="ООО «Чужая»", inn="1").body.decode("utf-8")
+        self.assertIn("не подтверждены", body, "ошибочная правка показана под подтверждённой меткой")
 
+    def test_inn_checksum(self):
+        from app.core.inn import inn_valid
 
-class TestAdminSetsOrg(_CabinetDB):
+        for good in ("7707083893", "500100732259", "4632000002"):
+            self.assertTrue(inn_valid(good), good)
+        for bad in ("7707083894", "500100732258", "4632000000", "770708389", "77070838９3", ""):
+            self.assertFalse(inn_valid(bad), bad)
+
     def setUp(self):
         super().setUp()
         self.uid = self._user().id
@@ -542,11 +562,13 @@ class TestCabinetLinksAndPolicy(unittest.TestCase):
         consent = self._render("profile.html", user=User(username="u", role="user"),
                                form={"region": ""}, regions=[], tab="profile", can_leave=True)
         consent = consent[consent.index('name="consent"'):]
-        for term in ("ФИО", "регион", "Telegram", "должность", "email", "телефон"):
+        for term in ("ФИО", "регион", "Telegram", "должность", "email", "телефон", "организация и её ИНН"):
             with self.subTest(term=term):
                 self.assertIn(term, participant, "категория «Данные участника» не называет поле кабинета")
                 self.assertIn(term, consent, "текст согласия не называет поле кабинета")
-        self.assertIn("организация и её ИНН", row("Учётные данные"))
+        # вечер 09.10.2026: организацию и ИНН вписывает пользователь — это данные участника, а не учётные
+        self.assertNotIn("ИНН", row("Учётные данные"))
+        self.assertIn("администратор", row("Подтверждение организации"))
 
 
 class TestCabinetColumnsMigrate(unittest.TestCase):

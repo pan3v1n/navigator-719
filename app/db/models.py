@@ -41,15 +41,21 @@ class User(Base):
     position: Mapped[str | None] = mapped_column(String(128), nullable=True)      # должность
     email: Mapped[str | None] = mapped_column(String(255), nullable=True)         # рабочий email
     phone: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    # Организация и ИНН — ТОЛЬКО admin сервиса (`/admin`, решение владельца 09.10.2026): по ним
-    # учитывается подключение организации, и пользователь не должен переписывать их сам.
+    # Организация и ИНН — вписывает сам пользователь в кабинете (решение владельца 09.10.2026, вечер;
+    # утром их вёл только admin). Чтобы не было фейков — статус подтверждения: ставит admin в карточке,
+    # любая правка пользователя его снимает. В будущем — подтверждение через профиль работника на Госуслугах.
     org: Mapped[str | None] = mapped_column(Text, nullable=True)
     inn: Mapped[str | None] = mapped_column(String(12), nullable=True)
+    org_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    org_verified_by: Mapped[int | None] = mapped_column(Integer, nullable=True)   # id admin'а
     # Тариф (#160): None — без лимита. Лимиты и период — `app/core/plans.py`; назначает admin.
     plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
     plan_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # дата подключения
     # Срок тарифа (09.10.2026): 00:00 МСК дня, с которого он уже не действует; None — бессрочно.
     plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Вид тарифа (09.10.2026): «individual» — личный, оплата с личной карты (когда появится); «corporate» —
+    # корпоративный, продление только через связь с заказчиком (попап). Ставит admin; None — личный.
+    plan_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     # Доступ (админка 09.10.2026): блокировка без удаления данных и «эпоха» входа — её поднимают
     # сброс пароля и блокировка, и все выданные сессии и куки «запомнить меня» гаснут сразу.
     blocked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -172,6 +178,8 @@ class Lead(Base):
     # Опции с витрины тарифов (09.10.2026): вид, период, число пользователей, проба за 1 ₽, опция-галочка —
     # строкой `pricing.parse_options`; пусто — тариф без опций.
     options: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    # Комментарий заявителя (09.10.2026): попап «Связаться с нами» корпоративных тарифов и форма лендинга.
+    message: Mapped[str | None] = mapped_column(Text, nullable=True)
     status_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # логическая ссылка на users.id

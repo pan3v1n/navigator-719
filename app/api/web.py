@@ -37,6 +37,7 @@ from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
 from app.core import pricing
+from app.core.inn import inn_valid
 from app.core.config import settings
 from app.core.release import release_label
 from app.core.regions import REGIONS, region_from_username
@@ -330,7 +331,7 @@ def _profile_form(user: User, **over) -> dict:
     form = {"full_name": user.full_name or "", "telegram": user.telegram or "",
             "region": user.region or region_from_username(user.username),
             "position": user.position or "", "email": user.email or "", "phone": user.phone or "",
-            "consent": bool(user.consent)}
+            "org": user.org or "", "inn": user.inn or "", "consent": bool(user.consent)}
     form.update(over)
     return form
 
@@ -484,16 +485,21 @@ def profile_submit(
     position: str = Form(default=""),
     email: str = Form(default=""),
     phone: str = Form(default=""),
+    org: str = Form(default=""),
+    inn: str = Form(default=""),
 ):
-    """Сохранение профиля. Организацию и ИНН форма не принимает вовсе: их ведёт admin
-    (`admin_set_org`), присланные в форме поля `org`/`inn` отбрасываются ещё на разборе."""
+    """Сохранение профиля. Организацию и ИНН вписывает сам пользователь (решение владельца 09.10.2026,
+    вечер; утром их вёл только admin) — по желанию; ИНН проверяется по контрольным цифрам. Правка
+    организации или ИНН снимает подтверждение admin'а (`queries.update_profile`)."""
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     fn, rg, tg = full_name.strip(), region.strip(), telegram.strip()
     pos, em, ph = position.strip(), email.strip(), phone.strip()
+    og, nn = " ".join(org.split()), inn.strip()
     form = _profile_form(user, full_name=fn, region=rg or region_from_username(user.username),
-                         telegram=tg, position=pos, email=em, phone=ph, consent=bool(consent))
+                         telegram=tg, position=pos, email=em, phone=ph, org=og, inn=nn,
+                         consent=bool(consent))
     # Обязательны ФИО, регион, рабочий email, телефон и согласие; должность и Telegram — по
     # желанию (решение владельца 09.10.2026). Ошибка → ре-рендер с введённым, а не потеря формы.
     errs = []
@@ -508,12 +514,16 @@ def profile_submit(
     if len(fn) > PROFILE_LIMITS["full_name"] or len(tg) > PROFILE_LIMITS["telegram"]:
         errs.append("Слишком длинное ФИО или ник в Telegram.")
     errs += _contact_errors(pos, em, ph)
+    if len(og) > ORG_LIMIT:
+        errs.append("Слишком длинное название организации.")
+    if nn and not inn_valid(nn):
+        errs.append("Проверьте ИНН: 10 цифр у организации или 12 у ИП, контрольные цифры не сходятся.")
     if errs:
         return _profile_response(request, user, form, error=" ".join(errs), status_code=400)
     first_fill = needs_profile(user)
     with get_session() as db:
         q.update_profile(db, user.id, full_name=fn, region=rg, telegram=tg, consent=True,
-                         position=pos, email=em, phone=ph)
+                         position=pos, email=em, phone=ph, org=og, inn=nn)
     # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
     # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
     return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)

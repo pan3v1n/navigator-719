@@ -59,20 +59,36 @@
         </select></label>
       <label>С <input type="date" name="started" value="{{ started or today }}" max="{{ today }}"></label>
       <label>До <input type="date" name="expires" value="{{ expires_iso }}" title="Пусто — бессрочно"></label>
+      <label>Вид
+        <select name="kind">
+          <option value="individual"{% if row.plan_kind != 'corporate' %} selected{% endif %}>личный</option>
+          <option value="corporate"{% if row.plan_kind == 'corporate' %} selected{% endif %}>корпоративный</option>
+        </select></label>
       <button class="ds-btn secondary" type="submit">Сохранить тариф</button>
     </form>
     <p class="muted">«До» — дата, с которой тариф уже не действует (с 00:00 МСК); пусто — бессрочно,
-      «{{ trial_plan }}» — на {{ trial_days }} дней. По истечении срока вопросы закрываются, кабинет и история остаются.</p>
+      «{{ trial_plan }}» — на {{ trial_days }} дней. По истечении срока вопросы закрываются, кабинет и история остаются.
+      Вид: личный продлевается заявкой (позже — оплатой картой), корпоративный — через связь с заказчиком.</p>
   </section>
 
   <section class="adm-card">
     <h2>Организация</h2>
+    {% if u.org or u.inn %}
+    <p>{% if u.org_verified_at %}<span class="badge ok">подтверждена</span> {{ org_verified }}
+      {% else %}<span class="badge warn">не подтверждена</span> — вписал пользователь, проверьте по ЕГРЮЛ/ЕГРИП{% endif %}</p>
+    <form method="post" action="/api/admin/users/{{ u.id }}/org-verify" class="adm-row">
+      <input type="hidden" name="verified" value="{{ '0' if u.org_verified_at else '1' }}">
+      <button class="ds-btn secondary" type="submit"{% if not u.org_verified_at and not (u.org and u.inn) %} disabled{% endif %}>
+        {{ 'Снять подтверждение' if u.org_verified_at else 'Подтвердить организацию' }}</button>
+    </form>
+    {% endif %}
     <form method="post" action="/api/admin/users/{{ u.id }}/org" class="adm-form">
       <label>Организация <input name="org" value="{{ u.org or '' }}" maxlength="300"></label>
       <label>ИНН <input name="inn" value="{{ u.inn or '' }}" inputmode="numeric" pattern="\d{10}(\d{2})?" maxlength="12"></label>
       <button class="ds-btn secondary" type="submit">Сохранить</button>
     </form>
-    <p class="muted">Пользователь видит их в кабинете, но изменить не может.</p>
+    <p class="muted">Пользователь вписывает их сам в кабинете; его правка снимает подтверждение.
+      Вписанное здесь — сразу подтверждено.</p>
   </section>
 
   <section class="adm-card">

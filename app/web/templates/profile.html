@@ -214,21 +214,26 @@
         <label class="field"><span>Ник в Telegram</span>
           <input name="telegram" value="{{ form.telegram }}" placeholder="@username" maxlength="128">
         </label>
-        {# Только чтение: без name — поле не уходит с формой; сервер всё равно его не принял бы #}
+        {# Организацию и ИНН вписывает пользователь (вечер 09.10.2026), по желанию. Статус — по записи в
+           базе: подтверждает admin, правка подтверждение снимает. В будущем — профиль работника на Госуслугах. #}
+        {% set org_ok = user.org_verified_at and user.org and user.inn and form.org == user.org and form.inn == user.inn %}
         <label class="field"><span>Организация</span>
-          <input value="{{ user.org or '' }}" placeholder="Не указана" disabled>
-          <span class="hint">Меняется через администратора сервиса</span>
+          <input name="org" value="{{ form.org }}" placeholder="ООО «Предприятие»" autocomplete="organization" maxlength="300">
         </label>
         <label class="field"><span>ИНН организации</span>
-          <input value="{{ user.inn or '' }}" placeholder="Не указан" disabled>
-          <span class="hint">Меняется через администратора сервиса</span>
+          <input name="inn" value="{{ form.inn }}" placeholder="10 или 12 цифр" inputmode="numeric" maxlength="12">
         </label>
+        {% if form.org or form.inn %}
+        <div class="org-status {{ 'ok' if org_ok else 'wait' }}" role="status">
+          {% if org_ok %}Организация и ИНН подтверждены администратором
+          {% else %}Организация и ИНН не подтверждены — их проверит администратор сервиса{% endif %}</div>
+        {% endif %}
       </div>
 
       <label class="check">
         <input type="checkbox" name="consent" value="1" {% if form.consent %}checked{% endif %} required>
         <span><b class="req" aria-hidden="true">*</b> Я даю согласие на обработку моих персональных данных (ФИО, регион, рабочий email, телефон,
-          а если я их укажу — должность и ник в Telegram; содержание диалогов с сервисом) оператором —
+          а если я их укажу — должность, ник в Telegram, организация и её ИНН; содержание диалогов с сервисом) оператором —
           {{ org }} — в целях проведения тестирования и улучшения сервиса «Навигатор ПП №719», на условиях
           <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
           Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>
