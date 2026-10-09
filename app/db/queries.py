@@ -39,15 +39,16 @@ def update_profile(
     """Сохраняет профиль пользователя (ФИО/регион/Telegram) и согласие на ПДн. Момент согласия
     (consent_at) фиксируем ОДИН раз при первой отметке — след 152-ФЗ. Возвращает User или None.
 
-    Контакты кабинета (должность, email, телефон) необязательны: None — поле не трогаем, пустая
-    строка — очищаем. Организацию и ИНН эта функция не пишет вовсе — их ведёт admin
+    Telegram по желанию (09.10.2026): пустой — None. Контакты кабинета (должность, email,
+    телефон): None — поле не трогаем, пустая строка — очищаем; обязательность email и телефона
+    проверяет форма, а не эта функция. Организацию и ИНН эта функция не пишет вовсе — их ведёт admin
     (`set_user_org`), и форма кабинета не должна иметь пути их переписать."""
     u = db.get(User, user_id)
     if not u:
         return None
     u.full_name = (full_name or "").strip()
     u.region = (region or "").strip()
-    u.telegram = (telegram or "").strip()
+    u.telegram = (telegram or "").strip() or None
     for field, value in (("position", position), ("email", email), ("phone", phone)):
         if value is not None:
             setattr(u, field, value.strip() or None)

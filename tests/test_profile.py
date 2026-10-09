@@ -47,10 +47,23 @@ class TestProfileGate(unittest.TestCase):
         self.assertTrue(profile_complete(u))
         self.assertFalse(needs_profile(u))
 
-    def test_missing_telegram_gated(self):
+    def test_telegram_is_optional(self):
+        # решение владельца 09.10.2026: Telegram — по желанию; анкета без него не должна
+        # возвращать человека на себя же
         u = self._user(telegram=None)
-        self.assertFalse(profile_complete(u))
-        self.assertTrue(needs_profile(u))
+        self.assertTrue(profile_complete(u))
+        self.assertFalse(needs_profile(u))
+
+    def test_missing_name_or_region_gated(self):
+        self.assertTrue(needs_profile(self._user(full_name=None)))
+        self.assertTrue(needs_profile(self._user(region=None)))
+
+    def test_existing_user_without_email_and_phone_keeps_working(self):
+        # «спрашивать при сохранении»: учётки, заполнившие анкету до появления email и телефона,
+        # в чат ходят как раньше (у _user их нет вовсе)
+        u = self._user()
+        self.assertIsNone(u.email)
+        self.assertFalse(needs_profile(u))
 
     def test_no_consent_gated(self):
         u = self._user(consent=False)
@@ -127,7 +140,8 @@ from app.api import web  # noqa: E402
 from app.core import plans  # noqa: E402
 from app.db.models import AnswerUsage  # noqa: E402
 
-COMPLETE = dict(full_name="Иван Петров", region="Курская область", telegram="@ivan", consent=True)
+COMPLETE = dict(full_name="Иван Петров", region="Курская область", telegram="@ivan", consent=True,
+                email="i.petrov@tpp.ru", phone="+7 900 000-00-00")
 
 
 def _request(path="/profile"):
@@ -166,7 +180,8 @@ class _CabinetDB(unittest.TestCase):
 
     def _submit(self, user, **form):
         fields = dict(consent="1", full_name=COMPLETE["full_name"], region=COMPLETE["region"],
-                      telegram=COMPLETE["telegram"], position="", email="", phone="")
+                      telegram=COMPLETE["telegram"], position="", email=COMPLETE["email"],
+                      phone=COMPLETE["phone"])
         fields.update(form)
         with mock.patch.object(web, "current_user", return_value=user):
             return web.profile_submit(_request(), **fields)
@@ -247,11 +262,28 @@ class TestCabinetSave(_CabinetDB):
 
     def test_required_fields_still_gate(self):
         u = self._user(complete=False)
-        for missing in ("consent", "full_name", "region", "telegram"):
+        for missing in ("consent", "full_name", "region", "email", "phone"):
             with self.subTest(missing=missing):
                 r = self._submit(u, **{missing: ""})
                 self.assertEqual(r.status_code, 400)
+                self.assertIn("Заполните ФИО, регион, рабочий email и телефон", r.body.decode("utf-8"))
         self.assertFalse(profile_complete(self._fresh(u.id)), "непрошедшая форма ничего не сохранила")
+
+    def test_telegram_optional_email_phone_required_in_form(self):
+        u = self._user(complete=False)
+        r = self._submit(u, telegram="")
+        self.assertEqual((r.status_code, r.headers["location"]), (302, "/chat"), "без Telegram анкета не прошла")
+        self.assertIsNone(self._fresh(u.id).telegram)
+        html = self._page(self._fresh(u.id))
+        for name, required in (("email", True), ("phone", True), ("telegram", False), ("position", False)):
+            tag = html[html.index(f'name="{name}"'):]
+            tag = tag[:tag.index(">")]
+            self.assertEqual("required" in tag, required, f"поле {name}")
+
+    def test_existing_user_must_add_contacts_on_save(self):
+        u = self._user(email=None, phone=None)            # заполнял анкету до появления полей
+        r = self._submit(u, email="", phone="")
+        self.assertEqual(r.status_code, 400, "сохранение без email и телефона прошло")
 
     def test_bad_contacts_rerender_with_input(self):
         u = self._user()
@@ -266,7 +298,7 @@ class TestCabinetSave(_CabinetDB):
                 self.assertIn(msg, body)
                 self.assertIn(f'value="{value}"', body, "введённое не должно теряться")
                 self.assertIn("Вернуться к сервису", body, "ре-рендер ошибки теряет выход (ревью 08.10)")
-        self.assertIsNone(self._fresh(u.id).email)
+        self.assertEqual(self._fresh(u.id).email, COMPLETE["email"], "ошибочная форма изменила email")
 
     def test_region_only_from_the_list(self):
         u = self._user()

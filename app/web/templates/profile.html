@@ -3,8 +3,9 @@
 {% block title %}Личный кабинет — {{ app_title }}{% endblock %}
 {% block body %}
 {# Макет «Navigator 719 Service», экран «Личный кабинет» (account). Решения владельца 09.10.2026:
-   * поля — макетные плюс наши: ФИО, регион и Telegram обязательны для регионального участника
-     (гейт до чата), должность, email и телефон — по желанию; организацию и ИНН ведёт admin сервиса
+   * поля — макетные плюс наши: ФИО, регион, рабочий email и телефон обязательны, должность и
+     Telegram — по желанию (уточнение того же дня; в гейт до чата входят ФИО и регион — см.
+     `auth.profile_complete`); организацию и ИНН ведёт admin сервиса
      (в макете — «администратор организации»), здесь они только для чтения;
    * согласие на обработку ПДн — явной галочкой (152-ФЗ), а не пассивным «продолжая, вы соглашаетесь»;
    * вкладки «Профиль» и «Тариф»; «Оплата» и «Документы» макета не показываются, пока нет биллинга.
@@ -78,8 +79,8 @@
     <form class="panel" method="post" action="/profile">
       <div>
         <h2>Данные пользователя</h2>
-        <p class="panel-sub">ФИО, регион и Telegram нужны для доступа к навигатору по ПП №719; должность,
-          email и телефон — по желанию, для связи с вами.</p>
+        <p class="panel-sub">ФИО, регион, рабочий email и телефон нужны для доступа к навигатору по ПП №719;
+          должность и Telegram — по желанию.</p>
       </div>
       {% if error %}<div class="error">{{ error }}</div>{% endif %}
 
@@ -94,11 +95,11 @@
         </label>
         <label class="field"><span>Рабочий email</span>
           <input name="email" type="email" value="{{ form.email }}" placeholder="name@tpp.ru"
-                 autocomplete="email" maxlength="255">
+                 autocomplete="email" maxlength="255" required>
         </label>
         <label class="field"><span>Телефон</span>
           <input name="phone" type="tel" value="{{ form.phone }}" placeholder="+7 900 000-00-00"
-                 autocomplete="tel" maxlength="32">
+                 autocomplete="tel" maxlength="32" required>
         </label>
         {# Регион — список с поиском по совпадению (просьба владельца 09.10.2026). Обычный <select>
            остаётся: без JS работает он, со скриптом его подменяет поле ввода с фильтром (ниже). #}
@@ -117,7 +118,7 @@
           </div>
         </div>
         <label class="field"><span>Ник в Telegram</span>
-          <input name="telegram" value="{{ form.telegram }}" placeholder="@username" maxlength="128" required>
+          <input name="telegram" value="{{ form.telegram }}" placeholder="@username" maxlength="128">
         </label>
         {# Только чтение: без name — поле не уходит с формой; сервер всё равно его не принял бы #}
         <label class="field"><span>Организация</span>
@@ -132,8 +133,8 @@
 
       <label class="check">
         <input type="checkbox" name="consent" value="1" {% if form.consent %}checked{% endif %} required>
-        <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, ник в Telegram, а если
-          я их укажу — должность, рабочий email и телефон; содержание диалогов с сервисом) оператором —
+        <span>Я даю согласие на обработку моих персональных данных (ФИО, регион, рабочий email, телефон,
+          а если я их укажу — должность и ник в Telegram; содержание диалогов с сервисом) оператором —
           {{ org }} — в целях проведения тестирования и улучшения сервиса «Навигатор ПП №719», на условиях
           <a href="/privacy" target="_blank" rel="noopener">Политики конфиденциальности</a>.
           Согласие действует на период тестирования; отозвать можно, обратившись к организатору.</span>

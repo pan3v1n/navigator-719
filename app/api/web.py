@@ -347,7 +347,8 @@ def profile_page(request: Request, tab: str = "profile", saved: str = ""):
 
 
 def _contact_errors(position: str, email: str, phone: str) -> list[str]:
-    """Необязательные контакты: пустое — можно, заполненное — проверяем как в заявке лендинга."""
+    """Формат контактов — как в заявке лендинга. Пустые email и телефон здесь не ошибка: их
+    обязательность проверяет форма отдельно, одной строкой вместе с ФИО и регионом."""
     errs = []
     if len(position) > CONTACT_LIMITS["position"]:
         errs.append("Слишком длинное название должности.")
@@ -378,12 +379,12 @@ def profile_submit(
     pos, em, ph = position.strip(), email.strip(), phone.strip()
     form = _profile_form(user, full_name=fn, region=rg or region_from_username(user.username),
                          telegram=tg, position=pos, email=em, phone=ph, consent=bool(consent))
-    # ФИО, регион, Telegram и согласие обязательны (решение заказчика: жёсткий гейт), контакты —
-    # нет. Ошибка → ре-рендер с введённым, а не потеря формы.
+    # Обязательны ФИО, регион, рабочий email, телефон и согласие; должность и Telegram — по
+    # желанию (решение владельца 09.10.2026). Ошибка → ре-рендер с введённым, а не потеря формы.
     errs = []
-    if not (consent and fn and rg and tg):
-        errs.append("Заполните ФИО, регион и Telegram и подтвердите согласие на обработку "
-                    "персональных данных.")
+    if not (consent and fn and rg and em and ph):
+        errs.append("Заполните ФИО, регион, рабочий email и телефон и подтвердите согласие на "
+                    "обработку персональных данных.")
     # Регион — только из справочника: поле с поиском выбирает из него, но форму можно прислать и
     # в обход страницы, а по региону строятся срезы админки.
     if rg and rg not in REGIONS:
