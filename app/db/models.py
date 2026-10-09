@@ -50,6 +50,10 @@ class User(Base):
     plan_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # дата подключения
     # Срок тарифа (09.10.2026): 00:00 МСК дня, с которого он уже не действует; None — бессрочно.
     plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Доступ (админка 09.10.2026): блокировка без удаления данных и «эпоха» входа — её поднимают
+    # сброс пароля и блокировка, и все выданные сессии и куки «запомнить меня» гаснут сразу.
+    blocked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    auth_epoch: Mapped[int] = mapped_column(Integer, default=0, nullable=False, server_default="0")
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

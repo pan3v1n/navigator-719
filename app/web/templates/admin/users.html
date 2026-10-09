@@ -1,0 +1,72 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="adm-head">
+  <h1>Пользователи</h1>
+  <span class="muted">{{ rows|length }} из {{ total }}</span>
+</div>
+{% if notice %}<div class="adm-note ok" role="status">{{ notice }}</div>{% endif %}
+
+<details class="adm-card adm-create"{% if create_error %} open{% endif %}>
+  <summary>Создать учётку</summary>
+  {% if create_error %}<div class="adm-note err">{{ create_error }}</div>{% endif %}
+  <form method="post" action="/api/admin/users" class="adm-row">
+    <input name="username" value="{{ create_form.username or '' }}" placeholder="логин, например kursk.expert2"
+           required maxlength="64" pattern="[a-z0-9][a-z0-9._\-]{2,63}" autocomplete="off" aria-label="Логин">
+    <select name="role" aria-label="Роль">
+      {% for key, label in roles.items() %}<option value="{{ key }}"{% if key == (create_form.role or 'user') %} selected{% endif %}>{{ label }}</option>{% endfor %}
+    </select>
+    <button class="ds-btn" type="submit">Создать</button>
+  </form>
+  <p class="muted">Логин — латиницей, строчными. Пароль сгенерируется и покажется один раз на карточке
+    учётки. Региональному участнику дайте логин вида <code>kursk.expert2</code> — регион подставится в анкету сам.</p>
+</details>
+
+<form class="adm-filters" method="get" action="/admin/users">
+  <input type="search" name="q" value="{{ filters.q or '' }}" placeholder="Логин, ФИО, организация, ИНН, email, регион"
+         aria-label="Поиск">
+  <select name="role" aria-label="Роль">
+    <option value="">Все роли</option>
+    {% for key, label in roles.items() %}<option value="{{ key }}"{% if key == filters.role %} selected{% endif %}>{{ label }}</option>{% endfor %}
+  </select>
+  <select name="status" aria-label="Состояние">
+    {% for key, label in (("", "Любое состояние"), ("active", "Активные"), ("blocked", "Заблокированные"),
+                         ("no_profile", "Без анкеты"), ("expired", "Тариф истёк")) %}
+    <option value="{{ key }}"{% if key == filters.status %} selected{% endif %}>{{ label }}</option>
+    {% endfor %}
+  </select>
+  <select name="plan" aria-label="Тариф">
+    <option value="">Любой тариф</option>
+    <option value="-"{% if filters.plan == '-' %} selected{% endif %}>Без тарифа</option>
+    {% for p in all_plans %}<option value="{{ p }}"{% if p == filters.plan %} selected{% endif %}>{{ p }}</option>{% endfor %}
+  </select>
+  <button class="ds-btn secondary" type="submit">Найти</button>
+  {% if filters.q or filters.role or filters.status or filters.plan %}<a class="ds-link" href="/admin/users">Сбросить</a>{% endif %}
+</form>
+
+<div class="adm-table-wrap">
+  <table class="adm-table">
+    <thead><tr><th>Учётка</th><th>Организация</th><th>Тариф</th><th>Расход за период</th><th>Последний вопрос</th></tr></thead>
+    <tbody>
+    {% for r in rows %}
+      <tr>
+        <td><a class="adm-strong" href="/admin/users/{{ r.id }}">{{ r.username }}</a>
+          <div class="muted">{{ r.full_name or '—' }} · {{ r.role_label }}</div>
+          {% if r.blocked %}<span class="badge bad">заблокирована</span>{% endif %}
+          {% if r.no_profile %}<span class="badge warn">без анкеты</span>{% endif %}</td>
+        <td>{{ r.org or '—' }}{% if r.inn %}<div class="muted">ИНН {{ r.inn }}</div>{% endif %}
+          {% if r.region %}<div class="muted">{{ r.region }}</div>{% endif %}</td>
+        <td>{% if r.plan %}{{ r.plan }}
+            <div class="muted">{% if r.expired %}<span class="badge bad">истёк {{ r.expires }}</span>{% elif r.expires %}до {{ r.expires }}{% else %}бессрочно{% endif %}</div>
+            {% if r.unknown_plan %}<span class="badge warn">неизвестный тариф — лимит не действует</span>{% endif %}
+          {% else %}<span class="muted">без тарифа</span>{% endif %}</td>
+        <td>{% if r.state %}{{ r.state.used }} из {{ r.state.limit }}{% if r.state.exhausted %} <span class="badge bad">исчерпан</span>{% endif %}
+          {% else %}<span class="muted">без лимита</span>{% endif %}</td>
+        <td>{{ r.last or '—' }}<div class="muted">{{ r.asked }} {{ r.asked | plural('вопрос', 'вопроса', 'вопросов') }} всего</div></td>
+      </tr>
+    {% else %}
+      <tr><td colspan="5" class="muted">Никого не нашлось.</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</div>
+{% endblock %}

@@ -136,6 +136,7 @@ from fastapi import HTTPException  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 from starlette.requests import Request  # noqa: E402
 
+from app.api import admin as adm  # noqa: E402
 from app.api import web  # noqa: E402
 from app.core import plans  # noqa: E402
 from app.db.models import AnswerUsage  # noqa: E402
@@ -155,9 +156,10 @@ class _CabinetDB(unittest.TestCase):
                                     poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
-        p = mock.patch.object(web, "get_session", self.Session)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.object(web, "get_session", self.Session),
+                  mock.patch.object(adm, "get_session", self.Session)):
+            p.start()
+            self.addCleanup(p.stop)
 
     def _user(self, role="user", complete=True, plan=None, **profile):
         with self.Session() as db:
@@ -353,7 +355,7 @@ class TestAdminSetsOrg(_CabinetDB):
         self.admin = mock.Mock(id=1)
 
     def _set(self, org, inn, uid=None):
-        return web.admin_set_org(uid or self.uid, org=org, inn=inn, admin=self.admin)
+        return adm.admin_set_org(uid or self.uid, org=org, inn=inn, admin=self.admin)
 
     def test_assign_and_clear(self):
         self.assertEqual(self._set(" Союз «Курская ТПП» ", "4632000000").status_code, 303)
@@ -396,13 +398,13 @@ class TestAdminSetsOrg(_CabinetDB):
     def test_admin_page_has_org_form(self):
         self._set("Союз «Курская ТПП»", "4632000000")
         admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(web, "current_user", return_value=admin), \
-             mock.patch.object(web, "system_health", return_value={}):
-            html = web.admin_page(_request("/admin")).body.decode("utf-8")
-        panel = html[html.index('id="tab-plans"'):]
-        self.assertIn(f'action="/api/admin/users/{self.uid}/org"', panel)
-        self.assertIn('value="Союз «Курская ТПП»"', panel)
-        self.assertIn('value="4632000000"', panel)
+        with mock.patch.object(adm, "current_user", return_value=admin):
+            card = adm.admin_user_card(_request("/admin"), self.uid).body.decode("utf-8")
+            listing = adm.admin_users(_request("/admin/users")).body.decode("utf-8")
+        self.assertIn(f'action="/api/admin/users/{self.uid}/org"', card)
+        self.assertIn('value="Союз «Курская ТПП»"', card)
+        self.assertIn('value="4632000000"', card)
+        self.assertIn("ИНН 4632000000", listing, "организация в списке пользователей")
 
 
 class TestAdminCreatesAccount(_CabinetDB):
@@ -420,7 +422,7 @@ class TestAdminCreatesAccount(_CabinetDB):
         self.admin = self._user(role="admin")
         self.as_user = self.admin
         for p in (mock.patch.object(auth, "current_user", side_effect=lambda r: self.as_user),
-                  mock.patch.object(web, "system_health", return_value={})):
+                  mock.patch.object(adm, "current_user", side_effect=lambda r: self.as_user)):
             p.start()
             self.addCleanup(p.stop)
 
@@ -436,7 +438,9 @@ class TestAdminCreatesAccount(_CabinetDB):
 
         r = self._post(" Kursk.Expert2 ")
         self.assertEqual(r.status_code, 200)
-        self.assertIn("Учётка создана: kursk.expert2 · Региональный участник", r.text)
+        self.assertIn("Учётка создана.", r.text)             # ответ — карточка новой учётки
+        self.assertIn("<h1>kursk.expert2</h1>", r.text)
+        self.assertIn("Региональный участник", r.text)
         pw = r.text.split('id="new-password">')[1].split("<")[0]
         self.assertGreaterEqual(len(pw), 12)
         u = self._by_login("kursk.expert2")
@@ -483,8 +487,8 @@ class TestAdminCreatesAccount(_CabinetDB):
                 self.as_user = self._user(role=role)
                 self.assertEqual(self._post(f"{role}.made1").status_code, 403)
         self.assertIsNone(self._by_login("user.made1"))
-        with mock.patch.object(web, "current_user", return_value=self.admin):
-            html = web.admin_page(_request("/admin")).body.decode("utf-8")
+        self.as_user = self.admin
+        html = self.client.get("/admin/users").text
         self.assertIn('action="/api/admin/users"', html)
         self.assertIn('<option value="expert"', html)
 

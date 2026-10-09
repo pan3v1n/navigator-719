@@ -1,0 +1,53 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="adm-head"><h1>Диалоги</h1>{% if only_user %}<span class="muted">пользователь {{ only_user }} · <a class="ds-link" href="/admin/dialogs">все</a></span>{% endif %}</div>
+{% include "admin/_filters.html" %}
+  <!-- ===== ЛОГИ ===== -->
+  <section id="tab-logs" class="adm-section">
+    {% for u in data %}
+    <details class="user-log"{% if only_user %} open{% endif %}>
+      <summary>
+        <span class="ul-name">{{ u.username }} <span class="role">{{ u.role }}</span>{% if u.region %} <span class="ul-region">{{ u.region }}</span>{% endif %}</span>
+        <span class="ul-meta">диалогов {{ u.conversations }} · запросов {{ u.requests }} · {{ u.tokens|spaced }} ток. · {{ '%.2f'|format(u.cost) }} ₽</span>
+      </summary>
+      <div class="ul-body">
+        {% if u.feedback %}
+        <div class="fb-list">
+          <h3>Отзывы</h3>
+          {% for f in u.feedback %}
+          <div class="fb">оценка: <b>{{ f.rating if f.rating is not none else '—' }}</b>
+            · соответствие 719: <b>{{ f.matched or '—' }}</b>{% if f.comment %}<br>«{{ f.comment }}»{% endif %}
+            <span class="ts">{{ f.ts }}</span></div>
+          {% endfor %}
+        </div>
+        {% endif %}
+        {% for s in u.sessions %}
+        <details class="thread" id="th-{{ s.sid }}">
+          <summary>{{ s.title }}<span class="thread-meta"> · {{ s.date }} · {{ s.messages|length }} реплик · {{ s.tokens|spaced }} ток. · {{ '%.3f'|format(s.cost) }} ₽</span></summary>
+          {% for m in s.messages %}
+          <div class="log-msg {{ m.role }}">
+            <b>{{ 'Эксперт' if m.role == 'user' else 'Ассистент' }}:</b>
+            <span class="content">{{ m.content }}</span>
+            <span class="ts">{{ m.ts }}</span>
+            {% if m.tokens %}<span class="tok">{{ m.tokens|spaced }} ток.</span>{% endif %}
+            {% if m.unverified %}<span class="flag">непроверенные числа: {{ m.unverified }}</span>{% endif %}
+            {% if m.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
+          </div>
+          {% endfor %}
+        </details>
+        {% else %}<p class="empty">Нет диалогов.</p>{% endfor %}
+      </div>
+    </details>
+    {% else %}<p class="empty">Нет пользователей.</p>{% endfor %}
+  </section>
+
+<script>
+  // Ссылка с якорем беседы (карточка учётки, плохие ответы): раскрыть беседу и прокрутить к ней.
+  (function () {
+    var th = location.hash && document.getElementById(location.hash.slice(1));
+    if (!th) return;
+    for (var p = th; p; p = p.parentElement) { if (p.tagName === "DETAILS") p.open = true; }
+    th.scrollIntoView({ block: "center" });
+  })();
+</script>
+{% endblock %}

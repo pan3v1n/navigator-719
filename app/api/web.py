@@ -8,45 +8,35 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
-from loguru import logger
 from pydantic import BaseModel
 
 from app.api.auth import (
     authenticate,
     clear_remember_cookie,
     current_user,
-    generate_password,
-    hash_password,
     login_session,
     logout_session,
     needs_profile,
-    require_admin,
     require_user_profiled,
     set_remember_cookie,
 )
 from app.api import quota, trial
-from app.api.admin_stats import build_admin_view, system_health
 from app.api.leads import LIMITS as LEAD_LIMITS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
-from app.api.leads import _INN_RE as INN_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import plans
 from app.core.config import settings
-from app.core.plans import PLAN_LIMITS
 from app.core.release import release_label
-from app.core.prompts import EXPERT_DISCLAIMER
 from app.core.regions import REGIONS, region_from_username
 from app.rag import followup
-from app.rag.edition import corpus_edition, corpus_line, kontur_719_url
+from app.rag.edition import corpus_edition, kontur_719_url
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -243,13 +233,18 @@ def login_submit(request: Request, username: str = Form(...), password: str = Fo
         return templates.TemplateResponse(
             "login.html", _ctx(request, error="Неверный логин или пароль"), status_code=401
         )
+    if user.blocked_at is not None:
+        # Только после верного пароля: так блокировка не подсказывает, какие логины существуют.
+        return templates.TemplateResponse(
+            "login.html", _ctx(request, error="Учётная запись заблокирована. Обратитесь к "
+                                              "администратору сервиса."), status_code=403)
     # Успешный вход снимает счётчик: человек, вспомнивший пароль с 9-й попытки, не должен
     # оставаться под лимитом — он бьёт по перебору, а не по забывчивости.
     _login_limit.reset(f"login:{ip}")
     login_session(request, user)
     resp = RedirectResponse("/", status_code=302)
-    if remember:  # «Запомнить меня» → персистентный cookie автовхода
-        set_remember_cookie(resp, user.id)
+    if remember:  # «Запомнить меня» → персистентный cookie автовхода (с эпохой входа)
+        set_remember_cookie(resp, user.id, user.auth_epoch or 0)
     return resp
 
 
@@ -405,247 +400,6 @@ def profile_submit(
     # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
     # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
     return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)
-
-
-@router.get("/admin", response_class=HTMLResponse)
-def admin_page(request: Request, date_from: str = "", date_to: str = "",
-               region: str = "", role: str = ""):
-    """Админ-панель: приёмочный скоркард, срез по регионам, триаж плохих ответов, логи.
-    Фильтры (query, опц.): date_from/date_to (YYYY-MM-DD), region, role. Только для admin.
-    Вся сборка данных — в app/api/admin_stats.build_admin_view (тестируемо + переиспользует экспорт)."""
-    user = current_user(request)
-    if not user:
-        return RedirectResponse("/login", status_code=302)
-    if user.role != "admin":
-        return RedirectResponse("/chat", status_code=302)  # эксперт логи не видит
-    return _admin_response(request, user, date_from=date_from, date_to=date_to,
-                           region=region, role=role)
-
-
-def _admin_response(request: Request, user: User, *, date_from: str = "", date_to: str = "",
-                    region: str = "", role: str = "", created: dict | None = None,
-                    create_error: str | None = None, create_form: dict | None = None,
-                    status_code: int = 200):
-    """Сборка `/admin`. Отдельно от маршрута: результат создания учётки (пароль — один раз) и её
-    ошибку показывает та же страница, без редиректа — пароль не должен жить ни в URL, ни в куке."""
-    with get_session() as db:
-        view = build_admin_view(
-            db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
-            region=region, role=role,
-        )
-        # Заявки с лендинга — ПДн, поэтому только здесь, за ролью admin. Просроченные (срок из
-        # политики ПДн) удаляются при каждом открытии; на страницу — не больше LEADS_ON_PAGE.
-        q.purge_old_leads(db)
-        leads = q.list_leads(db, limit=LEADS_ON_PAGE)
-        leads_total = q.count_leads(db)
-        plan_rows = _plan_rows(db)
-        q.purge_old_guest_messages(db)  # срок хранения — обещание политики, как у заявок
-        guest_view = _guest_view(db)
-    return templates.TemplateResponse(
-        "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads,
-                           leads_total=leads_total, plan_rows=plan_rows, guest_view=guest_view,
-                           paid_plans=list(PLAN_LIMITS), internal_plans=list(plans.INTERNAL_PLANS),
-                           trial_plan=plans.TRIAL_PLAN, trial_days=plans.TRIAL_DAYS,
-                           today=plans.msk_today().isoformat(), created=created,
-                           create_error=create_error, create_form=create_form or {},
-                           roles=ACCOUNT_ROLES, **view),
-        status_code=status_code)
-
-
-# Создание учётки из админки (решение владельца 09.10.2026: регистрации нет, учётки заводит admin).
-ACCOUNT_ROLES = {"user": "Региональный участник", "expert": "Эксперт ТПП", "admin": "Администратор"}
-_USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
-
-
-@router.post("/api/admin/users", response_class=HTMLResponse)
-def admin_create_user(request: Request, username: str = Form(default=""), role: str = Form(default="user"),
-                      admin: User = Depends(require_admin)):
-    """Новая учётка: логин и роль; пароль генерирует сервер и показывает admin'у ОДИН раз — в базе
-    только bcrypt-хеш, как у `seed_users.py`. Тариф, организацию и ИНН admin задаёт в строке учётки.
-    Региональному участнику логин вида `kursk.expert2` подставит регион в анкету (`regions`)."""
-    login, role = username.strip().lower(), role.strip()
-    form = {"username": login, "role": role}
-    error = None
-    if not _USERNAME_RE.match(login):
-        error = ("Логин — латинские буквы, цифры, точка, дефис или подчёркивание, от 3 до 64 "
-                 "символов, начинается с буквы или цифры.")
-    elif role not in ACCOUNT_ROLES:
-        error = "Неизвестная роль."
-    else:
-        with get_session() as db:
-            if q.get_user_by_username(db, login) is not None:
-                error = f"Логин «{login}» уже занят."
-            else:
-                password = generate_password()
-                q.create_user(db, login, hash_password(password), role=role)
-    if error:
-        return _admin_response(request, admin, create_error=error, create_form=form, status_code=400)
-    logger.info(f"учётка: admin_id={admin.id} создал «{login}» ({role})")  # пароль в журнал — никогда
-    return _admin_response(request, admin, created={"username": login, "password": password,
-                                                    "role": ACCOUNT_ROLES[role]})
-
-
-LEADS_ON_PAGE = 200
-GUEST_ON_PAGE = 400  # реплик пробного режима на вкладке (≈ 200 вопросов с ответами)
-
-
-def _guest_view(db) -> dict:
-    """Вкладка «Пробный режим»: расход за сутки против общего потолка и последние вопросы гостей
-    с ответами. Гости обезличены — показываем только текст, время и токены."""
-    day_start = plans.anchor_from_date(plans.msk_today())
-    rows, open_q = [], {}
-    for m in reversed(q.list_guest_messages(db, limit=GUEST_ON_PAGE)):   # по времени
-        if m.role == "user":
-            row = {"ts": f"{plans.naive_utc(m.ts) + plans.MSK_OFFSET:%d.%m %H:%M}",
-                   "question": m.content, "answer": "", "tokens": 0, "charged": False}
-            rows.append(row)
-            open_q[m.session_id] = row
-        elif (row := open_q.pop(m.session_id, None)) is not None:
-            row.update(answer=m.content, charged=m.charged,
-                       tokens=(m.prompt_tokens or 0) + (m.completion_tokens or 0))
-    return {"rows": rows[::-1], "today": q.count_guest_answers_since(db, day_start),
-            "cap": settings.GUEST_DAILY_TOTAL, "enabled": settings.GUEST_TRIAL_ENABLED,
-            "per_guest": settings.GUEST_TRIAL_QUESTIONS, "per_ip": settings.GUEST_IP_PER_DAY}
-
-
-def _plan_rows(db) -> list[dict]:
-    """Вкладка «Тарифы» (#160): тариф, дата подключения и расход текущего периода по каждому."""
-    rows = []
-    for u in q.list_users(db):
-        st = quota.quota_state(db, u)
-        rows.append({
-            "id": u.id, "username": u.username, "role": u.role,
-            "who": " · ".join(x for x in (u.full_name, u.region) if x),
-            "plan": u.plan or "",
-            "org": u.org or "", "inn": u.inn or "",
-            # название не из таблицы тарифов молча снимает лимит (ревью PR #161, LOW-3) — показываем
-            "unknown": bool(u.plan) and u.plan not in plans.ALL_PLANS,
-            "started": plans.msk_date(u.plan_started_at).isoformat() if u.plan_started_at else "",
-            # срок (09.10.2026): дата для формы и строка «до 16.10.2026» / «бессрочно» / истёк
-            "expires": plans.msk_date(u.plan_expires_at).isoformat() if u.plan_expires_at else "",
-            "expires_text": quota.validity(u)["expires"], "expired": plans.plan_expired(u),
-            "state": st,
-            "period": (f"{plans.msk_date(st.start):%d.%m.%Y} – "
-                       f"{plans.msk_date(st.end - timedelta(seconds=1)):%d.%m.%Y}") if st else "",
-        })
-    return rows
-
-
-@router.post("/api/admin/users/{user_id}/plan")
-def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Form(default=""),
-                   expires: str = Form(default=""),
-                   admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Назначить тариф, дату подключения и срок (#160; срок и внутренние тарифы — 09.10.2026).
-    Пустой тариф — снять лимит. Дата подключения по умолчанию — сегодня по Москве; в будущем
-    нельзя: период, которого ещё нет, пользователь не увидит. Срок — дата, с которой тариф уже не
-    действует («Активен до …»); пусто — бессрочно, у «Пробного режима» — TRIAL_DAYS дней.
-    Срок в прошлом допустим: так admin закрывает доступ, не снимая тариф."""
-    plan = plan.strip()
-    if plan and plan not in plans.ALL_PLANS:
-        raise HTTPException(status_code=422, detail=f"Неизвестный тариф «{plan}»")
-    started_at = expires_at = None
-    if plan:
-        day = _parse_date(started.strip()) if started.strip() else plans.msk_today()
-        if day is None:
-            raise HTTPException(status_code=422, detail="Дата подключения — в формате ГГГГ-ММ-ДД")
-        if day > plans.msk_today():
-            raise HTTPException(status_code=422, detail="Дата подключения не может быть в будущем")
-        started_at = plans.anchor_from_date(day)
-        until = _parse_date(expires.strip()) if expires.strip() else None
-        if expires.strip() and until is None:
-            raise HTTPException(status_code=422, detail="Срок действия — в формате ГГГГ-ММ-ДД")
-        if until is None and plan == plans.TRIAL_PLAN:
-            until = day + timedelta(days=plans.TRIAL_DAYS)
-        if until is not None and until <= day:
-            raise HTTPException(status_code=422, detail="Срок действия должен быть позже даты подключения")
-        expires_at = plans.anchor_from_date(until) if until else None
-    with get_session() as db:
-        if q.set_user_plan(db, user_id, plan or None, started_at, expires_at) is None:
-            raise HTTPException(status_code=404, detail="Пользователь не найден")
-    logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
-                f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else "")
-                + (f" до {plans.msk_date(expires_at):%d.%m.%Y}" if expires_at else ""))
-    return RedirectResponse("/admin", status_code=303)
-
-
-@router.post("/api/admin/users/{user_id}/org")
-def admin_set_org(user_id: int, org: str = Form(default=""), inn: str = Form(default=""),
-                  admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Организация и ИНН пользователя (решение владельца 09.10.2026: заполняет только admin
-    сервиса; в кабинете пользователь их видит, но не правит). Пустые — очистить."""
-    org, inn = org.strip(), inn.strip()
-    if len(org) > ORG_LIMIT:
-        raise HTTPException(status_code=422, detail="Слишком длинное название организации")
-    if inn and not INN_RE.match(inn):
-        raise HTTPException(status_code=422, detail="ИНН должен содержать 10 или 12 цифр")
-    with get_session() as db:
-        if q.set_user_org(db, user_id, org, inn) is None:
-            raise HTTPException(status_code=404, detail="Пользователь не найден")
-    logger.info(f"организация: admin_id={admin.id} изменил user_id={user_id}")
-    return RedirectResponse("/admin", status_code=303)
-
-
-@router.post("/api/admin/leads/{lead_id}/delete")
-def admin_delete_lead(lead_id: int, admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Удалить заявку — по отзыву согласия или требованию субъекта ПДн (политика, раздел 9)."""
-    with get_session() as db:
-        q.delete_lead(db, lead_id)
-    return RedirectResponse("/admin", status_code=303)
-
-
-@router.get("/api/admin/export")
-def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
-                 region: str = "", role: str = "",
-                 admin: User = Depends(require_admin)) -> Response:
-    """Выгрузка данных панели (только admin). Учитывает те же фильтры, что и /admin.
-    fmt=csv — скоркард: одна строка на оценённый ответ (для Excel, разделитель «;», BOM для кириллицы);
-    fmt=json — полная структура (скоркард + разбивки по регионам/пользователям + все оценки + исправления).
-    Заменяет ручной SSH-дамп таблиц с VM.
-
-    R27: проверка роли — через зависимость `require_admin`, а не ручным `if` в теле. Хелпер
-    существовал с самого начала и не использовался нигде, хотя ROADMAP заявлял его как часть
-    ролевого гейтинга; ручная проверка при этом дублировала его логику. `/admin` (страница)
-    осознанно оставлена на ручной проверке: там не-админа надо РЕДИРЕКТИТЬ в чат, а не отдавать
-    403 — зависимость такого не умеет."""
-    with get_session() as db:
-        view = build_admin_view(db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
-                                region=region, role=role)
-    st = view["stats"]
-    stamp = datetime.now().strftime("%Y%m%d")
-
-    if fmt == "csv":
-        import csv
-        import io
-
-        buf = io.StringIO()
-        w = csv.writer(buf, delimiter=";")
-        w.writerow(["Дата", "Пользователь", "Регион", "Роль", "Оценка", "Вопрос", "Ответ ИИ",
-                    "Непроверенные числа", "Низкая релевантность", "Комментарий", "Исправление"])
-        for r in st["answer_rows"]:
-            w.writerow([r["ts"], r["user"], r["region"], r["role"], r["rating"],
-                        r["question"], r["answer"], r["unverified"] or "",
-                        "да" if r["low_relevance"] else "", r["comment"], r["correction"]])
-        body = chr(0xFEFF) + buf.getvalue()  # BOM → Excel корректно читает кириллицу
-        return _download(body, "text/csv; charset=utf-8", f"navigator719-scorecard-{stamp}.csv")
-
-    scalar = ("users_total", "users", "experts", "admins", "conversations", "requests", "answers",
-              "tokens", "cost", "answer_ratings", "avg_stars", "accept_pct", "accept_user",
-              "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
-              "demand_product", "demand_procedural", "orphan_ratings")
-    payload = {
-        # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
-        "disclaimer": EXPERT_DISCLAIMER,
-        "corpus": corpus_line(),  # E1: редакция рядом с дисклеймером
-        "generated_at": st["generated_at"],
-        "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
-                    "region": st["filter_region"] or None, "role": st["filter_role"] or None},
-        "scorecard": {k: st[k] for k in scalar},
-        "regions": st["regions"],
-        "per_user": st["per_user"],
-        "answer_ratings": st["answer_rows"],
-        "corrections": st["corrections"],
-    }
-    return _json_download(payload, f"navigator719-admin-{stamp}.json")
 
 
 class FeedbackIn(BaseModel):

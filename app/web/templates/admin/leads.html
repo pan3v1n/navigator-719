@@ -1,0 +1,21 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="adm-head"><h1>Заявки</h1></div>
+  <!-- ===== ЗАЯВКИ С ЛЕНДИНГА (ПДн: только admin; фильтры периода сюда не применяются) ===== -->
+  <section id="tab-leads" class="adm-section">
+    <div class="card">
+      <h3>С сайта 719-навигатор.рф · {{ leads_total }}{% if leads_total > leads|length %} (показаны последние {{ leads|length }}){% endif %}</h3>
+      <p class="muted">Заявки хранятся не дольше 12 месяцев (политика ПДн, раздел 9) и удаляются автоматически. По отзыву согласия — «Удалить».</p>
+      <div class="feed">
+        {% for l in leads %}
+        <div class="feed-row">
+          <span class="feed-q"><b>{{ l.name }}</b> · {{ l.org }} · ИНН {{ l.inn }} · тариф «{{ l.tariff }}»{% if l.promo %} · промокод {{ l.promo }}{% endif %}</span>
+          <span class="feed-meta"><a href="mailto:{{ l.email }}">{{ l.email }}</a> · {{ l.phone }} · {{ l.created_at.strftime('%d.%m.%Y %H:%M') }} UTC · согласие на ПДн получено
+            <form method="post" action="/api/admin/leads/{{ l.id }}/delete" style="display:inline" onsubmit="return confirm('Удалить заявку {{ l.id }}? Это необратимо.')"><button type="submit" class="link">Удалить</button></form></span>
+        </div>
+        {% else %}<p class="empty">Заявок пока нет.</p>{% endfor %}
+      </div>
+    </div>
+  </section>
+
+{% endblock %}

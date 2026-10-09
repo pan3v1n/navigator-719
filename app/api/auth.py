@@ -25,22 +25,37 @@ REMEMBER_MAX_AGE = 30 * 24 * 3600  # 30 дней
 _remember = URLSafeTimedSerializer(settings.SESSION_SECRET, salt="remember-719")
 
 
-def make_remember_token(user_id: int) -> str:
-    return _remember.dumps(user_id)
+# Эпоха входа (`users.auth_epoch`, 09.10.2026): сессия и кука «запомнить меня» несут её вместе с
+# user_id, и `current_user` сверяет с базой. Сброс пароля и блокировка поднимают эпоху — все уже
+# выданные сессии и куки (на 30 дней!) перестают действовать сразу, а не когда истекут сами.
+# До правки кука несла голый user_id — такие читаются как эпоха 0 и живут до первого сброса.
+def make_remember_token(user_id: int, epoch: int = 0) -> str:
+    return _remember.dumps({"u": user_id, "e": epoch})
 
 
-def uid_from_remember(request: Request) -> int | None:
+def remember_from(request: Request) -> tuple[int, int] | None:
+    """(user_id, эпоха) из куки «запомнить меня»; None — куки нет, подпись или срок не сошлись."""
     tok = request.cookies.get(REMEMBER_COOKIE)
     if not tok:
         return None
     try:
-        return _remember.loads(tok, max_age=REMEMBER_MAX_AGE)
+        data = _remember.loads(tok, max_age=REMEMBER_MAX_AGE)
     except (BadSignature, SignatureExpired):
         return None
+    if isinstance(data, int) and not isinstance(data, bool):   # кука до 09.10.2026
+        return data, 0
+    if isinstance(data, dict) and isinstance(data.get("u"), int) and isinstance(data.get("e", 0), int):
+        return data["u"], data.get("e", 0)
+    return None
 
 
-def set_remember_cookie(response: Response, user_id: int) -> None:
-    response.set_cookie(REMEMBER_COOKIE, make_remember_token(user_id),
+def uid_from_remember(request: Request) -> int | None:
+    got = remember_from(request)
+    return got[0] if got else None
+
+
+def set_remember_cookie(response: Response, user_id: int, epoch: int = 0) -> None:
+    response.set_cookie(REMEMBER_COOKIE, make_remember_token(user_id, epoch),
                         max_age=REMEMBER_MAX_AGE, httponly=True, samesite="lax",
                         secure=settings.COOKIE_SECURE)
 
@@ -80,6 +95,7 @@ def authenticate(username: str, password: str) -> User | None:
 
 def login_session(request: Request, user: User) -> None:
     request.session["user_id"] = user.id
+    request.session["epoch"] = user.auth_epoch or 0
 
 
 def logout_session(request: Request) -> None:
@@ -88,19 +104,27 @@ def logout_session(request: Request) -> None:
 
 def current_user(request: Request) -> User | None:
     """Текущий пользователь из сессии или None (мягкая проверка, для страниц).
-    Если сессии нет, но есть валидный cookie «запомнить меня» — восстанавливаем сессию (автовход)."""
+    Если сессии нет, но есть валидный cookie «запомнить меня» — восстанавливаем сессию (автовход).
+
+    Заблокированная учётка и устаревшая эпоха (сброс пароля, блокировка) — None и очищенная
+    сессия: проверка на КАЖДОМ запросе, иначе блокировка ждала бы, пока человек сам выйдет."""
     uid = request.session.get("user_id")
+    epoch = request.session.get("epoch", 0)
     if not uid:
-        uid = uid_from_remember(request)
-        if uid:
-            request.session["user_id"] = uid
+        got = remember_from(request)
+        if got:
+            uid, epoch = got
+            request.session["user_id"], request.session["epoch"] = uid, epoch
     if not uid:
         return None
     with get_session() as db:
         user = q.get_user(db, uid)
         if user:
             db.expunge(user)
-        return user
+    if user is None or user.blocked_at is not None or (user.auth_epoch or 0) != epoch:
+        request.session.clear()
+        return None
+    return user
 
 
 def require_user(request: Request) -> User:

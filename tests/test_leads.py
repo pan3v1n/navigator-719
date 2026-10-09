@@ -168,7 +168,8 @@ class TestLeadRetention(unittest.TestCase):
     def test_purge_runs_on_new_lead_and_on_admin(self):
         import ast
 
-        for rel, fn in (("app/api/leads.py", "submit_lead"), ("app/api/web.py", "admin_page")):
+        # админ-панель пересобрана 09.10.2026: заявки — свой раздел /admin/leads
+        for rel, fn in (("app/api/leads.py", "submit_lead"), ("app/api/admin.py", "admin_leads_page")):
             tree = ast.parse((ROOT / rel).read_text(encoding="utf-8"))
             node = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == fn)
             calls = {c.attr for c in ast.walk(node) if isinstance(c, ast.Attribute)}
@@ -187,15 +188,17 @@ class TestLeadRetention(unittest.TestCase):
             self.assertFalse(q.delete_lead(db, first.id))
 
 class TestLeadsInAdminOnly(unittest.TestCase):
-    """Заявки читает только страница `/admin` (за ролью admin); выгрузка скоркарда их не несёт."""
+    """Заявки читает только раздел `/admin/leads` (за ролью admin); выгрузка скоркарда их не несёт."""
 
     def test_list_leads_is_called_only_from_the_admin_page(self):
         import ast
 
-        src = (ROOT / "app" / "api" / "web.py").read_text(encoding="utf-8")
-        callers = [n.name for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
-                   and any(isinstance(c, ast.Attribute) and c.attr == "list_leads" for c in ast.walk(n))]
-        self.assertEqual(callers, ["admin_page"])
+        callers = []
+        for rel in ("app/api/web.py", "app/api/admin.py", "app/api/admin_stats.py"):
+            src = (ROOT / rel).read_text(encoding="utf-8")
+            callers += [n.name for n in ast.walk(ast.parse(src)) if isinstance(n, ast.FunctionDef)
+                        and any(isinstance(c, ast.Attribute) and c.attr == "list_leads" for c in ast.walk(n))]
+        self.assertEqual(callers, ["admin_leads_page"])
 
 
 class TestLandingGuards(unittest.TestCase):

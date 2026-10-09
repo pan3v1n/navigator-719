@@ -351,23 +351,31 @@ class TestNavigateClosedForPlans(unittest.TestCase):
 
 class _AdminPlanBase(unittest.TestCase):
     def setUp(self):
-        from app.api import web
+        from app.api import admin, web
 
-        self.web = web
+        self.web, self.adm = web, admin   # кабинет — web, панель — admin (пересборка 09.10.2026)
         self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False},
                                     poolclass=StaticPool)
         Base.metadata.create_all(self.engine)
         self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
-        p = mock.patch.object(web, "get_session", self.Session)
-        p.start()
-        self.addCleanup(p.stop)
+        for p in (mock.patch.object(web, "get_session", self.Session),
+                  mock.patch.object(admin, "get_session", self.Session),
+                  mock.patch.object(admin, "system_health", return_value={})):
+            p.start()
+            self.addCleanup(p.stop)
         with self.Session() as db:
             self.uid = q.create_user(db, "client1", "h", role="user").id
         self.admin = mock.Mock(id=1)
 
     def _set(self, plan, started="", expires=""):
-        return self.web.admin_set_plan(self.uid, plan=plan, started=started, expires=expires,
+        return self.adm.admin_set_plan(self.uid, plan=plan, started=started, expires=expires,
                                        admin=self.admin)
+
+    def _admin_get(self, view, *args, **kw):
+        """Страница панели от имени admin'а."""
+        admin = mock.Mock(id=99, role="admin", username="adm")
+        with mock.patch.object(self.adm, "current_user", return_value=admin):
+            return view(self._request("/admin"), *args, **kw).body.decode("utf-8")
 
     def _row(self):
         with self.Session() as db:
@@ -383,7 +391,7 @@ class _AdminPlanBase(unittest.TestCase):
 class TestAdminSetsPlan(_AdminPlanBase):
     def test_assign_and_clear(self):
         r = self._set("Стандарт", "2026-10-01")
-        self.assertEqual(r.status_code, 303)
+        self.assertEqual((r.status_code, r.headers["location"]), (303, f"/admin/users/{self.uid}?ok=plan"))
         u = self._row()
         self.assertEqual((u.plan, u.plan_started_at), ("Стандарт", msk(2026, 10, 1)))
         self._set("")
@@ -404,7 +412,7 @@ class TestAdminSetsPlan(_AdminPlanBase):
 
     def test_missing_user_is_404(self):
         with self.assertRaises(HTTPException) as cm:
-            self.web.admin_set_plan(999, plan="Старт", started="", expires="", admin=self.admin)
+            self.adm.admin_set_plan(999, plan="Старт", started="", expires="", admin=self.admin)
         self.assertEqual(cm.exception.status_code, 404)
 
     def test_admin_page_and_profile_show_usage(self):
@@ -414,15 +422,11 @@ class TestAdminSetsPlan(_AdminPlanBase):
             db.commit()
             client = q.get_user(db, self.uid)
             db.expunge(client)
-        admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(self.web, "current_user", return_value=admin), \
-             mock.patch.object(self.web, "system_health", return_value={}):
-            html = self.web.admin_page(self._request("/admin")).body.decode("utf-8")
-        self.assertIn('data-tab="plans"', html)
-        panel = html[html.index('id="tab-plans"'):]
-        self.assertIn("<b>37 из 100</b>", panel)
-        self.assertIn('<option value="Старт" selected>', panel)
-        self.assertIn(f'value="{plans.msk_today().isoformat()}"', panel, "дата подключения в форме")
+        card = self._admin_get(self.adm.admin_user_card, self.uid)     # карточка учётки
+        self.assertIn("<b>37 из 100</b>", card)
+        self.assertIn('<option value="Старт" selected>', card)
+        self.assertIn(f'value="{plans.msk_today().isoformat()}"', card, "дата подключения в форме")
+        self.assertIn("37 из 100", self._admin_get(self.adm.admin_users), "расход в списке пользователей")
         with mock.patch.object(self.web, "current_user", return_value=client):
             # кабинет по макету (09.10.2026): расход — на вкладке «Тариф»
             page = self.web.profile_page(self._request("/profile"), tab="plan").body.decode("utf-8")
@@ -432,10 +436,7 @@ class TestAdminSetsPlan(_AdminPlanBase):
     def test_unknown_plan_is_flagged_in_admin(self):
         with self.Session() as db:
             q.set_user_plan(db, self.uid, "Безлимит", plans.anchor_from_date(plans.msk_today()))
-        admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(self.web, "current_user", return_value=admin),              mock.patch.object(self.web, "system_health", return_value={}):
-            html = self.web.admin_page(self._request("/admin")).body.decode("utf-8")
-        self.assertIn("тариф «Безлимит» неизвестен — лимит не действует", html)
+        self.assertIn("неизвестный тариф — лимит не действует", self._admin_get(self.adm.admin_users))
 
     def test_route_requires_admin(self):
         from fastapi.testclient import TestClient
@@ -542,17 +543,16 @@ class TestAdminSetsExpiry(_AdminPlanBase):
                                 plans.anchor_from_date(term) if term else None)
                 users[name] = (q.get_user(db, u.id), term)
                 db.expunge(users[name][0])
-        admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(self.web, "current_user", return_value=admin), \
-             mock.patch.object(self.web, "system_health", return_value={}):
-            panel = self.web.admin_page(self._request("/admin")).body.decode("utf-8")
-        panel = panel[panel.index('id="tab-plans"'):]
-        self.assertIn(f"до {users['a1'][1]:%d.%m.%Y}", panel)
-        self.assertIn("бессрочно", panel)
-        self.assertIn(f"срок истёк {users['a3'][1]:%d.%m.%Y}", panel)
-        self.assertIn('<optgroup label="Внутренние">', panel)
-        self.assertIn('<option value="Пробный режим"', panel)
-        self.assertIn(f'name="expires" value="{users["a1"][1].isoformat()}"', panel)
+        listing = self._admin_get(self.adm.admin_users)
+        self.assertIn(f"до {users['a1'][1]:%d.%m.%Y}", listing)
+        self.assertIn("бессрочно", listing)
+        self.assertIn(f"истёк {users['a3'][1]:%d.%m.%Y}", listing)
+        card = self._admin_get(self.adm.admin_user_card, users["a1"][0].id)
+        self.assertIn('<optgroup label="Внутренние">', card)
+        self.assertIn('<option value="Пробный режим"', card)
+        self.assertIn(f'name="expires" value="{users["a1"][1].isoformat()}"', card)
+        self.assertIn(f"срок истёк {users['a3'][1]:%d.%m.%Y}",
+                      self._admin_get(self.adm.admin_user_card, users["a3"][0].id))
         cabinet = {}
         for name, (u, term) in users.items():
             with mock.patch.object(self.web, "current_user", return_value=u):

@@ -55,6 +55,7 @@ from sqlalchemy import create_engine, inspect, select  # noqa: E402
 from sqlalchemy.orm import sessionmaker  # noqa: E402
 from sqlalchemy.pool import StaticPool  # noqa: E402
 
+from app.api import admin as admin_mod  # noqa: E402
 from app.api import guest, trial, web  # noqa: E402
 from app.api.ratelimit import SlidingWindow  # noqa: E402
 from app.core import plans  # noqa: E402
@@ -99,6 +100,7 @@ class _GuestBase(unittest.TestCase):
         self.calls = []
         patches = [mock.patch.object(guest, "get_session", self.Session),
                    mock.patch.object(web, "get_session", self.Session),
+                   mock.patch.object(admin_mod, "get_session", self.Session),
                    mock.patch.object(guest, "_ip_limit", SlidingWindow(1000, window=86400.0)),
                    mock.patch.object(guest, "answer", self._engine(_Ans)),
                    mock.patch.object(guest, "answer_stream", self._stream(_Ans))]
@@ -446,9 +448,8 @@ class TestGuestAdminAndPolicy(_GuestBase):
                 {"ts": datetime.now() - timedelta(days=q.GUEST_RETENTION_DAYS + 1)})
             db.commit()
         admin = mock.Mock(id=99, role="admin", username="adm")
-        with mock.patch.object(web, "current_user", return_value=admin), \
-             mock.patch.object(web, "system_health", return_value={}):
-            html = web.admin_page(self._request()).body.decode("utf-8")
+        with mock.patch.object(admin_mod, "current_user", return_value=admin):
+            html = admin_mod.admin_trial(self._request()).body.decode("utf-8")   # раздел /admin/trial
         panel = html[html.index('id="tab-guests"'):]
         self.assertIn("Что такое акт экспертизы?", panel)
         self.assertIn("Ответ движка", panel)

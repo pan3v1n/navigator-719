@@ -1,0 +1,136 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<a class="ds-link adm-back" href="/admin/users">← Все пользователи</a>
+<div class="adm-head">
+  <div>
+    <h1>{{ u.username }}</h1>
+    <div class="muted">{{ u.full_name or 'ФИО не указано' }} · {{ roles.get(u.role, u.role) }}{% if is_self %} · это вы{% endif %}</div>
+  </div>
+  <div class="adm-badges">
+    {% if row.blocked %}<span class="badge bad">заблокирована {{ blocked_at }}</span>{% endif %}
+    {% if row.no_profile %}<span class="badge warn">анкета не заполнена</span>{% endif %}
+  </div>
+</div>
+{% if notice %}<div class="adm-note ok" role="status">{{ notice }}</div>{% endif %}
+{% if error %}<div class="adm-note err" role="alert">{{ error }}</div>{% endif %}
+
+{# Пароль — только здесь и только сейчас (создание, сброс); в базе — хеш #}
+{% if password_shown %}
+<div class="adm-card adm-secret" role="status">
+  <div>Логин: <code>{{ u.username }}</code> · пароль: <code id="new-password">{{ password_shown }}</code>
+    <button type="button" class="ds-link" id="copy-password">Скопировать</button></div>
+  <p class="muted">Передайте логин и пароль человеку. Пароль показывается один раз: в базе хранится только его
+    хеш, посмотреть его позже нельзя — только сбросить снова.</p>
+</div>
+{% endif %}
+
+<div class="adm-grid">
+  <section class="adm-card">
+    <h2>Профиль</h2>
+    <dl class="adm-dl">
+      <dt>ФИО</dt><dd>{{ u.full_name or '—' }}</dd>
+      <dt>Должность</dt><dd>{{ u.position or '—' }}</dd>
+      <dt>Рабочий email</dt><dd>{% if u.email %}<a href="mailto:{{ u.email }}">{{ u.email }}</a>{% else %}—{% endif %}</dd>
+      <dt>Телефон</dt><dd>{{ u.phone or '—' }}</dd>
+      <dt>Регион</dt><dd>{{ u.region or '—' }}</dd>
+      <dt>Telegram</dt><dd>{{ u.telegram or '—' }}</dd>
+      <dt>Согласие на ПДн</dt><dd>{{ ('дано ' ~ consent_at) if u.consent else 'не дано' }}</dd>
+      <dt>Учётка создана</dt><dd>{{ created_at or '—' }}</dd>
+    </dl>
+    <p class="muted">Профиль заполняет сам пользователь в личном кабинете.</p>
+  </section>
+
+  <section class="adm-card">
+    <h2>Тариф</h2>
+    <p>{% if u.plan %}<b>{{ u.plan }}</b> ·
+      {% if row.expired %}<span class="badge bad">срок истёк {{ row.expires }}</span>{% elif row.expires %}до {{ row.expires }}{% else %}бессрочно{% endif %}
+      {% if row.state %}<br>Использовано <b>{{ row.state.used }} из {{ row.state.limit }}</b> за {{ period }}{% if row.state.exhausted %} <span class="badge bad">исчерпан</span>{% endif %}{% endif %}
+      {% else %}<span class="muted">Без тарифа — без ограничения числа запросов.</span>{% endif %}</p>
+    <form method="post" action="/api/admin/users/{{ u.id }}/plan" class="adm-form">
+      <label>Тариф
+        <select name="plan">
+          <option value=""{% if not u.plan %} selected{% endif %}>без тарифа</option>
+          <optgroup label="Платные">
+          {% for p in paid_plans %}<option value="{{ p }}"{% if p == u.plan %} selected{% endif %}>{{ p }}</option>{% endfor %}
+          </optgroup>
+          <optgroup label="Внутренние">
+          {% for p in internal_plans %}<option value="{{ p }}"{% if p == u.plan %} selected{% endif %}>{{ p }}</option>{% endfor %}
+          </optgroup>
+        </select></label>
+      <label>С <input type="date" name="started" value="{{ started or today }}" max="{{ today }}"></label>
+      <label>До <input type="date" name="expires" value="{{ expires_iso }}" title="Пусто — бессрочно"></label>
+      <button class="ds-btn secondary" type="submit">Сохранить тариф</button>
+    </form>
+    <p class="muted">«До» — дата, с которой тариф уже не действует (с 00:00 МСК); пусто — бессрочно,
+      «{{ trial_plan }}» — на {{ trial_days }} дней. По истечении срока вопросы закрываются, кабинет и история остаются.</p>
+  </section>
+
+  <section class="adm-card">
+    <h2>Организация</h2>
+    <form method="post" action="/api/admin/users/{{ u.id }}/org" class="adm-form">
+      <label>Организация <input name="org" value="{{ u.org or '' }}" maxlength="300"></label>
+      <label>ИНН <input name="inn" value="{{ u.inn or '' }}" inputmode="numeric" pattern="\d{10}(\d{2})?" maxlength="12"></label>
+      <button class="ds-btn secondary" type="submit">Сохранить</button>
+    </form>
+    <p class="muted">Пользователь видит их в кабинете, но изменить не может.</p>
+  </section>
+
+  <section class="adm-card">
+    <h2>Доступ</h2>
+    {% if is_self %}
+    <p class="muted">Это ваша учётка: роль, блокировку и удаление меняет другой администратор.</p>
+    {% else %}
+    <form method="post" action="/api/admin/users/{{ u.id }}/role" class="adm-row">
+      <select name="role" aria-label="Роль">
+        {% for key, label in roles.items() %}<option value="{{ key }}"{% if key == u.role %} selected{% endif %}>{{ label }}</option>{% endfor %}
+      </select>
+      <button class="ds-btn secondary" type="submit">Сменить роль</button>
+    </form>
+    <form method="post" action="/api/admin/users/{{ u.id }}/block" class="adm-row">
+      <input type="hidden" name="blocked" value="{{ '0' if row.blocked else '1' }}">
+      <button class="ds-btn secondary" type="submit">{{ 'Разблокировать' if row.blocked else 'Заблокировать' }}</button>
+      <span class="muted">{{ 'Вход закрыт, данные сохранены.' if row.blocked else 'Закроет вход и завершит открытые сессии; данные сохранятся.' }}</span>
+    </form>
+    {% endif %}
+    <form method="post" action="/api/admin/users/{{ u.id }}/password" class="adm-row">
+      <button class="ds-btn secondary" type="submit">Сбросить пароль</button>
+      <span class="muted">Новый пароль покажется один раз; прежние входы этой учётки завершатся.</span>
+    </form>
+  </section>
+
+  <section class="adm-card">
+    <h2>Активность</h2>
+    <p>Последний вопрос: <b>{{ row.last or '—' }}</b> · всего {{ row.asked }} {{ row.asked | plural('вопрос', 'вопроса', 'вопросов') }}</p>
+    {% if sessions %}
+    <ul class="adm-list">
+      {% for s in sessions %}
+      <li><a href="/admin/dialogs?user={{ u.username | urlencode }}#th-{{ s.session_id }}">{{ (s.title or 'Диалог') | truncate(90) }}</a>
+        <span class="muted">{{ s.ts }}</span></li>
+      {% endfor %}
+    </ul>
+    <a class="ds-link" href="/admin/dialogs?user={{ u.username | urlencode }}">Все диалоги пользователя</a>
+    {% else %}<p class="muted">Диалогов пока нет.</p>{% endif %}
+  </section>
+
+  {% if not is_self %}
+  <section class="adm-card adm-danger">
+    <h2>Удаление</h2>
+    <p>Удалит учётку вместе с профилем, диалогами, оценками и журналом расхода — по требованию субъекта
+      персональных данных (152-ФЗ). <b>Необратимо.</b> Чтобы просто закрыть доступ, заблокируйте учётку.</p>
+    <form method="post" action="/api/admin/users/{{ u.id }}/delete" class="adm-row">
+      <input name="confirm" placeholder="введите логин: {{ u.username }}" required autocomplete="off" aria-label="Логин для подтверждения">
+      <button class="ds-btn danger" type="submit">Удалить учётку</button>
+    </form>
+  </section>
+  {% endif %}
+</div>
+
+<script>
+  var copyBtn = document.getElementById("copy-password");
+  if (copyBtn) copyBtn.addEventListener("click", function () {
+    if (!navigator.clipboard) return;
+    navigator.clipboard.writeText(document.getElementById("new-password").textContent)
+      .then(function () { copyBtn.textContent = "Скопировано"; });
+  });
+</script>
+{% endblock %}

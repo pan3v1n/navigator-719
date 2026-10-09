@@ -80,12 +80,7 @@
     </div>
 
     <nav class="side-nav">
-      {% if user and user.role == 'admin' %}
-      <a class="nav-item" href="/admin">
-        <svg viewBox="0 0 24 24" fill="none"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
-        <span class="nc-text">Логи диалогов</span>
-      </a>
-      {% endif %}
+      {# «Логи диалогов» убраны (решение владельца 09.10.2026): админ-панель — по адресу /admin #}
       {% if user %}
       <button class="nav-item" id="export-btn" type="button">
         <svg viewBox="0 0 24 24" fill="none"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 17v2a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>

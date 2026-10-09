@@ -72,6 +72,69 @@ def set_user_org(db: Session, user_id: int, org: str, inn: str) -> User | None:
     return u
 
 
+# --- управление учётками из админки (09.10.2026) --------------------------
+def set_user_role(db: Session, user_id: int, role: str) -> User | None:
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.role = role
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def reset_password(db: Session, user_id: int, password_hash: str) -> User | None:
+    """Новый пароль + новая эпоха входа: прежние сессии и куки «запомнить меня» гаснут."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.password_hash = password_hash
+    u.auth_epoch = (u.auth_epoch or 0) + 1
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def set_blocked(db: Session, user_id: int, blocked: bool) -> User | None:
+    """Блокировка без удаления данных. Блокировка поднимает эпоху входа — уже открытые сессии
+    закрываются сразу; разблокировка эпоху не трогает: войти заново человек должен сам."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    if blocked and u.blocked_at is None:
+        u.blocked_at = _utcnow()
+        u.auth_epoch = (u.auth_epoch or 0) + 1
+    elif not blocked:
+        u.blocked_at = None
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def delete_user(db: Session, user_id: int) -> bool:
+    """Удалить учётку вместе с профилем, диалогами, оценками и журналом расхода (каскады модели) —
+    по требованию субъекта ПДн (ст. 21 152-ФЗ). Необратимо."""
+    u = db.get(User, user_id)
+    if not u:
+        return False
+    db.delete(u)
+    db.commit()
+    return True
+
+
+def count_active_admins(db: Session) -> int:
+    return db.execute(select(func.count(User.id)).where(
+        User.role == "admin", User.blocked_at.is_(None))).scalar_one()
+
+
+def user_activity(db: Session) -> dict[int, tuple]:
+    """{user_id: (последний вопрос, число вопросов)} — одним запросом на всех, для списка учёток."""
+    rows = db.execute(
+        select(Message.user_id, func.max(Message.ts), func.count(Message.id))
+        .where(Message.role == "user").group_by(Message.user_id)).all()
+    return {uid: (last, n) for uid, last, n in rows}
+
+
 def list_users(db: Session) -> list[User]:
     return list(db.execute(select(User).order_by(User.id)).scalars())
 

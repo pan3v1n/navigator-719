@@ -47,6 +47,8 @@ def _ensure_columns() -> None:
             ("plan", "VARCHAR(32)"),          # тариф (#160); у старых строк NULL — без лимита
             ("plan_started_at", "DATETIME"),
             ("plan_expires_at", "DATETIME"),  # срок тарифа (09.10.2026); NULL — бессрочно
+            ("blocked_at", "DATETIME"),       # админка (09.10.2026): блокировка учётки
+            ("auth_epoch", "INTEGER NOT NULL DEFAULT 0"),  # эпоха входа: сброс/блокировка гасят сессии
             ("position", "VARCHAR(128)"),     # кабинет (09.10.2026): контакты пользователя
             ("email", "VARCHAR(255)"),
             ("phone", "VARCHAR(32)"),

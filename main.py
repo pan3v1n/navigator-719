@@ -12,6 +12,7 @@ from app.api.history import router as history_router
 from app.api.leads import router as leads_router
 from app.api.routes import router as navigate_router
 from app.api.web import router as web_router
+from app.api.admin import router as admin_router
 from app.core.config import settings
 from app.core.release import release_label
 from app.db.engine import init_db
@@ -80,6 +81,7 @@ app.include_router(chat_router, tags=["chat"])
 app.include_router(guest_router, tags=["chat"])  # пробный режим без входа (09.10.2026)
 app.include_router(history_router, tags=["chat"])  # Б3: страница «История запросов»
 app.include_router(web_router, tags=["web"])
+app.include_router(admin_router, tags=["admin"])  # админ-панель /admin (пересборка 09.10.2026)
 app.include_router(leads_router, tags=["leads"])  # форма заявки лендинга (caddy проксирует /api/leads корня)
 
 # Статика веб-фронта (css/js)

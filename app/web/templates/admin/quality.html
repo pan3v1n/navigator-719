@@ -1,0 +1,227 @@
+{% extends "admin/base.html" %}
+{% block content %}
+<div class="adm-head"><h1>Качество</h1><span class="muted">приёмка, плохие ответы, исправления экспертов</span></div>
+{% include "admin/_filters.html" %}
+  <!-- ===== ОБЗОР ===== -->
+  <section id="tab-dash" class="adm-section">
+
+    <!-- Витрина показателей: пульс сервиса + тренд к прошлому периоду. -->
+    <div class="kpis">
+      <div class="kpi"><div class="kpi-val">{{ stats.users_total }}</div><div class="kpi-label">Пользователи</div>
+        <div class="kpi-sub">польз. {{ stats.users }} · эксп. {{ stats.experts }} · адм. {{ stats.admins }}</div>
+        <div class="kpi-tr"><span class="trend {{ stats.trends.users.cls }}" title="активных в периоде · {{ stats.trends.users.title }}">{{ stats.trends.users.arrow }} {{ stats.trends.users.label }}</span></div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.conversations }}</div><div class="kpi-label">Диалоги</div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.requests }}</div><div class="kpi-label">Запросы</div>
+        <div class="kpi-sub">ответов {{ stats.answers }}</div>
+        <div class="kpi-tr"><span class="trend {{ stats.trends.requests.cls }}" title="{{ stats.trends.requests.title }}">{{ stats.trends.requests.arrow }} {{ stats.trends.requests.label }}</span></div></div>
+      <div class="kpi"><div class="kpi-val">{{ stats.tokens|spaced }}</div><div class="kpi-label">Токены</div>
+        <div class="kpi-sub">~{{ stats.avg_tokens|spaced }} / ответ</div>
+        <div class="kpi-tr"><span class="trend {{ stats.trends.tokens.cls }}" title="{{ stats.trends.tokens.title }}">{{ stats.trends.tokens.arrow }} {{ stats.trends.tokens.label }}</span></div></div>
+      <div class="kpi"><div class="kpi-val">{{ '%.2f'|format(stats.cost) }} ₽</div><div class="kpi-label">Затраты</div>
+        <div class="kpi-sub">~{{ '%.3f'|format(stats.avg_cost) }} ₽ / ответ</div>
+        <div class="kpi-tr"><span class="trend {{ stats.trends.cost.cls }}" title="{{ stats.trends.cost.title }}">{{ stats.trends.cost.arrow }} {{ stats.trends.cost.label }}</span></div></div>
+      <div class="kpi"><div class="kpi-val {{ 'pass' if stats.gate_pass else ('fail' if stats.accept_pct is not none else '') }}">{{ (stats.accept_pct ~ '%') if stats.accept_pct is not none else '—' }}</div>
+        <div class="kpi-label">Приёмка ≥4★</div><div class="kpi-sub">порог ≥{{ stats.gate }}% · оценок {{ stats.answer_ratings }}</div></div>
+    </div>
+    <div class="trend-note">▲▼ тренд: {{ stats.trend_label }}</div>
+
+    <!-- Активность во времени + оперативный статус инфраструктуры. -->
+    <div class="charts">
+      <div class="card">
+        <h3>Активность по дням (запросы)</h3>
+        <div class="daychart">
+          {% for d in stats.per_day %}
+          <div class="daybar" title="{{ d.date }}: {{ d.requests }} запросов, {{ d.tokens|spaced }} ток.">
+            <span class="daybar-fill" style="height: {{ ((d.requests / (stats.max_day or 1)) * 100)|round }}%"></span>
+            <em>{{ d.date }}</em>
+          </div>
+          {% else %}<p class="empty">Нет данных.</p>{% endfor %}
+        </div>
+      </div>
+
+      <div class="card health">
+        <h3>Здоровье системы</h3>
+        <div class="hstat"><span class="dot {{ 'ok' if health.qdrant_ok else 'bad' }}"></span>
+          База знаний (Qdrant) <b>{{ 'на связи' if health.qdrant_ok else 'недоступна' }}</b>
+          <span class="hmeta">{{ health.qdrant_url }}</span></div>
+        {% for c in health.collections %}
+        <div class="hstat sub"><span class="dot {{ 'ok' if c.ok else 'bad' }}"></span>{{ c.label }}
+          <b>{{ (c.points|spaced) if c.ok and c.points is not none else '—' }}</b>
+          <span class="hmeta">{{ c.name }}</span></div>
+        {% endfor %}
+        <div class="hstat"><span class="dot {{ 'ok' if health.deepseek else 'bad' }}"></span>
+          LLM (DeepSeek) <b>{{ 'ключ задан' if health.deepseek else 'нет ключа' }}</b>
+          <span class="hmeta">{{ health.deepseek_model }}</span></div>
+        <div class="hstat"><span class="dot ok"></span>Версия <b>{{ health.version }}</b>
+          <span class="hmeta">{{ health.env }} · {{ health.server_time }}</span></div>
+      </div>
+    </div>
+
+    <!-- Живая лента: что спрашивают прямо сейчас. -->
+    <div class="card">
+      <h3>Последние вопросы</h3>
+      <div class="feed">
+        {% for r in stats.recent %}
+        <div class="feed-row">
+          <span class="feed-q">{{ r.q }}</span>
+          <span class="feed-meta">{{ r.user }}{% if r.region %} · {{ r.region }}{% endif %} · {{ r.ts }}</span>
+        </div>
+        {% else %}<p class="empty">Нет вопросов в выборке.</p>{% endfor %}
+      </div>
+    </div>
+
+    <div class="charts">
+      <div class="card">
+        <h3>Запросы по пользователям</h3>
+        {% for u in stats.per_user %}
+        <div class="bar-row" title="{{ u.username }}{% if u.region %} · {{ u.region }}{% endif %}: {{ u.requests }} запросов">
+          <span class="bar-label">{{ u.username }}</span>
+          <span class="bar-track"><span class="bar-fill" style="width: {{ ((u.requests / (stats.max_requests or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ u.requests }}</span>
+        </div>
+        {% else %}<p class="empty">Нет данных.</p>{% endfor %}
+      </div>
+
+      <div class="card">
+        <h3>Затраты по пользователям, ₽</h3>
+        {% for u in stats.per_user %}
+        <div class="bar-row" title="{{ u.username }}: {{ '%.3f'|format(u.cost) }} ₽ · {{ u.tokens|spaced }} ток.">
+          <span class="bar-label">{{ u.username }}</span>
+          <span class="bar-track"><span class="bar-fill cost" style="width: {{ ((u.cost / (stats.max_cost or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ '%.2f'|format(u.cost) }}</span>
+        </div>
+        {% else %}<p class="empty">Нет данных.</p>{% endfor %}
+      </div>
+    </div>
+
+    <!-- Спрос: чего хотят от сервиса + распределение оценок (справочно). -->
+    <div class="charts">
+      <div class="card">
+        <h3>Спрос: продукт vs процедура</h3>
+        <div class="bar-row" title="Товарные вопросы (по приложению 719): {{ stats.demand_product }}">
+          <span class="bar-label">Продукт</span>
+          <span class="bar-track"><span class="bar-fill good" style="width: {{ ((stats.demand_product / (stats.requests or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ stats.demand_product }}</span>
+        </div>
+        <div class="bar-row" title="Процедурные вопросы (реестр/ГИСП/документы): {{ stats.demand_procedural }}">
+          <span class="bar-label">Процедура</span>
+          <span class="bar-track"><span class="bar-fill" style="width: {{ ((stats.demand_procedural / (stats.requests or 1)) * 100)|round }}%; background:#2563eb"></span></span>
+          <span class="bar-val">{{ stats.demand_procedural }}</span>
+        </div>
+        <div class="kpi-sub" style="margin-top:8px">Товарные вопросы отвечаются по приложению 719; процедурные — по Правилам ведения реестра.</div>
+      </div>
+
+      <div class="card">
+        <h3>Распределение оценок</h3>
+        {% for star, cnt in stats.star_dist %}
+        <div class="bar-row" title="{{ star }}★: {{ cnt }}">
+          <span class="bar-label">{{ star }} ★</span>
+          <span class="bar-track"><span class="bar-fill {{ 'good' if star >= 4 else ('bad' if star <= 2 else 'mid') }}" style="width: {{ ((cnt / (stats.answer_ratings or 1)) * 100)|round }}%"></span></span>
+          <span class="bar-val">{{ cnt }}</span>
+        </div>
+        {% endfor %}
+        {% if not stats.answer_ratings %}<p class="empty">Нет оценок ответов в выборке.</p>{% endif %}
+      </div>
+    </div>
+
+    <!-- Приёмка по регионам (справочно, ниже основного пульса). -->
+    <div class="card region-card">
+      <h3>Приёмка по регионам</h3>
+      {% for r in stats.regions %}
+      <div class="bar-row region-row" title="{{ r.region }}: приёмка {{ r.accept_pct if r.accept_pct is not none else '—' }}%, оценок {{ r.answer_ratings }}, запросов {{ r.requests }}">
+        <span class="bar-label wide-label">{{ r.region }}</span>
+        <span class="bar-track"><span class="bar-fill {{ 'good' if r.accept_pct is not none and r.accept_pct >= stats.gate else ('bad' if r.accept_pct is not none else 'na') }}" style="width: {{ r.accept_pct or 0 }}%"></span></span>
+        <span class="bar-val">{{ (r.accept_pct ~ '%') if r.accept_pct is not none else '—' }}</span>
+        <span class="region-meta">{{ r.answer_ratings }} оц. · {{ r.requests }} запр. · {{ r.users }} чел.</span>
+      </div>
+      {% else %}<p class="empty">Нет оценок с привязкой к региону.</p>{% endfor %}
+    </div>
+
+    <!-- Сигналы качества: что настораживает и что просят исправить. -->
+    <div class="section-title">Сигналы качества</div>
+    <div class="charts">
+      <div class="card">
+        <h3>Флаги движка</h3>
+        <div class="fb-stat">Непроверенные числа (guard): <b class="{{ 'fail' if stats.flags_unverified else '' }}">{{ stats.flags_unverified }}</b></div>
+        <div class="fb-stat">Низкая релевантность: <b class="{{ 'fail' if stats.flags_lowrel else '' }}">{{ stats.flags_lowrel }}</b></div>
+        {% if stats.orphan_ratings %}
+        <div class="fb-stat" title="Оценки, чей ответ не найден (беседа удалена). В приёмочную метрику НЕ включены — иначе гейт считался бы по ответам, которых уже нет.">
+          Оценки без ответа (вне приёмки): <b class="fail">{{ stats.orphan_ratings }}</b></div>
+        {% endif %}
+      </div>
+
+      <div class="card">
+        <h3>Глобальный отзыв на сервис</h3>
+        <div class="fb-stat">Средняя оценка: <b>{{ stats.avg_rating if stats.avg_rating is not none else '—' }}</b> · отзывов: {{ stats.feedback_count }}</div>
+        <div class="fb-stat">Соответствие 719: да <b>{{ stats.matched['да'] }}</b> · частично <b>{{ stats.matched['частично'] }}</b> · нет <b>{{ stats.matched['нет'] }}</b></div>
+      </div>
+
+      <div class="card wide">
+        <h3>Исправления экспертов · {{ stats.corrections|length }}</h3>
+        {% for c in stats.corrections %}
+        <div class="corr">
+          <div class="corr-head">{{ c.user }}{% if c.region %} · {{ c.region }}{% endif %}<span class="ts">{{ c.ts }}</span></div>
+          {% if c.answer %}<div class="corr-ans">Ответ ИИ: {{ c.answer }}</div>{% endif %}
+          <div class="corr-fix">Исправление: <b>{{ c.correction }}</b></div>
+        </div>
+        {% else %}<p class="empty">Пока нет исправлений.</p>{% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Комментарии к ответам · {{ stats.answer_comments|length }}</h3>
+        {% for c in stats.answer_comments %}
+        <div class="corr">
+          <div class="corr-head">{{ c.user }}{% if c.region %} · {{ c.region }}{% endif %}<span class="ts">{{ c.ts }}</span></div>
+          {% if c.answer %}<div class="corr-ans">Ответ ИИ: {{ c.answer }}</div>{% endif %}
+          <div>«{{ c.comment }}»</div>
+        </div>
+        {% else %}<p class="empty">Пока нет комментариев к ответам.</p>{% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Комментарии к диалогам · {{ stats.dialog_comments|length }}</h3>
+        {% for c in stats.dialog_comments %}
+        <div class="corr"><div class="corr-head">{{ c.user }}{% if c.region %} · {{ c.region }}{% endif %}<span class="ts">{{ c.ts }}</span></div><div>«{{ c.comment }}»</div></div>
+        {% else %}<p class="empty">Пока нет комментариев.</p>{% endfor %}
+      </div>
+
+      <div class="card wide">
+        <h3>Процедурные вопросы · {{ stats.procedural_questions|length }}</h3>
+        <div class="kpi-sub" style="margin:0 0 8px">Вопросы про процедуру (реестр / ГИСП / документы) — отвечаются по Правилам ведения реестра; статистика показывает спрос.</div>
+        {% for c in stats.procedural_questions %}
+        <div class="corr"><div class="corr-head">{{ c.user }}{% if c.region %} · {{ c.region }}{% endif %}<span class="ts">{{ c.ts }}</span></div><div>«{{ c.q }}»</div></div>
+        {% else %}<p class="empty">Пока нет процедурных вопросов.</p>{% endfor %}
+      </div>
+    </div>
+  </section>
+
+  <h2 class="adm-h2">Плохие ответы (≤2★) · {{ stats.bad_count }}</h2>
+  <!-- ===== ПЛОХИЕ ОТВЕТЫ (триаж ≤2★) ===== -->
+  <section id="tab-bad" class="adm-section">
+    <div class="bad-intro">
+      Ответы с оценкой <b>≤2★</b> — <b>{{ stats.bad_count }}</b>. Худшие и свежие сверху. Это рабочий список
+      «почему проседает качество»: вопрос эксперта, ответ ИИ, флаги движка и что эксперт прокомментировал
+      или исправил. Учитывает текущий фильтр (период / регион / роль).
+    </div>
+    {% for b in stats.bad_answers %}
+    <div class="bad-card">
+      <div class="bad-head">
+        <span class="stars">{{ b.rating }}★</span>
+        <span class="bad-who">{{ b.user }}{% if b.region %} · {{ b.region }}{% endif %}</span>
+        <span class="ts">{{ b.ts }}</span>
+        {% if b.unverified %}<span class="flag">непроверенные числа: {{ b.unverified }}</span>{% endif %}
+        {% if b.low_relevance %}<span class="flag">низкая релевантность</span>{% endif %}
+        <a class="bad-link" href="/admin/dialogs?user={{ b.user | urlencode }}#th-{{ b.session_id }}">показать в диалогах →</a>
+      </div>
+      <div class="bad-q"><span class="lbl">Вопрос</span>{{ b.question or '—' }}</div>
+      <details class="bad-a">
+        <summary><span class="lbl">Ответ ИИ</span>{{ b.answer[:150] }}{% if b.answer|length > 150 %}…{% endif %}</summary>
+        <div class="bad-a-full">{{ b.answer }}</div>
+      </details>
+      {% if b.comment %}<div class="bad-c">Комментарий эксперта: «{{ b.comment }}»</div>{% endif %}
+      {% if b.correction %}<div class="bad-fix">Исправление: <b>{{ b.correction }}</b></div>{% endif %}
+    </div>
+    {% else %}<p class="empty">Ответов с оценкой ≤2★ в выборке нет — либо их пока не оценивали.</p>{% endfor %}
+  </section>
+
+{% endblock %}
