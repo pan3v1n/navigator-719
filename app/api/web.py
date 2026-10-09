@@ -355,12 +355,13 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
 
 
 @router.get("/profile", response_class=HTMLResponse)
-def profile_page(request: Request, tab: str = "profile", saved: str = "", requested: str = ""):
+def profile_page(request: Request, tab: str = "profile", saved: str = "", requested: str = "",
+                 err: str = ""):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
-                             requested=requested)
+                             requested=requested, error=PLAN_REQUEST_ERRORS.get(err))
 
 
 # «Подключить» на витрине тарифов кабинета (09.10.2026). Оплаты в сервисе нет — это заявка,
@@ -370,31 +371,50 @@ PLAN_REQUESTS_PER_HOUR = 5
 _plan_request_limit = SlidingWindow(PLAN_REQUESTS_PER_HOUR, window=3600.0)
 
 
+# Ошибки заявки — кодом в адресе (post/redirect/get, как успех с `requested=`): страница ошибки не
+# остаётся на адресе API и обновление не отправляет форму снова (ревью PR #184).
+PLAN_REQUEST_ERRORS = {
+    "tariff": "Выберите тариф.",
+    "options": "Проверьте условия на карточке: пробная неделя — только у «Старта», пользователей — от 1 до "
+               f"{pricing.MAX_SEATS}, период — месяц или год.",
+    "profile": "Чтобы отправить заявку, заполните во вкладке «Профиль» рабочий email и телефон и дайте "
+               "согласие на обработку данных — по ним с вами свяжутся.",
+    "limit": "Слишком много заявок подряд — попробуйте через час.",
+}
+
+
 @router.post("/api/plan-request", response_class=HTMLResponse)
 def plan_request(request: Request, tariff: str = Form(default=""), kind: str = Form(default="individual"),
                  addon: str = Form(default=""), period: str = Form(default="month"),
-                 seats: str = Form(default="1"), trial: str = Form(default="")):
+                 seats: str = Form(default="1"), trial_flag: str = Form(default="", alias="trial")):
+    # `trial_flag`, а не `trial`: имя занято модулем `app.api.trial` (ревью PR #184)
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
 
-    def fail(msg: str, code: int):
-        return _profile_response(request, user, _profile_form(user), tab="plan", error=msg, status_code=code)
+    def back(err: str):
+        return RedirectResponse(f"/profile?tab=plan&err={err}#tariffs", status_code=303)
 
     if tariff not in LEAD_TARIFFS:
-        return fail("Выберите тариф.", 422)
-    n = int(seats) if seats.isdigit() and len(seats) <= 4 else 0
+        return back("tariff")
+    # Только ASCII-цифры: «²».isdigit() — True, а int("²") роняет обработчик в 500 (ревью PR #184)
+    n = int(seats) if seats.isascii() and seats.isdigit() and len(seats) <= 4 else 0
     options, errs = pricing.parse_options(tariff, kind=kind, addon=bool(addon), period=period,
-                                          seats=n, trial=bool(trial))
+                                          seats=n, trial=bool(trial_flag))
     if errs:
-        return fail(" ".join(f"{m}." for m in errs.values()), 422)
+        return back("options")
+    # Заявка — ПДн со временем согласия (152-ФЗ): без согласия в анкете и без контактов её не создаём,
+    # иначе в «Заявках» лежала бы строка с согласием, которого человек не давал (ревью PR #184).
+    if not (user.consent and user.email and user.phone):
+        return back("profile")
     if not _plan_request_limit.check(f"user:{user.id}"):
-        return fail("Слишком много заявок подряд — попробуйте через час.", 429)
+        return back("limit")
     with get_session() as db:
         lead = q.create_lead(db, tariff=tariff, name=user.full_name or user.username, org=user.org or "",
-                             inn=user.inn or "", email=user.email or "", phone=user.phone or "",
+                             inn=user.inn or "", email=user.email, phone=user.phone,
                              options=" · ".join(filter(None, ("из личного кабинета", options))),
                              user_id=user.id)
+        q.purge_old_leads(db)   # срок хранения политики — и на этом пути новой заявки (ревью PR #184)
     logger.info(f"заявка #{lead.id} из кабинета: user_id={user.id}, тариф «{tariff}»")
     return RedirectResponse(f"/profile?tab=plan&requested={quote(tariff)}", status_code=303)
 

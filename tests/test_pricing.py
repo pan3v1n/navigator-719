@@ -119,6 +119,15 @@ class TestLandingShowcase(unittest.TestCase):
         self.assertEqual(re.findall(r"\d[\d\s]*₽", visible), ["1 ₽"] * visible.count("1 ₽"),
                          "на витрине появилась настоящая сумма — цены не утверждены")
 
+    def test_landing_script_speaks_the_catalog(self):
+        """Ревью PR #184: строка «Выбрано: …» и потолок пользователей в скрипте лендинга — копия
+        `pricing`; держим их равными описанию, как карточки."""
+        js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
+        for piece in (f"'{pricing.KINDS['corporate']}'", f"'пробная неделя за {pricing.TRIAL_PRICE}'",
+                      f"'{pricing.ADDON[0].lower() + pricing.ADDON[1:]}'", f", {pricing.MAX_SEATS})) : 1"):
+            self.assertIn(piece, js)
+        self.assertEqual(LANDING.count(f'max="{pricing.MAX_SEATS}"'), 3)
+
     def test_card_options_reach_the_lead_form(self):
         js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
         self.assertIn('id="tariff-opts"', LANDING)
@@ -170,6 +179,17 @@ class TestLandingLeadOptions(_Db):
         self.assertIn("options", r.json()["errors"])
         self.assertEqual(self.leads(), [])
 
+    def test_foreign_option_types_get_the_form_error_shape(self):
+        """Ревью PR #184: строгие типы отдавали стандартный 422 FastAPI `{"detail": …}`, которого форма
+        не понимает. Чужие типы — ошибка опций тем же ответом `errors`."""
+        for extra in (dict(seats="abc"), dict(seats=None), dict(addon="yes"), dict(trial=1),
+                      dict(kind=["corporate"]), dict(period={"x": 1}), dict(seats=True)):
+            with self.subTest(**{k: repr(v) for k, v in extra.items()}):
+                r = self.post(**extra)
+                self.assertEqual(r.status_code, 422, r.text)
+                self.assertIn("options", r.json()["errors"])
+        self.assertEqual(self.leads(), [])
+
 
 class TestCabinetShowcase(_Db):
     def _user(self, **profile):
@@ -187,7 +207,7 @@ class TestCabinetShowcase(_Db):
             return web.profile_page(_request(), tab="plan", **kw).body.decode("utf-8")
 
     def _ask(self, user, **form):
-        fields = dict(tariff="Стандарт", kind="individual", addon="", period="month", seats="1", trial="")
+        fields = dict(tariff="Стандарт", kind="individual", addon="", period="month", seats="1", trial_flag="")
         fields.update(form)
         with mock.patch.object(web, "current_user", return_value=user):
             return web.plan_request(_request(), **fields)
@@ -230,23 +250,57 @@ class TestCabinetShowcase(_Db):
 
     def test_trial_request_and_bad_input(self):
         u = self._user()
-        self._ask(u, tariff="Старт", trial="1")
+        self._ask(u, tariff="Старт", trial_flag="1")
         self.assertEqual(self.leads()[0].options, "из личного кабинета · пробная неделя за 1 ₽")
-        for form, msg in ((dict(tariff="Безлимит"), "Выберите тариф"), (dict(tariff="Профи", trial="1"), "только у тарифа «Старт»"),
-                          (dict(tariff="Профи", kind="corporate", seats="9999"), "Число пользователей"),
-                          (dict(tariff="Профи", kind="corporate", seats="-3"), "Число пользователей")):
+        for form, err in ((dict(tariff="Безлимит"), "tariff"), (dict(tariff="Профи", trial_flag="1"), "options"),
+                          (dict(tariff="Профи", kind="corporate", seats="9999"), "options"),
+                          (dict(tariff="Профи", kind="corporate", seats="-3"), "options"),
+                          (dict(tariff="Профи", kind="corporate", seats="²"), "options")):   # «²».isdigit() — 500
             with self.subTest(**form):
                 r = self._ask(u, **form)
-                self.assertEqual(r.status_code, 422)
-                self.assertIn(msg, r.body.decode("utf-8"))
+                # ревью PR #184: ошибка — редирект на вкладку (post/redirect/get), не страница на адресе API
+                self.assertEqual((r.status_code, r.headers["location"]), (303, f"/profile?tab=plan&err={err}#tariffs"))
+                self.assertIn(web.PLAN_REQUEST_ERRORS[err], self._page(u, err=err))
         self.assertEqual(len(self.leads()), 1, "неверная заявка записана")
+        self.assertNotIn('role="alert"', self._page(u, err="<script>"), "ошибка — только из списка кодов")
+
+    def test_no_consent_or_contacts_no_lead(self):
+        """Ревью PR #184 (152-ФЗ): заявка ставит время согласия — без согласия в анкете и без контактов
+        её не создаём, иначе в «Заявках» лежало бы согласие, которого человек не давал."""
+        for profile in (dict(consent=False), dict(email=""), dict(phone="")):
+            with self.subTest(**profile):
+                u = self._user()
+                with self.Session() as db:
+                    row = q.get_user(db, u.id)
+                    for k, v in profile.items():      # анкета согласие не снимает — ставим напрямую
+                        setattr(row, k, v)
+                    db.commit()
+                    u = q.get_user(db, u.id)
+                    db.expunge(u)
+                r = self._ask(u)
+                self.assertEqual(r.headers["location"], "/profile?tab=plan&err=profile#tariffs")
+        self.assertEqual(self.leads(), [])
+
+    def test_cabinet_lead_keeps_the_retention_promise(self):
+        """Ревью PR #184: срок хранения заявок (12 месяцев) исполняется и на пути заявки из кабинета."""
+        from datetime import timedelta
+
+        from app.db.models import Lead, _utcnow
+
+        with self.Session() as db:
+            old = q.create_lead(db, tariff="Старт", name="Старый", org="О", inn="4632000000", email="o@x.ru",
+                                phone="+7 900 000-00-00")
+            db.query(Lead).filter(Lead.id == old.id).update({"created_at": _utcnow() - timedelta(days=400)})
+            db.commit()
+        self._ask(self._user())
+        self.assertEqual([lead.name for lead in self.leads()], ["Иван Петров"], "просроченная заявка пережила новую")
 
     def test_rate_limit_and_anonymous(self):
         u = self._user()
         with mock.patch.object(web, "_plan_request_limit", web.SlidingWindow(1, window=3600.0)):
-            self.assertEqual(self._ask(u).status_code, 303)
+            self.assertEqual(self._ask(u).headers["location"], "/profile?tab=plan&requested=%D0%A1%D1%82%D0%B0%D0%BD%D0%B4%D0%B0%D1%80%D1%82")
             r = self._ask(u)
-        self.assertEqual(r.status_code, 429)
+        self.assertEqual(r.headers["location"], "/profile?tab=plan&err=limit#tariffs")
         self.assertEqual(len(self.leads()), 1)
         with mock.patch.object(web, "current_user", return_value=None):
             r = web.plan_request(_request(), tariff="Стандарт")
@@ -254,7 +308,7 @@ class TestCabinetShowcase(_Db):
 
     def test_admin_sees_the_options(self):
         u = self._user()
-        self._ask(u, tariff="Старт", trial="1", addon="1")
+        self._ask(u, tariff="Старт", trial_flag="1", addon="1")
         admin = mock.Mock(id=99, role="admin", username="adm")
         with mock.patch.object(adm, "current_user", return_value=admin):
             html = adm.admin_leads_page(Request({"type": "http", "method": "GET", "path": "/admin/leads", "headers": [],
