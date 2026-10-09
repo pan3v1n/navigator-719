@@ -452,12 +452,13 @@ def get_all_feedback(db: Session) -> list[Feedback]:
 # --- заявки с лендинга (ПДн: видит только admin) -------------------------------
 def create_lead(
     db: Session, *, tariff: str, name: str, org: str, inn: str, email: str, phone: str,
-    promo: str | None = None,
+    promo: str | None = None, options: str | None = None, user_id: int | None = None,
 ) -> Lead:
     """Сохранить заявку. Момент согласия ставится здесь: эндпоинт зовёт функцию только после того,
-    как согласие проверено, — отдельного поля «согласен» в строке нет, есть время согласия."""
+    как согласие проверено, — отдельного поля «согласен» в строке нет, есть время согласия.
+    `user_id` — заявка из личного кабинета: учётка уже есть, «Создать учётку» ей не нужна."""
     lead = Lead(tariff=tariff, name=name, org=org, inn=inn, email=email, phone=phone,
-                promo=promo or None, consent_at=_utcnow())
+                promo=promo or None, options=options or None, user_id=user_id, consent_at=_utcnow())
     db.add(lead)
     db.commit()
     db.refresh(lead)

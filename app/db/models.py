@@ -169,6 +169,9 @@ class Lead(Base):
     # Работа с заявкой в админке (09.10.2026): статус, заметка администратора и учётка, созданная
     # из заявки. Статусы — `LEAD_STATUSES` в app/api/admin.py.
     status: Mapped[str] = mapped_column(String(16), default="new", nullable=False, server_default="new")
+    # Опции с витрины тарифов (09.10.2026): вид, период, число пользователей, проба за 1 ₽, опция-галочка —
+    # строкой `pricing.parse_options`; пусто — тариф без опций.
+    options: Mapped[str | None] = mapped_column(String(200), nullable=True)
     status_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # логическая ссылка на users.id

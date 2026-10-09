@@ -60,6 +60,7 @@ def _ensure_columns() -> None:
             ("status_at", "DATETIME"),
             ("note", "TEXT"),
             ("user_id", "INTEGER"),
+            ("options", "VARCHAR(200)"),   # опции с витрины тарифов (09.10.2026)
         ],
     }
     with engine.begin() as conn:
