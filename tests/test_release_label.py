@@ -106,7 +106,7 @@ class TestLabelReachesTheUser(unittest.TestCase):
         Считаем ровно один носитель на страницу: ноль — метки нет там, где обещана; два — две
         надписи об одном, и они разъедутся при первой правке.
         """
-        from app.api.web import templates
+        from app.api.web import LOGIN_DEMO, templates
         from app.core import release as rel
 
         rel.release_label.cache_clear()
@@ -116,8 +116,11 @@ class TestLabelReachesTheUser(unittest.TestCase):
                 "position": "", "consent": True}
         ctx = dict(request=None, app_title="Навигатор", org="Курская ТПП",
                    corpus_edition="ред. от 22.07.2026", release_label=rel.release_label())
-        pages = (("login.html", {"error": None}),
-                 ("profile.html", {"user": user, "error": None, "saved": False, "regions": []}),
+        # login_demo и form — то, что страницам отдаёт `_ctx`/кабинет с 09.10.2026 (демо-чат входа,
+        # значения полей кабинета); без них шаблон не отрисуется вовсе, и метку не проверить
+        pages = (("login.html", {"error": None, "login_demo": LOGIN_DEMO}),
+                 ("profile.html", {"user": user, "form": user, "error": None, "saved": False,
+                                   "regions": []}),
                  ("terms.html", {}),
                  ("chat.html", {"user": user, "kontur_719_url": "#", "input_hint": ""}))
         for name, extra in pages:
