@@ -405,6 +405,90 @@ class TestAdminSetsOrg(_CabinetDB):
         self.assertIn('value="4632000000"', panel)
 
 
+class TestAdminCreatesAccount(_CabinetDB):
+    """Учётки заводит admin (решение владельца 09.10.2026: регистрации пока нет). Пароль генерирует
+    сервер и показывает ОДИН раз; в базе и журнале его нет."""
+
+    def setUp(self):
+        super().setUp()
+        from fastapi.testclient import TestClient
+
+        from main import app
+        from app.api import auth
+
+        self.client = TestClient(app)
+        self.admin = self._user(role="admin")
+        self.as_user = self.admin
+        for p in (mock.patch.object(auth, "current_user", side_effect=lambda r: self.as_user),
+                  mock.patch.object(web, "system_health", return_value={})):
+            p.start()
+            self.addCleanup(p.stop)
+
+    def _post(self, username, role="user"):
+        return self.client.post("/api/admin/users", data={"username": username, "role": role})
+
+    def _by_login(self, login):
+        with self.Session() as db:
+            return q.get_user_by_username(db, login)
+
+    def test_creates_with_one_time_password(self):
+        from app.api.auth import verify_password
+
+        r = self._post(" Kursk.Expert2 ")
+        self.assertEqual(r.status_code, 200)
+        self.assertIn("Учётка создана: kursk.expert2 · Региональный участник", r.text)
+        pw = r.text.split('id="new-password">')[1].split("<")[0]
+        self.assertGreaterEqual(len(pw), 12)
+        u = self._by_login("kursk.expert2")
+        self.assertEqual(u.role, "user")
+        self.assertTrue(verify_password(pw, u.password_hash), "показанный пароль не подходит")
+        self.assertNotIn(pw, u.password_hash, "пароль лежит в базе открыто")
+        r2 = self._post("kursk.expert3")
+        self.assertNotEqual(pw, r2.text.split('id="new-password">')[1].split("<")[0])
+
+    def test_password_never_logged(self):
+        from loguru import logger
+
+        lines = []
+        sink = logger.add(lambda m: lines.append(str(m)), level="DEBUG")
+        self.addCleanup(logger.remove, sink)
+        r = self._post("perm.expert1", role="expert")
+        pw = r.text.split('id="new-password">')[1].split("<")[0]
+        log = "".join(lines)
+        self.assertIn("perm.expert1", log, "создание учётки не попало в журнал")
+        self.assertNotIn(pw, log, "пароль записан в журнал")
+
+    def test_bad_input_creates_nothing(self):
+        existing = self._user()
+        with self.Session() as db:
+            before = len(q.list_users(db))
+        for login, role, msg in ((existing.username, "user", "уже занят"),
+                                 ("иван", "user", "Логин — латинские"),
+                                 ("ab", "user", "Логин — латинские"),
+                                 ("a b c", "user", "Логин — латинские"),
+                                 ("new.user1", "root", "Неизвестная роль")):
+            with self.subTest(login=login, role=role):
+                r = self._post(login, role)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(msg, r.text)
+                self.assertNotIn('id="new-password"', r.text)
+        with self.Session() as db:
+            self.assertEqual(len(q.list_users(db)), before)
+
+    def test_only_admin_creates(self):
+        self.as_user = None
+        self.assertEqual(self._post("x.expert1").status_code, 401)
+        for role in ("user", "expert"):
+            with self.subTest(role=role):
+                self.as_user = self._user(role=role)
+                self.assertEqual(self._post(f"{role}.made1").status_code, 403)
+        self.assertIsNone(self._by_login("user.made1"))
+        with mock.patch.object(web, "current_user", return_value=self.admin):
+            html = web.admin_page(_request("/admin")).body.decode("utf-8")
+        self.assertIn('action="/api/admin/users"', html)
+        self.assertIn('<option value="expert"', html)
+
+
 class TestCabinetLinksAndPolicy(unittest.TestCase):
     def _render(self, name, **kw):
         return web.templates.get_template(name).render(**web._ctx(_request(), **kw))

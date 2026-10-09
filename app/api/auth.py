@@ -7,6 +7,8 @@ username+password, состояние — в ПОДПИСАННОЙ сессио
 
 from __future__ import annotations
 
+import secrets
+
 import bcrypt
 from fastapi import HTTPException, Request, Response, status
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
@@ -45,6 +47,13 @@ def set_remember_cookie(response: Response, user_id: int) -> None:
 
 def clear_remember_cookie(response: Response) -> None:
     response.delete_cookie(REMEMBER_COOKIE)
+
+
+def generate_password() -> str:
+    """Пароль новой учётки (создание из `/admin`, 09.10.2026). 12 символов из urlsafe-алфавита —
+    длиннее восьмисимвольных паролей `seed_users.py`: их раздают людям, и перебор держит только
+    лимит попыток входа."""
+    return secrets.token_urlsafe(9)
 
 
 def hash_password(password: str) -> str:

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from datetime import datetime, timedelta
 from functools import lru_cache
 from pathlib import Path
@@ -22,6 +23,8 @@ from app.api.auth import (
     authenticate,
     clear_remember_cookie,
     current_user,
+    generate_password,
+    hash_password,
     login_session,
     logout_session,
     needs_profile,
@@ -415,6 +418,16 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
         return RedirectResponse("/login", status_code=302)
     if user.role != "admin":
         return RedirectResponse("/chat", status_code=302)  # эксперт логи не видит
+    return _admin_response(request, user, date_from=date_from, date_to=date_to,
+                           region=region, role=role)
+
+
+def _admin_response(request: Request, user: User, *, date_from: str = "", date_to: str = "",
+                    region: str = "", role: str = "", created: dict | None = None,
+                    create_error: str | None = None, create_form: dict | None = None,
+                    status_code: int = 200):
+    """Сборка `/admin`. Отдельно от маршрута: результат создания учётки (пароль — один раз) и её
+    ошибку показывает та же страница, без редиректа — пароль не должен жить ни в URL, ни в куке."""
     with get_session() as db:
         view = build_admin_view(
             db, date_from=_parse_date(date_from), date_to=_parse_date(date_to),
@@ -433,7 +446,43 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
                            leads_total=leads_total, plan_rows=plan_rows, guest_view=guest_view,
                            paid_plans=list(PLAN_LIMITS), internal_plans=list(plans.INTERNAL_PLANS),
                            trial_plan=plans.TRIAL_PLAN, trial_days=plans.TRIAL_DAYS,
-                           today=plans.msk_today().isoformat(), **view))
+                           today=plans.msk_today().isoformat(), created=created,
+                           create_error=create_error, create_form=create_form or {},
+                           roles=ACCOUNT_ROLES, **view),
+        status_code=status_code)
+
+
+# Создание учётки из админки (решение владельца 09.10.2026: регистрации нет, учётки заводит admin).
+ACCOUNT_ROLES = {"user": "Региональный участник", "expert": "Эксперт ТПП", "admin": "Администратор"}
+_USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
+
+
+@router.post("/api/admin/users", response_class=HTMLResponse)
+def admin_create_user(request: Request, username: str = Form(default=""), role: str = Form(default="user"),
+                      admin: User = Depends(require_admin)):
+    """Новая учётка: логин и роль; пароль генерирует сервер и показывает admin'у ОДИН раз — в базе
+    только bcrypt-хеш, как у `seed_users.py`. Тариф, организацию и ИНН admin задаёт в строке учётки.
+    Региональному участнику логин вида `kursk.expert2` подставит регион в анкету (`regions`)."""
+    login, role = username.strip().lower(), role.strip()
+    form = {"username": login, "role": role}
+    error = None
+    if not _USERNAME_RE.match(login):
+        error = ("Логин — латинские буквы, цифры, точка, дефис или подчёркивание, от 3 до 64 "
+                 "символов, начинается с буквы или цифры.")
+    elif role not in ACCOUNT_ROLES:
+        error = "Неизвестная роль."
+    else:
+        with get_session() as db:
+            if q.get_user_by_username(db, login) is not None:
+                error = f"Логин «{login}» уже занят."
+            else:
+                password = generate_password()
+                q.create_user(db, login, hash_password(password), role=role)
+    if error:
+        return _admin_response(request, admin, create_error=error, create_form=form, status_code=400)
+    logger.info(f"учётка: admin_id={admin.id} создал «{login}» ({role})")  # пароль в журнал — никогда
+    return _admin_response(request, admin, created={"username": login, "password": password,
+                                                    "role": ACCOUNT_ROLES[role]})
 
 
 LEADS_ON_PAGE = 200

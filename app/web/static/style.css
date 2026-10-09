@@ -702,6 +702,15 @@ a.head-avatar:hover { opacity: .9; }
 .charts { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
 .card { background: #fff; border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; }
 .card.wide { grid-column: 1 / -1; }
+/* создание учётки из админки (09.10.2026) */
+.create-account { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 8px; }
+.create-account input, .create-account select { padding: 7px 9px; border: 1px solid var(--border); border-radius: 8px;
+  font: inherit; background: #fff; }
+.create-account input { min-width: 240px; }
+.create-account button { padding: 8px 16px; border: 0; border-radius: 8px; background: var(--grad-btn); color: #fff;
+  font: 600 14px/1.2 var(--font); cursor: pointer; }
+.account-created { margin-bottom: 18px; border-color: var(--blue); }
+.account-created code { font-size: 16px; padding: 2px 6px; border-radius: 4px; background: var(--blue-07); color: var(--blue); }
 .card h3 { font-size: 12px; margin: 0 0 12px; text-transform: uppercase; letter-spacing: .4px; color: var(--muted); }
 
 .bar-row { display: flex; align-items: center; gap: 10px; margin: 6px 0; font-size: 13px; }
