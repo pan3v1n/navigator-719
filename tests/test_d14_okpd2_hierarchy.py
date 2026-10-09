@@ -196,12 +196,16 @@ CAT = "Углеводороды ациклические насыщенные"  
 class TestSearchFetchesNewRelations(unittest.TestCase):
     """`search` добирает новые связи отдельными запросами и ставит ближайшего предка первым."""
 
-    def _run(self, code, pool_has_category=False):
+    def _run(self, code, pool_has_category=False, corpus=None, hidden=(CAT,), query="Н-бутан очищенный",
+             fail_must=False):
         """Подмена `_hybrid` ФИЛЬТРУЕТ маленький корпус по правилам Qdrant (MatchAny по
         `okpd2_codes` и по посегментным префиксам, `must` и `should`), а не отвечает заготовкой:
-        иначе тест проверял бы подмену. Катализаторы класса «20» — score выше, чем у подкатегории."""
+        иначе тест проверял бы подмену. Катализаторы класса «20» — score выше, чем у подкатегории.
+        `hidden` — позиции, которые текстом пул не находит; `fail_must` — новые доборы (фильтр
+        `must`) падают, как упал бы Qdrant."""
         calls = []
-        corpus = [(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)] +                  [(CAT, ["20.14.11.110"], 0.05)]
+        corpus = corpus or [(f"катализатор {i}", ["20"], 0.9 - i / 100) for i in range(14)] + \
+            [(CAT, ["20.14.11.110"], 0.05)]
 
         def cond_ok(codes, cond):
             field = codes if cond.key == "okpd2_codes" else [p for c in codes for p in _seg_prefixes(c)]
@@ -217,14 +221,37 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None):
             conds = (getattr(qfilter, "should", None) or []) + (getattr(qfilter, "must", None) or [])
             calls.append([v for cond in conds for v in cond.match.any])
+            if fail_must and getattr(qfilter, "must", None):
+                raise RuntimeError("Qdrant недоступен")
             rows = [r for r in corpus if ok(r[1], qfilter)]
             if qfilter is None and not pool_has_category:
-                rows = [r for r in rows if r[0] != CAT]    # текстом пул её не находит
+                rows = [r for r in rows if r[0] not in hidden]    # текстом пул их не находит
             return [_point(*r) for r in sorted(rows, key=lambda r: -r[2])[:limit]]
 
         with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid),                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
-            hits = retriever.search("Н-бутан очищенный", okpd2=code, limit=8)
+            hits = retriever.search(query, okpd2=code, limit=8)
         return hits, calls
+
+    def test_broad_code_with_descendant_fetches_no_ancestors(self):
+        """Ревью PR #177, раунд 4 (HIGH), замер 09.10: «Мониторы» 26.40.34 — потомок 26.40.34.110 в
+        выдаче есть, а добор новых предков приносил «Гидрофоны» 26.40.3 с высоким score маленькой
+        выдачи (#179), и они становились целевой вместо мониторов. Предков добирают, только когда
+        потомков среди совпавших нет — у широкого кода окно по рангу, как на бою."""
+        corpus = [("Гидрофоны", ["26.40.3"], 0.95), ("Мониторы", ["26.40.34.110"], 0.5),
+                  ("Прочее", ["28.13.14.110"], 0.7)]
+        hits, calls = self._run("26.40.34", corpus=corpus, hidden=("Гидрофоны",),
+                                query="Мониторы и проекторы")
+        self.assertEqual(hits[0].source_anchor, "Мониторы")
+        self.assertNotIn("Гидрофоны", [h.source_anchor for h in hits])
+        self.assertTrue(all("26.40.3" not in c for c in calls[2:]), calls)
+
+    def test_failed_new_fetch_keeps_the_answer(self):
+        """Раунд 4: новые доборы уточняют окно; сбой Qdrant на них не роняет поиск — окно остаётся
+        прежним (до D14), без подкатегории."""
+        hits, calls = self._run("20.14.11.112", fail_must=True)
+        self.assertGreaterEqual(len(calls), 3)            # новый добор был и упал
+        self.assertNotIn(CAT, [h.source_anchor for h in hits])
+        self.assertEqual(hits[0].source_anchor, "катализатор 0")
 
     def test_broad_code_gets_no_new_descendant_fetch(self):
         """Узкий D14: новые запросы добирают только точные формы и новых ПРЕДКОВ, потомков — нет; у
