@@ -15,15 +15,42 @@ from datetime import date, datetime, timedelta, timezone
 
 PLAN_LIMITS: dict[str, int] = {"Старт": 100, "Стандарт": 200, "Профи": 400}
 
+# Внутренние тарифы (решение владельца 09.10.2026): назначает admin, на лендинге их нет, поэтому
+# отдельно от PLAN_LIMITS — ту сверяет с лендингом тест. «Пробный режим» — права платного тарифа
+# (лимит младшего, «Старт»); когда подключат оплату, он будет выдаваться на неделю за 1 ₽.
+# None — без ограничения числа запросов.
+TRIAL_PLAN = "Пробный режим"
+TRIAL_DAYS = 7  # срок «Пробного режима» по умолчанию, если admin не задал свой
+INTERNAL_PLANS: dict[str, int | None] = {
+    TRIAL_PLAN: PLAN_LIMITS["Старт"],
+    "Тестировщик": None,
+    "Администратор": None,
+}
+ALL_PLANS: dict[str, int | None] = {**PLAN_LIMITS, **INTERNAL_PLANS}
+
 # Москва живёт без перехода на летнее время с 2014 г. — смещение постоянное.
 MSK_OFFSET = timedelta(hours=3)
 
 
 def plan_limit(user) -> int | None:
-    """Лимит запросов пользователя за период; None — без лимита (тариф не назначен или admin)."""
+    """Лимит запросов пользователя за период; None — без лимита (тариф не назначен, тариф без
+    ограничения или admin)."""
     if getattr(user, "role", None) == "admin":
         return None
-    return PLAN_LIMITS.get(getattr(user, "plan", None) or "")
+    return ALL_PLANS.get(getattr(user, "plan", None) or "")
+
+
+def plan_expired(user, now: datetime | None = None) -> bool:
+    """Срок тарифа истёк — платный функционал (вопросы) закрыт (решение владельца 09.10.2026).
+
+    `plan_expires_at` — 00:00 МСК дня, С КОТОРОГО тариф уже не действует («Активен до 16.10.2026»
+    = последний день 15.10, как «Лимит обновится …» в макете). Без даты — бессрочно. admin не
+    блокируется никогда: иначе некому было бы продлить."""
+    exp = getattr(user, "plan_expires_at", None)
+    if getattr(user, "role", None) == "admin" or not getattr(user, "plan", None) \
+            or not isinstance(exp, datetime):
+        return False
+    return naive_utc(now or datetime.now(timezone.utc)) >= naive_utc(exp)
 
 
 def naive_utc(dt: datetime) -> datetime:

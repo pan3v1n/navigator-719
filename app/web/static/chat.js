@@ -971,12 +971,15 @@ function renderQuota(qv) {
   const left = qv.remaining;
   const pct = qv.limit ? Math.max(0, Math.min(100, Math.round(100 * left / qv.limit))) : 0;
   document.getElementById("quota-fill").style.width = pct + "%";
-  document.getElementById("quota-note").textContent =
-    "Осталось " + left + " из " + qv.limit + " до " + qv.renews + ". Лимиты обновляются каждый месяц.";
-  card.classList.toggle("low", left === 0);
+  // Срок тарифа (09.10.2026): истёкший закрывает вопросы — говорим об этом, а не об остатке
+  document.getElementById("quota-note").textContent = qv.expired
+    ? "Срок действия тарифа истёк " + qv.expires + ". Чтобы продлить, обратитесь в Курскую ТПП."
+    : "Осталось " + left + " из " + qv.limit + " до " + qv.renews + ". Лимиты обновляются каждый месяц."
+      + (qv.expires ? " Тариф действует до " + qv.expires + "." : "");
+  card.classList.toggle("low", left === 0 || !!qv.expired);
   card.classList.remove("hidden");
-  line.textContent = "Осталось " + left + " " + plural(left, "запрос", "запроса", "запросов")
-    + " до " + qv.renews + " · ";
+  line.textContent = qv.expired ? "Срок тарифа истёк · "
+    : "Осталось " + left + " " + plural(left, "запрос", "запроса", "запросов") + " до " + qv.renews + " · ";
   line.classList.remove("hidden");
 }
 

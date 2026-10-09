@@ -8,7 +8,7 @@ from fastapi import APIRouter, Depends, HTTPException
 
 from app.api.auth import require_user
 from app.api.schemas import NavigateRequest, NavigateResponse, SourceItem
-from app.core.plans import plan_limit
+from app.core.plans import plan_expired, plan_limit
 from app.db.models import User
 from app.tools.navigator import navigate
 
@@ -26,7 +26,7 @@ def navigate_endpoint(req: NavigateRequest, user: User = Depends(require_user)) 
     ⚠ Пользователю с тарифом (#160) закрыт: эта ручка расход не пишет, и через неё лимит обходился
     бы целиком. Тарифный клиент работает в чате, где расход считается.
     """
-    if plan_limit(user) is not None:
+    if plan_limit(user) is not None or plan_expired(user):  # истёкший тариф — та же дверь в обход чата
         raise HTTPException(status_code=403,
                             detail="Для подключения по тарифу вопросы задаются в чате сервиса.")
     try:

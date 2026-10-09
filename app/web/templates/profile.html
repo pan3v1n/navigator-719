@@ -42,7 +42,15 @@
     {% set pct = ((100 * quota.used / quota.limit) | round | int) if (quota and quota.limit) else 0 %}
     <div class="grid2" style="align-items:start">
       <div class="plan-card">
-        <div class="plan-head"><span>Текущий тариф</span>{% if quota %}<span class="tag">Новый период с {{ quota.renews }}</span>{% endif %}</div>
+        {# Срок тарифа (09.10.2026): «Активен до …» — как в макете, или «Бессрочно»; истёкший — красным #}
+        <div class="plan-head"><span>Текущий тариф</span>
+          {% if plan %}{% if plan.expired %}<span class="tag expired">Срок истёк {{ plan.expires }}</span>
+          {% elif plan.expires %}<span class="tag">Активен до {{ plan.expires }}</span>
+          {% else %}<span class="tag">Бессрочно</span>{% endif %}{% endif %}</div>
+        {% if plan and plan.expired %}
+        <div class="plan-expired">Срок действия тарифа истёк — новые вопросы недоступны. История и экспорт
+          диалогов остаются. Чтобы продлить, обратитесь в {{ org }}.</div>
+        {% endif %}
         {% if quota %}
         <div class="plan-title">
           <div class="plan-name">{{ quota.plan }}</div>
@@ -55,7 +63,7 @@
         </div>
         {% else %}
         <div class="plan-title">
-          <div class="plan-name">Без тарифа</div>
+          <div class="plan-name">{{ plan.plan if plan else "Без тарифа" }}</div>
           <div class="plan-sub">Число запросов не ограничено</div>
         </div>
         {% endif %}

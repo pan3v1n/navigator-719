@@ -48,6 +48,8 @@ class User(Base):
     # Тариф (#160): None — без лимита. Лимиты и период — `app/core/plans.py`; назначает admin.
     plan: Mapped[str | None] = mapped_column(String(32), nullable=True)
     plan_started_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)  # дата подключения
+    # Срок тарифа (09.10.2026): 00:00 МСК дня, с которого он уже не действует; None — бессрочно.
+    plan_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     messages: Mapped[list["Message"]] = relationship(
         back_populates="user", cascade="all, delete-orphan"

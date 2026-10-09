@@ -46,6 +46,7 @@ def _ensure_columns() -> None:
             ("telegram", "VARCHAR(128)"),
             ("plan", "VARCHAR(32)"),          # тариф (#160); у старых строк NULL — без лимита
             ("plan_started_at", "DATETIME"),
+            ("plan_expires_at", "DATETIME"),  # срок тарифа (09.10.2026); NULL — бессрочно
             ("position", "VARCHAR(128)"),     # кабинет (09.10.2026): контакты пользователя
             ("email", "VARCHAR(255)"),
             ("phone", "VARCHAR(32)"),

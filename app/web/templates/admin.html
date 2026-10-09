@@ -335,20 +335,31 @@
       <p class="muted">Период — месяц от даты подключения (с 00:00 МСК). Считаются ответы сервиса на вопросы;
         приветствия и сбои не считаются. По исчерпании вопросы блокируются до начала нового периода.
         Без тарифа — без ограничения; у admin лимита нет никогда.
+        Внутренние тарифы: «{{ trial_plan }}» — права платного (лимит «Старта»), по умолчанию на {{ trial_days }} дней;
+        «Тестировщик» и «Администратор» — без ограничения числа запросов.
+        Срок «до» — дата, с которой тариф уже не действует (с 00:00 МСК); пусто — бессрочно. По истечении срока
+        вопросы закрываются, кабинет и история остаются.
         Организацию и ИНН пользователь видит в личном кабинете, но изменить их может только администратор.</p>
       <div class="feed">
         {% for r in plan_rows %}
         <div class="feed-row">
           <span class="feed-q"><b>{{ r.username }}</b> · {{ r.role }}{% if r.who %} · {{ r.who }}{% endif %}
             {% if r.unknown %} · <span class="warn">тариф «{{ r.plan }}» неизвестен — лимит не действует</span>{% endif %}
-            {% if r.state %} · <b>{{ r.state.used }} из {{ r.state.limit }}</b> за {{ r.period }}{% if r.state.exhausted %} · <span class="warn">исчерпан</span>{% endif %}{% endif %}</span>
+            {% if r.state %} · <b>{{ r.state.used }} из {{ r.state.limit }}</b> за {{ r.period }}{% if r.state.exhausted %} · <span class="warn">исчерпан</span>{% endif %}{% endif %}
+            {% if r.plan %} · {% if r.expired %}<span class="warn">срок истёк {{ r.expires_text }}</span>{% elif r.expires_text %}до {{ r.expires_text }}{% else %}бессрочно{% endif %}{% endif %}</span>
           <span class="feed-meta">
             <form method="post" action="/api/admin/users/{{ r.id }}/plan" style="display:inline">
               <select name="plan" aria-label="Тариф {{ r.username }}">
                 <option value="" {% if not r.plan %}selected{% endif %}>без тарифа</option>
-                {% for p in plan_names %}<option value="{{ p }}" {% if p == r.plan %}selected{% endif %}>{{ p }}</option>{% endfor %}
+                <optgroup label="Платные">
+                {% for p in paid_plans %}<option value="{{ p }}" {% if p == r.plan %}selected{% endif %}>{{ p }}</option>{% endfor %}
+                </optgroup>
+                <optgroup label="Внутренние">
+                {% for p in internal_plans %}<option value="{{ p }}" {% if p == r.plan %}selected{% endif %}>{{ p }}</option>{% endfor %}
+                </optgroup>
               </select>
               с <input type="date" name="started" value="{{ r.started or today }}" max="{{ today }}" aria-label="Дата подключения {{ r.username }}">
+              до <input type="date" name="expires" value="{{ r.expires }}" aria-label="Срок действия {{ r.username }} (пусто — бессрочно)" title="Пусто — бессрочно">
               <button type="submit" class="link">Сохранить</button>
             </form>
             {# Организация и ИНН — только здесь (решение владельца 09.10.2026); в кабинете — для чтения #}

@@ -327,11 +327,12 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
     with get_session() as db:
-        qv = quota.quota_view(db, user)
+        pv = quota.plan_view(db, user)
     return templates.TemplateResponse(
         "profile.html",
         _ctx(request, user=user, form=form, regions=REGIONS, error=error, saved=saved,
-             tab=tab if tab in PROFILE_TABS else "profile", quota=qv,
+             tab=tab if tab in PROFILE_TABS else "profile", plan=pv,
+             quota=pv["quota"] if pv else None,
              can_leave=not needs_profile(user)),
         status_code=status_code,
     )
@@ -429,7 +430,9 @@ def admin_page(request: Request, date_from: str = "", date_to: str = "",
     return templates.TemplateResponse(
         "admin.html", _ctx(request, admin=user, health=system_health(), leads=leads,
                            leads_total=leads_total, plan_rows=plan_rows, guest_view=guest_view,
-                           plan_names=list(PLAN_LIMITS), today=plans.msk_today().isoformat(), **view))
+                           paid_plans=list(PLAN_LIMITS), internal_plans=list(plans.INTERNAL_PLANS),
+                           trial_plan=plans.TRIAL_PLAN, trial_days=plans.TRIAL_DAYS,
+                           today=plans.msk_today().isoformat(), **view))
 
 
 LEADS_ON_PAGE = 200
@@ -465,9 +468,12 @@ def _plan_rows(db) -> list[dict]:
             "who": " · ".join(x for x in (u.full_name, u.region) if x),
             "plan": u.plan or "",
             "org": u.org or "", "inn": u.inn or "",
-            # название не из PLAN_LIMITS молча снимает лимит (ревью PR #161, LOW-3) — показываем
-            "unknown": bool(u.plan) and u.plan not in PLAN_LIMITS,
+            # название не из таблицы тарифов молча снимает лимит (ревью PR #161, LOW-3) — показываем
+            "unknown": bool(u.plan) and u.plan not in plans.ALL_PLANS,
             "started": plans.msk_date(u.plan_started_at).isoformat() if u.plan_started_at else "",
+            # срок (09.10.2026): дата для формы и строка «до 16.10.2026» / «бессрочно» / истёк
+            "expires": plans.msk_date(u.plan_expires_at).isoformat() if u.plan_expires_at else "",
+            "expires_text": quota.validity(u)["expires"], "expired": plans.plan_expired(u),
             "state": st,
             "period": (f"{plans.msk_date(st.start):%d.%m.%Y} – "
                        f"{plans.msk_date(st.end - timedelta(seconds=1)):%d.%m.%Y}") if st else "",
@@ -477,13 +483,17 @@ def _plan_rows(db) -> list[dict]:
 
 @router.post("/api/admin/users/{user_id}/plan")
 def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Form(default=""),
+                   expires: str = Form(default=""),
                    admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Назначить тариф и дату подключения (#160). Пустой тариф — снять лимит. Дата по умолчанию —
-    сегодня по Москве; в будущем нельзя: период, которого ещё нет, пользователь не увидит."""
+    """Назначить тариф, дату подключения и срок (#160; срок и внутренние тарифы — 09.10.2026).
+    Пустой тариф — снять лимит. Дата подключения по умолчанию — сегодня по Москве; в будущем
+    нельзя: период, которого ещё нет, пользователь не увидит. Срок — дата, с которой тариф уже не
+    действует («Активен до …»); пусто — бессрочно, у «Пробного режима» — TRIAL_DAYS дней.
+    Срок в прошлом допустим: так admin закрывает доступ, не снимая тариф."""
     plan = plan.strip()
-    if plan and plan not in PLAN_LIMITS:
+    if plan and plan not in plans.ALL_PLANS:
         raise HTTPException(status_code=422, detail=f"Неизвестный тариф «{plan}»")
-    started_at = None
+    started_at = expires_at = None
     if plan:
         day = _parse_date(started.strip()) if started.strip() else plans.msk_today()
         if day is None:
@@ -491,11 +501,20 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
         if day > plans.msk_today():
             raise HTTPException(status_code=422, detail="Дата подключения не может быть в будущем")
         started_at = plans.anchor_from_date(day)
+        until = _parse_date(expires.strip()) if expires.strip() else None
+        if expires.strip() and until is None:
+            raise HTTPException(status_code=422, detail="Срок действия — в формате ГГГГ-ММ-ДД")
+        if until is None and plan == plans.TRIAL_PLAN:
+            until = day + timedelta(days=plans.TRIAL_DAYS)
+        if until is not None and until <= day:
+            raise HTTPException(status_code=422, detail="Срок действия должен быть позже даты подключения")
+        expires_at = plans.anchor_from_date(until) if until else None
     with get_session() as db:
-        if q.set_user_plan(db, user_id, plan or None, started_at) is None:
+        if q.set_user_plan(db, user_id, plan or None, started_at, expires_at) is None:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
     logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
-                f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else ""))
+                f"«{plan or 'без тарифа'}»" + (f" с {plans.msk_date(started_at):%d.%m.%Y}" if plan else "")
+                + (f" до {plans.msk_date(expires_at):%d.%m.%Y}" if expires_at else ""))
     return RedirectResponse("/admin", status_code=303)
 
 

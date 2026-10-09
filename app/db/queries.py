@@ -76,13 +76,16 @@ def list_users(db: Session) -> list[User]:
 
 
 # --- тарифы и расход (#160) -----------------------------------------------
-def set_user_plan(db: Session, user_id: int, plan: str | None, started_at=None) -> User | None:
-    """Назначить тариф (None — снять лимит) и дату подключения. Возвращает User или None."""
+def set_user_plan(db: Session, user_id: int, plan: str | None, started_at=None,
+                  expires_at=None) -> User | None:
+    """Назначить тариф (None — снять лимит), дату подключения и срок (None — бессрочно).
+    Возвращает User или None."""
     u = db.get(User, user_id)
     if not u:
         return None
     u.plan = plan
     u.plan_started_at = started_at if plan else None
+    u.plan_expires_at = expires_at if plan else None
     db.commit()
     db.refresh(u)
     return u

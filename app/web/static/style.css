@@ -169,6 +169,9 @@ textarea::placeholder, input::placeholder { color: var(--ink-40); }
 .combo-list li.active, .combo-list li:hover { background: var(--blue-07); color: var(--blue); }
 .combo-list li[aria-selected="true"] { font-weight: 600; }
 .combo-list li.combo-empty { cursor: default; color: var(--ink-60); background: none; }
+.tag.expired { color: var(--red); background: rgba(216, 51, 50, .08); }
+.plan-expired { background: rgba(216, 51, 50, .08); color: var(--red); border-radius: 8px; padding: 12px 16px;
+  font: 400 14px/1.4 var(--font); }
 .plan-check { flex: none; width: 16px; height: 16px; margin-top: 3px; border-radius: 4px; background: var(--blue); color: #fff;
   display: inline-flex; align-items: center; justify-content: center; }
 
