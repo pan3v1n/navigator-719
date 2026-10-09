@@ -415,6 +415,26 @@ class TestCabinetSave(_CabinetDB):
         self.assertIsNotNone(self._fresh(u.id).org_verified_at, "пробел снял подтверждение")
         self.assertIn("подтверждены администратором", self._page(self._fresh(u.id), edit="1"))
 
+    def test_real_form_clears_org_with_empty_fields(self):
+        """Через разбор формы FastAPI: пустые поля — «очистить», отсутствующие — «не трогать» (повторное
+        ревью PR #186: прямой вызов обработчика разбор формы минует)."""
+        from fastapi.testclient import TestClient
+
+        from main import app
+
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "ООО «Ромашка»", "7707083893", verified_by=99)
+        base = {"consent": "1", **{k: v for k, v in COMPLETE.items() if k != "consent"}}
+        with mock.patch.object(web, "current_user", return_value=self._fresh(u.id)):
+            TestClient(app).post("/profile", data=base, follow_redirects=False)
+        self.assertEqual(self._fresh(u.id).org, "ООО «Ромашка»", "POST без полей стёр организацию")
+        with mock.patch.object(web, "current_user", return_value=self._fresh(u.id)):
+            r = TestClient(app).post("/profile", data={**base, "org": "", "inn": ""}, follow_redirects=False)
+        self.assertEqual(r.status_code, 302)
+        fresh = self._fresh(u.id)
+        self.assertEqual((fresh.org, fresh.inn, fresh.org_verified_at), (None, None, None))
+
     def test_org_without_inn_asks_for_inn(self):
         u = self._user()
         self._submit(u, org="ООО «Ромашка»", inn="")

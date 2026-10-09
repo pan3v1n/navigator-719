@@ -97,7 +97,7 @@
       <h2>Продление тарифа «{{ renew.tariff }}»</h2>
       {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
       <dl class="renew-facts">
-        <div><dt>Сейчас</dt><dd>{{ 'до ' ~ renew.now_until if renew.now_until else 'бессрочно' }}</dd></div>
+        <div><dt>Сейчас</dt><dd>до {{ renew.now_until }}</dd></div>
         <div><dt>После продления</dt><dd>до {{ renew.new_until }}</dd></div>
         <div><dt>Стоимость</dt><dd>{{ pricing.PRICE }} ₽/мес</dd></div>
       </dl>
@@ -114,7 +114,7 @@
         <h2 id="renew-h">Продление тарифа «{{ renew.tariff }}»</h2>
         {% if error %}<div class="error" role="alert">{{ error }}</div>{% endif %}
         <p>Корпоративный тариф продлевается через связь с заказчиком: оставьте комментарий — менеджер
-          свяжется с вами и согласует условия. Сейчас: {{ 'до ' ~ renew.now_until if renew.now_until else 'бессрочно' }}.</p>
+          свяжется с вами и согласует условия. Сейчас тариф действует до {{ renew.now_until }}.</p>
         {{ req_message() }}
         {{ req_who() }}
         <input type="hidden" name="tariff" value="{{ renew.tariff }}"><input type="hidden" name="renew" value="1">

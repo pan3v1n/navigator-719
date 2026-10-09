@@ -449,7 +449,8 @@ class TestCabinetShowcase(_Db):
                 self.assertNotIn(">Продлить</a>", self._page(u))
                 html = self._page(u, "renew=1")
                 self.assertNotIn('id="renew"', html)
-                self.assertIn(web.PLAN_REQUEST_ERRORS["renew"], html)
+                key = "renew_unlimited" if plan == "Стандарт" else "renew"
+                self.assertIn(web.PLAN_REQUEST_ERRORS[key], html)
 
     def test_bad_choice_or_no_contacts_show_the_error_in_the_showcase(self):
         u = self._user()

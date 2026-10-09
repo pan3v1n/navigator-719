@@ -59,7 +59,8 @@ def main() -> int:
     need = {"org_verified_at", "org_verified_by", "plan_kind"}
     check(need <= users, "у users есть подтверждение организации и вид тарифа",
           f"миграция users не прошла, нет: {sorted(need - users)}")
-    check("message" in leads, "у leads есть комментарий заявителя", "миграция leads.message не прошла")
+    check({"message", "kind"} <= leads, "у leads есть комментарий заявителя и вид заявки",
+          f"миграция leads не прошла, нет: {sorted({'message', 'kind'} - leads)}")
 
     # 2. /api/leads знает комментарий. Без согласия заявку отклоняет любой код — в базу не пишется ничего.
     code, body = http("/api/leads", {"tariff": "Профи", "consent": False, "message": "x" * 1001})

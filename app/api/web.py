@@ -377,7 +377,8 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
     if tab == "plan" and qp.get("renew") == "1":
         renew = _renewal(user)
         if renew is None:
-            error = PLAN_REQUEST_ERRORS["renew"]
+            unlimited = user.plan in PLAN_LIMITS and not user.plan_expires_at
+            error = PLAN_REQUEST_ERRORS["renew_unlimited" if unlimited else "renew"]
         elif not (user.email and user.phone):
             renew, error = None, PLAN_REQUEST_ERRORS["profile"]
     elif tab == "plan" and qp.get("confirm") == "1":
@@ -416,15 +417,17 @@ PLAN_REQUEST_ERRORS = {
     "consent": "Отметьте согласие на обработку персональных данных — без него заявку не отправить.",
     "limit": "Слишком много заявок подряд — попробуйте через час.",
     "renew": "Продлевается только текущий платный тариф — выберите тариф на витрине.",
+    "renew_unlimited": "Ваш тариф бессрочный — продлевать его не нужно.",
     "message": "Комментарий — не длиннее 1000 знаков.",
 }
 MESSAGE_LIMIT = 1000
 
 
 def _renewal(user: User) -> dict | None:
-    """«Продлить» (решение владельца 09.10.2026, вечер): только платный тариф. Новый срок — на месяц от
-    конца текущего, а если срока нет или он истёк — от сегодня. Личный продлевается заявкой (позже —
-    оплатой с личной карты), корпоративный — только через связь с заказчиком (попап)."""
+    """«Продлить» (решение владельца 09.10.2026, вечер): только платный тариф СО СРОКОМ. Новый срок — на
+    месяц от конца текущего, а если он уже истёк — от сегодня. Личный продлевается заявкой (позже —
+    оплатой с личной карты), корпоративный — только через связь с заказчиком (попап). None — продлевать
+    нечего: не платный тариф или бессрочный."""
     # Бессрочный тариф продлевать нечего: «продление до …» поставило бы срок там, где его не было (ревью
     # PR #186) — кнопки нет, пока admin не задал срок.
     if user.plan not in PLAN_LIMITS or not user.plan_expires_at:
@@ -564,7 +567,7 @@ def profile_submit(
         errs.append("Слишком длинное название организации.")
     # Контрольные цифры — только у ИНН, который пользователь ввёл сам: ИНН из заявки или от admin'а мог
     # пройти лишь проверку длины, и без этого человек не сохранил бы анкету (гейт до чата) — ревью PR #186.
-    if nn and nn != (user.inn or "") and not inn_valid(nn):
+    if nn and nn != (q.norm_org(user.inn) or "") and not inn_valid(nn):
         errs.append("Проверьте ИНН: 10 цифр у организации или 12 у ИП, контрольные цифры не сходятся.")
     if errs:
         return _profile_response(request, user, form, error=" ".join(errs), status_code=400)
