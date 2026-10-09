@@ -135,6 +135,26 @@ def user_activity(db: Session) -> dict[int, tuple]:
     return {uid: (last, n) for uid, last, n in rows}
 
 
+# --- сводка админ-панели (09.10.2026): только нужные колонки за период, без текстов ----------
+def message_rows_since(db: Session, since) -> list:
+    """Реплики пользователей с момента `since` (наивное UTC) — без текстов, по порядку записи."""
+    return db.execute(
+        select(Message.id, Message.user_id, Message.session_id, Message.role, Message.ts,
+               Message.prompt_tokens, Message.completion_tokens)
+        .where(Message.ts >= since).order_by(Message.id)).all()
+
+
+def guest_rows_since(db: Session, since) -> list:
+    return db.execute(
+        select(GuestMessage.role, GuestMessage.ts, GuestMessage.prompt_tokens,
+               GuestMessage.completion_tokens, GuestMessage.charged)
+        .where(GuestMessage.ts >= since)).all()
+
+
+def count_leads_since(db: Session, since) -> int:
+    return db.execute(select(func.count(Lead.id)).where(Lead.created_at >= since)).scalar_one()
+
+
 def list_users(db: Session) -> list[User]:
     return list(db.execute(select(User).order_by(User.id)).scalars())
 

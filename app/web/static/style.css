@@ -755,6 +755,21 @@ a.head-avatar:hover { opacity: .9; }
 .adm-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 6px; font-size: 14px; }
 .adm-list a { color: var(--blue); }
 .adm-section { display: flex; flex-direction: column; gap: 16px; }
+/* сводка: плитки показателей и список здоровья */
+.adm-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+.adm-tile { background: var(--gray); border-radius: 12px; padding: 16px; display: flex; flex-direction: column; gap: 4px; }
+.adm-tile-v { font: 500 28px/1.15 var(--font); color: var(--ink); }
+.adm-tile-l { font: 500 14px/1.3 var(--font); color: var(--ink-80); }
+.adm-tile.bad { background: rgba(216, 51, 50, .08); }
+.adm-tile.bad .adm-tile-v { color: var(--red); }
+.adm-h3 { margin: 4px 0 0; font: 500 14px/1.3 var(--font); color: var(--ink-60); }
+.adm-health { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.adm-health li.sub { padding-left: 18px; color: var(--ink-80); }
+.adm-health .dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; margin-right: 8px; background: var(--ink-40); }
+.adm-health .dot.ok { background: #2e9d5b; }
+.adm-health .dot.bad { background: var(--red); }
+.adm-fail a { color: var(--ink); }
+.adm-fail a:hover { color: var(--blue); }
 @media (max-width: 900px) {
   .adm { flex-direction: column; }
   .adm-side { position: static; width: auto; height: auto; padding: 12px; gap: 10px; }

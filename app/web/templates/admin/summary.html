@@ -1,0 +1,76 @@
+{% extends "admin/base.html" %}
+{% macro tiles(p) -%}
+<div class="adm-tiles">
+  <div class="adm-tile"><div class="adm-tile-v">{{ p.questions }}</div><div class="adm-tile-l">вопросов</div>
+    <div class="muted">{{ p.users }} {{ p.users | plural('пользователь', 'пользователя', 'пользователей') }}</div></div>
+  <div class="adm-tile"><div class="adm-tile-v">{{ p.answers }}</div><div class="adm-tile-l">ответов</div></div>
+  <div class="adm-tile{% if p.unanswered_n %} bad{% endif %}"><div class="adm-tile-v">{{ p.unanswered_n }}</div>
+    <div class="adm-tile-l">без ответа</div><div class="muted">сбой движка или обрыв</div></div>
+  <div class="adm-tile"><div class="adm-tile-v">{{ '%.2f' | format(p.rub_total) }} ₽</div><div class="adm-tile-l">расход DeepSeek</div>
+    <div class="muted">из них гости {{ '%.2f' | format(p.guest.rub) }} ₽</div></div>
+  <div class="adm-tile"><div class="adm-tile-v">{{ p.guest.questions }}</div><div class="adm-tile-l">вопросов гостей</div>
+    <div class="muted">засчитано {{ p.guest.charged }}</div></div>
+</div>
+{%- endmacro %}
+{% block content %}
+<div class="adm-head">
+  <h1>Сводка</h1>
+  <span class="muted">релиз {{ release }} · {{ health.server_time }} · время в отчёте — московское</span>
+</div>
+
+<h2 class="adm-h2">Сегодня</h2>
+{{ tiles(s.periods.today) }}
+<h2 class="adm-h2">С начала месяца ({{ s.month_label }})</h2>
+{{ tiles(s.periods.month) }}
+<p class="muted">Расход — оценка по токенам DeepSeek, не для бухгалтерии. Детальная статистика и оценки ответов —
+  в разделе <a class="ds-link" href="/admin/quality">«Качество»</a>.</p>
+
+<div class="adm-grid">
+  <section class="adm-card">
+    <h2>Система</h2>
+    <ul class="adm-health">
+      <li><span class="dot {{ 'ok' if health.qdrant_ok else 'bad' }}"></span>База знаний (Qdrant):
+        <b>{{ 'на связи' if health.qdrant_ok else 'недоступна' }}</b></li>
+      {% for c in health.collections %}
+      <li class="sub"><span class="dot {{ 'ok' if c.ok else 'bad' }}"></span>{{ c.label }}:
+        <b>{{ (c.points | spaced) if c.ok and c.points is not none else '—' }}</b></li>
+      {% endfor %}
+      <li><span class="dot {{ 'ok' if health.deepseek else 'bad' }}"></span>Языковая модель (DeepSeek):
+        <b>{{ 'ключ задан' if health.deepseek else 'нет ключа' }}</b></li>
+      <li><span class="dot {{ 'ok' if s.trial.enabled else 'off' }}"></span>Пробный режим:
+        <b>{{ ('сегодня ' ~ s.trial.today ~ ' из ' ~ s.trial.cap) if s.trial.enabled else 'выключен' }}</b>
+        <a class="ds-link" href="/admin/trial">открыть</a></li>
+    </ul>
+  </section>
+
+  <section class="adm-card">
+    <h2>Тарифы</h2>
+    {% if not (s.expiring or s.expired or s.exhausted) %}<p class="muted">Ничего не истекает и не исчерпано.</p>{% endif %}
+    {% if s.expiring %}<h3 class="adm-h3">Истекают в ближайшие 7 дней · {{ s.expiring | length }}</h3>
+    <ul class="adm-list">{% for u in s.expiring %}<li><a href="/admin/users/{{ u.id }}">{{ u.username }}</a> · {{ u.plan }} · до {{ u.until }}</li>{% endfor %}</ul>{% endif %}
+    {% if s.expired %}<h3 class="adm-h3">Срок истёк — вопросы закрыты · {{ s.expired | length }}</h3>
+    <ul class="adm-list">{% for u in s.expired %}<li><a href="/admin/users/{{ u.id }}">{{ u.username }}</a> · {{ u.plan }} · истёк {{ u.until }}</li>{% endfor %}</ul>{% endif %}
+    {% if s.exhausted %}<h3 class="adm-h3">Лимит исчерпан · {{ s.exhausted | length }}</h3>
+    <ul class="adm-list">{% for u in s.exhausted %}<li><a href="/admin/users/{{ u.id }}">{{ u.username }}</a> · {{ u.plan }} · обновится {{ u.renews }}</li>{% endfor %}</ul>{% endif %}
+  </section>
+
+  <section class="adm-card">
+    <h2>Учётки и заявки</h2>
+    <ul class="adm-list">
+      <li>Учёток: <b>{{ s.accounts.total }}</b> · <a href="/admin/users">все</a></li>
+      <li>Без анкеты: <b>{{ s.accounts.no_profile }}</b>{% if s.accounts.no_profile %} · <a href="/admin/users?status=no_profile">показать</a>{% endif %}</li>
+      <li>Заблокировано: <b>{{ s.accounts.blocked }}</b>{% if s.accounts.blocked %} · <a href="/admin/users?status=blocked">показать</a>{% endif %}</li>
+      <li>Заявок с сайта: <b>{{ s.leads.total }}</b>, за 7 дней — <b>{{ s.leads.week }}</b> · <a href="/admin/leads">открыть</a></li>
+    </ul>
+  </section>
+
+  <section class="adm-card{% if s.failures %} adm-danger{% endif %}">
+    <h2>Вопросы без ответа · {{ s.periods.month.unanswered_n }}</h2>
+    {% for f in s.failures %}
+    <div class="adm-fail"><a href="/admin/dialogs?user={{ f.user | urlencode }}#th-{{ f.session_id }}">{{ f.text | truncate(140) }}</a>
+      <div class="muted">{{ f.user }} · {{ f.ts }}</div></div>
+    {% else %}<p class="muted">В этом месяце все вопросы получили ответ.</p>{% endfor %}
+    {% if s.periods.month.unanswered_n > s.failures | length %}<p class="muted">Показаны последние {{ s.failures | length }}.</p>{% endif %}
+  </section>
+</div>
+{% endblock %}

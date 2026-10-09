@@ -249,13 +249,97 @@ class TestCardActions(_PanelDB):
         self.assertNotIn(f'action="/api/admin/users/{self.admin.id}/delete"', own)
 
 
+class TestSummary(_PanelDB):
+    """Сводка (этап 2): работает ли сервис и что требует внимания — сегодня и с начала месяца."""
+
+    def setUp(self):
+        super().setUp()
+        from datetime import datetime, timedelta, timezone
+
+        from app.api import admin_summary
+        from app.db.models import GuestMessage, Lead
+
+        self.summary = admin_summary
+        self.now = datetime.now(timezone.utc)
+        now_n = plans.naive_utc(self.now)
+        today = plans.anchor_from_date(plans.msk_today(self.now))
+        month = admin_summary._month_start(self.now)
+        self.a, self.b, self.c = (self._mk(n) for n in ("kursk.a", "kursk.b", "kursk.c"))
+        with self.Session() as db:
+            start = plans.anchor_from_date(plans.msk_today() - timedelta(days=5))
+            q.set_user_plan(db, self.a.id, "Старт", start, plans.anchor_from_date(plans.msk_today() + timedelta(days=3)))
+            q.set_user_plan(db, self.b.id, "Профи", start, plans.anchor_from_date(plans.msk_today()))   # истёк
+            q.set_user_plan(db, self.c.id, "Старт", start)
+            db.add_all([AnswerUsage(user_id=self.c.id, ts=now_n - timedelta(minutes=30)) for _ in range(100)])
+
+            def say(uid, sid, role, text, ago, pt=None, ct=None):
+                m = q.log_message(db, user_id=uid, session_id=sid, role=role, content=text,
+                                  prompt_tokens=pt, completion_tokens=ct)
+                m.ts = now_n - ago
+                db.commit()
+
+            say(self.a.id, "s1", "user", "Отвеченный вопрос", timedelta(minutes=50))
+            say(self.a.id, "s1", "assistant", "ответ", timedelta(minutes=49), 1_000_000, 0)  # 0.27 $ × 90 = 24.3 ₽
+            say(self.a.id, "s2", "user", "Упавший вопрос", timedelta(minutes=40))            # без ответа
+            say(self.c.id, "s3", "user", "Первый без ответа", timedelta(minutes=30))
+            say(self.c.id, "s3", "user", "Переспросил", timedelta(minutes=29))
+            say(self.c.id, "s3", "assistant", "ответ", timedelta(minutes=28))
+            say(self.c.id, "s4", "user", "Только что спросил", timedelta(seconds=20))          # моложе FRESH
+            say(self.b.id, "s5", "user", "Прошлый месяц", now_n - month + timedelta(minutes=1))
+            if today != month:   # реплика «вчера или раньше, но в этом месяце» — в месяц, не в сегодня
+                say(self.b.id, "s6", "user", "Ранее в этом месяце", now_n - today + timedelta(minutes=1))
+                say(self.b.id, "s6", "assistant", "ответ", now_n - today + timedelta(seconds=30))
+            gm = GuestMessage(guest_id="g" * 32, session_id="g1", role="assistant", content="x",
+                              prompt_tokens=1_000_000, completion_tokens=0, charged=True)
+            db.add(gm)
+            db.add_all([Lead(tariff="Старт", name="Н", org="О", inn="4632000000", email="e@x.ru", phone="+7",
+                             consent_at=now_n, created_at=now_n - timedelta(days=d)) for d in (2, 30)])
+            db.commit()
+        self.today_is_month_start = today == month
+
+    def test_counts_and_unanswered(self):
+        with self.Session() as db:
+            s = self.summary.summary_view(db, self.now)
+        today = s["periods"]["today"]
+        self.assertEqual((today["questions"], today["answers"]), (5, 2), "вопрос прошлого месяца или ответ лишний")
+        self.assertEqual(today["unanswered_n"], 2, "без ответа: упавший и «первый» в паре подряд; свежий — нет")
+        self.assertEqual(today["users"], 2)
+        self.assertAlmostEqual(today["rub"], 24.3, places=2)
+        self.assertAlmostEqual(today["rub_total"], 48.6, places=2, msg="гости в расход не попали")
+        self.assertEqual((today["guest"]["charged"]), 1)
+        self.assertEqual({f["text"] for f in s["failures"]}, {"Упавший вопрос", "Первый без ответа"})
+        month = s["periods"]["month"]
+        if not self.today_is_month_start:
+            self.assertEqual((month["questions"], month["answers"]), (6, 3),
+                             "реплика прошлого месяца попала в месяц или ранняя реплика месяца потерялась")
+
+    def test_attention_lists(self):
+        with self.Session() as db:
+            s = self.summary.summary_view(db, self.now)
+        self.assertEqual([u["username"] for u in s["expiring"]], ["kursk.a"])
+        self.assertEqual([u["username"] for u in s["expired"]], ["kursk.b"])
+        self.assertEqual([u["username"] for u in s["exhausted"]], ["kursk.c"])
+        self.assertEqual(s["accounts"]["no_profile"], 3)
+        self.assertEqual((s["leads"]["total"], s["leads"]["week"]), (2, 1))
+        self.assertEqual(s["trial"]["today"], 1)
+
+    def test_page(self):
+        with mock.patch.object(adm, "system_health", return_value={"collections": [], "server_time": "—"}):
+            html = self.as_admin.get("/admin").text
+        self.assertIn('<a href="/admin" class="on" aria-current="page">Сводка</a>', html)
+        self.assertIn("/admin/dialogs?user=kursk.a#th-s2", html, "сбой без ссылки на беседу")
+        self.assertIn("Упавший вопрос", html)
+        self.assertIn(f'href="/admin/users/{self.a.id}">kursk.a</a> · Старт · до', html)
+        self.assertIn('href="/admin/users?status=no_profile"', html)
+
+
 class TestAccessAndNavigation(_PanelDB):
-    PAGES = ("/admin/users", "/admin/leads", "/admin/quality", "/admin/dialogs", "/admin/trial")
+    PAGES = ("/admin", "/admin/users", "/admin/leads", "/admin/quality", "/admin/dialogs", "/admin/trial")
 
     def test_only_admin(self):
         anon = self.TestClient(self.app)
         expert = self._login(self._mk("perm.expert1", role="expert").username)
-        for path in self.PAGES + ("/admin", f"/admin/users/{self.admin.id}"):
+        for path in self.PAGES + (f"/admin/users/{self.admin.id}",):
             with self.subTest(path=path):
                 self.assertEqual(anon.get(path, follow_redirects=False).headers.get("location"), "/login")
                 self.assertEqual(expert.get(path, follow_redirects=False).headers.get("location"), "/chat")
@@ -271,7 +355,7 @@ class TestAccessAndNavigation(_PanelDB):
                     r = self.as_admin.get(href)
                     self.assertEqual(r.status_code, 200)
                     self.assertIn(f'<a href="{href}" class="on" aria-current="page">{label}</a>', r.text)
-        self.assertEqual(self.as_admin.get("/admin", follow_redirects=False).headers["location"], "/admin/users")
+        self.assertEqual(adm.SECTIONS[0][:2], ("summary", "/admin"), "панель открывается Сводкой")
 
     def test_chat_has_no_dialog_logs_link(self):
         with mock.patch.object(web.quota, "quota_view", return_value=None):

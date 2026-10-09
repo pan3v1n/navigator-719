@@ -30,6 +30,7 @@ from loguru import logger
 
 from app.api import quota
 from app.api.admin_stats import build_admin_view, system_health
+from app.api.admin_summary import summary_view
 from app.api.auth import current_user, generate_password, hash_password, require_admin
 from app.api.leads import _INN_RE as INN_RE
 from app.api.web import (
@@ -44,6 +45,7 @@ from app.core import plans
 from app.core.config import settings
 from app.core.plans import PLAN_LIMITS
 from app.core.prompts import EXPERT_DISCLAIMER
+from app.core.release import release_label
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -53,6 +55,7 @@ router = APIRouter()
 
 # Разделы сайдбара: (ключ, адрес, подпись). Порядок — порядок работы: что сломалось и кто это.
 SECTIONS = [
+    ("summary", "/admin", "Сводка"),
     ("users", "/admin/users", "Пользователи"),
     ("leads", "/admin/leads", "Заявки"),
     ("quality", "/admin/quality", "Качество"),
@@ -98,11 +101,15 @@ def _page(request: Request, admin: User, template: str, section: str, title: str
 
 @router.get("/admin", response_class=HTMLResponse)
 def admin_home(request: Request):
-    """Вход в панель. До «Сводки» (следующий этап) — список пользователей."""
+    """Сводка: работает ли сервис и что требует внимания — сегодня и с начала месяца
+    (`app/api/admin_summary.py`)."""
     gate = _gate(request)
     if isinstance(gate, RedirectResponse):
         return gate
-    return RedirectResponse("/admin/users", status_code=302)
+    with get_session() as db:
+        view = summary_view(db)
+    return _page(request, gate, "summary", "summary", "Сводка", s=view, health=system_health(),
+                 release=release_label())
 
 
 # --------------------------------------------------------------------------- #
