@@ -31,13 +31,29 @@
       dots = document.getElementById('demo-dots').children;
   var d = { i: 0, phase: 'typing', n: 0, dots: 0, caret: true }, caretEl = document.createElement('span');
   caretEl.className = 'caret';
+  var THINKING = 'Навигатор ищет в тексте документов';
+
+  // Невидимые копии всех примеров в ячейке живого: карточка берёт высоту самого длинного и не прыгает
+  // при смене примера (styles.css, `.demo-sizer`). Подпись — самая длинная («…ищет…»), у вопроса —
+  // курсор: на последних буквах набора он может перенести строку.
+  var stage = document.getElementById('demo-stage');
+  function el(tag, cls, text) { var e = document.createElement(tag); e.className = cls; if (text) e.textContent = text; return e; }
+  DEMO.forEach(function (it) {
+    var s = el('div', 'demo-sizer'), q = el('div', 'bubble', it.q), refs = el('div', 'refs');
+    s.setAttribute('aria-hidden', 'true');
+    q.appendChild(el('span', 'caret'));
+    it.refs.forEach(function (r) { refs.appendChild(el('span', 'ref', r)); });
+    s.appendChild(q); s.appendChild(el('div', 'demo-label', THINKING + '...'));
+    s.appendChild(el('p', 'demo-a', it.a)); s.appendChild(refs);
+    stage.appendChild(s);
+  });
 
   function paintDemo() {
     var it = DEMO[d.i], ans = d.phase === 'answer', out = d.phase === 'out';
     dq.textContent = it.q.slice(0, d.n);
     if (d.phase === 'typing' && d.caret) dq.appendChild(caretEl);
     dq.classList.toggle('gone', out);
-    dl.textContent = d.phase === 'thinking' ? 'Навигатор ищет в тексте документов' + '.'.repeat(d.dots % 4) : 'Навигатор ПП 719';
+    dl.textContent = d.phase === 'thinking' ? THINKING + '.'.repeat(d.dots % 4) : 'Навигатор ПП 719';
     dl.classList.toggle('gone', d.phase === 'typing' || out);
     da.textContent = it.a;
     da.classList.toggle('fade', !ans);
