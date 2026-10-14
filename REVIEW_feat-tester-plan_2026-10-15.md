@@ -101,4 +101,4 @@
 Полный `requirements.txt` не ставился (torch/sentence-transformers слишком тяжёлые); поставлены лёгкие
 зависимости, `sentence_transformers` подменён заглушкой вне репозитория. Прогон:
 `python -m unittest tests.test_pricing tests.test_testers tests.test_leads tests.test_admin_panel` —
-**110 тестов, OK** (21:51 МСК 14.10.2026). Остальная батарея не запускалась.
+**110 тестов, OK** (00:51 МСК 15.10.2026, то есть сразу после полуночи — окно, в котором до правки #191 краснел `TestSummary`). Остальная батарея не запускалась.
