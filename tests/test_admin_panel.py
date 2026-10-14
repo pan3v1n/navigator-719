@@ -327,13 +327,15 @@ class TestSummary(_PanelDB):
 
     def setUp(self):
         super().setUp()
-        from datetime import datetime, timedelta, timezone
+        from datetime import timedelta, timezone
 
         from app.api import admin_summary
         from app.db.models import GuestMessage, Lead
 
         self.summary = admin_summary
-        self.now = datetime.now(timezone.utc)
+        # #191: «сейчас» фикстуры — полдень МСК сегодняшних суток, а не момент запуска. Реплики кладутся
+        # за 20 с – 50 мин до него, и в первые ~50 минут после 00:00 МСК часть уезжала во «вчера».
+        self.now = (plans.anchor_from_date(plans.msk_today()) + timedelta(hours=12)).replace(tzinfo=timezone.utc)
         now_n = plans.naive_utc(self.now)
         today = plans.anchor_from_date(plans.msk_today(self.now))
         month = admin_summary._month_start(self.now)
@@ -401,7 +403,9 @@ class TestSummary(_PanelDB):
         self.assertEqual(s["trial"]["today"], 1)
 
     def test_page(self):
-        with mock.patch.object(adm, "system_health", return_value={"collections": [], "server_time": "—"}):
+        real = adm.summary_view   # страница считает от того же «сейчас», что фикстура (#191)
+        with mock.patch.object(adm, "system_health", return_value={"collections": [], "server_time": "—"}), \
+                mock.patch.object(adm, "summary_view", lambda db: real(db, self.now)):
             html = self.as_admin.get("/admin").text
         self.assertIn('<a href="/admin" class="on" aria-current="page">Сводка</a>', html)
         self.assertIn("/admin/dialogs/s2", html, "сбой без ссылки на беседу")
