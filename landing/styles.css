@@ -157,6 +157,15 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
 .addon small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-60); }
 .btn-2l { flex-direction: column; gap: 3px; line-height: 1.1; }
 .btn-2l small { font: 500 12px/1.2 var(--font); opacity: .85; }
+/* цены из презентации (14.10.2026): сумма не рвётся переносом (разряды — обычный пробел); у корпоративных
+   число держит `.sum`, а «₽/год» при 500 пользователях за год может уйти строкой ниже — не за край карточки */
+.plan:not(.promo):not([data-corp]) .price, .sum, .price-old, .price-sub, .org-price { white-space: nowrap; }
+.price-sub { font: 400 13px/1.3 var(--font); color: var(--text-60); }
+.org-price { font: 500 22px/1.2 var(--font); color: var(--text); }
+.org-steps { display: block; margin: 0; padding-left: 22px; }
+.org-steps li + li { margin-top: 12px; }
+.org-steps li::marker { color: var(--blue); font-weight: 600; }
+.plans-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 380px)); justify-content: center; }
 .btn-dark { color: #fff; background: var(--text); }
 .btn-dark:hover { color: #fff; background: #03050C; }
 .org-actions { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }

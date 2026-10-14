@@ -62,6 +62,7 @@ SECTIONS = [
     ("users", "/admin/users", "Пользователи"),
     ("orgs", "/admin/orgs", "Организации"),
     ("leads", "/admin/leads", "Заявки"),
+    ("testers", "/admin/testers", "Тестировщики"),
     ("quality", "/admin/quality", "Качество"),
     ("dialogs", "/admin/dialogs", "Диалоги"),
     ("trial", "/admin/trial", "Пробный режим"),
@@ -235,6 +236,7 @@ def _card(request: Request, admin: User, user_id: int, *, password_shown: str | 
         verifier = q.get_user(db, u.org_verified_by) if u.org_verified_by else None
         org_verified = (f"{_msk(u.org_verified_at)}" + (f" · {verifier.username}" if verifier else "")
                         if u.org_verified_at else "")
+        tester_verified = _tester_verified(db, u)
         db.expunge(u)
     return _page(
         request, admin, "user", "users", u.username, status_code=status_code, u=u, row=row,
@@ -247,7 +249,16 @@ def _card(request: Request, admin: User, user_id: int, *, password_shown: str | 
                 f"{plans.msk_date(row['state'].end - timedelta(seconds=1)):%d.%m.%Y}") if row["state"] else "",
         consent_at=_msk(u.consent_at), created_at=_msk(u.created_at), blocked_at=_msk(u.blocked_at),
         is_self=u.id == admin.id, password_shown=password_shown, notice=notice, error=error,
-        org_verified=org_verified)
+        org_verified=org_verified, tester_verified=tester_verified)
+
+
+def _tester_verified(db, u: User, verifiers: dict | None = None) -> str:
+    """«14.10.2026 21:05 · admin» — кто из разработчиков подтвердил тестировщика; пусто — не тестировщик."""
+    if u.plan != plans.TESTER_PLAN or u.tester_verified_at is None:
+        return ""
+    by = (verifiers or {}).get(u.tester_verified_by) if verifiers is not None else (
+        q.get_user(db, u.tester_verified_by) if u.tester_verified_by else None)
+    return _msk(u.tester_verified_at) + (f" · {by.username}" if by else "")
 
 
 @router.get("/admin/users/{user_id}", response_class=HTMLResponse)
@@ -387,7 +398,7 @@ def admin_set_plan(user_id: int, plan: str = Form(default=""), started: str = Fo
             raise HTTPException(status_code=422, detail="Срок действия должен быть позже даты подключения")
         expires_at = plans.anchor_from_date(until) if until else None
     with get_session() as db:
-        if q.set_user_plan(db, user_id, plan or None, started_at, expires_at,
+        if q.set_user_plan(db, user_id, plan or None, started_at, expires_at, verified_by=admin.id,
                            kind="corporate" if kind == "corporate" else None) is None:
             raise HTTPException(status_code=404, detail="Пользователь не найден")
     logger.info(f"тариф: admin_id={admin.id} назначил user_id={user_id} "
@@ -614,7 +625,7 @@ def admin_lead_account(request: Request, lead_id: int, username: str = Form(defa
                                            or lead.tariff == pricing.ORG_TARIFF))
                 q.set_user_plan(db, uid, plan, plans.anchor_from_date(day),
                                 plans.anchor_from_date(until) if until else None,
-                                kind="corporate" if corporate else None)
+                                kind="corporate" if corporate else None, verified_by=admin.id)
             q.set_lead_status(db, lead_id, "connected", user_id=uid)
     if error:
         return _leads_response(request, admin, error=error, error_lead=lead_id, form=form,
@@ -630,6 +641,99 @@ def admin_delete_lead(lead_id: int, admin: User = Depends(require_admin)) -> Red
     with get_session() as db:
         q.delete_lead(db, lead_id)
     return RedirectResponse("/admin/leads", status_code=303)
+
+
+# --------------------------------------------------------------------------- #
+# Тестировщики (14.10.2026): тариф без лимита — только после подтверждения разработчиками
+# --------------------------------------------------------------------------- #
+TESTER_DONE = {
+    "approved": "Тестировщик подтверждён: тариф подключён с сегодняшнего дня.",
+    "rejected": "Заявка отклонена.",
+    "revoked": "Тариф «Тестировщик» снят.",
+}
+
+
+def _is_tester_lead(lead) -> bool:
+    return lead.kind == "tester" or lead.tariff == plans.TESTER_PLAN
+
+
+@router.get("/admin/testers", response_class=HTMLResponse)
+def admin_testers(request: Request, ok: str = ""):
+    """Очередь заявок на «Тестировщика» и действующие тестировщики. ⚠ ПДн заявок (имя, почта, телефон)
+    здесь не читаются — их место раздел «Заявки» (`_leads_response`); тут номер, дата, организация и
+    учётка, а за подробностями — ссылка на заявку."""
+    gate = _gate(request)
+    if isinstance(gate, RedirectResponse):
+        return gate
+    with get_session() as db:
+        q.purge_old_leads(db)   # срок хранения заявок — и на этом пути их чтения
+        pending = q.list_tester_leads(db, limit=LEADS_ON_PAGE)
+        testers = q.list_testers(db)
+        people = q.users_by_ids(db, [lead.user_id for lead in pending] + [u.tester_verified_by for u in testers])
+        requests = []
+        for lead in pending:
+            u = people.get(lead.user_id)
+            requests.append({"id": lead.id, "created": _msk(lead.created_at), "org": lead.org,
+                             "status": LEAD_STATUSES.get(lead.status, lead.status),
+                             "user_id": u.id if u else None, "login": u.username if u else "",
+                             "name": (u.full_name or "") if u else "",
+                             "is_tester": bool(u and u.plan == plans.TESTER_PLAN)})
+        rows = [{"id": u.id, "login": u.username, "name": u.full_name or "", "org": u.org or "",
+                 "region": u.region or "", "verified": _tester_verified(db, u, people),
+                 "expires": f"{plans.msk_date(u.plan_expires_at):%d.%m.%Y}" if u.plan_expires_at else "",
+                 "expired": plans.plan_expired(u)} for u in testers]
+    return _page(request, gate, "testers", "testers", "Тестировщики", requests=requests, rows=rows,
+                 done=TESTER_DONE.get(ok, ""), today=plans.msk_today().isoformat(), tester=plans.TESTER_PLAN)
+
+
+@router.post("/api/admin/testers/{lead_id}/approve")
+def admin_tester_approve(lead_id: int, expires: str = Form(default=""),
+                         admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Подтвердить заявку из кабинета: учётке — «Тестировщик» с сегодняшнего дня, срок — по желанию
+    (пусто — бессрочно); подтверждение (кто и когда) пишется в учётку, заявка — «Подключена». Заявке
+    с лендинга учётку сначала создают в «Заявках» — тариф «Тестировщик» там же и подтверждается."""
+    today = plans.msk_today()
+    until = _parse_date(expires.strip()) if expires.strip() else None
+    if expires.strip() and until is None:
+        raise HTTPException(status_code=422, detail="Срок действия — в формате ГГГГ-ММ-ДД")
+    if until is not None and until <= today:
+        raise HTTPException(status_code=422, detail="Срок действия должен быть позже сегодняшнего дня")
+    with get_session() as db:
+        lead = q.get_lead(db, lead_id)
+        if lead is None or not _is_tester_lead(lead):
+            raise HTTPException(status_code=404, detail="Заявка на тестирование не найдена")
+        if not lead.user_id or q.get_user(db, lead.user_id) is None:
+            raise HTTPException(status_code=422, detail="У заявки нет учётки — создайте её в разделе «Заявки»")
+        uid = lead.user_id
+        q.set_user_plan(db, uid, plans.TESTER_PLAN, plans.anchor_from_date(today),
+                        plans.anchor_from_date(until) if until else None, verified_by=admin.id)
+        q.set_lead_status(db, lead_id, "connected")
+    logger.info(f"тестировщик: admin_id={admin.id} подтвердил lead_id={lead_id} → user_id={uid}"
+                + (f" до {until:%d.%m.%Y}" if until else ""))
+    return RedirectResponse("/admin/testers?ok=approved", status_code=303)
+
+
+@router.post("/api/admin/testers/{lead_id}/reject")
+def admin_tester_reject(lead_id: int, admin: User = Depends(require_admin)) -> RedirectResponse:
+    with get_session() as db:
+        lead = q.get_lead(db, lead_id)
+        if lead is None or not _is_tester_lead(lead):
+            raise HTTPException(status_code=404, detail="Заявка на тестирование не найдена")
+        q.set_lead_status(db, lead_id, "rejected")
+    logger.info(f"тестировщик: admin_id={admin.id} отклонил lead_id={lead_id}")
+    return RedirectResponse("/admin/testers?ok=rejected", status_code=303)
+
+
+@router.post("/api/admin/testers/users/{user_id}/revoke")
+def admin_tester_revoke(user_id: int, admin: User = Depends(require_admin)) -> RedirectResponse:
+    """Снять «Тестировщика» — учётка остаётся без тарифа (как «без тарифа» в карточке)."""
+    with get_session() as db:
+        u = q.get_user(db, user_id)
+        if u is None or u.plan != plans.TESTER_PLAN:
+            raise HTTPException(status_code=404, detail="Тестировщик не найден")
+        q.set_user_plan(db, user_id, None)
+    logger.info(f"тестировщик: admin_id={admin.id} снял тариф у user_id={user_id}")
+    return RedirectResponse("/admin/testers?ok=revoked", status_code=303)
 
 
 # --------------------------------------------------------------------------- #

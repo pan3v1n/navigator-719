@@ -99,7 +99,7 @@
       <dl class="renew-facts">
         <div><dt>Сейчас</dt><dd>до {{ renew.now_until }}</dd></div>
         <div><dt>После продления</dt><dd>до {{ renew.new_until }}</dd></div>
-        <div><dt>Стоимость</dt><dd>{{ pricing.PRICE }} ₽/мес</dd></div>
+        <div><dt>Стоимость</dt><dd>{{ renew.price }} без НДС</dd></div>
       </dl>
       <p>Оплата картой появится позже — пока отправьте заявку: специалист свяжется с вами и продлит тариф.</p>
       {{ req_who() }}
@@ -129,14 +129,18 @@
        «Подключить» открывает подтверждение — условия, данные из профиля и галочка согласия на обработку
        ПДн (152-ФЗ, как в форме лендинга); только оно отправляет заявку (`/api/plan-request`), её видит
        admin в «Заявках». Ошибки и подтверждение — внутри витрины: к ней ведёт `#tariffs`. #}
-    {% set titles = {'individual': 'Тарифы для индивидуального использования', 'corporate': 'Тарифы для организаций'} %}
     <section class="tariffs" id="tariffs" aria-labelledby="tariffs-h">
       {% if error and not renew %}<div class="error" role="alert">{{ error }}</div>{% endif %}
       {% if confirm and not confirm.popup %}
       <form class="tconfirm" method="post" action="/api/plan-request">
         <h2>Заявка на тариф «{{ confirm.tariff }}»</h2>
+        {% if confirm.tester %}
+        <p class="tconfirm-opts">Тариф бесплатный, без ограничения числа запросов. Подключают его разработчики
+          сервиса после проверки заявки — с вами свяжутся по контактам из профиля.</p>
+        {% else %}
         <p class="tconfirm-opts">{% if confirm.summary %}{{ confirm.summary[0] | upper }}{{ confirm.summary[1:] }}{% else %}Без дополнительных условий{% endif %}.
-          Окончательную стоимость сообщит специалист после заявки.</p>
+          Стоимость — {{ confirm.price }} без НДС; окончательную сообщит специалист после заявки.</p>
+        {% endif %}
         {{ req_who() }}
         {% for k, v in confirm.fields.items() %}<input type="hidden" name="{{ k }}" value="{{ v }}">{% endfor %}
         {{ req_consent() }}
@@ -162,19 +166,39 @@
       </div>
       {% endif %}
       <div class="tariffs-head">
-        <h2 id="tariffs-h">{{ titles[tariff_kind] }}</h2>
+        <h2 id="tariffs-h">{{ pricing.TABS.get(tariff_kind, pricing.TABS.individual)[1] }}</h2>
         <div class="seg" role="tablist" aria-label="Вид тарифа">
-          {% for k, label in (('individual', 'Индивидуальные'), ('corporate', 'Корпоративные')) %}
+          {% for k, (label, title) in pricing.TABS.items() %}
           <button type="button" role="tab" class="seg-item{% if k == tariff_kind %} on{% endif %}"
                   aria-selected="{{ 'true' if k == tariff_kind else 'false' }}" data-kind="{{ k }}"
-                  {% if k != tariff_kind %}tabindex="-1" {% endif %}data-title="{{ titles[k] }}">{{ label }}</button>
+                  {% if k != tariff_kind %}tabindex="-1" {% endif %}data-title="{{ title }}">{{ label }}</button>
           {% endfor %}
+        </div>
+      </div>
+      {# «Тестирование» (14.10.2026): бесплатный тариф без лимита, подключают разработчики после проверки
+         заявки (раздел «Тестировщики» админки). Уже подключённому — без кнопки. #}
+      <div class="tcards" data-panel="tester" role="tabpanel"{% if tariff_kind != 'tester' %} hidden{% endif %}>
+        <form class="tcard" method="get" action="/profile#tariffs">
+          <input type="hidden" name="tab" value="plan"><input type="hidden" name="confirm" value="1">
+          <input type="hidden" name="tariff" value="{{ pricing.TESTER_TARIFF }}"><input type="hidden" name="kind" value="tester">
+          <div class="tcard-name">{{ pricing.TESTER_TARIFF }}</div>
+          <div class="tcard-desc">{{ pricing.TESTER_DESC }}</div>
+          <div class="tcard-price"><div class="price">{{ pricing.TESTER_PRICE }}</div><div class="price-sub">{{ pricing.TESTER_NOTE }}</div></div>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
+            <span><b>{{ pricing.SOURCES }}</b><small>{{ pricing.SOURCES_NOTE }}</small></span></div>
+          {% if user.plan == pricing.TESTER_TARIFF %}<button class="ds-btn block tcard-btn" type="button" disabled>Подключён</button>
+          {% else %}<button class="ds-btn block tcard-btn" type="submit">Подать заявку</button>{% endif %}
+        </form>
+        <div class="tcard org">
+          <div class="tcard-name">{{ pricing.HOWTO_NAME }}</div>
+          <div class="tcard-desc">{{ pricing.HOWTO_DESC }}</div>
+          <ol class="tcard-list">{% for s in pricing.HOWTO_STEPS %}<li>{{ s }}</li>{% endfor %}</ol>
         </div>
       </div>
       {% for kind in ('individual', 'corporate') %}
       <div class="tcards" data-panel="{{ kind }}" role="tabpanel"{% if kind != tariff_kind %} hidden{% endif %}>
         {% for p in pricing.PLANS %}{% set promo = p.trial and kind == 'individual' %}
-        <form class="tcard{% if promo %} promo{% endif %}" method="get" action="/profile#tariffs">
+        <form class="tcard{% if promo %} promo{% endif %}" method="get" action="/profile#tariffs"{% if kind == 'corporate' %} data-price="{{ pricing.PRICES[p.name] }}"{% endif %}>
           {% if promo %}<span class="tcard-badge">Предложение ограничено</span>{% endif %}
           <input type="hidden" name="tab" value="plan"><input type="hidden" name="confirm" value="1">
           <input type="hidden" name="tariff" value="{{ p.name }}"><input type="hidden" name="kind" value="{{ kind }}">
@@ -196,14 +220,15 @@
           </div>
           {% endif %}
           <div class="tcard-price">
-            {% if promo %}<s class="price-old">{{ pricing.PRICE }} ₽/мес</s><div class="price">{{ pricing.TRIAL_TEXT }}</div>
-            {% else %}<div class="price">{{ pricing.PRICE }} ₽/<span class="per">мес</span></div>{% endif %}
+            {% if promo %}<s class="price-old">{{ p.price }} ₽/мес</s><div class="price">{{ pricing.TRIAL_TEXT }}</div>
+            {% else %}<div class="price"><span class="sum">{{ p.price }}</span> ₽/<span class="per">мес</span></div>
+            {% if p.year and kind == 'individual' %}<div class="price-sub">{{ p.year }}</div>{% endif %}{% endif %}
           </div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
             <span><b>{{ pricing.SOURCES }}</b><small>{{ pricing.SOURCES_NOTE }}</small></span></div>
           <button class="ds-btn block tcard-btn" type="submit">
-            {% if promo %}Подключить за {{ pricing.TRIAL_PRICE }}<small>далее {{ pricing.PRICE }} ₽/мес</small>
-            {% else %}Подключить<small>за {{ pricing.PRICE }} ₽/<span class="per">мес</span></small>{% endif %}</button>
+            {% if promo %}Подключить за {{ pricing.TRIAL_PRICE }}<small>далее {{ p.price }} ₽/мес</small>
+            {% else %}Подключить<small>за <span class="sum">{{ p.price }}</span> ₽/<span class="per">мес</span></small>{% endif %}</button>
         </form>
         {% endfor %}
         <form class="tcard org" method="get" action="/profile#tariffs">
@@ -212,6 +237,7 @@
           <div class="tcard-name">{{ 'Для организаций' if kind == 'individual' else 'Особые условия' }}</div>
           <div class="tcard-desc">{{ pricing.ORG_DESC if kind == 'individual' else pricing.SPECIAL_DESC }}</div>
           <ul class="tcard-list">{% for b in pricing.ORG_BULLETS %}<li>{{ b }}</li>{% endfor %}</ul>
+          <div class="tcard-price org-price"><div class="price">{{ pricing.ORG_PRICE }}</div></div>
           <div class="tcard-actions">
             {% if kind == 'individual' %}<button type="button" class="ds-btn block" data-goto="corporate">Посмотреть тарифы</button>{% endif %}
             <button type="submit" class="ds-btn block secondary">Свяжитесь со мной</button>
@@ -433,8 +459,8 @@
     var close = document.querySelector(".pop-close");
     if (e.key === "Escape" && close) location.href = close.href;
   });
-  // Витрина тарифов: вкладки «Индивидуальные» / «Корпоративные», период и число пользователей.
-  // Суммы — плейсхолдеры, считать нечего: период меняет только подпись «/мес» ↔ «/год».
+  // Витрина тарифов: вкладки «Индивидуальные» / «Корпоративные» / «Тестирование», период и число
+  // пользователей. Корпоративная сумма = цена × пользователи (× 12 за год) — как `pricing.price_line`.
   (function () {
     var box = document.getElementById("tariffs");
     if (!box) return;
@@ -451,18 +477,22 @@
     box.querySelectorAll("[data-goto]").forEach(function (b) {
       b.addEventListener("click", function () { show(b.getAttribute("data-goto")); title.scrollIntoView({ block: "start" }); });
     });
-    box.querySelectorAll(".tcard").forEach(function (card) {
-      card.querySelectorAll('input[name="period"]').forEach(function (r) {
-        r.addEventListener("change", function () {
-          card.querySelectorAll(".per").forEach(function (s) { s.textContent = r.value === "year" ? "год" : "мес"; });
-        });
-      });
-      var seats = card.querySelector('input[name="seats"]');
-      if (!seats) return;
+    function rub(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, " "); }
+    box.querySelectorAll(".tcard[data-price]").forEach(function (card) {
+      var seats = card.querySelector('input[name="seats"]'), base = parseInt(card.getAttribute("data-price"), 10);
+      function reprice() {
+        var per = card.querySelector('input[name="period"]:checked'), year = per && per.value === "year",
+            n = Math.max(1, Math.min(parseInt(seats.value, 10) || 1, parseInt(seats.max, 10)));
+        card.querySelectorAll(".sum").forEach(function (s) { s.textContent = rub(base * n * (year ? 12 : 1)); });
+        card.querySelectorAll(".per").forEach(function (s) { s.textContent = year ? "год" : "мес"; });
+      }
+      card.querySelectorAll('input[name="period"]').forEach(function (r) { r.addEventListener("change", reprice); });
+      seats.addEventListener("input", reprice);
       card.querySelectorAll(".seat-btn").forEach(function (b) {
         b.addEventListener("click", function () {
           var n = (parseInt(seats.value, 10) || 1) + parseInt(b.getAttribute("data-d"), 10);
           seats.value = Math.max(1, Math.min(n, parseInt(seats.max, 10)));
+          reprice();
         });
       });
     });

@@ -28,7 +28,7 @@ from app.db.engine import get_session
 
 router = APIRouter()
 
-TARIFFS = ("Старт", "Стандарт", "Профи", "Для организаций")
+TARIFFS = ("Старт", "Стандарт", "Профи", "Для организаций", pricing.TESTER_TARIFF)
 # Честная заявка — одна-две с адреса; лимит держит перебор и автозаполнение ботами.
 # ⚠ Списывается ТОЛЬКО за принятую заявку (ревью PR #158): отклонённые проверками попытки и
 # проверка выкатки (пустая форма → 422) квоту не тратят — иначе посетитель, поправивший ошибку
@@ -141,7 +141,7 @@ def submit_lead(lead: LeadIn, request: Request) -> JSONResponse:
         row = q.create_lead(db, tariff=lead.tariff, name=lead.name.strip(), org=lead.org.strip(),
                             inn=lead.inn.strip(), email=lead.email.strip(), phone=lead.phone.strip(),
                             promo=lead.promo.strip(), options=options, message=_message(lead.message),
-                            kind="corporate" if lead.kind == "corporate" or lead.tariff == pricing.ORG_TARIFF else None)
+                            kind=pricing.lead_kind(lead.tariff, lead.kind if isinstance(lead.kind, str) else ""))
         purged = q.purge_old_leads(db)
     logger.info("lead: сохранена заявка #{} (тариф «{}»){}", row.id, row.tariff,
                 f"; удалено просроченных: {purged}" if purged else "")

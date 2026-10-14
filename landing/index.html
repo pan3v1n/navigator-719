@@ -65,13 +65,14 @@
     </section>
 
     <section class="sec" id="pricing" aria-labelledby="pricing-h">
-      <!-- Витрина тарифов по образцу Нейроюриста (решение владельца 09.10.2026): суммы — плейсхолдеры
-           «X XXX», цены не утверждены. Описание — app/core/pricing.py, равенство держит tests/test_pricing.py. -->
+      <!-- Витрина тарифов по образцу Нейроюриста (решение владельца 09.10.2026); цены — из презентации
+           владельца (14.10.2026), без НДС. Описание — app/core/pricing.py, равенство держит tests/test_pricing.py. -->
       <div class="sec-head pricing-head">
         <h2 id="pricing-h">Тарифы для индивидуального использования</h2>
         <div class="seg" role="tablist" aria-label="Вид тарифа" id="price-tabs">
           <button type="button" role="tab" id="ptab-individual" aria-selected="true" aria-controls="plans-individual" data-kind="individual" data-title="Тарифы для индивидуального использования">Индивидуальные</button>
           <button type="button" role="tab" id="ptab-corporate" aria-selected="false" aria-controls="plans-corporate" data-kind="corporate" data-title="Тарифы для организаций" tabindex="-1">Корпоративные</button>
+          <button type="button" role="tab" id="ptab-tester" aria-selected="false" aria-controls="plans-tester" data-kind="tester" data-title="Тариф для тестирования сервиса" tabindex="-1">Тестирование</button>
         </div>
       </div>
       <div class="plans" id="plans-individual" role="tabpanel" aria-labelledby="ptab-individual" data-panel="individual">
@@ -79,23 +80,23 @@
           <span class="promo-badge">Предложение ограничено</span>
           <div class="plan-head"><div class="plan-name">Старт</div></div>
           <div class="plan-desc">До 100 запросов в месяц для редких обращений или знакомства с сервисом</div>
-          <div class="plan-price"><div class="price-old">X XXX ₽/мес</div><div class="price">1 ₽ первая неделя</div></div>
+          <div class="plan-price"><div class="price-old">9 900 ₽/мес</div><div class="price">1 ₽ первая неделя</div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
-          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Старт" data-trial="1">Подключить за 1 ₽<small>далее X XXX ₽/мес</small></button>
+          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Старт" data-trial="1">Подключить за 1 ₽<small>далее 9 900 ₽/мес</small></button>
         </div>
         <div class="plan" data-plan="Стандарт">
           <div class="plan-head"><div class="plan-name">Стандарт</div></div>
           <div class="plan-desc">До 200 запросов в месяц для регулярной работы с постановлением</div>
-          <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
+          <div class="plan-price"><div class="price">14 900 ₽/<span class="per">мес</span></div><div class="price-sub">178 800 ₽ при оплате за год</div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
-          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Стандарт">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
+          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Стандарт">Подключить<small>за 14 900 ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan" data-plan="Профи">
           <div class="plan-head"><div class="plan-name">Профи</div></div>
           <div class="plan-desc">До 400 запросов в месяц для ежедневной работы эксперта</div>
-          <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
+          <div class="plan-price"><div class="price">19 900 ₽/<span class="per">мес</span></div><div class="price-sub">238 800 ₽ при оплате за год</div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
-          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Профи">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
+          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Профи">Подключить<small>за 19 900 ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan org">
           <div class="plan-head"><div class="plan-name">Для организаций</div></div>
@@ -105,6 +106,7 @@
             <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Индивидуальные условия подключения</div>
             <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Лицензии на группу сотрудников</div>
           </div>
+          <div class="org-price">от 240 000 ₽/год</div>
           <div class="org-actions">
             <button class="btn btn-sm btn-dark btn-block" type="button" data-goto="corporate">Посмотреть тарифы</button>
             <button class="btn btn-sm btn-block" type="button" data-pick="Для организаций">Свяжитесь со мной</button>
@@ -112,29 +114,29 @@
         </div>
       </div>
       <div class="plans" id="plans-corporate" role="tabpanel" aria-labelledby="ptab-corporate" data-panel="corporate" hidden>
-        <div class="plan" data-plan="Старт" data-corp>
+        <div class="plan" data-plan="Старт" data-corp data-price="9900">
           <div class="plan-head"><div class="plan-name">Старт</div></div>
           <div class="plan-desc">До 100 запросов в месяц для редких обращений или знакомства с сервисом</div>
           <div class="plan-ctl"><div class="mini-seg" role="radiogroup" aria-label="Период оплаты"><label><input type="radio" name="period-start" value="month" checked><span>месяц</span></label><label><input type="radio" name="period-start" value="year"><span>год</span></label></div><div class="seats"><button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button><input type="number" value="1" min="1" max="500" inputmode="numeric" aria-label="Число пользователей" data-seats><button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button><span class="seats-l">польз.</span></div></div>
-          <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
+          <div class="plan-price"><div class="price"><span class="sum">9 900</span> ₽/<span class="per">мес</span></div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
-          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Старт">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
+          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Старт">Подключить<small>за <span class="sum">9 900</span> ₽/<span class="per">мес</span></small></button>
         </div>
-        <div class="plan" data-plan="Стандарт" data-corp>
+        <div class="plan" data-plan="Стандарт" data-corp data-price="14900">
           <div class="plan-head"><div class="plan-name">Стандарт</div></div>
           <div class="plan-desc">До 200 запросов в месяц для регулярной работы с постановлением</div>
           <div class="plan-ctl"><div class="mini-seg" role="radiogroup" aria-label="Период оплаты"><label><input type="radio" name="period-standard" value="month" checked><span>месяц</span></label><label><input type="radio" name="period-standard" value="year"><span>год</span></label></div><div class="seats"><button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button><input type="number" value="1" min="1" max="500" inputmode="numeric" aria-label="Число пользователей" data-seats><button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button><span class="seats-l">польз.</span></div></div>
-          <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
+          <div class="plan-price"><div class="price"><span class="sum">14 900</span> ₽/<span class="per">мес</span></div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
-          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Стандарт">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
+          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Стандарт">Подключить<small>за <span class="sum">14 900</span> ₽/<span class="per">мес</span></small></button>
         </div>
-        <div class="plan" data-plan="Профи" data-corp>
+        <div class="plan" data-plan="Профи" data-corp data-price="19900">
           <div class="plan-head"><div class="plan-name">Профи</div></div>
           <div class="plan-desc">До 400 запросов в месяц для ежедневной работы эксперта</div>
           <div class="plan-ctl"><div class="mini-seg" role="radiogroup" aria-label="Период оплаты"><label><input type="radio" name="period-pro" value="month" checked><span>месяц</span></label><label><input type="radio" name="period-pro" value="year"><span>год</span></label></div><div class="seats"><button type="button" class="seat-btn" data-d="-1" aria-label="Меньше пользователей">−</button><input type="number" value="1" min="1" max="500" inputmode="numeric" aria-label="Число пользователей" data-seats><button type="button" class="seat-btn" data-d="1" aria-label="Больше пользователей">+</button><span class="seats-l">польз.</span></div></div>
-          <div class="plan-price"><div class="price">X XXX ₽/<span class="per">мес</span></div></div>
+          <div class="plan-price"><div class="price"><span class="sum">19 900</span> ₽/<span class="per">мес</span></div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
-          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Профи">Подключить<small>за X XXX ₽/<span class="per">мес</span></small></button>
+          <button class="btn btn-sm btn-primary btn-block btn-2l" type="button" data-pick="Профи">Подключить<small>за <span class="sum">19 900</span> ₽/<span class="per">мес</span></small></button>
         </div>
         <div class="plan org">
           <div class="plan-head"><div class="plan-name">Особые условия</div></div>
@@ -144,21 +146,46 @@
             <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Индивидуальные условия подключения</div>
             <div><svg viewBox="0 0 16 16" fill="none" aria-hidden="true"><path d="M3 8.5 6.5 12 13 4.5" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>Лицензии на группу сотрудников</div>
           </div>
+          <div class="org-price">от 240 000 ₽/год</div>
           <div class="org-actions">
             <button class="btn btn-sm btn-block" type="button" data-pick="Для организаций">Свяжитесь со мной</button>
           </div>
         </div>
       </div>
+      <!-- «Тестирование» (14.10.2026): бесплатно, без лимита; подключают разработчики после проверки заявки -->
+      <div class="plans plans-2" id="plans-tester" role="tabpanel" aria-labelledby="ptab-tester" data-panel="tester" hidden>
+        <div class="plan" data-plan="Тестировщик">
+          <div class="plan-head"><div class="plan-name">Тестировщик</div></div>
+          <div class="plan-desc">Без ограничения числа запросов — для проверки сервиса и обратной связи разработчикам</div>
+          <div class="plan-price"><div class="price">Бесплатно</div><div class="price-sub">после подтверждения разработчиками</div></div>
+          <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span><span><b>Доступ к источникам в ответах Навигатора</b><small>Бесплатно</small></span></div>
+          <button class="btn btn-sm btn-primary btn-block" type="button" data-pick="Тестировщик" data-tester="1">Подать заявку</button>
+        </div>
+        <div class="plan org">
+          <div class="plan-head"><div class="plan-name">Как подключиться</div></div>
+          <div class="plan-desc">Тестовый доступ выдают разработчики сервиса — по заявке и после её проверки</div>
+          <ol class="org-list org-steps">
+            <li>Заявка с контактами и организацией</li>
+            <li>Проверка заявки разработчиками сервиса</li>
+            <li>Доступ без лимита запросов на время тестирования</li>
+          </ol>
+        </div>
+      </div>
       <div class="fine" data-panel="individual">
-        <p>Лицензия на месяц предоставляется для 1 пользователя.</p>
+        <p>Цены без НДС. Лицензия на месяц предоставляется для 1 пользователя.</p>
         <p>Акция до ДД.ММ.ГГГГ: первая неделя тарифа «Старт» — за 1 ₽, далее — по цене тарифа.</p>
         <p>Доступ к источникам в ответах Навигатора — бесплатно во всех тарифах. Окончательную стоимость тарифа сообщит специалист после заявки.</p>
         <p>Стоимость не включает проведение экспертизы ТПП и оформление акта экспертизы.</p>
       </div>
       <div class="fine" data-panel="corporate" hidden>
-        <p>Лицензия предоставляется на выбранное число пользователей и период.</p>
+        <p>Цены без НДС. Лицензия предоставляется на выбранное число пользователей и период.</p>
         <p>Доступ к источникам в ответах Навигатора — бесплатно во всех тарифах. Окончательную стоимость тарифа сообщит специалист после заявки.</p>
         <p>Стоимость не включает проведение экспертизы ТПП и оформление акта экспертизы.</p>
+      </div>
+      <div class="fine" data-panel="tester" hidden>
+        <p>Тариф «Тестировщик» подключается только после проверки заявки разработчиками сервиса — по ней с вами свяжутся.</p>
+        <p>Срок тестового доступа назначают разработчики; число запросов на это время не ограничено.</p>
+        <p>Доступ к источникам в ответах Навигатора — бесплатно во всех тарифах.</p>
       </div>
     </section>
 
@@ -216,6 +243,7 @@
               <button type="button" aria-pressed="true">Стандарт</button>
               <button type="button" aria-pressed="false">Профи</button>
               <button type="button" aria-pressed="false">Для организаций</button>
+              <button type="button" aria-pressed="false">Тестировщик</button>
             </div>
             <div class="tariff-opts" id="tariff-opts" hidden></div>
           </div>

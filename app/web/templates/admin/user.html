@@ -45,6 +45,7 @@
     <p>{% if u.plan %}<b>{{ u.plan }}</b> ·
       {% if row.expired %}<span class="badge bad">срок истёк {{ row.expires }}</span>{% elif row.expires %}до {{ row.expires }}{% else %}бессрочно{% endif %}
       {% if row.state %}<br>Использовано <b>{{ row.state.used }} из {{ row.state.limit }}</b> за {{ period }}{% if row.state.exhausted %} <span class="badge bad">исчерпан</span>{% endif %}{% endif %}
+      {% if tester_verified %}<br>Тестировщик подтверждён: {{ tester_verified }} · <a href="/admin/testers">все тестировщики</a>{% endif %}
       {% else %}<span class="muted">Без тарифа — без ограничения числа запросов.</span>{% endif %}</p>
     <form method="post" action="/api/admin/users/{{ u.id }}/plan" class="adm-form">
       <label>Тариф

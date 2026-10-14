@@ -1,9 +1,10 @@
-"""Витрина тарифов (решение владельца 09.10.2026): «как у Нейроюриста, но с плейсхолдерами вместо сумм».
+"""Витрина тарифов (решение владельца 09.10.2026): «как у Нейроюриста»; цены — из презентации (14.10.2026).
 
 Закрепляем: лендинг (статичный) и кабинет (шаблон) показывают ОДНО описание из `app/core/pricing.py` —
-названия, объёмы (= лимиты #160), опцию, пробу за 1 ₽ и сноски по вкладкам; суммы — только
-плейсхолдер «X XXX», ни одной выдуманной цены; выбранные на карточке опции доезжают до заявки — и
-с лендинга (`/api/leads`), и из кабинета (`/api/plan-request`, заявка привязана к учётке).
+названия, объёмы (= лимиты #160), цены, опцию, пробу за 1 ₽ и сноски по вкладкам; цены равны
+презентации владельца (числа записаны в тесте отдельно от `pricing.py`, чтобы опечатку там ловить, а не
+повторять); выбранные на карточке опции доезжают до заявки — и с лендинга (`/api/leads`), и из кабинета
+(`/api/plan-request`, заявка привязана к учётке). Вкладка «Тестирование» — `TestTesterTab`.
 """
 
 from __future__ import annotations
@@ -33,6 +34,11 @@ from app.db import queries as q  # noqa: E402
 from app.db.models import Base  # noqa: E402
 
 LANDING = (ROOT / "landing" / "index.html").read_text(encoding="utf-8")
+# Цены презентации владельца 14.10.2026 — записаны здесь, а не взяты из `pricing`: опечатку в
+# `PRICES` тест обязан поймать, а не повторить.
+PRESENTATION = {"Старт": "9 900", "Стандарт": "14 900", "Профи": "19 900"}
+PRESENTATION_YEAR = {"Стандарт": "178 800", "Профи": "238 800"}
+ORG_FROM = "240 000"
 GOOD = {"tariff": "Стандарт", "name": "Иван Иванов", "org": "ООО «Предприятие»", "inn": "4632000000",
         "email": "ivan@example.ru", "phone": "+7 (912) 345-67-89", "promo": "", "consent": True}
 
@@ -99,8 +105,10 @@ class TestLandingShowcase(unittest.TestCase):
         want = [(p["name"], p["desc"]) for p in pricing.PLANS]
         self.assertEqual(_cards(_panel(LANDING, "individual")), want + [("Для организаций", pricing.ORG_DESC)])
         self.assertEqual(_cards(_panel(LANDING, "corporate")), want + [("Особые условия", pricing.SPECIAL_DESC)])
+        self.assertEqual(_cards(_panel(LANDING, "tester")), [(pricing.TESTER_TARIFF, pricing.TESTER_DESC),
+                                                              (pricing.HOWTO_NAME, pricing.HOWTO_DESC)])
         self.assertIn('data-goto="corporate">Посмотреть тарифы', LANDING)
-        self.assertEqual(LANDING.count(f"<b>{pricing.SOURCES}</b>"), 6, "источники — на каждой тарифной карточке")
+        self.assertEqual(LANDING.count(f"<b>{pricing.SOURCES}</b>"), 7, "источники — на каждой тарифной карточке")
         self.assertEqual(LANDING.count("data-seats"), 3, "число пользователей — у корпоративных")
 
     def test_trial_only_on_individual_start(self):
@@ -115,32 +123,55 @@ class TestLandingShowcase(unittest.TestCase):
         """Решение владельца 09.10.2026: доступ к источникам — бесплатно во всех тарифах (у Нейроюриста это
         платная опция «за Гарант Лайт»): строка включённого, без галочки и цены; «Гарант» не упоминается."""
         notes = [_inline(n) for n in re.findall(r"<b>" + re.escape(pricing.SOURCES) + r"</b><small>(.*?)</small>", LANDING, re.S)]
-        self.assertEqual(notes, [pricing.SOURCES_NOTE] * 6)
+        self.assertEqual(notes, [pricing.SOURCES_NOTE] * 7)
         self.assertNotIn("data-addon", LANDING)
         self.assertNotIn("Гарант", LANDING)
 
     def test_footnotes_per_tab(self):
-        for kind in ("individual", "corporate"):
+        self.assertEqual(list(pricing.FOOTNOTES), list(pricing.TABS))
+        for kind in pricing.TABS:
             with self.subTest(kind=kind):
                 block = LANDING[LANDING.index(f'<div class="fine" data-panel="{kind}"'):]
                 block = block[:block.index("</div>")]
                 self.assertEqual([_text(p) for p in re.findall(r"<p>(.*?)</p>", block, re.S)],
                                  pricing.FOOTNOTES[kind])
 
-    def test_only_placeholder_prices(self):
-        """Цены не утверждены: везде «X XXX ₽». Цифры при рубле допустимы только у пробы за 1 ₽."""
+    def test_prices_are_the_presentation(self):
+        """Цены — из презентации владельца 14.10.2026, без НДС. Каждая сумма на витрине — оттуда; у
+        «Старта» на индивидуальной вкладке — проба (неделя за 1 ₽ осталась решением владельца 14.10)."""
         section = LANDING[LANDING.index('id="pricing"'):LANDING.index('id="audience"')]
         visible = _text(re.sub(r"<!--.*?-->", "", section, flags=re.S))
-        self.assertIn("X XXX ₽/мес", visible)
-        self.assertEqual(re.findall(r"\d[\d\s]*₽", visible), ["1 ₽"] * visible.count("1 ₽"),
-                         "на витрине появилась настоящая сумма — цены не утверждены")
+        allowed = set(PRESENTATION.values()) | set(PRESENTATION_YEAR.values()) | {ORG_FROM, "1"}
+        found = re.findall(r"(\d[\d ]*) ₽", visible)
+        self.assertTrue(found)
+        self.assertEqual({f for f in found if f not in allowed}, set(), "сумма не из презентации")
+        self.assertNotIn("X XXX", visible)
+        ind, corp = _panel(LANDING, "individual"), _panel(LANDING, "corporate")
+        self.assertIn(f'<div class="price-old">{PRESENTATION["Старт"]} ₽/мес</div>', ind)
+        self.assertIn(f'Подключить за 1 ₽<small>далее {PRESENTATION["Старт"]} ₽/мес</small>', ind)
+        for name in ("Стандарт", "Профи"):
+            with self.subTest(name=name):
+                self.assertIn(f'<div class="price">{PRESENTATION[name]} ₽/<span class="per">мес</span></div>'
+                              f'<div class="price-sub">{PRESENTATION_YEAR[name]} ₽ при оплате за год</div>', ind)
+                self.assertIn(f'data-pick="{name}">Подключить<small>за {PRESENTATION[name]} ₽/', ind)
+        for name, price in PRESENTATION.items():
+            with self.subTest(corporate=name):
+                card = corp[corp.index(f'data-plan="{name}" data-corp'):]
+                card = card[:card.index("</small></button>")]   # до «Подключить», а не до «−» числа мест
+                self.assertIn(f'data-price="{price.replace(" ", "")}"', card)
+                self.assertEqual(card.count(f'<span class="sum">{price}</span> ₽/<span class="per">мес</span>'), 2)
+        self.assertEqual(LANDING.count(f'<div class="org-price">от {ORG_FROM} ₽/год</div>'), 2)
+        self.assertIn("Цены без НДС.", _text(LANDING[LANDING.index('<div class="fine" data-panel="individual"'):]))
 
     def test_landing_script_speaks_the_catalog(self):
         """Ревью PR #184: строка «Выбрано: …» и потолок пользователей в скрипте лендинга — копия
         `pricing`; держим их равными описанию, как карточки."""
         js = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
         for piece in (f"'{pricing.KINDS['corporate']}'", f"'пробная неделя за {pricing.TRIAL_PRICE}'",
-                      f", {pricing.MAX_SEATS})) : 1"):
+                      f", {pricing.MAX_SEATS})) : 1",
+                      # сумма корпоративной карточки = цена × пользователи (× 12 за год) — как `price_line`
+                      "card.querySelectorAll('.sum').forEach(function (s) { s.textContent = rub(base * n * (year ? 12 : 1)); });",
+                      "function rub(n) { return String(n).replace(/\\B(?=(\\d{3})+(?!\\d))/g, ' '); }"):
             self.assertIn(piece, js)
         self.assertEqual(LANDING.count(f'max="{pricing.MAX_SEATS}"'), 3)
 
@@ -265,12 +296,24 @@ class TestCabinetShowcase(_Db):
     def test_plan_tab_shows_the_same_catalog(self):
         html = self._page(self._user())
         notes = [_inline(n) for n in re.findall(r"<b>" + re.escape(pricing.SOURCES) + r"</b><small>(.*?)</small>", html, re.S)]
-        self.assertEqual(notes, [pricing.SOURCES_NOTE] * 6, "источники в кабинете — не как на лендинге")
+        self.assertEqual(notes, [pricing.SOURCES_NOTE] * 7, "источники в кабинете — не как на лендинге")
         self.assertNotIn('name="addon"', html)
         want = [(p["name"], p["desc"]) for p in pricing.PLANS]
         self.assertEqual(_cards(_panel(html, "individual")), want + [("Для организаций", pricing.ORG_DESC)])
         self.assertEqual(_cards(_panel(html, "corporate")), want + [("Особые условия", pricing.SPECIAL_DESC)])
-        for kind in ("individual", "corporate"):
+        self.assertEqual(_cards(_panel(html, "tester")), [(pricing.TESTER_TARIFF, pricing.TESTER_DESC),
+                                                           (pricing.HOWTO_NAME, pricing.HOWTO_DESC)])
+        # цены — те же, что на лендинге (и в презентации)
+        ind, corp = _panel(html, "individual"), _panel(html, "corporate")
+        self.assertIn(f'<s class="price-old">{PRESENTATION["Старт"]} ₽/мес</s>', ind)
+        for name in ("Стандарт", "Профи"):
+            self.assertIn(f'<span class="sum">{PRESENTATION[name]}</span> ₽/<span class="per">мес</span></div>', ind)
+            self.assertIn(f'<div class="price-sub">{PRESENTATION_YEAR[name]} ₽ при оплате за год</div>', ind)
+        for name, price in PRESENTATION.items():
+            self.assertIn(f'data-price="{price.replace(" ", "")}"', corp)
+        self.assertEqual(html.count(f"от {ORG_FROM} ₽/год"), 2)
+        self.assertNotIn("X XXX", html)
+        for kind in pricing.TABS:
             block = html[html.index(f'class="tariffs-fine" data-panel="{kind}"'):]
             block = block[:block.index("</div>")]
             self.assertEqual([_text(p) for p in re.findall(r"<p>(.*?)</p>", block, re.S)], pricing.FOOTNOTES[kind])
@@ -354,8 +397,9 @@ class TestCabinetShowcase(_Db):
         self.assertNotIn('class="pop-back"', html, "личный тариф — не попапом")
         self.assertLess(html.index('id="tariffs"'), html.index('class="tconfirm"'), "подтверждение вне витрины")
         self.assertEqual(self.leads(), [], "подтверждение само заявку не создаёт")
+        self.assertIn(f"Стоимость — {PRESENTATION['Стандарт']} ₽/мес без НДС", _text(box))
         html = self._page(u, "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5")
-        self.assertEqual(html.count('method="get" action="/profile#tariffs"'), 8, "карточка ведёт не на подтверждение")
+        self.assertEqual(html.count('method="get" action="/profile#tariffs"'), 9, "карточка ведёт не на подтверждение")
         self.assertEqual(html.count('action="/api/plan-request"'), 1, "заявку шлёт что-то кроме подтверждения")
 
     def test_corporate_goes_through_a_contact_popup(self):
@@ -415,7 +459,7 @@ class TestCabinetShowcase(_Db):
         self.assertIn("Продление тарифа «Стандарт»", panel)
         self.assertIn("до 31.12.2026", _text(panel))
         self.assertIn("до 31.01.2027", _text(panel))
-        self.assertIn(f"{pricing.PRICE} ₽/мес", panel)
+        self.assertIn(f"{PRESENTATION['Стандарт']} ₽/мес без НДС", _text(panel))
         self.assertIn('name="consent" value="1" required', panel)
         self.assertNotIn('class="pop-back"', html)
         r = self._ask(u, tariff="Стандарт", renew="1")

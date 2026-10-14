@@ -127,7 +127,7 @@
   document.getElementById('aud-prev').addEventListener('click', function () { goTab(cur - 1); });
   document.getElementById('aud-next').addEventListener('click', function () { goTab(cur + 1); });
 
-  // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; суммы — плейсхолдеры «X XXX») ----
+  // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; цены — из презентации, 14.10.2026) ----
   var ptabs = document.querySelectorAll('#price-tabs [role="tab"]'), ptitle = document.getElementById('pricing-h');
   function showPlans(kind) {
     ptabs.forEach(function (t) {
@@ -141,19 +141,23 @@
   document.querySelectorAll('[data-goto]').forEach(function (b) {
     b.addEventListener('click', function () { showPlans(b.getAttribute('data-goto')); ptitle.scrollIntoView({ block: 'start' }); });
   });
-  document.querySelectorAll('#pricing .plan').forEach(function (card) {
-    // суммы — плейсхолдеры, пересчитывать нечего: период меняет только подпись «/мес» ↔ «/год»
-    card.querySelectorAll('.mini-seg input').forEach(function (r) {
-      r.addEventListener('change', function () {
-        card.querySelectorAll('.per').forEach(function (s) { s.textContent = r.value === 'year' ? 'год' : 'мес'; });
-      });
-    });
-    var seats = card.querySelector('[data-seats]');
-    if (!seats) return;
+  // Корпоративная сумма = цена × пользователи (× 12 за год, без скидки) — как `pricing.price_line`.
+  function rub(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' '); }
+  document.querySelectorAll('#pricing .plan[data-price]').forEach(function (card) {
+    var seats = card.querySelector('[data-seats]'), base = parseInt(card.getAttribute('data-price'), 10);
+    function reprice() {
+      var per = card.querySelector('.mini-seg input:checked'), year = per && per.value === 'year',
+          n = Math.max(1, Math.min(parseInt(seats.value, 10) || 1, parseInt(seats.max, 10)));
+      card.querySelectorAll('.sum').forEach(function (s) { s.textContent = rub(base * n * (year ? 12 : 1)); });
+      card.querySelectorAll('.per').forEach(function (s) { s.textContent = year ? 'год' : 'мес'; });
+    }
+    card.querySelectorAll('.mini-seg input').forEach(function (r) { r.addEventListener('change', reprice); });
+    seats.addEventListener('input', reprice);
     card.querySelectorAll('.seat-btn').forEach(function (b) {
       b.addEventListener('click', function () {
         var n = (parseInt(seats.value, 10) || 1) + parseInt(b.getAttribute('data-d'), 10);
         seats.value = Math.max(1, Math.min(n, parseInt(seats.max, 10)));
+        reprice();
       });
     });
   });
@@ -181,9 +185,9 @@
     b.addEventListener('click', function () {
       var card = b.closest('.plan'), o = null, name = b.getAttribute('data-pick');
       if (name !== 'Для организаций') {
-        var corp = card.hasAttribute('data-corp'),
+        var corp = card.hasAttribute('data-corp'), tester = b.hasAttribute('data-tester'),
             per = card.querySelector('.mini-seg input:checked'), seats = card.querySelector('[data-seats]');
-        o = { kind: corp ? 'corporate' : 'individual', trial: b.hasAttribute('data-trial'),
+        o = { kind: corp ? 'corporate' : tester ? 'tester' : 'individual', trial: b.hasAttribute('data-trial'),
               period: per ? per.value : 'month', seats: seats ? Math.max(1, Math.min(parseInt(seats.value, 10) || 1, 500)) : 1 };
       }
       setTariff(name, o);
