@@ -206,7 +206,9 @@ class TestCabinetPage(_CabinetDB):
         u = self._user()
         locked = self._page(u)
         self.assertIn('<fieldset class="fields-lock" disabled>', locked)
-        self.assertNotIn('type="submit"', locked[locked.index('<form class="panel"'):], "в просмотре форму можно отправить")
+        # Только форма анкеты: ниже — форма смены пароля (15.10.2026) со своей кнопкой отправки
+        start = locked.index('<form class="panel" method="post" action="/profile">')
+        self.assertNotIn('type="submit"', locked[start:locked.index("</form>", start)], "в просмотре форму можно отправить")
         edit = self._page(u, edit="1")
         self.assertIn('<fieldset class="fields-lock">', edit)
         self.assertIn("Сохранить изменения", edit)

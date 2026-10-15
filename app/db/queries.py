@@ -153,8 +153,20 @@ def set_user_role(db: Session, user_id: int, role: str) -> User | None:
     return u
 
 
-def reset_password(db: Session, user_id: int, password_hash: str) -> User | None:
-    """Новый пароль + новая эпоха входа: прежние сессии и куки «запомнить меня» гаснут."""
+def reset_password(db: Session, user_id: int, password_hash: str,
+                   expected_epoch: int | None = None) -> User | None:
+    """Новый пароль + новая эпоха входа: прежние сессии и куки «запомнить меня» гаснут.
+
+    `expected_epoch` — смена пароля самим пользователем (15.10.2026): запись только если эпоха та же, что
+    у его сессии, одним UPDATE … WHERE. Между проверкой сессии и записью — два bcrypt (≈0,5 с); сброс
+    admin'ом в это окно иначе перетирался бы паролем пользователя, а его браузер получал бы живую сессию
+    (ревью test39, LOW). Не совпало — None, ничего не записано."""
+    if expected_epoch is not None:
+        res = db.execute(update(User)
+                         .where(User.id == user_id, User.auth_epoch == expected_epoch)
+                         .values(password_hash=password_hash, auth_epoch=User.auth_epoch + 1))
+        db.commit()
+        return db.get(User, user_id) if res.rowcount == 1 else None
     u = db.get(User, user_id)
     if not u:
         return None
@@ -335,6 +347,19 @@ def set_user_plan(db: Session, user_id: int, plan: str | None, started_at=None,
     u.plan_started_at = started_at if plan else None
     u.plan_expires_at = expires_at if plan else None
     u.plan_kind = "corporate" if plan and kind == "corporate" else None
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def close_plan(db: Session, user_id: int, expires_at) -> User | None:
+    """Закрыть доступ по тарифу: сдвинуть ТОЛЬКО срок. Через `set_user_plan` нельзя — у тестировщика без
+    отметки подтверждения (назначен до test38, колонки пусты) он записал бы подтверждающим того, кто
+    закрывает доступ, и время закрытия (ревью 15.10.2026, LOW)."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.plan_expires_at = expires_at
     db.commit()
     db.refresh(u)
     return u

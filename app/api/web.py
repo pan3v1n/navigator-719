@@ -23,12 +23,14 @@ from app.api.auth import (
     authenticate,
     clear_remember_cookie,
     current_user,
+    hash_password,
     login_session,
     logout_session,
     needs_profile,
     remember_from,
     require_user_profiled,
     set_remember_cookie,
+    verify_password,
 )
 from app.api import quota, trial
 from app.api.leads import LIMITS as LEAD_LIMITS
@@ -340,7 +342,8 @@ def _profile_form(user: User, **over) -> dict:
 def _profile_response(request: Request, user: User, form: dict, *, tab: str = "profile",
                       saved: bool = False, error: str | None = None, status_code: int = 200,
                       requested: str = "", confirm: dict | None = None, tariff_kind: str = "",
-                      editing: bool = False, renew: dict | None = None):
+                      editing: bool = False, renew: dict | None = None, password_error: str = "",
+                      password_saved: bool = False):
     """Страница кабинета. Расход тарифа считается один раз и нужен обеим вкладкам (в шапке —
     название тарифа). can_leave — профиль уже заполнен; пока нет, уйти некуда: чат вернёт сюда
     же (`needs_profile`), поэтому и «Вернуться к сервису» не рисуется."""
@@ -358,14 +361,15 @@ def _profile_response(request: Request, user: User, form: dict, *, tab: str = "p
              # сразу, пока профиль не заполнен (гейт до чата) и когда сохранение вернуло ошибку — иначе
              # нечего было бы исправлять.
              editing=editing or needs_profile(user) or bool(error),
-             can_leave=not needs_profile(user)),
+             can_leave=not needs_profile(user),
+             password_error=password_error, password_saved=password_saved),
         status_code=status_code,
     )
 
 
 @router.get("/profile", response_class=HTMLResponse)
 def profile_page(request: Request, tab: str = "profile", saved: str = "", requested: str = "",
-                 err: str = "", edit: str = ""):
+                 err: str = "", edit: str = "", password: str = ""):
     user = current_user(request)
     if not user:
         return RedirectResponse("/login", status_code=302)
@@ -399,7 +403,7 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
             error = PLAN_REQUEST_ERRORS[code]
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
                              requested=requested, error=error, confirm=confirm, renew=renew,
-                             tariff_kind=qp.get("kind", ""), editing=edit == "1")
+                             tariff_kind=qp.get("kind", ""), editing=edit == "1", password_saved=password == "1")
 
 
 # «Подключить» на витрине тарифов кабинета (09.10.2026). Оплаты в сервисе нет — это заявка,
@@ -583,6 +587,79 @@ def profile_submit(
     # Первое заполнение — это гейт до чата: дальше сразу в работу. Правка в кабинете — остаёмся
     # на месте с «Изменения сохранены», как в макете (PRG: обновление страницы не шлёт форму снова).
     return RedirectResponse("/chat" if first_fill else "/profile?saved=1", status_code=302)
+
+
+# Смена пароля самим пользователем (просьба владельца 15.10.2026). Попытки — под лимитом, как вход: форма
+# проверяет текущий пароль, то есть без лимита это был бы перебор пароля из открытой сессии.
+_password_limit = SlidingWindow(settings.RATE_LIMIT_LOGIN_PER_MIN, window=60.0)
+PASSWORD_MIN = 8
+PASSWORD_MAX_BYTES = 72   # bcrypt учитывает только первые 72 байта: длиннее — молча тот же хеш
+
+
+def _password_errors(user: User, current: str, new: str, repeat: str) -> str:
+    if not current or not _current_password_ok(user, current):
+        return "Текущий пароль указан неверно."
+    if len(new) < PASSWORD_MIN:
+        return f"Новый пароль — не короче {PASSWORD_MIN} символов."
+    if len(new.encode("utf-8")) > PASSWORD_MAX_BYTES:
+        return "Новый пароль слишком длинный."
+    if not new.strip():
+        return "Новый пароль не может состоять из пробелов."
+    if new != repeat:
+        return "Новый пароль и повтор не совпадают."
+    if new == current:
+        return "Новый пароль совпадает с текущим."
+    return ""
+
+
+def _current_password_ok(user: User, password: str) -> bool:
+    """Текущий пароль — по хешу из базы, а не из объекта сессии: тот мог устареть."""
+    with get_session() as db:
+        fresh = q.get_user(db, user.id)
+        return bool(fresh) and verify_password(password, fresh.password_hash)
+
+
+@router.post("/profile/password", response_class=HTMLResponse)
+def password_submit(request: Request, current_password: str = Form(default=""),
+                    new_password: str = Form(default=""), repeat_password: str = Form(default="")):
+    """Новый пароль — по текущему. Эпоха входа растёт (`queries.reset_password`, как при сбросе admin'ом):
+    входы на других устройствах и их «запомнить меня» гаснут, а этот браузер остаётся в сессии — ему
+    выдаются сессия и кука с новой эпохой. Пароли не попадают ни в журнал, ни в ответ."""
+    user = current_user(request)
+    if not user:
+        return RedirectResponse("/login", status_code=302)
+    key = f"password:{user.id}"
+    if not _password_limit.check(key):
+        retry = _password_limit.retry_after(key)
+        return _profile_response(request, user, _profile_form(user), status_code=429,
+                                 password_error=f"Слишком много попыток. Повторите через {retry} с.")
+    why = _password_errors(user, current_password, new_password, repeat_password)
+    if why:
+        return _profile_response(request, user, _profile_form(user), status_code=400, password_error=why)
+    _password_limit.reset(key)
+    epoch = user.auth_epoch or 0
+    remembered = remember_from(request)
+    with get_session() as db:
+        fresh = q.reset_password(db, user.id, hash_password(new_password), expected_epoch=epoch)
+    if fresh is None:
+        # Эпоха сменилась, пока шла проверка (сброс пароля или блокировка admin'ом): эта сессия уже не
+        # действует — ничего не записано, вход заново.
+        logout_session(request)
+        logger.info(f"пароль: user_id={user.id} — смена не записана, эпоха входа сменилась во время проверки")
+        resp = RedirectResponse("/login", status_code=303)
+        clear_remember_cookie(resp)
+        return resp
+    login_session(request, fresh)
+    resp = RedirectResponse("/profile?password=1#password", status_code=303)
+    # «Запомнить меня» продлевается, только если кука — ЭТОЙ учётки и действующая: подписанная кука другого
+    # пользователя или устаревшая (вход без «запомнить» её не снимает) иначе превратилась бы в свежий
+    # автовход на 30 дней — на общем компьютере (ревью test39, MED). Чужую или мёртвую — снимаем.
+    if remembered == (user.id, epoch):
+        set_remember_cookie(resp, fresh.id, fresh.auth_epoch or 0)
+    elif remembered:
+        clear_remember_cookie(resp)
+    logger.info(f"пароль: user_id={user.id} сменил пароль, прочие входы завершены")
+    return resp
 
 
 class FeedbackIn(BaseModel):
