@@ -10,15 +10,16 @@
   <summary>Создать учётку</summary>
   {% if create_error %}<div class="adm-note err">{{ create_error }}</div>{% endif %}
   <form method="post" action="/api/admin/users" class="adm-row">
-    <input name="username" value="{{ create_form.username or '' }}" placeholder="логин, например kursk.expert2"
-           required maxlength="64" pattern="[a-z0-9][a-z0-9._\-]{2,63}" autocomplete="off" aria-label="Логин">
+    <input name="username" value="{{ create_form.username or '' }}" placeholder="рабочий email, например ivanov@kcci.ru"
+           required maxlength="64" autocomplete="off" aria-label="Логин" size="34">
     <select name="role" aria-label="Роль">
       {% for key, label in roles.items() %}<option value="{{ key }}"{% if key == (create_form.role or 'user') %} selected{% endif %}>{{ label }}</option>{% endfor %}
     </select>
     <button class="ds-btn" type="submit">Создать</button>
   </form>
-  <p class="muted">Логин — латиницей, строчными. Пароль сгенерируется и покажется один раз на карточке
-    учётки. Региональному участнику дайте логин вида <code>kursk.expert2</code> — регион подставится в анкету сам.</p>
+  <p class="muted">Логин — рабочий email человека, латиницей (заглавные станут строчными); он же подставится
+    в анкету как рабочий email. Пароль сгенерируется и покажется один раз на карточке учётки. Прежний вид
+    логина (<code>kursk.expert2</code>) тоже принимается — им входят действующие учётки.</p>
 </details>
 
 <form class="adm-filters" method="get" action="/admin/users">

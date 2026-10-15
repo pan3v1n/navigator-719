@@ -84,9 +84,15 @@ def verify_password(password: str, password_hash: str) -> bool:
 
 
 def authenticate(username: str, password: str) -> User | None:
-    """Проверяет логин/пароль. Возвращает отвязанный от сессии User при успехе, иначе None."""
+    """Проверяет логин/пароль. Возвращает отвязанный от сессии User при успехе, иначе None.
+
+    Логины хранятся строчными (админка приводит при создании), а email люди набирают как привыкли —
+    «Belodurov@KCCI.ru» (логин-почта, 15.10.2026). Поэтому сначала точное совпадение (вдруг в базе есть
+    логин с заглавной, заведённый скриптом), затем — строчными."""
     with get_session() as db:
         user = q.get_user_by_username(db, username)
+        if user is None and username != username.lower():
+            user = q.get_user_by_username(db, username.lower())
         if user and verify_password(password, user.password_hash):
             db.expunge(user)  # объект переживёт закрытие сессии (нужны только скалярные поля)
             return user

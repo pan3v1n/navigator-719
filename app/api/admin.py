@@ -73,6 +73,15 @@ SECTIONS = [
 ]
 ACCOUNT_ROLES = {"user": "Региональный участник", "expert": "Эксперт ТПП", "admin": "Администратор"}
 _USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
+# Логин-почта (просьба владельца 15.10.2026: «логин в формате электронной почты»). Только латиница: логин
+# вводят на странице входа и сравнивают побайтно. Длина — по колонке `users.username` (64).
+# `%` в логине не нужен ни одному реальному адресу и ломается в URL — не принимаем (ревью test40, LOW).
+_EMAIL_LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
+LOGIN_MAX = 64
+
+
+def is_email_login(login: str) -> bool:
+    return len(login) <= LOGIN_MAX and bool(_EMAIL_LOGIN_RE.match(login))
 LEADS_ON_PAGE = 200
 GUEST_ON_PAGE = 400  # реплик пробного режима на странице (≈ 200 вопросов с ответами)
 
@@ -175,8 +184,7 @@ def _matches(row: dict, text: str, role: str, status: str, plan: str) -> bool:
 
 
 @router.get("/admin/users", response_class=HTMLResponse)
-def admin_users(request: Request, role: str = "", status: str = "", plan: str = "", ok: str = "",
-                login: str = ""):
+def admin_users(request: Request, role: str = "", status: str = "", plan: str = "", ok: str = ""):
     """Список учёток: поиск по логину, ФИО, организации, ИНН, email и региону; фильтры роли,
     состояния и тарифа. Свежая активность сверху."""
     gate = _gate(request)
@@ -189,7 +197,9 @@ def admin_users(request: Request, role: str = "", status: str = "", plan: str = 
     total = len(rows)
     rows = [r for r in rows if _matches(r, text, role, status, plan)]
     rows.sort(key=lambda r: (r["last_ts"] is not None, r["last_ts"] or datetime.min, -r["id"]), reverse=True)
-    notice = f"Учётка «{login}» удалена вместе с профилем и диалогами." if ok == "deleted" and login else ""
+    # Логин в адрес не кладём: с 15.10.2026 логин — email, а адрес оседает в журнале доступа (uvicorn) —
+    # удаление по требованию субъекта ПДн записывало бы его email (ревью test40, MED).
+    notice = "Учётка удалена вместе с профилем и диалогами." if ok == "deleted" else ""
     return _page(request, gate, "users", "users", "Пользователи", rows=rows, total=total,
                  filters={"q": text, "role": role, "status": status, "plan": plan}, roles=ACCOUNT_ROLES,
                  all_plans=list(plans.ALL_PLANS), notice=notice, create_form={})
@@ -208,6 +218,8 @@ def admin_create_user(request: Request, username: str = Form(default=""), role: 
         if not error:
             password = generate_password()
             uid = q.create_user(db, login, hash_password(password), role=role).id
+            if is_email_login(login):   # логин-почта — она же рабочий email анкеты; человек подтвердит или сменит
+                q.prefill_contacts(db, uid, email=login, phone=None)
     if error:
         with get_session() as db:
             activity = q.user_activity(db)
@@ -215,7 +227,8 @@ def admin_create_user(request: Request, username: str = Form(default=""), role: 
         return _page(request, admin, "users", "users", "Пользователи", status_code=400, rows=rows,
                      total=len(rows), filters={}, roles=ACCOUNT_ROLES, all_plans=list(plans.ALL_PLANS),
                      create_error=error, create_form={"username": login, "role": role})
-    logger.info(f"учётка: admin_id={admin.id} создал «{login}» ({role})")  # пароль в журнал — никогда
+    # ни пароля, ни логина: логин теперь email — ПДн (ревью test40, MED)
+    logger.info(f"учётка: admin_id={admin.id} создал user_id={uid} ({role})")
     return _card(request, admin, uid, password_shown=password, notice="Учётка создана.")
 
 
@@ -228,10 +241,11 @@ def _new_account_error(db, login: str, role: str) -> str:
 
 def _login_error(db, login: str) -> str:
     """Причина, по которой логин нельзя дать учётке (новой или переименуемой), или «». Одно правило
-    на создание и смену логина: иначе переименованием обходился бы формат, который держит создание."""
-    if not _USERNAME_RE.match(login):
-        return ("Логин — латинские буквы, цифры, точка, дефис или подчёркивание, от 3 до 64 "
-                "символов, начинается с буквы или цифры.")
+    на создание и смену логина: иначе переименованием обходился бы формат, который держит создание.
+    Формат — рабочий email (с 15.10.2026) или прежний вид `kursk.expert1`: им входят действующие учётки."""
+    if not (_USERNAME_RE.match(login) or is_email_login(login)):
+        return ("Логин — рабочий email латиницей (например, ivanov@kcci.ru) или латинские буквы, цифры, "
+                "точка, дефис, подчёркивание; от 3 до 64 символов.")
     if q.get_user_by_username(db, login) is not None:
         return f"Логин «{login}» уже занят."
     return ""
@@ -424,7 +438,7 @@ def admin_delete_user(request: Request, user_id: int, confirm: str = Form(defaul
     if why:
         return _card(request, admin, user_id, error=why, status_code=400)
     logger.info(f"учётка: admin_id={admin.id} удалил user_id={user_id}")
-    return RedirectResponse(f"/admin/users?ok=deleted&login={login}", status_code=303)
+    return RedirectResponse("/admin/users?ok=deleted", status_code=303)
 
 
 @router.post("/api/admin/users/{user_id}/plan")
@@ -600,9 +614,14 @@ LEAD_STATUSES = {"new": "Новая", "in_work": "В работе", "connected":
 
 
 def _suggest_login(lead, taken: set[str]) -> str:
-    """Логин по умолчанию для учётки из заявки — из email (часть до @), латиницей, свободный.
+    """Логин по умолчанию для учётки из заявки — сам email заявки (логин-почта, 15.10.2026); занят или не
+    годится в логин (кириллица, длиннее 64) — прежний вид из части до @, латиницей, свободный.
     Занятые логины — одним запросом на страницу (`taken`), а не запросом на каждую попытку."""
-    base = re.sub(r"[^a-z0-9._-]", "", (lead.email or "").split("@")[0].lower()).strip("._-")
+    email = (lead.email or "").strip().lower()
+    if is_email_login(email) and email not in taken:
+        taken.add(email)
+        return email
+    base = re.sub(r"[^a-z0-9._-]", "", email.split("@")[0]).strip("._-")
     base = (base or f"client{lead.id}")[:56]
     if len(base) < 3:
         base = f"{base}.client"
@@ -703,7 +722,7 @@ def admin_lead_account(request: Request, lead_id: int, username: str = Form(defa
     if error:
         return _leads_response(request, admin, error=error, error_lead=lead_id, form=form,
                                status_code=400)
-    logger.info(f"заявка: admin_id={admin.id} создал из lead_id={lead_id} учётку «{login}» ({role})")
+    logger.info(f"заявка: admin_id={admin.id} создал из lead_id={lead_id} учётку user_id={uid} ({role})")
     return _card(request, admin, uid, password_shown=password,
                  notice=f"Учётка создана из заявки №{lead_id}: организация, ИНН и контакты перенесены.")
 

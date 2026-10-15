@@ -37,8 +37,11 @@ REGIONS: list[str] = sorted(set(REGION_BY_PREFIX.values()))
 
 
 def region_from_username(username: str) -> str:
-    """Регион по префиксу логина: «moscow.expert1» → «Москва». Бесточечный/неизвестный → ''."""
+    """Регион по префиксу логина: «moscow.expert1» → «Москва». Бесточечный/неизвестный → ''.
+    Логин-почта (15.10.2026) — тоже '': «perm.office@…» — адрес, а не регион тестировщика."""
     uname = username or ""
+    if "@" in uname:
+        return ""
     prefix = uname.split(".", 1)[0].lower() if "." in uname else ""
     return REGION_BY_PREFIX.get(prefix, "")
 
