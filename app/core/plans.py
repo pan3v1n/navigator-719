@@ -21,9 +21,12 @@ PLAN_LIMITS: dict[str, int] = {"Старт": 100, "Стандарт": 200, "Пр
 # None — без ограничения числа запросов.
 TRIAL_PLAN = "Пробный режим"
 TRIAL_DAYS = 7  # срок «Пробного режима» по умолчанию, если admin не задал свой
+# «Тестировщик» с 14.10.2026 — ещё и вкладка «Тестирование» на витрине: заявку подаёт сам человек,
+# подключают только разработчики сервиса (admin) — кто и когда, пишется в учётку (`tester_verified_*`).
+TESTER_PLAN = "Тестировщик"
 INTERNAL_PLANS: dict[str, int | None] = {
     TRIAL_PLAN: PLAN_LIMITS["Старт"],
-    "Тестировщик": None,
+    TESTER_PLAN: None,
     "Администратор": None,
 }
 ALL_PLANS: dict[str, int | None] = {**PLAN_LIMITS, **INTERNAL_PLANS}

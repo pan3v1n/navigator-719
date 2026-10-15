@@ -37,7 +37,29 @@
       <dt>Согласие на ПДн</dt><dd>{{ ('дано ' ~ consent_at) if u.consent else 'не дано' }}</dd>
       <dt>Учётка создана</dt><dd>{{ created_at or '—' }}</dd>
     </dl>
-    <p class="muted">Профиль заполняет сам пользователь в личном кабинете.</p>
+    <details class="adm-create adm-edit"{% if profile_open %} open{% endif %}>
+      <summary>Редактировать</summary>
+      <form method="post" action="/api/admin/users/{{ u.id }}/profile" class="adm-form">
+        <label>Логин <input name="username" value="{{ pf.username }}" required maxlength="64"
+               pattern="[a-z0-9][a-z0-9._\-]{2,63}" autocomplete="off"></label>
+        <label>ФИО <input name="full_name" value="{{ pf.full_name }}" maxlength="200"></label>
+        <label>Должность <input name="position" value="{{ pf.position }}" maxlength="128"></label>
+        <label>Рабочий email <input type="email" name="email" value="{{ pf.email }}" maxlength="255"></label>
+        <label>Телефон <input type="tel" name="phone" value="{{ pf.phone }}" placeholder="+7 900 000-00-00" maxlength="32"></label>
+        <label>Регион
+          <select name="region">
+            <option value=""{% if not pf.region %} selected{% endif %}>не указан</option>
+            {% if pf.region and pf.region not in regions %}<option value="{{ pf.region }}" selected>{{ pf.region }}</option>{% endif %}
+            {% for r in regions %}<option value="{{ r }}"{% if r == pf.region %} selected{% endif %}>{{ r }}</option>{% endfor %}
+          </select></label>
+        <label>Telegram <input name="telegram" value="{{ pf.telegram }}" maxlength="128"></label>
+        <button class="ds-btn secondary" type="submit">Сохранить профиль</button>
+      </form>
+      <p class="muted">Новый логин действует сразу: старым войти нельзя, открытые входы сохраняются — сообщите
+        человеку новый логин. Согласие на обработку ПДн даёт только сам пользователь в кабинете; без него
+        региональный участник в чат не попадёт, как бы полно ни была заполнена анкета.</p>
+    </details>
+    <p class="muted">Профиль заполняет пользователь в личном кабинете; здесь его можно поправить.</p>
   </section>
 
   <section class="adm-card">
@@ -45,6 +67,7 @@
     <p>{% if u.plan %}<b>{{ u.plan }}</b> ·
       {% if row.expired %}<span class="badge bad">срок истёк {{ row.expires }}</span>{% elif row.expires %}до {{ row.expires }}{% else %}бессрочно{% endif %}
       {% if row.state %}<br>Использовано <b>{{ row.state.used }} из {{ row.state.limit }}</b> за {{ period }}{% if row.state.exhausted %} <span class="badge bad">исчерпан</span>{% endif %}{% endif %}
+      {% if tester_verified %}<br>Тестировщик подтверждён: {{ tester_verified }} · <a href="/admin/testers">все тестировщики</a>{% endif %}
       {% else %}<span class="muted">Без тарифа — без ограничения числа запросов.</span>{% endif %}</p>
     <form method="post" action="/api/admin/users/{{ u.id }}/plan" class="adm-form">
       <label>Тариф

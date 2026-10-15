@@ -1,0 +1,82 @@
+{% extends "admin/base.html" %}
+{% block content %}
+{# Тестировщики (14.10.2026): тариф «Тестировщик» — бесплатно и без лимита, подключают только разработчики
+   сервиса после проверки заявки. ПДн заявок (имя, почта, телефон) здесь не показываются — они в «Заявках». #}
+<div class="adm-head">
+  <h1>Тестировщики</h1>
+  <span class="muted">заявок ждут решения: {{ requests|length }} · подключено: {{ rows|length }}</span>
+</div>
+{% if done %}<div class="adm-note ok" role="status">{{ done }}</div>{% endif %}
+
+<section class="adm-card">
+  <h2>Заявки на подтверждение</h2>
+  <p class="muted">Заявки с вкладки «Тестирование» на лендинге и в кабинете. Проверьте человека по заявке
+    (контакты — в разделе «Заявки») и подтвердите: учётка получит тариф «{{ tester }}» с сегодняшнего дня.
+    Заявке с лендинга сначала создайте учётку в «Заявках» с тарифом «{{ tester }}».</p>
+  {% if requests %}
+  <div class="adm-table-wrap">
+    <table class="adm-table">
+      <thead><tr><th>Заявка</th><th>Организация</th><th>Учётка</th><th>Решение</th></tr></thead>
+      <tbody>
+      {% for r in requests %}
+        <tr id="tester-lead-{{ r.id }}">
+          <td><a class="adm-strong" href="/admin/leads#lead-{{ r.id }}">№{{ r.id }}</a>
+            <div class="muted">{{ r.created }} · {{ r.status }}</div></td>
+          <td>{{ r.org or '—' }}</td>
+          <td>{% if r.user_id %}<a href="/admin/users/{{ r.user_id }}">{{ r.login }}</a>
+            {% if r.name %}<div class="muted">{{ r.name }}</div>{% endif %}
+            {% if r.is_tester %}<span class="badge ok">уже тестировщик</span>{% endif %}
+            {% else %}<span class="muted">с лендинга — учётки нет</span>{% endif %}</td>
+          <td>
+            {% if r.user_id %}
+            <form method="post" action="/api/admin/testers/{{ r.id }}/approve" class="adm-row">
+              <label>До <input type="date" name="expires" min="{{ today }}" title="Пусто — бессрочно"></label>
+              <button class="ds-btn" type="submit">Подтвердить</button>
+            </form>
+            {% else %}
+            <a class="ds-btn secondary" href="/admin/leads#lead-{{ r.id }}">Создать учётку</a>
+            {% endif %}
+            <form method="post" action="/api/admin/testers/{{ r.id }}/reject"
+                  onsubmit="return confirm('Отклонить заявку №{{ r.id }}?')">
+              <button class="ds-link adm-danger-link" type="submit">Отклонить</button>
+            </form>
+          </td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Новых заявок на тестирование нет.</p>
+  {% endif %}
+</section>
+
+<section class="adm-card">
+  <h2>Подключённые тестировщики</h2>
+  {% if rows %}
+  <div class="adm-table-wrap">
+    <table class="adm-table">
+      <thead><tr><th>Учётка</th><th>Организация</th><th>Подтвердил</th><th>Срок</th><th></th></tr></thead>
+      <tbody>
+      {% for r in rows %}
+        <tr>
+          <td><a class="adm-strong" href="/admin/users/{{ r.id }}">{{ r.login }}</a>
+            <div class="muted">{{ r.name or '—' }}</div></td>
+          <td>{{ r.org or '—' }}{% if r.region %}<div class="muted">{{ r.region }}</div>{% endif %}</td>
+          <td>{{ r.verified or '—' }}</td>
+          <td>{% if r.expired %}<span class="badge bad">истёк {{ r.expires }}</span>{% elif r.expires %}до {{ r.expires }}{% else %}бессрочно{% endif %}</td>
+          <td>{% if not r.expired %}<form method="post" action="/api/admin/testers/users/{{ r.id }}/revoke"
+                    onsubmit="return confirm('Закрыть доступ тестировщика у {{ r.login }}? Вопросы закроются сегодня, учётка и история останутся.')">
+                <button class="ds-link adm-danger-link" type="submit">Закрыть доступ</button></form>{% endif %}</td>
+        </tr>
+      {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  {% else %}
+  <p class="muted">Тестировщиков пока нет.</p>
+  {% endif %}
+  <p class="muted">«Подтвердил» — администратор, назначивший тариф: здесь, в «Заявках» или в карточке учётки.
+    Срок и тариф меняются в карточке учётки.</p>
+</section>
+{% endblock %}

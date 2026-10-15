@@ -322,18 +322,120 @@ class TestCardActions(_PanelDB):
         self.assertNotIn(f'action="/api/admin/users/{self.admin.id}/delete"', own)
 
 
+class TestProfileEdit(_PanelDB):
+    """Правка логина и анкеты admin'ом (просьба владельца 15.10.2026). Закрепляем: правила — те же, что у
+    создания учётки и у кабинета; согласие на ПДн admin не ставит; смена логина не гасит входы (они по
+    id), но старым логином войти уже нельзя; в журнал — названия полей, а не значения."""
+
+    FULL = {"username": "kursk.ivanov", "full_name": "Иван Петров", "position": "Эксперт",
+            "email": "i.petrov@tpp.ru", "phone": "+7 900 000-00-00", "region": "Курская область",
+            "telegram": "@ivan"}
+
+    def _save(self, uid, client=None, **over):
+        return (client or self.as_admin).post(f"/api/admin/users/{uid}/profile", data={**self.FULL, **over},
+                                              follow_redirects=False)
+
+    def test_edit_login_and_profile(self):
+        u = self._mk("kursk.expert1")
+        browser = self._login("kursk.expert1", remember=True)
+        with mock.patch.object(adm.logger, "info") as log:
+            r = self._save(u.id, username="Kursk.Ivanov")                 # регистр — как у создания
+        self.assertEqual((r.status_code, r.headers["location"]), (303, f"/admin/users/{u.id}?ok=login"))
+        got = self._fresh(u.id)
+        self.assertEqual({f: getattr(got, f) for f in self.FULL}, self.FULL)
+        line = next(c.args[0] for c in log.call_args_list if str(c.args[0]).startswith("профиль:"))
+        self.assertIn("логин, ФИО, должность, email, телефон, регион, Telegram", line)
+        for value in ("Иван Петров", "i.petrov@tpp.ru", "+7 900 000-00-00", "@ivan"):
+            self.assertNotIn(value, line, "в журнал ушли ПДн")
+        self.assertIn("Сообщите человеку новый логин", self.as_admin.get(f"/admin/users/{u.id}?ok=login").text)
+        # входы привязаны к id: открытая сессия и «запомнить меня» живы, старым логином войти нельзя
+        self.assertTrue(self._signed_in(browser), "смена логина завершила открытый вход")
+        browser.cookies.pop("session", None)
+        self.assertTrue(self._signed_in(browser), "смена логина погасила «запомнить меня»")
+        old = self.TestClient(self.app).post("/login", data={"username": "kursk.expert1", "password": PW},
+                                             follow_redirects=False)
+        self.assertEqual(old.status_code, 401)
+        self._login("kursk.ivanov")
+
+    def test_consent_is_never_set_by_admin(self):
+        """Согласие на ПДн даёт только субъект: полная анкета от admin'а не пускает роль user в чат."""
+        u = self._mk("kursk.expert2")
+        self._save(u.id, username="kursk.expert2")
+        got = self._fresh(u.id)
+        self.assertEqual((got.consent, got.consent_at), (False, None))
+        self.assertTrue(auth.needs_profile(got), "анкета admin'а открыла чат без согласия")
+        r = self._login("kursk.expert2").get("/chat", follow_redirects=False)
+        self.assertEqual(r.headers.get("location"), "/profile")
+
+    def test_consent_and_org_survive_the_edit(self):
+        u = self._mk("kursk.expert3", full_name="Анна", region="Курская область", telegram="", consent=True)
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "ООО «Станкозавод»", "7707083893", verified_by=self.admin.id)
+        before = self._fresh(u.id)
+        self.assertEqual(self._save(u.id, username="kursk.expert3").status_code, 303)
+        got = self._fresh(u.id)
+        self.assertEqual((got.consent, got.consent_at), (True, before.consent_at))
+        self.assertEqual((got.org, got.inn, got.org_verified_by), ("ООО «Станкозавод»", "7707083893", self.admin.id))
+        self.assertEqual(self._save(u.id, username="kursk.expert3").headers["location"],
+                         f"/admin/users/{u.id}?ok=profile", "без смены логина — «Профиль сохранён»")
+
+    def test_invalid_input_rerenders_the_open_form_and_changes_nothing(self):
+        u = self._mk("kursk.expert4")
+        for over, why in (({"username": "boss"}, "уже занят"),
+                          ({"username": "плохой логин"}, "латинские буквы"),
+                          ({"username": ""}, "латинские буквы"),
+                          ({"email": "не-почта"}, "email"),
+                          ({"phone": "123"}, "11 цифр"),
+                          ({"region": "Марс"}, "из списка"),
+                          ({"full_name": "Я" * 201}, "Слишком длинное ФИО")):
+            with self.subTest(over=over):
+                r = self._save(u.id, **over)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn(why, r.text)
+                self.assertIn('<details class="adm-create adm-edit" open>', r.text, "форма с ошибкой закрыта")
+                self.assertIn('value="@ivan"', r.text, "введённое потеряно")   # поле, которое не правим ни в одном случае
+                got = self._fresh(u.id)
+                self.assertEqual((got.username, got.email), ("kursk.expert4", None))
+
+    def test_legacy_region_outside_the_list_can_stay(self):
+        u = self._mk("kursk.expert5", full_name="", region="Курская обл.", telegram="", consent=False)
+        self.assertIn('<option value="Курская обл." selected>', self.as_admin.get(f"/admin/users/{u.id}").text)
+        self.assertEqual(self._save(u.id, username="kursk.expert5", region="Курская обл.").status_code, 303)
+        self.assertEqual(self._fresh(u.id).region, "Курская обл.")
+
+    def test_login_taken_in_a_race(self):
+        """Логин заняли между проверкой и записью — уникальный индекс, а не 500."""
+        u = self._mk("kursk.expert6")
+        self._mk("kursk.ivanov")
+        with mock.patch.object(q, "get_user_by_username", return_value=None):
+            r = self._save(u.id)
+        self.assertEqual(r.status_code, 400)
+        self.assertIn("уже занят", r.text)
+        self.assertEqual(self._fresh(u.id).username, "kursk.expert6")
+
+    def test_only_admin(self):
+        u = self._mk("kursk.expert7")
+        self._mk("perm.expert1", role="expert")
+        self.assertEqual(self._save(u.id, client=self.TestClient(self.app)).status_code, 401)
+        self.assertEqual(self._save(u.id, client=self._login("perm.expert1")).status_code, 403)
+        self.assertEqual(self._fresh(u.id).username, "kursk.expert7")
+        self.assertEqual(self._save(9999).status_code, 404)
+
+
 class TestSummary(_PanelDB):
     """Сводка (этап 2): работает ли сервис и что требует внимания — сегодня и с начала месяца."""
 
     def setUp(self):
         super().setUp()
-        from datetime import datetime, timedelta, timezone
+        from datetime import timedelta, timezone
 
         from app.api import admin_summary
         from app.db.models import GuestMessage, Lead
 
         self.summary = admin_summary
-        self.now = datetime.now(timezone.utc)
+        # #191: «сейчас» фикстуры — полдень МСК сегодняшних суток, а не момент запуска. Реплики кладутся
+        # за 20 с – 50 мин до него, и в первые ~50 минут после 00:00 МСК часть уезжала во «вчера».
+        self.now = (plans.anchor_from_date(plans.msk_today()) + timedelta(hours=12)).replace(tzinfo=timezone.utc)
         now_n = plans.naive_utc(self.now)
         today = plans.anchor_from_date(plans.msk_today(self.now))
         month = admin_summary._month_start(self.now)
@@ -401,7 +503,9 @@ class TestSummary(_PanelDB):
         self.assertEqual(s["trial"]["today"], 1)
 
     def test_page(self):
-        with mock.patch.object(adm, "system_health", return_value={"collections": [], "server_time": "—"}):
+        real = adm.summary_view   # страница считает от того же «сейчас», что фикстура (#191)
+        with mock.patch.object(adm, "system_health", return_value={"collections": [], "server_time": "—"}), \
+                mock.patch.object(adm, "summary_view", lambda db: real(db, self.now)):
             html = self.as_admin.get("/admin").text
         self.assertIn('<a href="/admin" class="on" aria-current="page">Сводка</a>', html)
         self.assertIn("/admin/dialogs/s2", html, "сбой без ссылки на беседу")

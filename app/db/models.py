@@ -56,6 +56,10 @@ class User(Base):
     # Вид тарифа (09.10.2026): «individual» — личный, оплата с личной карты (когда появится); «corporate» —
     # корпоративный, продление только через связь с заказчиком (попап). Ставит admin; None — личный.
     plan_kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
+    # Тестировщик (14.10.2026): тариф без лимита подключают только разработчики сервиса (admin) — кто и
+    # когда подтвердил. Пишется при назначении тарифа «Тестировщик», снимается при смене тарифа.
+    tester_verified_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    tester_verified_by: Mapped[int | None] = mapped_column(Integer, nullable=True)   # id admin'а
     # Доступ (админка 09.10.2026): блокировка без удаления данных и «эпоха» входа — её поднимают
     # сброс пароля и блокировка, и все выданные сессии и куки «запомнить меня» гаснут сразу.
     blocked_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
@@ -182,6 +186,7 @@ class Lead(Base):
     message: Mapped[str | None] = mapped_column(Text, nullable=True)
     # Вид заявки (ревью PR #186): «corporate» — с корпоративной карточки, «Для организаций» или продление
     # корпоративного тарифа; учётка из неё получает корпоративный тариф. Данными, а не поиском по `options`.
+    # «tester» (14.10.2026) — заявка на тариф «Тестировщик»: её видит раздел «Тестировщики» админки.
     kind: Mapped[str | None] = mapped_column(String(16), nullable=True)
     status_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
