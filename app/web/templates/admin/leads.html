@@ -44,7 +44,7 @@
     <summary>Создать учётку из заявки</summary>
     <form method="post" action="/api/admin/leads/{{ l.id }}/account" class="adm-form">
       <label>Логин <input name="username" value="{{ f.username or r.suggest }}" required maxlength="64"
-             pattern="[a-z0-9][a-z0-9._\-]{2,63}" autocomplete="off"></label>
+             size="30" autocomplete="off"></label>
       <label>Роль <select name="role">{% for key, label in roles.items() %}<option value="{{ key }}"{% if key == (f.role or 'user') %} selected{% endif %}>{{ label }}</option>{% endfor %}</select></label>
       {% set chosen = f.plan if f else r.plan %}
       <label>Тариф

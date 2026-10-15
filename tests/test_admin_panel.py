@@ -422,6 +422,66 @@ class TestProfileEdit(_PanelDB):
         self.assertEqual(self._save(9999).status_code, 404)
 
 
+class TestEmailLogin(_PanelDB):
+    """Логин-почта (просьба владельца 15.10.2026): учётку заводят по рабочему email. Закрепляем: email
+    принимается и хранится строчными, вход — без учёта регистра, email логина подставляется в анкету;
+    прежний вид логина по-прежнему принимается (им входят действующие учётки); кривые и кириллические
+    адреса — отказ; регион из логина-почты не угадывается."""
+
+    def _create(self, login, role="user"):
+        return self.as_admin.post("/api/admin/users", data={"username": login, "role": role})
+
+    def test_create_by_email_and_sign_in_with_any_case(self):
+        r = self._create("Belodurov@KCCI.ru")
+        self.assertEqual(r.status_code, 200, r.text[:300])
+        password = r.text.split('id="new-password">')[1].split("<")[0]
+        with self.Session() as db:
+            u = q.get_user_by_username(db, "belodurov@kcci.ru")
+        self.assertIsNotNone(u, "логин не сохранён строчными")
+        self.assertEqual(u.email, "belodurov@kcci.ru", "email логина не подставлен в анкету")
+        self.assertFalse(u.consent, "подстановка email поставила согласие")
+        for typed in ("belodurov@kcci.ru", "Belodurov@KCCI.ru", "BELODUROV@KCCI.RU"):
+            with self.subTest(typed=typed):
+                c = self.TestClient(self.app)
+                ok = c.post("/login", data={"username": typed, "password": password}, follow_redirects=False)
+                self.assertEqual(ok.status_code, 302, f"вход «{typed}» не прошёл")
+        self.assertEqual(self._create("BELODUROV@kcci.ru").status_code, 400, "тот же email другим регистром — второй учёткой")
+
+    def test_old_login_form_still_accepted_without_email_prefill(self):
+        self.assertEqual(self._create("kursk.expert9").status_code, 200)
+        with self.Session() as db:
+            self.assertIsNone(q.get_user_by_username(db, "kursk.expert9").email)
+
+    def test_malformed_and_cyrillic_addresses_are_refused(self):
+        for login in ("a@b", "@kcci.ru", "ivanov@kcci", "ivan ov@kcci.ru", "ivanov@kcci..ru", "ivanov@-kcci.ru",
+                      "иванов@кцци.рф", "ivanov@кцци.рф", "x" * 57 + "@kcci.ru"):           # 65 > 64
+            with self.subTest(login=login):
+                r = self._create(login)
+                self.assertEqual(r.status_code, 400)
+                self.assertIn("рабочий email латиницей", r.text)
+        self.assertEqual(self._create("x" * 56 + "@kcci.ru").status_code, 200, "64 символа — законная длина")
+        with self.Session() as db:
+            self.assertEqual(len(q.list_users(db)), 2, "кривой логин завёл учётку")
+
+    def test_rename_to_email_in_the_card(self):
+        u = self._mk("kursk.expert3")
+        r = self.as_admin.post(f"/api/admin/users/{u.id}/profile", follow_redirects=False,
+                               data={"username": "Ivanov@KCCI.ru", "full_name": "", "position": "", "email": "",
+                                     "phone": "", "region": "", "telegram": ""})
+        self.assertEqual(r.status_code, 303)
+        self.assertEqual(self._fresh(u.id).username, "ivanov@kcci.ru")
+
+    def test_region_is_not_guessed_from_an_email_login(self):
+        from app.core.regions import region_from_username
+
+        self.assertEqual(region_from_username("perm.office@kcci.ru"), "")
+        self.assertEqual(region_from_username("perm.expert1"), "Пермский край", "прежний вид сломался")
+        u = self._mk("perm.office@kcci.ru")
+        page = self._login("perm.office@kcci.ru").get("/profile").text
+        self.assertNotIn('<option value="Пермский край" selected>', page)
+        self.assertIsNotNone(u)
+
+
 class TestSummary(_PanelDB):
     """Сводка (этап 2): работает ли сервис и что требует внимания — сегодня и с начала месяца."""
 
@@ -547,7 +607,7 @@ class TestLeadsToAccounts(_PanelDB):
 
     def test_account_from_lead(self):
         page = self.as_admin.get("/admin/leads").text
-        self.assertIn('name="username" value="i.petrov"', page, "логин не предложен из email")
+        self.assertIn('name="username" value="i.petrov@zavod.ru"', page, "логин не предложен из email")
         r = self.as_admin.post(f"/api/admin/leads/{self.lead}/account",
                                data={"username": "i.petrov", "role": "user", "plan": "Старт"})
         self.assertEqual(r.status_code, 200)
@@ -590,9 +650,12 @@ class TestLeadsToAccounts(_PanelDB):
         self.assertEqual(again.status_code, 200, "из заявки нельзя создать учётку заново")
 
     def test_suggestion_avoids_taken_login_and_bad_input_keeps_the_lead(self):
+        # логин-почта (15.10.2026): предлагается сам email заявки, строчными; занят — прежний вид из части до @
+        self.assertIn('name="username" value="i.petrov@zavod.ru"', self.as_admin.get("/admin/leads").text)
+        self._mk("i.petrov@zavod.ru")
         self._mk("i.petrov")
         self.assertIn('name="username" value="i.petrov2"', self.as_admin.get("/admin/leads").text)
-        for data, msg in (({"username": "i.petrov"}, "уже занят"), ({"username": "Иван"}, "Логин — латинские"),
+        for data, msg in (({"username": "i.petrov"}, "уже занят"), ({"username": "Иван"}, "латинские буквы"),
                           ({"username": "ok.login", "plan": "Безлимит"}, "Неизвестный тариф")):
             with self.subTest(data=data):
                 r = self.as_admin.post(f"/api/admin/leads/{self.lead}/account", data=data)

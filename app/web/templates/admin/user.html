@@ -41,7 +41,7 @@
       <summary>Редактировать</summary>
       <form method="post" action="/api/admin/users/{{ u.id }}/profile" class="adm-form">
         <label>Логин <input name="username" value="{{ pf.username }}" required maxlength="64"
-               pattern="[a-z0-9][a-z0-9._\-]{2,63}" autocomplete="off"></label>
+               autocomplete="off"></label>
         <label>ФИО <input name="full_name" value="{{ pf.full_name }}" maxlength="200"></label>
         <label>Должность <input name="position" value="{{ pf.position }}" maxlength="128"></label>
         <label>Рабочий email <input type="email" name="email" value="{{ pf.email }}" maxlength="255"></label>

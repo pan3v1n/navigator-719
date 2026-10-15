@@ -19,7 +19,7 @@
           {% if trial_over %}<div class="note-box">Пробные вопросы закончились. Войдите, чтобы продолжить работу.</div>{% endif %}
           {% if error %}<div class="error">{{ error }}</div>{% endif %}
           <label class="field"><span>Логин</span>
-            <input name="username" autocomplete="username" required autofocus>
+            <input name="username" autocomplete="username" placeholder="Рабочий email или логин" required autofocus>
           </label>
           <label class="field"><span>Пароль</span>
             <input name="password" type="password" autocomplete="current-password" required>

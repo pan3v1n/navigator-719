@@ -570,9 +570,9 @@ class TestAdminCreatesAccount(_CabinetDB):
         with self.Session() as db:
             before = len(q.list_users(db))
         for login, role, msg in ((existing.username, "user", "уже занят"),
-                                 ("иван", "user", "Логин — латинские"),
-                                 ("ab", "user", "Логин — латинские"),
-                                 ("a b c", "user", "Логин — латинские"),
+                                 ("иван", "user", "латинские буквы"),
+                                 ("ab", "user", "латинские буквы"),
+                                 ("a b c", "user", "латинские буквы"),
                                  ("new.user1", "root", "Неизвестная роль")):
             with self.subTest(login=login, role=role):
                 r = self._post(login, role)
