@@ -340,6 +340,19 @@ def set_user_plan(db: Session, user_id: int, plan: str | None, started_at=None,
     return u
 
 
+def close_plan(db: Session, user_id: int, expires_at) -> User | None:
+    """Закрыть доступ по тарифу: сдвинуть ТОЛЬКО срок. Через `set_user_plan` нельзя — у тестировщика без
+    отметки подтверждения (назначен до test38, колонки пусты) он записал бы подтверждающим того, кто
+    закрывает доступ, и время закрытия (ревью 15.10.2026, LOW)."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.plan_expires_at = expires_at
+    db.commit()
+    db.refresh(u)
+    return u
+
+
 def record_answer_usage(db: Session, user_id: int) -> None:
     db.add(AnswerUsage(user_id=user_id))
     db.commit()

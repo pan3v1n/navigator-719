@@ -340,6 +340,30 @@
         {% if saved %}<span class="saved-note" role="status">Изменения сохранены</span>{% endif %}
       </div>
     </form>
+
+    {# Смена пароля (просьба владельца 15.10.2026). Отдельная форма: пароль не уходит вместе с анкетой,
+       а ошибка одной формы не стирает введённое в другой. Якорь — чтобы после отправки вернуться сюда. #}
+    <form class="panel" id="password" method="post" action="/profile/password#password" autocomplete="off">
+      <div>
+        <h2>Пароль</h2>
+        <p class="panel-sub">После смены пароля входы на других устройствах завершатся — там нужно будет войти
+          заново. В этом браузере вы останетесь в сервисе.</p>
+      </div>
+      {% if password_error %}<div class="error" role="alert">{{ password_error }}</div>{% endif %}
+      <div class="grid2">
+        <label class="field"><span>Текущий пароль</span>
+          <input type="password" name="current_password" autocomplete="current-password" required></label>
+        <label class="field"><span>Новый пароль</span>
+          <input type="password" name="new_password" autocomplete="new-password" minlength="8" required></label>
+        <label class="field"><span>Повторите новый пароль</span>
+          <input type="password" name="repeat_password" autocomplete="new-password" minlength="8" required></label>
+      </div>
+      <p class="req-note">Не короче 8 символов. Не используйте пароль от других сервисов.</p>
+      <div class="save-row">
+        <button class="ds-btn" type="submit">Сменить пароль</button>
+        {% if password_saved %}<span class="saved-note" role="status">Пароль изменён</span>{% endif %}
+      </div>
+    </form>
     {% endif %}
   </div>
 </div>

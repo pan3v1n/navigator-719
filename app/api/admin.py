@@ -369,11 +369,10 @@ def admin_edit_profile(request: Request, user_id: int, username: str = Form(defa
                 errs.append(f"Логин «{form['username']}» уже занят.")
     if errs:
         return _card(request, admin, user_id, error=" ".join(errs), status_code=400, profile_form=form)
+    # Только названия полей: логин тоже бывает ПДн (из почты собирается `i.petrov`) — ревью 15.10.2026, LOW
     changed = [label for f, label in PROFILE_FIELDS.items() if before[f] != after[f]]
-    renamed = before["username"] != after["username"]
-    logger.info(f"профиль: admin_id={admin.id} изменил user_id={user_id}: {', '.join(changed) or 'без изменений'}"
-                + (f"; логин «{before['username']}» → «{after['username']}»" if renamed else ""))
-    return _back(user_id, "login" if renamed else "profile")
+    logger.info(f"профиль: admin_id={admin.id} изменил user_id={user_id}: {', '.join(changed) or 'без изменений'}")
+    return _back(user_id, "login" if before["username"] != after["username"] else "profile")
 
 
 @router.post("/api/admin/users/{user_id}/password", response_class=HTMLResponse)
@@ -809,8 +808,7 @@ def admin_tester_revoke(user_id: int, admin: User = Depends(require_admin)) -> R
         if u is None or u.plan != plans.TESTER_PLAN:
             raise HTTPException(status_code=404, detail="Тестировщик не найден")
         if not plans.plan_expired(u):
-            q.set_user_plan(db, user_id, plans.TESTER_PLAN, u.plan_started_at,
-                            plans.anchor_from_date(plans.msk_today()), verified_by=admin.id)
+            q.close_plan(db, user_id, plans.anchor_from_date(plans.msk_today()))
     logger.info(f"тестировщик: admin_id={admin.id} закрыл доступ user_id={user_id}")
     return RedirectResponse("/admin/testers?ok=revoked", status_code=303)
 
