@@ -29,6 +29,7 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from loguru import logger
+from sqlalchemy.exc import IntegrityError
 
 from app.api import quota
 from app.api.admin_stats import build_admin_view, system_health
@@ -37,6 +38,8 @@ from app.api.auth import current_user, generate_password, hash_password, needs_p
 from app.api.leads import _INN_RE as INN_RE
 from app.api.web import (
     ORG_LIMIT,
+    PROFILE_LIMITS,
+    _contact_errors,
     _ctx,
     _download,
     _json_download,
@@ -48,6 +51,7 @@ from app.core.config import settings
 from app.core.costs import cost_rub
 from app.core.plans import PLAN_LIMITS
 from app.core.prompts import EXPERT_DISCLAIMER
+from app.core.regions import REGIONS
 from app.core.release import release_label
 from app.db import queries as q
 from app.db.engine import get_session
@@ -80,6 +84,9 @@ DONE = {
     "verified": "Организация и ИНН подтверждены.",
     "unverified": "Подтверждение организации снято.",
     "role": "Роль изменена.",
+    "profile": "Профиль сохранён.",
+    "login": ("Профиль сохранён, логин изменён. Сообщите человеку новый логин: старым войти уже нельзя, "
+              "открытые входы продолжают работать."),
     "blocked": "Учётка заблокирована: вход закрыт, открытые сессии завершены.",
     "unblocked": "Учётка разблокирована.",
 }
@@ -214,18 +221,34 @@ def admin_create_user(request: Request, username: str = Form(default=""), role: 
 
 def _new_account_error(db, login: str, role: str) -> str:
     """Причина, по которой учётку с таким логином и ролью завести нельзя, или «»."""
+    if role not in ACCOUNT_ROLES:
+        return "Неизвестная роль."
+    return _login_error(db, login)
+
+
+def _login_error(db, login: str) -> str:
+    """Причина, по которой логин нельзя дать учётке (новой или переименуемой), или «». Одно правило
+    на создание и смену логина: иначе переименованием обходился бы формат, который держит создание."""
     if not _USERNAME_RE.match(login):
         return ("Логин — латинские буквы, цифры, точка, дефис или подчёркивание, от 3 до 64 "
                 "символов, начинается с буквы или цифры.")
-    if role not in ACCOUNT_ROLES:
-        return "Неизвестная роль."
     if q.get_user_by_username(db, login) is not None:
         return f"Логин «{login}» уже занят."
     return ""
 
 
+# Поля, которые admin правит в карточке, в порядке формы; подписи — для журнала, куда идут только
+# НАЗВАНИЯ изменённых полей, без значений (ПДн).
+PROFILE_FIELDS = {"username": "логин", "full_name": "ФИО", "position": "должность", "email": "email",
+                  "phone": "телефон", "region": "регион", "telegram": "Telegram"}
+
+
+def _profile_values(u: User) -> dict:
+    return {f: getattr(u, f) or "" for f in PROFILE_FIELDS}
+
+
 def _card(request: Request, admin: User, user_id: int, *, password_shown: str | None = None,
-          notice: str = "", error: str = "", status_code: int = 200):
+          notice: str = "", error: str = "", status_code: int = 200, profile_form: dict | None = None):
     with get_session() as db:
         u = q.get_user(db, user_id)
         if u is None:
@@ -237,6 +260,8 @@ def _card(request: Request, admin: User, user_id: int, *, password_shown: str | 
         org_verified = (f"{_msk(u.org_verified_at)}" + (f" · {verifier.username}" if verifier else "")
                         if u.org_verified_at else "")
         tester_verified = _tester_verified(db, u)
+        # Ошибка сохранения — форма открыта с введённым, иначе нечего было бы исправлять
+        pf = profile_form or _profile_values(u)
         db.expunge(u)
     return _page(
         request, admin, "user", "users", u.username, status_code=status_code, u=u, row=row,
@@ -249,7 +274,8 @@ def _card(request: Request, admin: User, user_id: int, *, password_shown: str | 
                 f"{plans.msk_date(row['state'].end - timedelta(seconds=1)):%d.%m.%Y}") if row["state"] else "",
         consent_at=_msk(u.consent_at), created_at=_msk(u.created_at), blocked_at=_msk(u.blocked_at),
         is_self=u.id == admin.id, password_shown=password_shown, notice=notice, error=error,
-        org_verified=org_verified, tester_verified=tester_verified)
+        org_verified=org_verified, tester_verified=tester_verified,
+        pf=pf, profile_open=profile_form is not None, regions=REGIONS)
 
 
 def _tester_verified(db, u: User, verifiers: dict | None = None) -> str:
@@ -300,6 +326,54 @@ def admin_set_role(request: Request, user_id: int, role: str = Form(default=""),
         return _card(request, admin, user_id, error=why, status_code=400)
     logger.info(f"учётка: admin_id={admin.id} сменил роль user_id={user_id} на {role}")
     return _back(user_id, "role")
+
+
+def _profile_errors(db, cur: User, form: dict) -> list[str]:
+    """Правила — те же, что у анкеты кабинета (`web.profile_submit`), кроме обязательности: admin
+    может поправить одно поле, не заполняя остальные."""
+    errs = []
+    if form["username"] != cur.username and (why := _login_error(db, form["username"])):
+        errs.append(why)
+    if len(form["full_name"]) > PROFILE_LIMITS["full_name"] or len(form["telegram"]) > PROFILE_LIMITS["telegram"]:
+        errs.append("Слишком длинное ФИО или ник в Telegram.")
+    errs += _contact_errors(form["position"], form["email"], form["phone"])
+    # Регион — из справочника; прежнее значение вне справочника (заполнено до него) оставить можно:
+    # иначе admin не сохранил бы и ФИО, пока не сменит регион.
+    if form["region"] and form["region"] not in REGIONS and form["region"] != (cur.region or ""):
+        errs.append("Выберите регион из списка.")
+    return errs
+
+
+@router.post("/api/admin/users/{user_id}/profile", response_class=HTMLResponse)
+def admin_edit_profile(request: Request, user_id: int, username: str = Form(default=""),
+                       full_name: str = Form(default=""), position: str = Form(default=""),
+                       email: str = Form(default=""), phone: str = Form(default=""),
+                       region: str = Form(default=""), telegram: str = Form(default=""),
+                       admin: User = Depends(require_admin)):
+    """Логин и анкета учётки (просьба владельца 15.10.2026). Согласие на ПДн здесь не ставится — только
+    самим пользователем (`queries.edit_profile_by_admin`). Ошибка — карточка с открытой формой и
+    введённым; успех — PRG на карточку."""
+    form = {"username": username.strip().lower(), "full_name": full_name.strip(), "position": position.strip(),
+            "email": email.strip(), "phone": phone.strip(), "region": region.strip(), "telegram": telegram.strip()}
+    with get_session() as db:
+        cur = q.get_user(db, user_id)
+        if cur is None:
+            raise HTTPException(status_code=404, detail="Пользователь не найден")
+        before = _profile_values(cur)
+        errs = _profile_errors(db, cur, form)
+        if not errs:
+            try:
+                after = _profile_values(q.edit_profile_by_admin(db, user_id, **form))
+            except IntegrityError:          # логин заняли между проверкой и записью
+                db.rollback()
+                errs.append(f"Логин «{form['username']}» уже занят.")
+    if errs:
+        return _card(request, admin, user_id, error=" ".join(errs), status_code=400, profile_form=form)
+    changed = [label for f, label in PROFILE_FIELDS.items() if before[f] != after[f]]
+    renamed = before["username"] != after["username"]
+    logger.info(f"профиль: admin_id={admin.id} изменил user_id={user_id}: {', '.join(changed) or 'без изменений'}"
+                + (f"; логин «{before['username']}» → «{after['username']}»" if renamed else ""))
+    return _back(user_id, "login" if renamed else "profile")
 
 
 @router.post("/api/admin/users/{user_id}/password", response_class=HTMLResponse)

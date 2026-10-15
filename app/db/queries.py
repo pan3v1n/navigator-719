@@ -49,12 +49,8 @@ def update_profile(
     u = db.get(User, user_id)
     if not u:
         return None
-    u.full_name = (full_name or "").strip()
-    u.region = (region or "").strip()
-    u.telegram = (telegram or "").strip() or None
-    for field, value in (("position", position), ("email", email), ("phone", phone)):
-        if value is not None:
-            setattr(u, field, value.strip() or None)
+    _set_profile_fields(u, full_name=full_name, region=region, telegram=telegram,
+                        position=position, email=email, phone=phone)
     changed = False
     for field, value in (("org", org), ("inn", inn)):
         # сравнение — нормализованных: двойной пробел в названии, вписанном admin'ом, не «правка»
@@ -66,6 +62,36 @@ def update_profile(
     if consent and not u.consent:
         u.consent = True
         u.consent_at = _utcnow()
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def _set_profile_fields(u: User, *, full_name: str, region: str, telegram: str, position: str | None,
+                        email: str | None, phone: str | None) -> None:
+    """Поля анкеты — одно место нормализации для кабинета и админки: иначе одно и то же значение,
+    сохранённое с двух путей, хранилось бы по-разному."""
+    u.full_name = (full_name or "").strip()
+    u.region = (region or "").strip()
+    u.telegram = (telegram or "").strip() or None
+    for field, value in (("position", position), ("email", email), ("phone", phone)):
+        if value is not None:
+            setattr(u, field, value.strip() or None)
+
+
+def edit_profile_by_admin(db: Session, user_id: int, *, username: str, full_name: str, region: str,
+                          telegram: str, position: str, email: str, phone: str) -> User | None:
+    """Правка учётки admin'ом (просьба владельца 15.10.2026): логин и поля анкеты одной записью.
+    Согласие на ПДн НЕ трогается: его даёт только сам субъект (152-ФЗ), и пока он его не дал, гейт
+    чата держит роль user на анкете, как бы полно admin её ни заполнил. Организация и ИНН — своей
+    формой (`set_user_org`), там своё подтверждение. Сессии и «запомнить меня» привязаны к id, а не к
+    логину, — смена логина входы не гасит. Занятый логин в гонке — IntegrityError на commit."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.username = username
+    _set_profile_fields(u, full_name=full_name, region=region, telegram=telegram,
+                        position=position, email=email, phone=phone)
     db.commit()
     db.refresh(u)
     return u

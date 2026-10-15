@@ -737,6 +737,9 @@ a.head-avatar:hover { opacity: .9; }
 .adm-secret code, .adm-card code { padding: 2px 6px; border-radius: 4px; background: var(--blue-07); color: var(--blue); font-size: 15px; }
 .adm-danger { box-shadow: inset 0 0 0 1px rgba(216, 51, 50, .35); }
 .adm-create summary { cursor: pointer; font: 500 16px/1.3 var(--font); color: var(--blue); }
+/* правка анкеты в карточке учётки: отступы между «Редактировать», формой и пояснением */
+.adm-edit[open] > summary { margin-bottom: 12px; }
+.adm-edit > .adm-form { margin-bottom: 12px; }
 .adm-row, .adm-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .adm-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
 .adm-form label { display: flex; flex-direction: column; gap: 6px; font: 500 13px/1.2 var(--font); color: var(--ink-60); }
