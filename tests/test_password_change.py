@@ -70,6 +70,53 @@ class TestPasswordChange(_PanelDB):
                          "«запомнить меня» выдано браузеру, который об этом не просил")
         self.assertTrue(self._signed_in(here))
 
+    def test_stale_or_foreign_remember_cookie_is_not_revived(self):
+        """Ревью test39 (MED): «запомнить меня» продлевалось по ЛЮБОЙ подписанной куке. Вход без «запомнить»
+        прежнюю куку не снимает, и на общем компьютере мёртвая кука (или чужая) превращалась в свежий
+        автовход на 30 дней для того, кто меняет пароль."""
+        from app.db import queries as q
+
+        # своя, но устаревшая: «запомнить» → сброс admin'ом (эпоха 1) → вход без «запомнить» → смена пароля
+        c = self.TestClient(self.app)
+        c.post("/login", data={"username": "kursk.expert1", "password": PW, "remember": "1"}, follow_redirects=False)
+        with self.Session() as db:
+            q.reset_password(db, self.u.id, auth.hash_password(PW))
+        c.post("/login", data={"username": "kursk.expert1", "password": PW}, follow_redirects=False)
+        self.assertEqual(self._change(c).status_code, 303)
+        self.assertIsNone(c.cookies.get(auth.REMEMBER_COOKIE), "мёртвая кука ожила с новой эпохой")
+        c.cookies.pop("session", None)
+        self.assertFalse(self._signed_in(c), "после закрытия браузера вход сохранился")
+        # чужая действующая: B «запомнен», A входит без «запомнить» и меняет пароль
+        web._password_limit.reset()
+        self._mk("kursk.expert2", role="expert")
+        shared = self.TestClient(self.app)
+        shared.post("/login", data={"username": "kursk.expert2", "password": PW, "remember": "1"},
+                    follow_redirects=False)
+        shared.post("/login", data={"username": "kursk.expert1", "password": NEW}, follow_redirects=False)
+        self.assertEqual(self._change(shared, current=NEW, new="Tretii-Parol-1").status_code, 303)
+        self.assertIsNone(shared.cookies.get(auth.REMEMBER_COOKIE), "чужая кука стала автовходом сменившего")
+
+    def test_admin_reset_during_the_change_wins(self):
+        """Ревью test39 (LOW): между проверкой сессии и записью — два bcrypt. Сброс admin'ом в это окно
+        перетирался паролем пользователя, а его браузер получал живую сессию."""
+        from app.db import queries as q
+
+        here = self._login("kursk.expert1")
+        real = web.hash_password
+
+        def admin_resets_meanwhile(password):        # окно: текущий пароль уже проверен, запись ещё впереди
+            with self.Session() as db:
+                q.reset_password(db, self.u.id, real("Admin-Temp-1"))
+            return real(password)
+
+        with mock.patch.object(web, "hash_password", admin_resets_meanwhile):
+            r = self._change(here)
+        self.assertEqual((r.status_code, r.headers["location"]), (303, "/login"))
+        got = self._fresh(self.u.id)
+        self.assertTrue(verify_password("Admin-Temp-1", got.password_hash), "пароль пользователя перетёр сброс admin'а")
+        self.assertEqual(got.auth_epoch, 1)
+        self.assertFalse(self._signed_in(here), "браузер получил живую сессию поверх сброса")
+
     def test_rejections_change_nothing(self):
         here = self._login("kursk.expert1")
         for kw, why in (({"current": "не-тот"}, "Текущий пароль указан неверно"),

@@ -637,12 +637,27 @@ def password_submit(request: Request, current_password: str = Form(default=""),
     if why:
         return _profile_response(request, user, _profile_form(user), status_code=400, password_error=why)
     _password_limit.reset(key)
+    epoch = user.auth_epoch or 0
+    remembered = remember_from(request)
     with get_session() as db:
-        fresh = q.reset_password(db, user.id, hash_password(new_password))
+        fresh = q.reset_password(db, user.id, hash_password(new_password), expected_epoch=epoch)
+    if fresh is None:
+        # Эпоха сменилась, пока шла проверка (сброс пароля или блокировка admin'ом): эта сессия уже не
+        # действует — ничего не записано, вход заново.
+        logout_session(request)
+        logger.info(f"пароль: user_id={user.id} — смена не записана, эпоха входа сменилась во время проверки")
+        resp = RedirectResponse("/login", status_code=303)
+        clear_remember_cookie(resp)
+        return resp
     login_session(request, fresh)
     resp = RedirectResponse("/profile?password=1#password", status_code=303)
-    if remember_from(request):   # этот браузер был «запомнен» — продлеваем с новой эпохой, а не разлогиниваем
+    # «Запомнить меня» продлевается, только если кука — ЭТОЙ учётки и действующая: подписанная кука другого
+    # пользователя или устаревшая (вход без «запомнить» её не снимает) иначе превратилась бы в свежий
+    # автовход на 30 дней — на общем компьютере (ревью test39, MED). Чужую или мёртвую — снимаем.
+    if remembered == (user.id, epoch):
         set_remember_cookie(resp, fresh.id, fresh.auth_epoch or 0)
+    elif remembered:
+        clear_remember_cookie(resp)
     logger.info(f"пароль: user_id={user.id} сменил пароль, прочие входы завершены")
     return resp
 
