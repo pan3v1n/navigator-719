@@ -300,6 +300,22 @@ class TestAdminTesters(_Accounts):
         with self.assertRaises(HTTPException):
             adm.admin_tester_revoke(u.id, admin=ADMIN)          # не тестировщик — закрывать нечего
 
+    def test_revoke_does_not_stamp_a_legacy_tester(self):
+        """Ревью 15.10.2026, LOW: тестировщик, назначенный до test38, — без отметки подтверждения. Закрытие
+        доступа шло через `set_user_plan` и записывало подтверждающим того, кто закрывает."""
+        from app.db.models import User
+
+        t = self.user("kursk.tester3", plan=TESTER)
+        with self.Session() as db:
+            row = db.get(User, t.id)
+            row.tester_verified_at = row.tester_verified_by = None     # как после миграции test38
+            db.commit()
+        adm.admin_tester_revoke(t.id, admin=ADMIN)
+        got = self.get(t.id)
+        self.assertTrue(plans.plan_expired(got))
+        self.assertEqual((got.tester_verified_at, got.tester_verified_by), (None, None),
+                         "закрывший доступ записан подтверждающим")
+
     def test_card_assignment_records_and_plan_change_clears(self):
         u = self.user()
         adm.admin_set_plan(u.id, plan=TESTER, started="", expires="", kind="individual", admin=ADMIN)

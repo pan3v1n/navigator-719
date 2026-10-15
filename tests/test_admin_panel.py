@@ -345,7 +345,7 @@ class TestProfileEdit(_PanelDB):
         self.assertEqual({f: getattr(got, f) for f in self.FULL}, self.FULL)
         line = next(c.args[0] for c in log.call_args_list if str(c.args[0]).startswith("профиль:"))
         self.assertIn("логин, ФИО, должность, email, телефон, регион, Telegram", line)
-        for value in ("Иван Петров", "i.petrov@tpp.ru", "+7 900 000-00-00", "@ivan"):
+        for value in ("Иван Петров", "i.petrov@tpp.ru", "+7 900 000-00-00", "@ivan", "kursk.ivanov", "kursk.expert1"):
             self.assertNotIn(value, line, "в журнал ушли ПДн")
         self.assertIn("Сообщите человеку новый логин", self.as_admin.get(f"/admin/users/{u.id}?ok=login").text)
         # входы привязаны к id: открытая сессия и «запомнить меня» живы, старым логином войти нельзя
