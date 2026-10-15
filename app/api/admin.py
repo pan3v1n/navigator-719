@@ -75,7 +75,8 @@ ACCOUNT_ROLES = {"user": "Региональный участник", "expert": 
 _USERNAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{2,63}$")
 # Логин-почта (просьба владельца 15.10.2026: «логин в формате электронной почты»). Только латиница: логин
 # вводят на странице входа и сравнивают побайтно. Длина — по колонке `users.username` (64).
-_EMAIL_LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._%+-]*@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
+# `%` в логине не нужен ни одному реальному адресу и ломается в URL — не принимаем (ревью test40, LOW).
+_EMAIL_LOGIN_RE = re.compile(r"^[a-z0-9][a-z0-9._+-]*@[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]*[a-z0-9])?)+$")
 LOGIN_MAX = 64
 
 
@@ -183,8 +184,7 @@ def _matches(row: dict, text: str, role: str, status: str, plan: str) -> bool:
 
 
 @router.get("/admin/users", response_class=HTMLResponse)
-def admin_users(request: Request, role: str = "", status: str = "", plan: str = "", ok: str = "",
-                login: str = ""):
+def admin_users(request: Request, role: str = "", status: str = "", plan: str = "", ok: str = ""):
     """Список учёток: поиск по логину, ФИО, организации, ИНН, email и региону; фильтры роли,
     состояния и тарифа. Свежая активность сверху."""
     gate = _gate(request)
@@ -197,7 +197,9 @@ def admin_users(request: Request, role: str = "", status: str = "", plan: str = 
     total = len(rows)
     rows = [r for r in rows if _matches(r, text, role, status, plan)]
     rows.sort(key=lambda r: (r["last_ts"] is not None, r["last_ts"] or datetime.min, -r["id"]), reverse=True)
-    notice = f"Учётка «{login}» удалена вместе с профилем и диалогами." if ok == "deleted" and login else ""
+    # Логин в адрес не кладём: с 15.10.2026 логин — email, а адрес оседает в журнале доступа (uvicorn) —
+    # удаление по требованию субъекта ПДн записывало бы его email (ревью test40, MED).
+    notice = "Учётка удалена вместе с профилем и диалогами." if ok == "deleted" else ""
     return _page(request, gate, "users", "users", "Пользователи", rows=rows, total=total,
                  filters={"q": text, "role": role, "status": status, "plan": plan}, roles=ACCOUNT_ROLES,
                  all_plans=list(plans.ALL_PLANS), notice=notice, create_form={})
@@ -225,7 +227,8 @@ def admin_create_user(request: Request, username: str = Form(default=""), role: 
         return _page(request, admin, "users", "users", "Пользователи", status_code=400, rows=rows,
                      total=len(rows), filters={}, roles=ACCOUNT_ROLES, all_plans=list(plans.ALL_PLANS),
                      create_error=error, create_form={"username": login, "role": role})
-    logger.info(f"учётка: admin_id={admin.id} создал «{login}» ({role})")  # пароль в журнал — никогда
+    # ни пароля, ни логина: логин теперь email — ПДн (ревью test40, MED)
+    logger.info(f"учётка: admin_id={admin.id} создал user_id={uid} ({role})")
     return _card(request, admin, uid, password_shown=password, notice="Учётка создана.")
 
 
@@ -435,7 +438,7 @@ def admin_delete_user(request: Request, user_id: int, confirm: str = Form(defaul
     if why:
         return _card(request, admin, user_id, error=why, status_code=400)
     logger.info(f"учётка: admin_id={admin.id} удалил user_id={user_id}")
-    return RedirectResponse(f"/admin/users?ok=deleted&login={login}", status_code=303)
+    return RedirectResponse("/admin/users?ok=deleted", status_code=303)
 
 
 @router.post("/api/admin/users/{user_id}/plan")
@@ -719,7 +722,7 @@ def admin_lead_account(request: Request, lead_id: int, username: str = Form(defa
     if error:
         return _leads_response(request, admin, error=error, error_lead=lead_id, form=form,
                                status_code=400)
-    logger.info(f"заявка: admin_id={admin.id} создал из lead_id={lead_id} учётку «{login}» ({role})")
+    logger.info(f"заявка: admin_id={admin.id} создал из lead_id={lead_id} учётку user_id={uid} ({role})")
     return _card(request, admin, uid, password_shown=password,
                  notice=f"Учётка создана из заявки №{lead_id}: организация, ИНН и контакты перенесены.")
 

@@ -562,7 +562,9 @@ class TestAdminCreatesAccount(_CabinetDB):
         r = self._post("perm.expert1", role="expert")
         pw = r.text.split('id="new-password">')[1].split("<")[0]
         log = "".join(lines)
-        self.assertIn("perm.expert1", log, "создание учётки не попало в журнал")
+        # событие в журнале есть, но по номеру: логин с 15.10.2026 — email, то есть ПДн (ревью test40, MED)
+        self.assertIn("создал user_id=", log, "создание учётки не попало в журнал")
+        self.assertNotIn("perm.expert1", log, "логин записан в журнал")
         self.assertNotIn(pw, log, "пароль записан в журнал")
 
     def test_bad_input_creates_nothing(self):

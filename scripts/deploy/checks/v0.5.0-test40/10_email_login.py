@@ -61,13 +61,15 @@ def main() -> int:
         with mock.patch.object(auth, "get_session", S), mock.patch.object(web, "get_session", S), \
                 mock.patch.object(adm, "get_session", S):
             web._login_limit.reset()
-            boss = TestClient(app)        # без `with` — lifespan (init_db боевой базы) не запускается
+            # https: на сервере COOKIE_SECURE=true, кука сессии Secure — по http клиент её не вернул бы, и все
+            # /api/admin/* ответили бы 401 на верном коде (ревью test40, HIGH). Без `with` — lifespan не запускается.
+            boss = TestClient(app, base_url="https://testserver")
             boss.post("/login", data={"username": "check-admin40", "password": pw}, follow_redirects=False)
             r = boss.post("/api/admin/users", data={"username": "Check.Ivanov@KCCI.ru", "role": "user"})
             password = r.text.split('id="new-password">')[1].split("<")[0] if 'id="new-password">' in r.text else ""
             bad_addr = boss.post("/api/admin/users", data={"username": "иванов@кцци.рф", "role": "user"})
             old_form = boss.post("/api/admin/users", data={"username": "kursk.check40", "role": "user"})
-            mixed = TestClient(app).post("/login", data={"username": "CHECK.IVANOV@kcci.ru", "password": password},
+            mixed = TestClient(app, base_url="https://testserver").post("/login", data={"username": "CHECK.IVANOV@kcci.ru", "password": password},
                                          follow_redirects=False)
             web._login_limit.reset()
         with S() as db:

@@ -254,13 +254,13 @@ class TestCardActions(_PanelDB):
         self.assertIsNotNone(self._fresh(u.id), "удалено без точного подтверждения")
         r = self.as_admin.post(f"/api/admin/users/{u.id}/delete", data={"confirm": "kursk.expert9"},
                                follow_redirects=False)
-        self.assertEqual(r.headers["location"], "/admin/users?ok=deleted&login=kursk.expert9")
+        # логин в адрес не кладётся: он оседает в журнале доступа, а логин теперь email (ревью test40, MED)
+        self.assertEqual(r.headers["location"], "/admin/users?ok=deleted")
         self.assertIsNone(self._fresh(u.id))
         with self.Session() as db:
             self.assertEqual(db.execute(select(Message).where(Message.user_id == u.id)).all(), [])
             self.assertEqual(db.execute(select(AnswerUsage).where(AnswerUsage.user_id == u.id)).all(), [])
-        self.assertIn("удалена вместе с профилем и диалогами",
-                      self.as_admin.get("/admin/users?ok=deleted&login=kursk.expert9").text)
+        self.assertIn("удалена вместе с профилем и диалогами", self.as_admin.get("/admin/users?ok=deleted").text)
 
     def test_org_verification(self):
         """Вечер 09.10.2026: организацию вписывает пользователь, admin подтверждает («чтобы не было
@@ -447,6 +447,20 @@ class TestEmailLogin(_PanelDB):
                 self.assertEqual(ok.status_code, 302, f"вход «{typed}» не прошёл")
         self.assertEqual(self._create("BELODUROV@kcci.ru").status_code, 400, "тот же email другим регистром — второй учёткой")
 
+    def test_email_login_stays_out_of_the_log_and_the_url(self):
+        """Ревью test40 (MED): логин-почта — ПДн; он не должен попадать ни в журнал при создании (в том
+        числе из заявки), ни в адрес после удаления (адрес оседает в журнале доступа)."""
+        with mock.patch.object(adm.logger, "info") as log:
+            self.assertEqual(self._create("ivanov+tpp@kcci.ru").status_code, 200, "«+» в адресе — законный логин")
+        self.assertTrue(log.call_args_list)
+        self.assertFalse([c for c in log.call_args_list if "ivanov" in str(c)], "email логина в журнале")
+        with self.Session() as db:
+            uid = q.get_user_by_username(db, "ivanov+tpp@kcci.ru").id
+        r = self.as_admin.post(f"/api/admin/users/{uid}/delete", data={"confirm": "ivanov+tpp@kcci.ru"},
+                               follow_redirects=False)
+        self.assertNotIn("ivanov", r.headers["location"])
+        self.assertEqual(self._create("a%41b@kcci.ru").status_code, 400, "«%» в логине ломается в URL")
+
     def test_old_login_form_still_accepted_without_email_prefill(self):
         self.assertEqual(self._create("kursk.expert9").status_code, 200)
         with self.Session() as db:
@@ -608,6 +622,9 @@ class TestLeadsToAccounts(_PanelDB):
     def test_account_from_lead(self):
         page = self.as_admin.get("/admin/leads").text
         self.assertIn('name="username" value="i.petrov@zavod.ru"', page, "логин не предложен из email")
+        with mock.patch.object(adm.logger, "info") as log:
+            self.as_admin.post(f"/api/admin/leads/{self.other}/account", data={"username": "anna@pribor.ru"})
+        self.assertFalse([c for c in log.call_args_list if "anna" in str(c)], "email логина из заявки в журнале")
         r = self.as_admin.post(f"/api/admin/leads/{self.lead}/account",
                                data={"username": "i.petrov", "role": "user", "plan": "Старт"})
         self.assertEqual(r.status_code, 200)
