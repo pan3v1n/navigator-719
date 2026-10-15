@@ -723,7 +723,7 @@ def admin_delete_lead(lead_id: int, admin: User = Depends(require_admin)) -> Red
 TESTER_DONE = {
     "approved": "Тестировщик подтверждён: тариф подключён с сегодняшнего дня.",
     "rejected": "Заявка отклонена.",
-    "revoked": "Тариф «Тестировщик» снят.",
+    "revoked": "Доступ тестировщика закрыт с сегодняшнего дня: вопросы закрыты, учётка и история сохранены.",
 }
 
 
@@ -800,13 +800,18 @@ def admin_tester_reject(lead_id: int, admin: User = Depends(require_admin)) -> R
 
 @router.post("/api/admin/testers/users/{user_id}/revoke")
 def admin_tester_revoke(user_id: int, admin: User = Depends(require_admin)) -> RedirectResponse:
-    """Снять «Тестировщика» — учётка остаётся без тарифа (как «без тарифа» в карточке)."""
+    """Закрыть доступ тестировщику: тариф остаётся, срок — сегодняшний день, и вопросы закрываются тем же
+    путём, что у любого истёкшего тарифа (402). Снимать тариф НЕЛЬЗЯ: «без тарифа» — это безлимит без
+    срока (так живут учётки до #160), и отзыв давал больше доступа, чем бездействие (ревью
+    feat/tester-plan 15.10.2026, MED). Уже истёкший срок не трогаем — иначе отзыв сдвигал бы его дату."""
     with get_session() as db:
         u = q.get_user(db, user_id)
         if u is None or u.plan != plans.TESTER_PLAN:
             raise HTTPException(status_code=404, detail="Тестировщик не найден")
-        q.set_user_plan(db, user_id, None)
-    logger.info(f"тестировщик: admin_id={admin.id} снял тариф у user_id={user_id}")
+        if not plans.plan_expired(u):
+            q.set_user_plan(db, user_id, plans.TESTER_PLAN, u.plan_started_at,
+                            plans.anchor_from_date(plans.msk_today()), verified_by=admin.id)
+    logger.info(f"тестировщик: admin_id={admin.id} закрыл доступ user_id={user_id}")
     return RedirectResponse("/admin/testers?ok=revoked", status_code=303)
 
 

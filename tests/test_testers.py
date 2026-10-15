@@ -275,12 +275,30 @@ class TestAdminTesters(_Accounts):
         with self.assertRaises(HTTPException):
             adm.admin_tester_reject(self.lead(tariff="Профи", kind=None), admin=ADMIN)
         t = self.user("kursk.tester2", plan=TESTER)
+        before = self.get(t.id)
         self.assertIn(f'action="/api/admin/testers/users/{t.id}/revoke"', self.page())
         adm.admin_tester_revoke(t.id, admin=ADMIN)
+        # Ревью 15.10.2026 (MED): отзыв снимал тариф, а «без тарифа» — безлимит без срока, то есть отзыв
+        # давал больше доступа, чем бездействие. Теперь доступ закрыт: тариф тот же, срок истёк сегодня.
         got = self.get(t.id)
-        self.assertEqual((got.plan, got.tester_verified_at, got.tester_verified_by), (None, None, None))
+        self.assertEqual(got.plan, TESTER)
+        self.assertTrue(plans.plan_expired(got), "после отзыва у тестировщика остался доступ")
+        self.assertEqual(plans.msk_date(got.plan_expires_at), plans.msk_today())
+        self.assertEqual((got.plan_started_at, got.tester_verified_at), (before.plan_started_at, before.tester_verified_at))
+        from app.api import chat
+        with self.assertRaises(HTTPException) as e:
+            chat._enforce_plan_quota(got, mock.Mock(session_id=None, message="вопрос"))
+        self.assertEqual(e.exception.status_code, 402, "вопросы после отзыва не закрыты")
+        page = self.page("revoked")
+        self.assertIn("Доступ тестировщика закрыт", page)
+        self.assertNotIn(f'action="/api/admin/testers/users/{t.id}/revoke"', page, "истёкшему — снова «Закрыть доступ»")
+        # повторный отзыв уже закрытого не сдвигает дату
+        with self.Session() as db:
+            q.set_user_plan(db, t.id, TESTER, got.plan_started_at, plans.anchor_from_date(plans.msk_today() - timedelta(days=3)))
+        adm.admin_tester_revoke(t.id, admin=ADMIN)
+        self.assertEqual(plans.msk_date(self.get(t.id).plan_expires_at), plans.msk_today() - timedelta(days=3))
         with self.assertRaises(HTTPException):
-            adm.admin_tester_revoke(u.id, admin=ADMIN)          # не тестировщик — снимать нечего
+            adm.admin_tester_revoke(u.id, admin=ADMIN)          # не тестировщик — закрывать нечего
 
     def test_card_assignment_records_and_plan_change_clears(self):
         u = self.user()
