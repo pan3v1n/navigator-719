@@ -737,6 +737,9 @@ a.head-avatar:hover { opacity: .9; }
 .adm-secret code, .adm-card code { padding: 2px 6px; border-radius: 4px; background: var(--blue-07); color: var(--blue); font-size: 15px; }
 .adm-danger { box-shadow: inset 0 0 0 1px rgba(216, 51, 50, .35); }
 .adm-create summary { cursor: pointer; font: 500 16px/1.3 var(--font); color: var(--blue); }
+/* правка анкеты в карточке учётки: отступы между «Редактировать», формой и пояснением */
+.adm-edit[open] > summary { margin-bottom: 12px; }
+.adm-edit > .adm-form { margin-bottom: 12px; }
 .adm-row, .adm-filters { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; }
 .adm-form { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-end; }
 .adm-form label { display: flex; flex-direction: column; gap: 6px; font: 500 13px/1.2 var(--font); color: var(--ink-60); }
@@ -1082,6 +1085,16 @@ body.tour-on { overflow: hidden; }
 .tcard-price { margin-top: auto; display: flex; flex-direction: column; gap: 2px; min-height: 58px; justify-content: flex-end; }
 .tcard-price .price { font: 600 24px/1.2 var(--font); color: var(--ink); }
 .tcard-price .price-old { font: 500 16px/1.2 var(--font); color: var(--ink-60); }
+/* суммы не рвутся переносом («9 900 ₽»): разряды — обычным пробелом, как в презентации (14.10.2026) */
+.tcard:not(.promo):not([data-price]) .tcard-price .price, .tcard-price .sum, .tcard-price .price-old,
+.tcard-price .price-sub, .tcard-btn .sum { white-space: nowrap; }
+.tcard-price .price-sub { font: 400 12px/1.3 var(--font); color: var(--ink-60); }
+.tcard-price.org-price { margin-top: 0; min-height: 0; }
+.tcard-price.org-price .price { font-size: 20px; }
+ol.tcard-list { counter-reset: step; }
+ol.tcard-list li { counter-increment: step; }
+ol.tcard-list li::before { content: counter(step); top: 0; width: auto; height: auto; border: 0; transform: none;
+  font-weight: 600; color: var(--blue); }
 .tcard.promo .price { font-size: 20px; white-space: nowrap; }
 .tcard .addon { display: flex; gap: 10px; align-items: flex-start; padding: 12px; border-radius: 10px; background: var(--gray);
   cursor: pointer; font: 400 13px/1.35 var(--font); color: var(--ink-80); }

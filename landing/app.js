@@ -31,13 +31,29 @@
       dots = document.getElementById('demo-dots').children;
   var d = { i: 0, phase: 'typing', n: 0, dots: 0, caret: true }, caretEl = document.createElement('span');
   caretEl.className = 'caret';
+  var THINKING = 'Навигатор ищет в тексте документов';
+
+  // Невидимые копии всех примеров в ячейке живого: карточка берёт высоту самого длинного и не прыгает
+  // при смене примера (styles.css, `.demo-sizer`). Подпись — самая длинная («…ищет…»), у вопроса —
+  // курсор: на последних буквах набора он может перенести строку.
+  var stage = document.getElementById('demo-stage');
+  function el(tag, cls, text) { var e = document.createElement(tag); e.className = cls; if (text) e.textContent = text; return e; }
+  DEMO.forEach(function (it) {
+    var s = el('div', 'demo-sizer'), q = el('div', 'bubble', it.q), refs = el('div', 'refs');
+    s.setAttribute('aria-hidden', 'true');
+    q.appendChild(el('span', 'caret'));
+    it.refs.forEach(function (r) { refs.appendChild(el('span', 'ref', r)); });
+    s.appendChild(q); s.appendChild(el('div', 'demo-label', THINKING + '...'));
+    s.appendChild(el('p', 'demo-a', it.a)); s.appendChild(refs);
+    stage.appendChild(s);
+  });
 
   function paintDemo() {
     var it = DEMO[d.i], ans = d.phase === 'answer', out = d.phase === 'out';
     dq.textContent = it.q.slice(0, d.n);
     if (d.phase === 'typing' && d.caret) dq.appendChild(caretEl);
     dq.classList.toggle('gone', out);
-    dl.textContent = d.phase === 'thinking' ? 'Навигатор ищет в тексте документов' + '.'.repeat(d.dots % 4) : 'Навигатор ПП 719';
+    dl.textContent = d.phase === 'thinking' ? THINKING + '.'.repeat(d.dots % 4) : 'Навигатор ПП 719';
     dl.classList.toggle('gone', d.phase === 'typing' || out);
     da.textContent = it.a;
     da.classList.toggle('fade', !ans);
@@ -111,7 +127,7 @@
   document.getElementById('aud-prev').addEventListener('click', function () { goTab(cur - 1); });
   document.getElementById('aud-next').addEventListener('click', function () { goTab(cur + 1); });
 
-  // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; суммы — плейсхолдеры «X XXX») ----
+  // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; цены — из презентации, 14.10.2026) ----
   var ptabs = document.querySelectorAll('#price-tabs [role="tab"]'), ptitle = document.getElementById('pricing-h');
   function showPlans(kind) {
     ptabs.forEach(function (t) {
@@ -125,19 +141,23 @@
   document.querySelectorAll('[data-goto]').forEach(function (b) {
     b.addEventListener('click', function () { showPlans(b.getAttribute('data-goto')); ptitle.scrollIntoView({ block: 'start' }); });
   });
-  document.querySelectorAll('#pricing .plan').forEach(function (card) {
-    // суммы — плейсхолдеры, пересчитывать нечего: период меняет только подпись «/мес» ↔ «/год»
-    card.querySelectorAll('.mini-seg input').forEach(function (r) {
-      r.addEventListener('change', function () {
-        card.querySelectorAll('.per').forEach(function (s) { s.textContent = r.value === 'year' ? 'год' : 'мес'; });
-      });
-    });
-    var seats = card.querySelector('[data-seats]');
-    if (!seats) return;
+  // Корпоративная сумма = цена × пользователи (× 12 за год, без скидки) — как `pricing.price_line`.
+  function rub(n) { return String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ' '); }
+  document.querySelectorAll('#pricing .plan[data-price]').forEach(function (card) {
+    var seats = card.querySelector('[data-seats]'), base = parseInt(card.getAttribute('data-price'), 10);
+    function reprice() {
+      var per = card.querySelector('.mini-seg input:checked'), year = per && per.value === 'year',
+          n = Math.max(1, Math.min(parseInt(seats.value, 10) || 1, parseInt(seats.max, 10)));
+      card.querySelectorAll('.sum').forEach(function (s) { s.textContent = rub(base * n * (year ? 12 : 1)); });
+      card.querySelectorAll('.per').forEach(function (s) { s.textContent = year ? 'год' : 'мес'; });
+    }
+    card.querySelectorAll('.mini-seg input').forEach(function (r) { r.addEventListener('change', reprice); });
+    seats.addEventListener('input', reprice);
     card.querySelectorAll('.seat-btn').forEach(function (b) {
       b.addEventListener('click', function () {
         var n = (parseInt(seats.value, 10) || 1) + parseInt(b.getAttribute('data-d'), 10);
         seats.value = Math.max(1, Math.min(n, parseInt(seats.max, 10)));
+        reprice();
       });
     });
   });
@@ -165,9 +185,9 @@
     b.addEventListener('click', function () {
       var card = b.closest('.plan'), o = null, name = b.getAttribute('data-pick');
       if (name !== 'Для организаций') {
-        var corp = card.hasAttribute('data-corp'),
+        var corp = card.hasAttribute('data-corp'), tester = b.hasAttribute('data-tester'),
             per = card.querySelector('.mini-seg input:checked'), seats = card.querySelector('[data-seats]');
-        o = { kind: corp ? 'corporate' : 'individual', trial: b.hasAttribute('data-trial'),
+        o = { kind: corp ? 'corporate' : tester ? 'tester' : 'individual', trial: b.hasAttribute('data-trial'),
               period: per ? per.value : 'month', seats: seats ? Math.max(1, Math.min(parseInt(seats.value, 10) || 1, 500)) : 1 };
       }
       setTariff(name, o);

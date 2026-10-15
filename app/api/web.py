@@ -391,7 +391,10 @@ def profile_page(request: Request, tab: str = "profile", saved: str = "", reques
         if code is None:
             # Корпоративный тариф и «Для организаций» — только через связь с заказчиком: попап с комментарием
             confirm = {"tariff": fields["tariff"], "summary": summary, "fields": fields,
-                       "popup": fields["kind"] == "corporate" or fields["tariff"] == pricing.ORG_TARIFF}
+                       "popup": fields["kind"] == "corporate" or fields["tariff"] == pricing.ORG_TARIFF,
+                       "tester": fields["tariff"] == pricing.TESTER_TARIFF,
+                       "price": pricing.price_line(fields["tariff"], kind=fields["kind"], period=fields["period"],
+                                                   seats=int(fields["seats"]), trial="trial" in fields)}
         else:
             error = PLAN_REQUEST_ERRORS[code]
     return _profile_response(request, user, _profile_form(user), tab=tab, saved=bool(saved),
@@ -437,7 +440,8 @@ def _renewal(user: User) -> dict | None:
     base = max(today, until)
     new = plans.add_months(datetime(base.year, base.month, base.day), 1).date()
     return {"tariff": user.plan, "corporate": user.plan_kind == "corporate",
-            "now_until": f"{until:%d.%m.%Y}", "new_until": f"{new:%d.%m.%Y}"}
+            "now_until": f"{until:%d.%m.%Y}", "new_until": f"{new:%d.%m.%Y}",
+            "price": pricing.price_line(user.plan)}
 
 
 def _plan_choice(tariff: str, kind: str, period: str, seats: str, trial: str):
@@ -472,7 +476,7 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
         # над карточкой тарифа она уезжала за край экрана, а корпоративная возвращалась на «Индивидуальные»)
         if renew == "1":    # продление — назад к его панели, а не к витрине
             return RedirectResponse(f"/profile?tab=plan&renew=1&err={err}#renew", status_code=303)
-        tab_kind = "&kind=corporate" if kind == "corporate" else ""
+        tab_kind = f"&kind={kind}" if kind in ("corporate", "tester") else ""
         return RedirectResponse(f"/profile?tab=plan&err={err}{tab_kind}#tariffs", status_code=303)
 
     msg = message.replace("\r\n", "\n").strip()   # перевод строки — один знак, как считает браузер
@@ -502,7 +506,7 @@ def plan_request(request: Request, tariff: str = Form(default=""), kind: str = F
                              inn=user.inn or "", email=user.email, phone=user.phone,
                              options=" · ".join(filter(None, ("из личного кабинета", options))),
                              user_id=user.id, message=msg,
-                             kind="corporate" if kind == "corporate" or tariff == pricing.ORG_TARIFF else None)
+                             kind=pricing.lead_kind(tariff, kind))
         q.purge_old_leads(db)   # срок хранения политики — и на этом пути новой заявки (ревью PR #184)
     logger.info(f"заявка #{lead.id} из кабинета: user_id={user.id}, тариф «{tariff}»")
     return RedirectResponse(f"/profile?tab=plan&requested={quote(tariff)}", status_code=303)

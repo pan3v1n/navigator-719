@@ -82,9 +82,16 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
 .hero-lead { margin: 32px 0 0; max-width: 480px; font: 400 20px/1.35 var(--font); color: var(--text-80); }
 .hero-cta { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 40px; }
 
-.demo { min-width: 0; width: 100%; max-width: 600px; justify-self: end; height: 440px; background: var(--white);
+/* ⚠ Высота карточки НЕ фиксированная (14.10.2026): при `height: 440px` на окне 820–1100 px текст не
+   влезал, флекс сжимал пузырь вопроса (его `min-height` снимает защиту от сжатия ниже содержимого) —
+   вопрос наезжал на подпись, подвал обрезался. Место держат невидимые копии ВСЕХ примеров в той же
+   ячейке сетки (`.demo-sizer`, их строит app.js из DEMO): карточка по самому длинному и не прыгает. */
+.demo { min-width: 0; width: 100%; max-width: 600px; justify-self: end; min-height: 440px; background: var(--white);
   border-radius: 16px; box-shadow: var(--ring); padding: 28px; display: flex; flex-direction: column; gap: 18px;
   overflow: hidden; }
+.demo-stage { display: grid; }
+.demo-stage > * { grid-area: 1 / 1; min-width: 0; display: flex; flex-direction: column; gap: 18px; }
+.demo-sizer { visibility: hidden; }
 .demo-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .demo-title { font: 600 14px/1.2 var(--font); }
 .dots { display: flex; gap: 6px; }
@@ -150,6 +157,15 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
 .addon small { display: block; margin-top: 2px; font-size: 12px; color: var(--text-60); }
 .btn-2l { flex-direction: column; gap: 3px; line-height: 1.1; }
 .btn-2l small { font: 500 12px/1.2 var(--font); opacity: .85; }
+/* цены из презентации (14.10.2026): сумма не рвётся переносом (разряды — обычный пробел); у корпоративных
+   число держит `.sum`, а «₽/год» при 500 пользователях за год может уйти строкой ниже — не за край карточки */
+.plan:not(.promo):not([data-corp]) .price, .sum, .price-old, .price-sub, .org-price { white-space: nowrap; }
+.price-sub { font: 400 13px/1.3 var(--font); color: var(--text-60); }
+.org-price { font: 500 22px/1.2 var(--font); color: var(--text); }
+.org-steps { display: block; margin: 0; padding-left: 22px; }
+.org-steps li + li { margin-top: 12px; }
+.org-steps li::marker { color: var(--blue); font-weight: 600; }
+.plans-2 { grid-template-columns: repeat(auto-fit, minmax(280px, 380px)); justify-content: center; }
 .btn-dark { color: #fff; background: var(--text); }
 .btn-dark:hover { color: #fff; background: #03050C; }
 .org-actions { margin-top: auto; display: flex; flex-direction: column; gap: 10px; }

@@ -229,7 +229,10 @@ class TestLandingGuards(unittest.TestCase):
             self.assertNotIn(bad, self.text, f"на лендинге «{bad}» — утратившая силу норма или неверный раздел")
 
     def test_no_placeholder_prices(self):
-        self.assertNotIn("0 000 ₽", self.text)
+        # 07.10: суммы макета («10 000 ₽») не ехали на лендинг; 09.10 — плейсхолдер «X XXX»; с 14.10.2026 —
+        # цены из презентации владельца. Каждая сумма витрины сверяется с `pricing` — `test_pricing`.
+        self.assertNotIn("X XXX", self.text)
+        self.assertNotIn("10 000 ₽", self.text)
 
     def test_tab_title_is_short(self):
         # решение владельца 07.10: во вкладке браузера — только имя сервиса, без «ИИ-помощник

@@ -128,6 +128,37 @@ class TestLanding(unittest.TestCase):
             self.assertRegex(self.src, r'href="https://сервис\.[^"]+' + path + '"')
 
 
+class TestLandingDemoCardHeight(unittest.TestCase):
+    """14.10.2026: при `height: 440px` на окне 820–1100 px вопрос демо-чата наезжал на подпись и
+    обрезался подвал (флекс сжимал пузырь). Высоту держат невидимые копии всех примеров в ячейке
+    сетки — карточка по самому длинному и не прыгает. Геометрию мерил headless Chrome; здесь —
+    сторож от отката."""
+
+    def test_card_height_is_not_fixed(self):
+        css = _read("landing/styles.css")
+        block = re.search(r"^\.demo \{([^}]*)\}", css, re.M).group(1)
+        self.assertIn("min-height", block)
+        self.assertNotRegex(block, r"(?<![-\w])height\s*:")
+
+    def test_stage_stacks_live_and_sizers_in_one_cell(self):
+        css = _read("landing/styles.css")
+        self.assertRegex(css, r"\.demo-stage \{ display: grid; \}")
+        self.assertRegex(css, r"\.demo-stage > \* \{ grid-area: 1 / 1;")
+        self.assertRegex(css, r"\.demo-sizer \{ visibility: hidden; \}")
+        html = _read("landing/index.html")
+        stage = re.search(r'id="demo-stage">(.*?)<div class="demo-foot">', html, re.S)
+        self.assertIsNotNone(stage)
+        for el_id in ("demo-q", "demo-label", "demo-a", "demo-refs"):
+            self.assertIn(f'id="{el_id}"', stage.group(1))
+
+    def test_sizers_built_for_every_example(self):
+        js = _read("landing/app.js")
+        self.assertIn("DEMO.forEach(function (it) {", js)
+        self.assertIn("el('div', 'demo-sizer')", js)
+        self.assertIn("s.setAttribute('aria-hidden', 'true')", js)
+        self.assertIn("stage.appendChild(s)", js)
+
+
 class TestDeployChecksGoThroughLoopbackPort(unittest.TestCase):
     def test_ping_and_pages_use_port_8000(self):
         src = _read("scripts/deploy/deploy.sh")

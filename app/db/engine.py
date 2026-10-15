@@ -57,6 +57,8 @@ def _ensure_columns() -> None:
             ("org_verified_at", "DATETIME"),  # подтверждение организации admin'ом; NULL — не подтверждена
             ("org_verified_by", "INTEGER"),
             ("plan_kind", "VARCHAR(16)"),     # личный / корпоративный тариф; NULL — личный
+            ("tester_verified_at", "DATETIME"),  # кто и когда подтвердил тестировщика (14.10.2026)
+            ("tester_verified_by", "INTEGER"),
         ],
         "leads": [  # работа с заявкой в админке (09.10.2026); старые заявки — «новые»
             ("status", "VARCHAR(16) NOT NULL DEFAULT 'new'"),

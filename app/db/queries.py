@@ -9,9 +9,10 @@ from __future__ import annotations
 import json
 from datetime import timedelta
 
-from sqlalchemy import delete, func, select, update
+from sqlalchemy import delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
+from app.core import plans
 from app.db.models import AnswerUsage, Feedback, GuestMessage, Lead, Message, User, _utcnow
 
 
@@ -48,12 +49,8 @@ def update_profile(
     u = db.get(User, user_id)
     if not u:
         return None
-    u.full_name = (full_name or "").strip()
-    u.region = (region or "").strip()
-    u.telegram = (telegram or "").strip() or None
-    for field, value in (("position", position), ("email", email), ("phone", phone)):
-        if value is not None:
-            setattr(u, field, value.strip() or None)
+    _set_profile_fields(u, full_name=full_name, region=region, telegram=telegram,
+                        position=position, email=email, phone=phone)
     changed = False
     for field, value in (("org", org), ("inn", inn)):
         # сравнение — нормализованных: двойной пробел в названии, вписанном admin'ом, не «правка»
@@ -65,6 +62,36 @@ def update_profile(
     if consent and not u.consent:
         u.consent = True
         u.consent_at = _utcnow()
+    db.commit()
+    db.refresh(u)
+    return u
+
+
+def _set_profile_fields(u: User, *, full_name: str, region: str, telegram: str, position: str | None,
+                        email: str | None, phone: str | None) -> None:
+    """Поля анкеты — одно место нормализации для кабинета и админки: иначе одно и то же значение,
+    сохранённое с двух путей, хранилось бы по-разному."""
+    u.full_name = (full_name or "").strip()
+    u.region = (region or "").strip()
+    u.telegram = (telegram or "").strip() or None
+    for field, value in (("position", position), ("email", email), ("phone", phone)):
+        if value is not None:
+            setattr(u, field, value.strip() or None)
+
+
+def edit_profile_by_admin(db: Session, user_id: int, *, username: str, full_name: str, region: str,
+                          telegram: str, position: str, email: str, phone: str) -> User | None:
+    """Правка учётки admin'ом (просьба владельца 15.10.2026): логин и поля анкеты одной записью.
+    Согласие на ПДн НЕ трогается: его даёт только сам субъект (152-ФЗ), и пока он его не дал, гейт
+    чата держит роль user на анкете, как бы полно admin её ни заполнил. Организация и ИНН — своей
+    формой (`set_user_org`), там своё подтверждение. Сессии и «запомнить меня» привязаны к id, а не к
+    логину, — смена логина входы не гасит. Занятый логин в гонке — IntegrityError на commit."""
+    u = db.get(User, user_id)
+    if not u:
+        return None
+    u.username = username
+    _set_profile_fields(u, full_name=full_name, region=region, telegram=telegram,
+                        position=position, email=email, phone=phone)
     db.commit()
     db.refresh(u)
     return u
@@ -289,12 +316,21 @@ def list_users(db: Session) -> list[User]:
 
 # --- тарифы и расход (#160) -----------------------------------------------
 def set_user_plan(db: Session, user_id: int, plan: str | None, started_at=None,
-                  expires_at=None, kind: str | None = None) -> User | None:
+                  expires_at=None, kind: str | None = None, verified_by: int | None = None) -> User | None:
     """Назначить тариф (None — снять лимит), дату подключения, срок (None — бессрочно) и вид
-    («corporate» — корпоративный; иначе личный). Возвращает User или None."""
+    («corporate» — корпоративный; иначе личный). Возвращает User или None.
+
+    «Тестировщик» (14.10.2026) подключают только разработчики: `verified_by` — id admin'а, он и время
+    пишутся в учётку. Повторное сохранение тестировщика (сменили срок) подтверждение не перезаписывает;
+    смена тарифа на другой его снимает."""
     u = db.get(User, user_id)
     if not u:
         return None
+    if plan == plans.TESTER_PLAN:
+        if u.plan != plans.TESTER_PLAN or u.tester_verified_at is None:
+            u.tester_verified_at, u.tester_verified_by = _utcnow(), verified_by
+    else:
+        u.tester_verified_at = u.tester_verified_by = None
     u.plan = plan
     u.plan_started_at = started_at if plan else None
     u.plan_expires_at = expires_at if plan else None
@@ -505,7 +541,7 @@ def create_lead(
     lead = Lead(tariff=tariff, name=name, org=org, inn=inn, email=email, phone=phone,
                 promo=promo or None, options=options or None, user_id=user_id,
                 message=(message or "").strip() or None, consent_at=_utcnow(),
-                kind="corporate" if kind == "corporate" else None)
+                kind=kind if kind in ("corporate", "tester") else None)
     db.add(lead)
     db.commit()
     db.refresh(lead)
@@ -522,6 +558,24 @@ def list_leads(db: Session, limit: int | None = None, status: str | None = None)
     if limit:
         stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def list_tester_leads(db: Session, limit: int | None = None) -> list[Lead]:
+    """Очередь раздела «Тестировщики» (14.10.2026): заявки на тариф «Тестировщик», ждущие решения
+    (новые и в работе), старые сверху. Вид — данными (`kind`), тариф — для заявок без вида."""
+    stmt = (select(Lead)
+            .where(or_(Lead.kind == "tester", Lead.tariff == plans.TESTER_PLAN),
+                   Lead.status.in_(("new", "in_work")))
+            .order_by(Lead.created_at, Lead.id))
+    if limit:
+        stmt = stmt.limit(limit)
+    return list(db.execute(stmt).scalars())
+
+
+def list_testers(db: Session) -> list[User]:
+    """Учётки с тарифом «Тестировщик», последние подтверждённые сверху."""
+    return list(db.execute(select(User).where(User.plan == plans.TESTER_PLAN)
+                           .order_by(User.tester_verified_at.desc(), User.id.desc())).scalars())
 
 
 def users_by_ids(db: Session, ids) -> dict[int, User]:
