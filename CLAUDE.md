@@ -190,6 +190,8 @@ navigator-719/             ← дерево сверено с файлами 202
 │   ├── seed_cases.py      ← скрипт: загрузить кейсы экспертов
 │   ├── convert_metodrek.py ← PDF Методрекомендаций ТПП → текст корпуса (K15)
 │   ├── eval_*.py          ← замеры по EVAL_GUIDE (в т.ч. eval_cases_influence — влияние петли кейсов)
+│   ├── pc_transfer.sh     ← переезд на другой ПК: всё, чего нет в git (.env, модель, граф, хуки,
+│   │                        первоисточники, память Claude Code) — pack/unpack, см. WORK_ON_OTHER_PC.md
 │   └── deploy/            ← ЭТАЛОННАЯ ВЫКАТКА: deploy.sh + releases/<тег>.env + checks/common
 │
 ├── tests/                 ← 80 модулей test_*.py, 1748 тестов (15.10.2026), офлайн (без Qdrant и ключа)
@@ -1399,6 +1401,10 @@ _(2026-07-02: main перемотан на dev, prod создан из dev — �
 ---
 
 ## Как продолжить работу на новом устройстве
+
+**Переезд с прежнего ПК** (модель, граф, первоисточники, память Claude Code, хуки, новый
+SSH-ключ к бою) — по [WORK_ON_OTHER_PC.md](WORK_ON_OTHER_PC.md), скрипт `scripts/pc_transfer.sh`.
+Голый старт без прежнего ПК:
 ```bash
 git clone https://github.com/pan3v1n/navigator-719.git
 cd navigator-719
@@ -1407,6 +1413,8 @@ py -3 -m venv .venv
 copy .env.example .env
 # Заполнить .env секретами
 # Запустить Qdrant: docker run -p 6333:6333 qdrant/qdrant
-.venv\Scripts\python scripts/load_kb.py   # загрузить базу знаний
-.venv\Scripts\python main.py              # запустить сервис
+.venv\Scripts\python scripts/load_kb.py        # товарный корпус → pp719
+.venv\Scripts\python scripts/load_rules_kb.py  # процедурный корпус → pp719_rules
+.venv\Scripts\python scripts/seed_cases.py     # кейсы экспертов → verified_cases
+.venv\Scripts\python main.py                   # запустить сервис
 ```
