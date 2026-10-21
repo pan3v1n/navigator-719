@@ -55,11 +55,22 @@ def _norm(s: str) -> str:
     return " ".join(s.replace(" ", " ").split()).lower()
 
 
-def json_indent(text: str) -> int:
+def json_indent(text: str) -> int | None:
     """Отступ, которым записан JSON раздела: в репозитории есть и 1, и 2 (XI, XXI — 1; VII,
-    XVIII — 2). Чужой отступ превращает правку одной позиции в дифф на весь файл."""
-    second = text.split("\n", 2)[1]
-    return len(second) - len(second.lstrip(" ")) or 2
+    XVIII — 2). Чужой отступ превращает правку одной позиции в дифф на весь файл.
+    Однострочный файл → None (`json.dumps` без отступа, как он и записан)."""
+    lines = text.replace("\r\n", "\n").split("\n", 2)
+    if len(lines) < 2:
+        return None
+    return len(lines[1]) - len(lines[1].lstrip(" "))
+
+
+def reuse_key(p) -> str:
+    """Ключ «позиция в новой редакции та же»: ячейка КОДА и исходный блок (имя + требования).
+    ⚠ Ревью PR #209: по одному `raw_block` позиция, которой редакция сменила только код (так N 1002
+    перевела суда 30.11.33.190 → .191–.197), переиспользовалась бы со СТАРЫМИ кодами — а по коду
+    идут поиск, ОКПД2-буст и пороги."""
+    return f"{p.okpd2_field.strip()}\n{p.raw_block()}"
 
 
 def git_text(rev: str, path: Path) -> str:
@@ -119,12 +130,12 @@ def plan(roman: str, rev: str, anchors: str):
 
     by_raw: dict[str, int] = {}
     for i, p in enumerate(old):
-        by_raw.setdefault(p.raw_block(), i)
+        by_raw.setdefault(reuse_key(p), i)
     # Изменённая позиция (keep): прежняя запись — по тем же правилам, но среди НЕиспользованных.
     reused_old: set[int] = set()
     steps = []   # (product, "reuse"|"llm", old_record_index|None)
     for p in new:
-        i = by_raw.get(p.raw_block())
+        i = by_raw.get(reuse_key(p))
         if i is not None and i not in reused_old:
             reused_old.add(i)
             steps.append((p, "reuse", pairs[i]))
@@ -167,10 +178,10 @@ def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -
     _, old = sk.parse_section(git_text(rev, chunk))
     title = sk.section_title(header, chunk.stem)
 
-    old_raw = {p.raw_block() for p in old}
-    new_raw = {p.raw_block() for p in new}
-    changed = [p for p in new if p.raw_block() not in old_raw]
-    gone = [p for p in old if p.raw_block() not in new_raw]
+    old_raw = {reuse_key(p) for p in old}
+    new_raw = {reuse_key(p) for p in new}
+    changed = [p for p in new if reuse_key(p) not in old_raw]
+    gone = [p for p in old if reuse_key(p) not in new_raw]
     # Пара по исходным ячейкам: тот же набор кодов, ближайшее имя (однозначно). Близость — доля
     # КОРОТКОГО имени, совпавшая с длинным: редакция чаще ДОПИСЫВАЕТ оговорку («Матрасы, кроме
     # матрасных основ (за исключением продукции … раздела VII …)»), и обычный ratio падает ниже порога.

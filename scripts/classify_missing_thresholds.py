@@ -83,8 +83,10 @@ from app.rag.thresholds import (  # noqa: E402
     _flat_thresholds,
     _norm,
     _rows_by_name,
+    _strict_match,
     _strip_fn,
     _tables,
+    _variant_of,
     note_scope,
 )
 from scripts.eval_threshold_coverage import (  # noqa: E402
@@ -145,14 +147,27 @@ def note_rows() -> list[dict]:
             continue
         for row in t["rows"]:
             by_year = row.get("by_year") or {}
-            if not _BALL_RE.search(" ".join(by_year.values())):
-                continue
-            quote = "; ".join(f"{k} — {v}" for k, v in list(by_year.items())[:2])
             # Табличные строки в рантайме идут другой веткой, вето к ним не применяется.
             # Раздел таблицы переносится ради того же фильтра, что в ветке 1б `_lookup`.
-            out.append({"codes": row["codes"], "names": [row["name"]], "note": t["note"],
-                        "quote": quote, "kind": "таблица", "strict_name": False,
-                        "section": t.get("section")})
+            # ⚠ Ревью PR #209: строка 80.1 (`strict_name`) в рантайме — кандидат только по
+            # дословному имени, а её виды — по началу имени (`_strict_match` / `_variant_of`).
+            # Без переноса классификатор мерил 80.1 правилом «≥2 общих слова» и объявлял «нашим
+            # дефектом» VII-19, которой рантайм ВЕРНО отказывает, а виды не видел вовсе.
+            table_strict = "row" if row.get("strict_name") else None
+            if _BALL_RE.search(" ".join(by_year.values())):
+                quote = "; ".join(f"{k} — {v}" for k, v in list(by_year.items())[:2])
+                out.append({"codes": row["codes"], "names": [row["name"]], "note": t["note"],
+                            "quote": quote, "kind": "таблица", "strict_name": False,
+                            "table_strict": table_strict, "section": t.get("section")})
+            elif table_strict:
+                for v in row.get("variants") or []:
+                    vy = v.get("by_year") or {}
+                    if not _BALL_RE.search(" ".join(vy.values())):
+                        continue
+                    out.append({"codes": row["codes"], "names": [v["name"]], "note": t["note"],
+                                "quote": "; ".join(f"{k} — {x}" for k, x in list(vy.items())[:2]),
+                                "kind": "таблица, вид группы", "strict_name": False,
+                                "table_strict": "variant", "section": t.get("section")})
     return out
 
 
@@ -235,6 +250,17 @@ def classify(rec: dict, rows: list[dict]) -> dict:
     # — «не наш дефект». ⚠ Цена ошибки прямая: `attachment_defects` гейтится порогом 0, значит
     # гейт мог показывать НОЛЬ при живых неприсоединённых порогах. Предохранитель, который не
     # умеет сработать, равен отсутствующему.
+    # ⚠ ТАБЛИЦА, НАЗВАВШАЯ РАЗДЕЛ, К ЧУЖОМУ РАЗДЕЛУ НЕ ОТНОСИТСЯ — фильтр рантайма (ред. 29.09.2026,
+    # ветка 1б `_lookup`), перенесённый сюда ред. 05.10.2026 (N 1297): она дала XXII-1 (26.51.52)
+    # операции и долю компонентов, позиция вошла в срез, и судовая строка прим. 17(3) «Приборы для
+    # измерения … расхода, уровня, давления» (код 26.51) стала «нашим дефектом» там, где рантайм
+    # отказывается ВЕРНО. Уликой такая строка остаётся («порог написан для другой продукции»):
+    # исключи её из улик вовсе — у 47 позиций среза сменился бы класс в листе сверки эксперта.
+    sec = rec.get("section_roman")
+
+    def _foreign(row: dict) -> bool:
+        return bool(sec and row.get("section") and row["section"] != sec)
+
     coverings: list[dict] = []
     narrower, by_name = None, None
     for row in rows:
@@ -245,8 +271,10 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                         coverings.append(row)
                 elif _code_applies(c, rc):
                     narrower = narrower or row
-        if by_name is None and any(_norm(_strip_fn(n)) == _norm(_strip_fn(name))
-                                   for n in row["names"]):
+        # ⚠ Фильтр раздела — ПРИ ВЫБОРЕ (ревью PR #209): иначе первой бралась строка чужого
+        # раздела, отбрасывалась ниже, и дословная строка своего раздела не рассматривалась.
+        if by_name is None and not _foreign(row) and any(_norm(_strip_fn(n)) == _norm(_strip_fn(name))
+                                                         for n in row["names"]):
             by_name = row
 
     def _speaks_about_us(row: dict) -> bool:
@@ -263,22 +291,18 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         # ВМЕСТЕ с предикатом — рантайм применяет его только к таким строкам, и проверка, идущая
         # шире защищаемого кода, объявила бы «не наш дефект» там, где дефект настоящий, при гейте
         # `attachment_defects == 0`.
+        if row.get("table_strict") == "row":
+            return any(_strict_match(n, name) for n in nm)
+        if row.get("table_strict") == "variant":
+            return any(_variant_of(n, name) for n in nm)
         if row.get("strict_name"):
             return _names_this_position(name, nm)
         return (not nm
                 or _name_overlap(name, nm) >= 2
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
 
-    # ⚠ ТАБЛИЦА, НАЗВАВШАЯ РАЗДЕЛ, К ЧУЖОМУ РАЗДЕЛУ НЕ ОТНОСИТСЯ — фильтр рантайма (ред. 29.09.2026,
-    # ветка 1б `_lookup`), перенесённый сюда ред. 05.10.2026 (N 1297): она дала XXII-1 (26.51.52)
-    # операции и долю компонентов, позиция вошла в срез, и судовая строка прим. 17(3) «Приборы для
-    # измерения … расхода, уровня, давления» (код 26.51) стала «нашим дефектом» там, где рантайм
-    # отказывается ВЕРНО. Уликой такая строка остаётся («порог написан для другой продукции»):
-    # исключи её из улик вовсе — у 47 позиций среза сменился бы класс в листе сверки эксперта.
-    sec = rec.get("section_roman")
-
     def _ours(row: dict) -> bool:
-        return not (sec and row.get("section") and row["section"] != sec) and _speaks_about_us(row)
+        return not _foreign(row) and _speaks_about_us(row)
 
     # Из покрывающих строк выбираем ту, что говорит про ЭТУ позицию; если такой нет — первую,
     # и тогда вердикт прежний («порог написан для другой продукции, привязывать нельзя»).
@@ -313,7 +337,7 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                             f"({', '.join(covering['codes'][:2])}) написан для ДРУГОЙ продукции "
                             f"— «{names[0][:60]}»; привязывать нельзя",
                 "note": covering["note"], "quote": covering["quote"][:160]}
-    if by_name and not (sec and by_name.get("section") and by_name["section"] != sec):
+    if by_name:
         return {"class": "defect_name_match",
                 "evidence": f"прим. {by_name['note']} ({by_name['kind']}): наименование строки "
                             f"совпадает дословно, коды {', '.join(by_name['codes'][:3])} — другие",

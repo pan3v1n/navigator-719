@@ -284,7 +284,11 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
             if parent.get("min_threshold") and not mt:
                 mt = (f"{parent['min_threshold']} — порог группы, указан у позиции "
                       f"«{parent.get('product_name', '')}»")
-    if mt:
+    # Порог по видам (прим. 80.1, многострочный) — ПОСЛЕ требований (ревью PR #209): у группы до
+    # 48 видов, и сверху он съедал кап целиком — панель не показывала ни одного требования. Внизу
+    # кап режет хвост перечня видов, а требования позиции видны всегда.
+    by_kind = bool(mt) and "\n" in mt
+    if mt and not by_kind:
         lines.insert(0, f"Порог: {mt}")
     proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)
     if proc:
@@ -303,9 +307,27 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
     if fragments.has_incomplete_thresholds(h.section_roman, h.product_name):
         lines.append("Пороги показаны не полностью: в первоисточнике у позиции несколько порогов "
                      "(по узлам изделия или видам работ).")
+    more = " …(полный перечень — в первоисточнике ПП №719)"
     text = "\n".join(lines)
+    if by_kind:
+        # Кап делится: перечню видов — не больше половины (целыми строками, с числом непоказанных),
+        # требованиям — остаток. У VII-127 и того и другого больше капа: целиком сверху порог
+        # съедал требования, целиком снизу — требования съедали порог.
+        kinds = f"Порог: {mt}".split("\n")
+        shown = [kinds[0]]
+        for ln in kinds[1:]:
+            if len("\n".join(shown + [ln])) > cap // 2:
+                break
+            shown.append(ln)
+        if len(shown) < len(kinds):
+            shown.append(f"      … ещё видов: {len(kinds) - len(shown)} — в первоисточнике ПП №719")
+        block = "\n".join(shown)
+        room = cap - len(block) - 1
+        if len(text) > room:
+            text = text[:max(room - len(more), 0)].rstrip() + more
+        return f"{text}\n{block}" if text else block
     if len(text) > cap:
-        text = text[:cap].rstrip() + " …(полный перечень — в первоисточнике ПП №719)"
+        text = text[:cap].rstrip() + more
     return text
 
 

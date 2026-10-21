@@ -10,8 +10,10 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 import unittest
+import unittest.mock
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -40,8 +42,12 @@ class TestCorpusEdition(unittest.TestCase):
     def test_next_edition_did_not_leak_in(self):
         """N 1257 вступает 31.10.2026 (`A7` #154). Текст собран из вёрстки Контура 508574, где он уже
         есть, — значит его вычитание обязано быть полным: корпус стоит на ДЕЙСТВУЮЩЕЙ редакции."""
+        # ⚠ Форма номера — как у разбора редакции (`edition._AMEND_RE`: «N», «Н», «№», NBSP), а не
+        # литерал «N 1257» (ревью PR #209): в корпусе 2633 неразрывных пробела.
+        act = re.compile(r"[NН№]\s*1257(?!\d)")
         for p in [KB / "pp719_full.txt", *sorted((KB / "chunks").glob("*.txt"))]:
-            self.assertNotIn("N 1257", p.read_text(encoding="utf-8"), f"{p.name}: акт N 1257 до 31.10")
+            self.assertIsNone(act.search(p.read_text(encoding="utf-8")), f"{p.name}: акт N 1257 до 31.10")
+        self.assertIsNotNone(act.search("от 29.09.2026 № 1257"), "шаблон не узнаёт «№»+NBSP")
 
 
 class TestExcludedRowsParser(unittest.TestCase):
@@ -139,7 +145,8 @@ class TestNote80_1GroupAndVariants(unittest.TestCase):
         self.assertEqual(r["product_name"], "Средства гемостатические")
         thr = _thr(r)
         self.assertTrue(thr.startswith("по видам продукции [прим. 80.1]:"))
-        self.assertIn("— Губки гемостатические рассасывающиеся: 2026 год — не менее 85 баллов", thr)
+        self.assertIn("— Губки гемостатические рассасывающиеся: 2026–2028 гг. — не менее 85 баллов; "
+                      "с 2029 года — 105 баллов", thr)
         self.assertIn("— Бинты, салфетки, повязки со средствами гемостатическими рассасывающимися однослойные", thr)
 
     def test_position_without_own_group_takes_its_variants_from_the_neighbour_group(self):
@@ -177,6 +184,107 @@ class TestClassifierForeignSectionTable(unittest.TestCase):
         self.assertIsNone(thresholds.lookup_threshold(rec["okpd2_codes"], rec["product_name"], "XXII"))
         got = C.classify(rec, C.note_rows())
         self.assertEqual((got["class"], got["note"]), ("note_other_product", "17(3)"))
+
+
+def _table(note: str, *rows: dict) -> dict:
+    return {"note": note, "section": None, "years": ["2026 год"], "rows": list(rows)}
+
+
+def _row(name: str, value: str | None, strict: bool = False, variants=None) -> dict:
+    return {"name": name, "codes": ["99.99.99.999"], "strict_name": strict,
+            "by_year": {"2026 год": value} if value else {}, "variants": variants or []}
+
+
+class TestReviewPR209(unittest.TestCase):
+    """Ревью PR #209 (medium, 15 находок): правки, исправленные до `main`."""
+
+    def test_schedule_runs_collapse_and_keep_cells_verbatim(self):
+        c = thresholds._collapse_schedule
+        self.assertEqual(c({"2026 год": "не менее 45 баллов", "2027 год": "не менее 45 баллов",
+                            "2028 год": "не менее 45 баллов", "2029 год": "65 баллов",
+                            "2030 год": "65 баллов", "с 2031 года": "65 баллов"}),
+                         "2026–2028 гг. — не менее 45 баллов; с 2029 года — 65 баллов")
+        # «не менее 65» и «65» — разные ячейки первоисточника, не сливаются.
+        self.assertEqual(c({"2029 год": "не менее 65 баллов", "2030 год": "65 баллов"}),
+                         "2029 год — не менее 65 баллов; 2030 год — 65 баллов")
+        self.assertEqual(c({"до 1 января 2029 г.": "35 баллов", "с 1 января 2029 г.": "35 баллов"}),
+                         "до 1 января 2029 г., с 1 января 2029 г. — 35 баллов")
+
+    def test_panel_shows_requirements_of_a_group_with_many_kinds(self):
+        """VII-127 «Заплаты сердечно-сосудистые…»: порог по видам съедал кап панели целиком."""
+        import dataclasses
+
+        from app.rag import pipeline
+        from app.rag.retriever import Hit
+
+        r = _vii()["127"]
+        names = {f.name for f in dataclasses.fields(Hit)}
+        st = pipeline.source_text(Hit(**{k: v for k, v in {**r, "score": 1.0}.items() if k in names}))
+        lines = st.split("\n")
+        first_req = next(i for i, ln in enumerate(lines) if ln.startswith("• "))
+        thr = next(i for i, ln in enumerate(lines) if ln.startswith("Порог:"))
+        self.assertGreater(sum(ln.startswith("• ") for ln in lines), 10, "требования не видны")
+        self.assertLess(first_req, thr, "порог по видам снова над требованиями")
+        self.assertLessEqual(len(st), pipeline.SOURCE_TEXT_CAP)
+        self.assertIn("… ещё видов:", st, "у 48 видов VII-127 перечень обязан быть урезан с пометкой")
+
+    def test_kind_of_a_position_starts_with_its_whole_word(self):
+        self.assertFalse(thresholds._variant_of("Шприцы инъекционные однократного применения", "Шприц"))
+        self.assertTrue(thresholds._variant_of("Шприц инъекционный", "Шприц"))
+        self.assertTrue(thresholds._variant_of(
+            "Кресла-стулья для инвалидов с санитарным оснащением и с колесами, со стояночной системой "
+            "торможения в колесах, без опоры для ног", _vii()["154"]["product_name"]))
+
+    def test_strict_row_differing_by_separator_wins_the_tie_break(self):
+        """Строка 80.1 «Ось; вал; шкив» и позиция «Ось, вал, шкив»: ключ тот же, `_norm` — нет, а
+        значимое слово одно («шкив»), и правило «≥2 общих слова» отдало бы None."""
+        tables = [_table("28", _row("Шкив", "не менее 10 баллов")),
+                  _table("80.1", _row("Ось; вал; шкив", "не менее 20 баллов", strict=True))]
+        with unittest.mock.patch.object(thresholds, "_tables", lambda: tables):
+            got = thresholds.lookup_threshold(["99.99.99.999"], "Ось, вал, шкив", "VII")
+        self.assertEqual(got, "2026 год — не менее 20 баллов [прим. 80.1]")
+
+    def test_exact_named_row_beats_a_kind_of_another_group(self):
+        """Строка, названная ровно как позиция, конкретнее вида чужой группы с тем же началом имени."""
+        tables = [_table("33", _row("Светильник операционный", "не менее 50 баллов")),
+                  _table("80.1", _row("Светильники медицинские", None, strict=True, variants=[
+                      {"name": "Светильник операционный потолочный", "by_year": {"2026 год": "90 баллов"}}]))]
+        with unittest.mock.patch.object(thresholds, "_tables", lambda: tables):
+            got = thresholds.lookup_threshold(["99.99.99.999"], "Светильник операционный", "VII")
+        self.assertEqual(got, "2026 год — не менее 50 баллов [прим. 33]")
+
+    def test_own_strict_row_beats_the_list_verdict(self):
+        """Позиция-перечень «Альфа; Бета» с СОБСТВЕННОЙ строкой-группой: вид «Альфа», стоящий в
+        таблице отдельной строкой, не отнимает у неё порог."""
+        tables = [_table("80.1", _row("Альфа", "не менее 10 баллов", strict=True),
+                         _row("Альфа; Бета", None, strict=True, variants=[
+                             {"name": "Альфа малая", "by_year": {"2026 год": "30 баллов"}},
+                             {"name": "Бета большая", "by_year": {"2026 год": "40 баллов"}}]))]
+        with unittest.mock.patch.object(thresholds, "_tables", lambda: tables):
+            got = thresholds.lookup_threshold(["99.99.99.999"], "Альфа; Бета", "VII")
+        self.assertTrue((got or "").startswith("по видам продукции [прим. 80.1]:"), got)
+
+    def test_classifier_reads_80_1_the_way_the_runtime_does(self):
+        import classify_missing_thresholds as C
+
+        rows = C.note_rows()
+        recs = {r["source_anchor"]: r for r in json.loads(
+            (KB / "structured" / "VII_medizdeliya.json").read_text(encoding="utf-8"))}
+        vii19 = recs["Приложение к ПП №719, Раздел VII, позиция 19"]
+        self.assertNotIn(C.classify(vii19, rows)["class"], C.DEFECT_CLASSES,
+                         "VII-19: строке 80.1 рантайм отказывает ВЕРНО, а классификатор зовёт дефектом")
+        self.assertTrue(any(r.get("table_strict") == "variant" for r in rows), "виды 80.1 не видны")
+
+    def test_reuse_key_includes_the_code_cell(self):
+        import restructure_changed as rc
+        import structure_kb as sk
+
+        a = sk.Product(okpd2_field="30.11.33.190", name_raw="Суда промерные", component_cells=["x"])
+        b = sk.Product(okpd2_field="30.11.33.191", name_raw="Суда промерные", component_cells=["x"])
+        self.assertEqual(a.raw_block(), b.raw_block())
+        self.assertNotEqual(rc.reuse_key(a), rc.reuse_key(b), "смена одного кода прошла бы как «та же позиция»")
+        self.assertIsNone(rc.json_indent("[]"))
+        self.assertEqual(rc.json_indent('[\n{\n"a": 1\n}\n]'), 0)
 
 
 class TestRestructureKeepsFileForm(unittest.TestCase):
