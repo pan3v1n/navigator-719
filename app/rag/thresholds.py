@@ -141,6 +141,100 @@ def _unit_header_table(lines: list[str], i: int, note_no: str, section: str | No
     return {"note": note_no, "section": section, "years": years, "rows": rows}, k
 
 
+# --- Таблица «ГРУППА + ВИДЫ» (прим. 80.1, ред. 05.10.2026 N 1297) ------------------------------
+# Медизделия раздела VII переведены на баллы одной таблицей на ~1300 строк. Позиция приложения
+# стоит строкой-ГРУППОЙ (коды, наименование, ВСЕ ячейки значений пусты), под ней — строки-ВИДЫ
+# без кода, у каждого вида свой график по годам:
+#     из 21.20.23.194, из 26.60.11.130, из 26.60.13.190|Микроисточники с йодом-125| | | | | | |
+#     Микроисточники с йодом-125 не в стренде без системы имплантации|не менее 115 баллов|…|130 баллов|
+#     Микроисточники с йодом-125 в стренде без системы имплантации|не менее 135 баллов|…|170 баллов|
+# Общий разбор этой формы не видит дважды: он останавливается на ПЕРВОЙ пустой строке (а они стоят
+# между группами), и склеивает группу с первым видом в одну строку, где наименованием становится
+# «не менее 115 баллов», а значения сдвигаются на год. Ветка срабатывает ТОЛЬКО когда в таблице
+# есть группа с видами и КАЖДАЯ логическая строка узнана; иначе — общий разбор, как раньше.
+def _logical_rows(lines: list[str], k: int) -> tuple[list[str], list[str], int]:
+    """Логические строки от `k` до следующей вводной примечания: физические строки склеиваются,
+    пока строка не закончится «|». Пустые строки внутри таблицы границей НЕ считаются."""
+    rows, buf, n = [], [], len(lines)
+    while k < n and not _NOTE_INTRO_RE.match(lines[k]):
+        if lines[k].strip():
+            buf.append(lines[k])
+            if lines[k].rstrip().endswith("|"):
+                rows.append("\n".join(buf))
+                buf = []
+        k += 1
+    return rows, buf, k
+
+
+def _variant_cells(row: str, n_years: int):
+    """→ ("sep",) | ("code", ячейка кодов, имя, значения) | ("var", имя, значения) | None."""
+    c = [x.replace("\xa0", " ") for x in row.split("|")[:-1]]
+    if len(c) == 1 and not c[0].strip():
+        return ("sep",)
+    if _CODE_RE.search(c[0]):
+        if len(c) == 2 + n_years:
+            return ("code", c[0], c[1].strip(), [x.strip() for x in c[2:]])
+        return None
+    if len(c) == 1 + n_years:                        # «Вид|v1|…|v6|»
+        return ("var", c[0].strip(), [x.strip() for x in c[1:]])
+    if len(c) == 2 + n_years and not c[0].strip():   # «|Вид|v1|…|v6|»
+        return ("var", c[1].strip(), [x.strip() for x in c[2:]])
+    return None
+
+
+def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: str,
+                         section: str | None):
+    """`(таблица, индекс конца)` либо `(None, j)` — форма не та.
+
+    Строка-группа отдаёт ОДНУ строку таблицы с наименованием позиции: одинаковые графики у всех
+    видов — это и есть порог позиции; разные — `by_year` пуст, а графики лежат в `variants`
+    (печатает `_fmt`). Строка-вид без значений сразу под группой — перенос наименования группы
+    (в ред. 05.10.2026 таких две); такая же строка ПОСЛЕ видов — отказ от формы целиком, потому
+    что её смысл (объединённая ячейка? перенос имени вида?) отсюда не различить."""
+    rows, tail, end = _logical_rows(lines, j + 1)
+    if tail:
+        return None, j
+    parsed = [_variant_cells(r, len(years)) for r in rows]
+    if not parsed or any(p is None for p in parsed):
+        return None, j
+    out: list[dict] = []
+    cur: dict | None = None
+    for p in parsed:
+        if p[0] == "sep":
+            continue
+        if p[0] == "code":
+            vals = p[3]
+            # ⚠ ИМЯ — КЛЮЧ (`strict_name`, как у прим. 27 в `K2-2`). Коды здесь «из …» и общие на
+            # десятки позиций (32.50.13.190 — у 40 групп), поэтому привязка по коду с добором
+            # «≥2 общих слова» отдавала график группы «Устройства для переливания крови…» позиции
+            # «Аппараты и одноразовые системы для переливания крови…», которой в таблице нет.
+            row = {"codes": _CODE_RE.findall(p[1]), "name": p[2], "strict_name": True,
+                   "by_year": {years[x]: vals[x] for x in range(len(years)) if vals[x]}}
+            cur = None
+            if not any(vals):
+                row["variants"] = []
+                cur = row
+            out.append(row)
+            continue
+        name, vals = p[1], p[2]
+        if cur is None:
+            return None, j                           # вид без группы — не та форма
+        if not any(vals):
+            if cur["variants"]:
+                return None, j
+            cur["name"] = f"{cur['name']} {name}".strip()
+            continue
+        cur["variants"].append(
+            {"name": name, "by_year": {years[x]: vals[x] for x in range(len(years)) if vals[x]}})
+    groups = [r for r in out if "variants" in r]
+    if not groups or any(not r["variants"] for r in groups):
+        return None, j
+    for r in groups:
+        if len({tuple(v["by_year"].items()) for v in r["variants"]}) == 1:
+            r["by_year"] = dict(r["variants"][0]["by_year"])
+    return {"note": note_no, "section": section, "years": years, "rows": out}, end
+
+
 @lru_cache(maxsize=1)
 def _tables() -> list[dict]:
     """Парсит все таблицы-пороги из чанка примечаний. Кэш на процесс."""
@@ -205,6 +299,11 @@ def _tables() -> list[dict]:
         # 74), и молчали они лишь потому, что в их первой колонке нет кода ОКПД2. Подписи берём
         # ДОСЛОВНО или не берём вовсе — цитата эксперту важнее полноты разбора.
         years = hcells
+        variant_table, end = _group_variant_table(lines, j, years, note_no, section)
+        if variant_table is not None:
+            tables.append(variant_table)
+            i = end
+            continue
         rows: list[dict] = []
         pending = ""  # строка-продолжение многострочной ячейки кода («из 28.25.12»)
         k = j + 1
@@ -269,11 +368,44 @@ def _norm(s: str | None) -> str:
     return re.sub(r"\s+", " ", (s or "").strip().lower())
 
 
+def _strict_key(s: str | None) -> str:
+    """Ключ имени строки с `strict_name`: без сноски, регистра и различия «,» / «;» между видами.
+    ⚠ Приложение и прим. 80.1 перечисляют одно и то же разными знаками («… однократного
+    применения, наборы, устройства …» против «…; наборы, устройства …») — слова те же."""
+    return re.sub(r"\s*[;,]\s*", ", ", _norm(_strip_fn(s)))
+
+
+def _own_variants(row: dict, product_name: str | None) -> dict | None:
+    """Виды строки-группы, чьё наименование НАЧИНАЕТСЯ с наименования позиции, — строкой для неё.
+
+    ⚠ ЗАЧЕМ (ред. 05.10.2026, прим. 80.1). Под группой «Кресла-стулья … с колесами без стояночной
+    системы торможения» стоят шесть видов: три «… без стояночной системы …» и три «… со стояночной
+    системой …» — а в разделе VII это ДВЕ позиции, и строки-группы для второй нет (так и в HTML
+    Контура). Имя вида начинается с полного имени своей позиции — это прямое указание источника,
+    а не догадка по общим словам. None — ни один вид так не начинается."""
+    key = _strict_key(product_name)
+    own = [v for v in row.get("variants") or [] if key and _strict_key(v["name"]).startswith(key)]
+    if not own:
+        return None
+    out = {**row, "variants": own, "by_year": {}}
+    if len({tuple(v["by_year"].items()) for v in own}) == 1:
+        out["by_year"] = dict(own[0]["by_year"])
+    return out
+
+
 def _fmt(row: dict, note: str, section: str | None) -> str:
     # Подпись колонки печатается как в первоисточнике; «с 1 января YYYY» уже содержит предлог,
     # «2028 год и далее» — нет, поэтому соединяем нейтральным тире, а не дописываем «с 1 января».
-    steps = "; ".join(f"{lbl} — {val}" for lbl, val in row["by_year"].items())
     src = f"прим. {note} к разд. {section}" if section else f"прим. {note}"
+    if not row["by_year"] and row.get("variants"):
+        # Группа, у видов которой РАЗНЫЕ графики (прим. 80.1): общего порога у позиции нет, и
+        # выбрать один вид значило бы отдать чужой порог. Печатаем все — каждый со своим видом,
+        # отступом под строкой «Порог:» (как у «⚠ ИНОЙ порог» в `_fmt_flat`).
+        parts = ["; ".join(f"{lbl} — {val}" for lbl, val in v["by_year"].items())
+                 for v in row["variants"]]
+        body = "\n".join(f"      — {v['name']}: {p}" for v, p in zip(row["variants"], parts))
+        return f"по видам продукции [{src}]:\n{body}"
+    steps = "; ".join(f"{lbl} — {val}" for lbl, val in row["by_year"].items())
     return f"{steps} [{src}]"
 
 
@@ -1292,6 +1424,13 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             if isinstance(verdict, dict):
                 return _fmt(verdict, t["note"], t["section"])
             for r in t["rows"]:
+                # Строка, у которой имя — ключ (прим. 80.1), кандидат только по ДОСЛОВНОМУ имени
+                # (с точностью до «,»/«;»); позиция-перечень дошла бы сюда через
+                # `_list_items_verdict` выше. ⚠ Виды группы НЕ отбираются по началу имени: в группе
+                # «Средства гемостатические» законные виды называются «Губки гемостатические…»,
+                # «Бинты … со средствами гемостатическими…», и такой отбор выбросил бы 15 из 21.
+                if r.get("strict_name") and _strict_key(r["name"]) != _strict_key(product_name):
+                    continue
                 exact = None
                 for c in codes:
                     for rc in r["codes"]:
@@ -1299,6 +1438,27 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                             exact = bool(exact) or (_segs(rc) == _segs(c))
                 if exact is not None:
                     tcands.append((t, r, exact))
+        if not any(r.get("strict_name") for _, r, _ in tcands):
+            # Позиция без своей строки-группы, чьи виды стоят под ЧУЖОЙ группой (см. `_own_variants`):
+            # виды берутся, только если код группы покрывает код позиции и имя вида начинается с её
+            # имени; найтись они обязаны ровно в одной группе — иначе не гадаем. Идёт ДО прочих
+            # кандидатов по коду: вид, названный ИМЕНЕМ позиции, конкретнее строки чужой таблицы,
+            # совпавшей только кодом «из 32.50.50.190».
+            own = []
+            for t in _tables():
+                if note_scope(t["note"]) != scope:
+                    continue
+                if section and t["section"] and t["section"] != section:
+                    continue
+                for r in t["rows"]:
+                    if r.get("strict_name") and r.get("variants") and any(
+                            _code_applies(rc, c) for c in codes for rc in r["codes"]):
+                        hit = _own_variants(r, product_name)
+                        if hit:
+                            own.append((t, hit))
+            if len(own) == 1:
+                t, r = own[0]
+                return _fmt(r, t["note"], t["section"])
         if len(tcands) == 1:
             t, r, _ = tcands[0]
             return _fmt(r, t["note"], t["section"])

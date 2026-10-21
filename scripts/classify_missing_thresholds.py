@@ -149,8 +149,10 @@ def note_rows() -> list[dict]:
                 continue
             quote = "; ".join(f"{k} — {v}" for k, v in list(by_year.items())[:2])
             # Табличные строки в рантайме идут другой веткой, вето к ним не применяется.
+            # Раздел таблицы переносится ради того же фильтра, что в ветке 1б `_lookup`.
             out.append({"codes": row["codes"], "names": [row["name"]], "note": t["note"],
-                        "quote": quote, "kind": "таблица", "strict_name": False})
+                        "quote": quote, "kind": "таблица", "strict_name": False,
+                        "section": t.get("section")})
     return out
 
 
@@ -267,9 +269,20 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                 or _name_overlap(name, nm) >= 2
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
 
+    # ⚠ ТАБЛИЦА, НАЗВАВШАЯ РАЗДЕЛ, К ЧУЖОМУ РАЗДЕЛУ НЕ ОТНОСИТСЯ — фильтр рантайма (ред. 29.09.2026,
+    # ветка 1б `_lookup`), перенесённый сюда ред. 05.10.2026 (N 1297): она дала XXII-1 (26.51.52)
+    # операции и долю компонентов, позиция вошла в срез, и судовая строка прим. 17(3) «Приборы для
+    # измерения … расхода, уровня, давления» (код 26.51) стала «нашим дефектом» там, где рантайм
+    # отказывается ВЕРНО. Уликой такая строка остаётся («порог написан для другой продукции»):
+    # исключи её из улик вовсе — у 47 позиций среза сменился бы класс в листе сверки эксперта.
+    sec = rec.get("section_roman")
+
+    def _ours(row: dict) -> bool:
+        return not (sec and row.get("section") and row["section"] != sec) and _speaks_about_us(row)
+
     # Из покрывающих строк выбираем ту, что говорит про ЭТУ позицию; если такой нет — первую,
     # и тогда вердикт прежний («порог написан для другой продукции, привязывать нельзя»).
-    covering = next((r for r in coverings if _speaks_about_us(r)), None) or (
+    covering = next((r for r in coverings if _ours(r)), None) or (
         coverings[0] if coverings else None)
 
     if covering:
@@ -287,7 +300,7 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         #   * либо наименование совпадает с позицией (дословно или пересечением ≥2 значимых слов).
         names = [n for n in (covering.get("names") or []) if n.strip()]
         # Одно решение — одно место: тот же предикат, которым строка и выбиралась выше.
-        if _speaks_about_us(covering):
+        if _ours(covering):
             return {"class": "defect_unattached",
                     "evidence": f"прим. {covering['note']} ({covering['kind']}), "
                                 f"коды {', '.join(covering['codes'][:3])} покрывают "
@@ -300,7 +313,7 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                             f"({', '.join(covering['codes'][:2])}) написан для ДРУГОЙ продукции "
                             f"— «{names[0][:60]}»; привязывать нельзя",
                 "note": covering["note"], "quote": covering["quote"][:160]}
-    if by_name:
+    if by_name and not (sec and by_name.get("section") and by_name["section"] != sec):
         return {"class": "defect_name_match",
                 "evidence": f"прим. {by_name['note']} ({by_name['kind']}): наименование строки "
                             f"совпадает дословно, коды {', '.join(by_name['codes'][:3])} — другие",

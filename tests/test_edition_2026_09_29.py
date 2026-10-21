@@ -25,10 +25,10 @@ def _thr(codes, name, section):
 
 
 class TestCorpusEdition(unittest.TestCase):
-    def test_corpus_is_on_the_edition_in_force(self):
-        edition.corpus_edition.cache_clear()
-        self.assertEqual(edition.corpus_edition(), "ред. от 29.09.2026 N 1254")
-        self.assertTrue(edition.kontur_719_url().endswith("documentId=508572"))
+    def test_edition_row_kept_for_rollback(self):
+        """С 21.10.2026 корпус на ред. 05.10.2026 N 1297 — «корпус на действующей» проверяет
+        `test_edition_2026_10_05`. Строка этой редакции остаётся ради отката на прошлый корпус."""
+        self.assertEqual(edition.KONTUR_719_BY_EDITION["ред. от 29.09.2026 N 1254"], "508572")
 
 
 class TestSectionIVRestored(unittest.TestCase):
