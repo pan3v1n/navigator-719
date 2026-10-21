@@ -81,9 +81,13 @@ docker run -d --name qdrant -p 6333:6333 qdrant/qdrant
 она скачивается с HuggingFace при первом запуске индексации.
 
 ```powershell
-.venv\Scripts\python scripts\load_kb.py        # JSON → Qdrant, ~1379 точек (разово, ~15–25 мин на CPU)
-.venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases (на старте пусто)
+.venv\Scripts\python scripts\load_kb.py        # товарный корпус → pp719 (разово, ~15–25 мин на CPU)
+.venv\Scripts\python scripts\load_rules_kb.py  # процедурный корпус (Правила, приказы ТПП) → pp719_rules
+.venv\Scripts\python scripts\seed_cases.py     # кейсы эксперта → verified_cases
 ```
+Без `load_rules_kb.py` процедурная ветка («как подать», «какие документы») остаётся без
+корпуса. Числа точек на 15.10.2026: `pp719` 1534 · `pp719_rules` 761 · `verified_cases` 12.
+Переезд с другого ПК — [WORK_ON_OTHER_PC.md](WORK_ON_OTHER_PC.md).
 
 **Если скачивание модели рвётся (нестабильная сеть / из РФ)** — три способа:
 
