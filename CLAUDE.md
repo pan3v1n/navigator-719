@@ -1403,7 +1403,8 @@ _(2026-07-02: main перемотан на dev, prod создан из dev — �
 ## Как продолжить работу на новом устройстве
 
 **Переезд с прежнего ПК** (модель, граф, первоисточники, память Claude Code, хуки, новый
-SSH-ключ к бою) — по [WORK_ON_OTHER_PC.md](WORK_ON_OTHER_PC.md), скрипт `scripts/pc_transfer.sh`.
+SSH-ключ к бою) — по [WORK_ON_OTHER_PC.md](WORK_ON_OTHER_PC.md), скрипт `scripts/pc_transfer.sh`;
+пошаговая инструкция для Claude Code на новом ПК — [docs/NEW_PC_SETUP_CLAUDE.md](docs/NEW_PC_SETUP_CLAUDE.md).
 Голый старт без прежнего ПК:
 ```bash
 git clone https://github.com/pan3v1n/navigator-719.git
