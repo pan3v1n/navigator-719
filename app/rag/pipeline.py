@@ -28,7 +28,7 @@ from app.rag import documents_ref, fragments, inheritance, okpd2_ref, retriever,
 from app.rag.embeddings import embed_query
 from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, okpd2_match, search,
                                search_cases, search_rules)
-from app.rag.thresholds import lookup_procurement_threshold, lookup_threshold
+from app.rag.thresholds import BY_KIND, lookup_procurement_threshold, lookup_threshold
 
 # Кап операций ЦЕЛЕВОГО хита (вариант A, 2026-07-05): 60, чтобы не резать умеренные продукты
 # (напр. чиллеры XVI, 38 операций). «СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ» помечается только там, где список
@@ -284,11 +284,7 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
             if parent.get("min_threshold") and not mt:
                 mt = (f"{parent['min_threshold']} — порог группы, указан у позиции "
                       f"«{parent.get('product_name', '')}»")
-    # Порог по видам (прим. 80.1, многострочный) — ПОСЛЕ требований (ревью PR #209): у группы до
-    # 48 видов, и сверху он съедал кап целиком — панель не показывала ни одного требования. Внизу
-    # кап режет хвост перечня видов, а требования позиции видны всегда.
-    by_kind = bool(mt) and "\n" in mt
-    if mt and not by_kind:
+    if mt:
         lines.insert(0, f"Порог: {mt}")
     proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)
     if proc:
@@ -309,23 +305,26 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
                      "(по узлам изделия или видам работ).")
     more = " …(полный перечень — в первоисточнике ПП №719)"
     text = "\n".join(lines)
-    if by_kind:
-        # Кап делится: перечню видов — не больше половины (целыми строками, с числом непоказанных),
-        # требованиям — остаток. У VII-127 и того и другого больше капа: целиком сверху порог
-        # съедал требования, целиком снизу — требования съедали порог.
+    if len(text) > cap and mt and mt.startswith(BY_KIND):
+        # ⚠ Порог ПО ВИДАМ (прим. 80.1) и кап делят панель (ревью PR #209). У группы до 48 видов:
+        # целиком сверху он съедал кап — панель не показывала ни одного требования (VII-127, -133,
+        # -114). Требованиям — не больше половины капа, перечню видов — остаток, целыми строками и с
+        # числом непоказанных. Порядок строк прежний; панель, укладывающаяся в кап, не меняется.
         kinds = f"Порог: {mt}".split("\n")
+        rest = "\n".join(lines[1:])
+        budget = cap - min(len(rest), cap // 2) - 1 - 60     # 60 — строка «… ещё видов: N»
         shown = [kinds[0]]
         for ln in kinds[1:]:
-            if len("\n".join(shown + [ln])) > cap // 2:
+            if len("\n".join(shown + [ln])) > budget:
                 break
             shown.append(ln)
         if len(shown) < len(kinds):
             shown.append(f"      … ещё видов: {len(kinds) - len(shown)} — в первоисточнике ПП №719")
         block = "\n".join(shown)
         room = cap - len(block) - 1
-        if len(text) > room:
-            text = text[:max(room - len(more), 0)].rstrip() + more
-        return f"{text}\n{block}" if text else block
+        if len(rest) > room:
+            rest = rest[:max(room - len(more), 0)].rstrip() + more
+        return f"{block}\n{rest}" if rest else block
     if len(text) > cap:
         text = text[:cap].rstrip() + more
     return text

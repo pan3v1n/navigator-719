@@ -386,10 +386,12 @@ def _strict_match(row_name: str | None, product_name: str | None) -> bool:
 
 def _variant_of(variant_name: str | None, product_name: str | None) -> bool:
     """Вид группы 80.1 — вид ЭТОЙ позиции: его имя начинается с её имени ЦЕЛЫМ словом.
-    ⚠ Граница слова (ревью PR #209): иначе «Шприц» забрал бы виды «Шприцы инъекционные …»."""
+    ⚠ Граница слова (ревью PR #209): иначе «Шприц» забрал бы виды «Шприцы инъекционные …».
+    Дефис — часть слова (раунд 2): «Кресла» не забирает «Кресла-коляски …»."""
     key = _strict_key(product_name)
     v = _strict_key(variant_name)
-    return bool(key) and v.startswith(key) and (len(v) == len(key) or not v[len(key)].isalnum())
+    nxt = v[len(key):len(key) + 1]
+    return bool(key) and v.startswith(key) and not (nxt.isalnum() or nxt == "-")
 
 
 def _own_variants(row: dict, product_name: str | None) -> dict | None:
@@ -411,6 +413,9 @@ def _own_variants(row: dict, product_name: str | None) -> dict | None:
 
 _YEAR_LBL = re.compile(r"(\d{4}) год")
 _FROM_LBL = re.compile(r"с (\d{4}) года")
+# Начало порога ПО ВИДАМ (прим. 80.1). Одна константа на формат (`_fmt`) и на панель
+# (`pipeline.source_text`): признак «многострочный» ловил и «⚠ ИНОЙ порог» (ревью PR #209, раунд 2).
+BY_KIND = "по видам продукции ["
 
 
 def _collapse_schedule(by_year: dict[str, str]) -> str:
@@ -433,12 +438,16 @@ def _collapse_schedule(by_year: dict[str, str]) -> str:
     for lbls, val in runs:
         years = [_YEAR_LBL.fullmatch(lb) for lb in lbls]
         tail = _FROM_LBL.fullmatch(lbls[-1])
+        # Отрезок — только у СМЕЖНЫХ лет (раунд 2): пустая ячейка выпадает из `by_year`, и без
+        # проверки {2026: X, 2028: X} стало бы «2026–2028 гг. — X», приписав значение 2027 году.
+        nums = [int(y.group(1)) for y in years if y] + ([int(tail.group(1))] if tail else [])
+        adjacent = all(b - a == 1 for a, b in zip(nums, nums[1:]))
         if len(lbls) == 1:
             span = lbls[0]
-        elif tail and all(years[:-1]):
-            span = f"с {years[0].group(1)} года"          # …2029, 2030, с 2031 → «с 2029 года»
-        elif all(years):
-            span = f"{years[0].group(1)}–{years[-1].group(1)} гг."
+        elif tail and all(years[:-1]) and adjacent:
+            span = f"с {nums[0]} года"                     # …2029, 2030, с 2031 → «с 2029 года»
+        elif all(years) and adjacent:
+            span = f"{nums[0]}–{nums[-1]} гг."
         else:
             span = ", ".join(lbls)
         out.append(f"{span} — {val}")
@@ -456,7 +465,7 @@ def _fmt(row: dict, note: str, section: str | None) -> str:
         # строкой: ячейка первоисточника бывает многострочной, и перенос ломал бы отступ блока.
         body = "\n".join(f"      — {' '.join(v['name'].split())}: {_collapse_schedule(v['by_year'])}"
                          for v in row["variants"])
-        return f"по видам продукции [{src}]:\n{body}"
+        return f"{BY_KIND}{src}]:\n{body}"
     steps = "; ".join(f"{lbl} — {val}" for lbl, val in row["by_year"].items())
     return f"{steps} [{src}]"
 

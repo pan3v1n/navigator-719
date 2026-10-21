@@ -210,27 +210,85 @@ class TestReviewPR209(unittest.TestCase):
         self.assertEqual(c({"до 1 января 2029 г.": "35 баллов", "с 1 января 2029 г.": "35 баллов"}),
                          "до 1 января 2029 г., с 1 января 2029 г. — 35 баллов")
 
-    def test_panel_shows_requirements_of_a_group_with_many_kinds(self):
-        """VII-127 «Заплаты сердечно-сосудистые…»: порог по видам съедал кап панели целиком."""
+    @staticmethod
+    def _panel(rec: dict) -> str:
         import dataclasses
 
         from app.rag import pipeline
         from app.rag.retriever import Hit
 
-        r = _vii()["127"]
         names = {f.name for f in dataclasses.fields(Hit)}
-        st = pipeline.source_text(Hit(**{k: v for k, v in {**r, "score": 1.0}.items() if k in names}))
-        lines = st.split("\n")
-        first_req = next(i for i, ln in enumerate(lines) if ln.startswith("• "))
-        thr = next(i for i, ln in enumerate(lines) if ln.startswith("Порог:"))
+        return pipeline.source_text(Hit(**{k: v for k, v in {**rec, "score": 1.0}.items() if k in names}))
+
+    def test_panel_shows_requirements_of_a_group_with_many_kinds(self):
+        """VII-127 «Заплаты сердечно-сосудистые…»: порог по видам съедал кап панели целиком."""
+        from app.rag import pipeline
+
+        lines = (st := self._panel(_vii()["127"])).split("\n")
+        self.assertTrue(lines[0].startswith("Порог: по видам продукции"), "порядок строк панели сменился")
         self.assertGreater(sum(ln.startswith("• ") for ln in lines), 10, "требования не видны")
-        self.assertLess(first_req, thr, "порог по видам снова над требованиями")
         self.assertLessEqual(len(st), pipeline.SOURCE_TEXT_CAP)
         self.assertIn("… ещё видов:", st, "у 48 видов VII-127 перечень обязан быть урезан с пометкой")
+
+    def test_panel_that_fits_is_unchanged(self):
+        """Раунд 2: перенос порога вниз задевал «⚠ ИНОЙ порог» (16 позиций V и XVIII) и 60 групп 80.1,
+        которым кап не грозит. Панель, укладывающаяся в кап, — порог первой строкой, как прежде."""
+        from app.rag import pipeline
+
+        sec_v = json.loads((KB / "structured" / "V_energomash_elektrotehnika.json").read_text(encoding="utf-8"))
+        contactors = next(r for r in sec_v if r["source_anchor"].endswith("позиция 34"))
+        self.assertTrue(contactors["product_name"].startswith("Контакторы и пускатели"))
+        for rec, head in ((_vii()["154"], "Порог: по видам продукции [прим. 80.1]:"), (contactors, "Порог: ")):
+            with self.subTest(pos=rec["source_anchor"][-12:]):
+                st = self._panel(rec)
+                self.assertLessEqual(len(st), pipeline.SOURCE_TEXT_CAP)
+                self.assertTrue(st.startswith(head), st[:80])
+                self.assertNotIn("… ещё видов:", st)
+        self.assertIn("ИНОЙ", self._panel(contactors).split("\n• ")[0], "контроль: у контакторов — «⚠ ИНОЙ порог»")
+
+    def test_schedule_span_needs_adjacent_years(self):
+        """Пустая ячейка выпадает из графика — 2026 и 2028 без 2027 отрезком не склеиваются."""
+        self.assertEqual(thresholds._collapse_schedule({"2026 год": "10 баллов", "2028 год": "10 баллов"}),
+                         "2026 год, 2028 год — 10 баллов")
+        self.assertEqual(thresholds._collapse_schedule({"2029 год": "5 баллов", "с 2031 года": "5 баллов"}),
+                         "2029 год, с 2031 года — 5 баллов")
+
+    def test_lookup_kind_needs_a_word_boundary(self):
+        """Путь `_lookup` → `_own_variants`, а не только сама функция (раунд 2: мутация выживала)."""
+        tables = [_table("80.1", _row("Шприцы медицинские", None, strict=True, variants=[
+            {"name": "Шприцы инъекционные", "by_year": {"2026 год": "70 баллов"}},
+            {"name": "Кресла-коляски", "by_year": {"2026 год": "80 баллов"}}]))]
+        with unittest.mock.patch.object(thresholds, "_tables", lambda: tables):
+            self.assertIsNone(thresholds.lookup_threshold(["99.99.99.999"], "Шприц", "VII"))
+            self.assertIsNone(thresholds.lookup_threshold(["99.99.99.999"], "Кресла", "VII"))
+
+    def test_classifier_picks_same_name_row_of_its_own_section(self):
+        import classify_missing_thresholds as C
+
+        rec = {"product_name": "Изделие Гамма", "okpd2_codes": ["99.99.99.999"], "section_roman": "VII",
+               "requirement_type": "points"}
+        rows = [{"codes": ["11.11.11.111"], "names": ["Изделие Гамма"], "note": "17(3)", "quote": "q1",
+                 "kind": "таблица", "strict_name": False, "section": "XVIII"},
+                {"codes": ["22.22.22.222"], "names": ["Изделие Гамма"], "note": "38", "quote": "q2",
+                 "kind": "таблица", "strict_name": False, "section": None}]
+        got = C.classify(rec, rows)
+        self.assertEqual((got["class"], got["note"]), ("defect_name_match", "38"))
+
+    def test_classifier_sees_an_unattached_kind_as_our_defect(self):
+        """Вид 80.1, названный именем позиции, который рантайм НЕ привязал, — наш дефект."""
+        import classify_missing_thresholds as C
+
+        rec = {"product_name": "Шприц инъекционный", "okpd2_codes": ["99.99.99.999"], "section_roman": "VII",
+               "requirement_type": "points"}
+        rows = [{"codes": ["99.99.99.999"], "names": ["Шприц инъекционный малый"], "note": "80.1", "quote": "q",
+                 "kind": "таблица, вид группы", "strict_name": False, "table_strict": "variant",
+                 "section": None}]
+        self.assertEqual(C.classify(rec, rows)["class"], "defect_unattached")
 
     def test_kind_of_a_position_starts_with_its_whole_word(self):
         self.assertFalse(thresholds._variant_of("Шприцы инъекционные однократного применения", "Шприц"))
         self.assertTrue(thresholds._variant_of("Шприц инъекционный", "Шприц"))
+        self.assertFalse(thresholds._variant_of("Кресла-коляски с ручным приводом", "Кресла"))
         self.assertTrue(thresholds._variant_of(
             "Кресла-стулья для инвалидов с санитарным оснащением и с колесами, со стояночной системой "
             "торможения в колесах, без опоры для ног", _vii()["154"]["product_name"]))
