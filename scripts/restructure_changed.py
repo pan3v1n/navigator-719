@@ -23,9 +23,11 @@
              модель не зовётся. Новая позиция без пары — отказ (её место — renumber).
 
 СМЕНА ТОЛЬКО КОДА (оба режима, #212): исходный блок (имя + требования) побайтно тот же, а ячейка
-кода другая — так N 1002 перевела суда 30.11.33.190 → .191–.197 при тех же требованиях. Запись
-переиспользуется с НОВЫМИ кодами и поправками, модель не зовётся. Только однозначная пара: блок
-встречается ровно у одной новой и ровно у одной старой позиции из ещё не сопоставленных.
+кода другая (сценарий ревью PR #209: суда 30.11.33.190 → .191–.197). Запись переиспользуется с
+НОВЫМИ кодами и поправками, модель не зовётся. Только однозначная пара: блок встречается ровно у
+одной новой и ровно у одной старой позиции из ещё не сопоставленных; примечание записи, назвавшее
+старый код, — повод отдать позицию модели (`notes_cite_old_code`). ⚠ На реальных переходах 2026 г.
+ветка не сработала ни разу: у судов N 1002 сменилось и имя (снята сноска «<9>»), — её держат тесты.
 
 Запуск (из корня; старый чанк берётся из git):
   .venv/Scripts/python.exe scripts/restructure_changed.py VII --anchors renumber            # план
@@ -72,8 +74,8 @@ def json_indent(text: str) -> int | None:
 
 def reuse_key(p) -> str:
     """Ключ «позиция в новой редакции та же»: ячейка КОДА и исходный блок (имя + требования).
-    ⚠ Ревью PR #209: по одному `raw_block` позиция, которой редакция сменила только код (так N 1002
-    перевела суда 30.11.33.190 → .191–.197), переиспользовалась бы со СТАРЫМИ кодами — а по коду
+    ⚠ Ревью PR #209: по одному `raw_block` позиция, которой редакция сменила только код (сценарий:
+    суда 30.11.33.190 → .191–.197), переиспользовалась бы со СТАРЫМИ кодами — а по коду
     идут поиск, ОКПД2-буст и пороги."""
     return f"{p.okpd2_field.strip()}\n{p.raw_block()}"
 
@@ -84,9 +86,11 @@ def git_text(rev: str, path: Path) -> str:
     return out.stdout.decode("utf-8").replace("\r\n", "\n")
 
 
-def match_records(products: list, records: list[dict]) -> dict[int, int]:
-    """Кандидат старого разбора (индекс) → старая запись (индекс). Только однозначные пары."""
-    pairs: dict[int, int] = {}
+def match_records(products: list, records: list[dict], contested: set[int] | None = None) -> dict[int, int]:
+    """Кандидат старого разбора (индекс) → старая запись (индекс). Только однозначные пары.
+    `contested` (если передан) получает записи, на которые претендовали несколько кандидатов без
+    явного лидера: отказ это или нет, решает вызывающий."""
+    best: dict[int, tuple[int, float]] = {}
     for i, p in enumerate(products):
         cands = [j for j, r in enumerate(records) if sorted(r["okpd2_codes"]) == sorted(p.okpd2_codes)]
         scored = sorted(
@@ -96,13 +100,22 @@ def match_records(products: list, records: list[dict]) -> dict[int, int]:
             continue
         if len(scored) > 1 and scored[1][0] > scored[0][0] - NAME_GAP:
             continue
-        pairs[i] = scored[0][1]
-    # Одна запись у двух кандидатов — неоднозначно: не достаётся никому (#212). Прежде это был
-    # голый `assert` ниже: на XVIII ред. 29.09 (187 → 344 позиций) скрипт падал трассой, а не отказом.
-    claims: dict[int, int] = {}
-    for j in pairs.values():
-        claims[j] = claims.get(j, 0) + 1
-    pairs = {i: j for i, j in pairs.items() if claims[j] == 1}
+        best[i] = (scored[0][1], scored[0][0])
+    # Одна запись у нескольких кандидатов (#212; прежде — голый `assert` ниже, и на XVIII ред. 29.09,
+    # 187 → 344 позиций, скрипт падал трассой): достаётся лидеру, опередившему остальных на
+    # `NAME_GAP`, без лидера — никому. ⚠ «Никому» без условия (первая редакция правки) отдавало в
+    # `dropped` и явного победителя: XVIII «Грунтозаборные устройства…» — 0.695 против 0.633 и 0.622,
+    # а карта якорей объявляла позицию исключённой (ревью #212).
+    claims: dict[int, list[tuple[float, int]]] = {}
+    for i, (j, score) in best.items():
+        claims.setdefault(j, []).append((score, i))
+    pairs: dict[int, int] = {}
+    for j, cl in claims.items():
+        cl.sort(reverse=True)
+        if len(cl) == 1 or cl[0][0] - cl[1][0] >= NAME_GAP:
+            pairs[cl[0][1]] = j
+        elif contested is not None:
+            contested.add(j)
     # Остаток: ровно один несопоставленный кандидат и ровно одна свободная запись с теми же кодами.
     used = set(pairs.values())
     for i, p in enumerate(products):
@@ -135,6 +148,16 @@ def recode_pairs(new: list, old: list, skip_new=frozenset(), skip_old=frozenset(
     return {ns[0]: ob[b][0] for b, ns in nb.items()
             if len(ns) == 1 and len(ob.get(b, [])) == 1
             and new[ns[0]].okpd2_field.strip() != old[ob[b][0]].okpd2_field.strip()}
+
+
+def notes_cite_old_code(rec: dict, p) -> bool:
+    """Примечание записи называет код, которого у позиции больше нет (ревью #212): «… под общим
+    кодом «из 20.59.56»» осталось бы в `notes` при новом 20.59.57, а `notes` идёт в sparse-текст
+    (`load_kb.build_text`) — старый код жил бы токеном BM25. Такую запись не переиспользуем: пара
+    остаётся (якорь и карта верны), а разбирает позицию модель."""
+    notes = rec.get("notes") or ""
+    return any(re.search(rf"(?<![\d.]){re.escape(c)}(?![\d.])", notes)
+               for c in rec.get("okpd2_codes") or [] if c not in p.okpd2_codes)
 
 
 def plan(roman: str, rev: str, anchors: str):
@@ -181,16 +204,22 @@ def plan_steps(new: list, old: list, recs: list[dict], anchors: str):
     taken_new = {n for n, (_, kind, _) in enumerate(steps) if kind != "llm"}
     for n, i in recode_pairs(new, old, skip_new=taken_new, skip_old=reused_old).items():
         reused_old.add(i)
-        steps[n] = (new[n], "recode", pairs[i])
+        steps[n] = (new[n], "llm" if notes_cite_old_code(recs[pairs[i]], new[n]) else "recode", pairs[i])
     # Изменённая позиция → её прежняя запись (тем же сопоставлением, среди неиспользованных).
     # keep: обязательна — оттуда берётся якорь; renumber: только для карты якорей и отчёта.
     rest = [k for k in range(len(old)) if k not in reused_old]
     rest_recs = [recs[pairs[k]] for k in rest]
-    llm_prods = [p for p, kind, _ in steps if kind == "llm"]
-    sub = match_records(llm_prods, rest_recs)
+    llm_prods = [p for p, kind, j in steps if kind == "llm" and j is None]
+    contested: set[int] = set()
+    sub = match_records(llm_prods, rest_recs, contested)
+    if contested and anchors == "renumber":
+        # Иначе запись ушла бы в `dropped`, а карта якорей объявила бы живую позицию исключённой.
+        sys.exit("записи, на которые претендуют несколько новых позиций без явного лидера: "
+                 f"{[rest_recs[k]['product_name'][:50] for k in sorted(contested)]} — карта якорей была "
+                 "бы неверной, остановка")
     it = iter(range(len(llm_prods)))
-    for n, (p, kind, _) in enumerate(steps):
-        if kind != "llm":
+    for n, (p, kind, j) in enumerate(steps):
+        if kind != "llm" or j is not None:
             continue
         k = next(it)
         if k in sub:
@@ -301,7 +330,10 @@ def patch_jobs(new: list, old: list, records: list[dict]) -> tuple[list, list[in
              if k not in taken and sorted(q.okpd2_codes) == sorted(p.okpd2_codes)), reverse=True)
         if scored and scored[0][0] >= NAME_MIN and (len(scored) == 1 or scored[1][0] < scored[0][0] - NAME_GAP):
             pairs[i] = scored[0][1]
-    assert len(set(pairs.values())) == len(pairs), "одна старая позиция в паре с двумя новыми"
+    twice = sorted({k for k in pairs.values() if list(pairs.values()).count(k) > 1})
+    if twice:   # ревью #212: голый `assert` падал трассой (IV ред. 22.07 → 29.09, XVIII)
+        sys.exit(f"старая позиция в паре с несколькими новыми: {[gone[k].name_raw.strip()[:50] for k in twice]}"
+                 " — это раздел для --anchors renumber")
     unpaired = [p.name_raw.strip()[:60] for i, p in enumerate(changed) if i not in pairs and i not in recoded]
     if unpaired:
         sys.exit(f"новые позиции без пары ({len(unpaired)}): {unpaired} — это раздел для --anchors renumber")
@@ -314,7 +346,8 @@ def patch_jobs(new: list, old: list, records: list[dict]) -> tuple[list, list[in
     jobs = []   # (record index, new product, "recode"|"rename"|"llm")
     for i, p in enumerate(changed):
         if i in recoded:
-            jobs.append((plain[rec_of[recoded[i]]], p, "recode"))
+            j = plain[rec_of[recoded[i]]]
+            jobs.append((j, p, "llm" if notes_cite_old_code(records[j], p) else "recode"))
             continue
         q = gone[pairs[i]]
         j = plain[rec_of[pairs[i]]]

@@ -109,7 +109,61 @@ class TestRestructureRecode(unittest.TestCase):
         cands = [sk.Product(okpd2_field="30.11.33.190", name_raw="Суда промерные малые", okpd2_codes=["30.11.33.190"]),
                  sk.Product(okpd2_field="30.11.33.190", name_raw="Суда промерные малые.", okpd2_codes=["30.11.33.190"])]
         recs = [_rec(1, "Суда промерные малые", ["30.11.33.190"]), _rec(2, "Буксиры", ["30.11.33.190"])]
-        self.assertEqual(rc.match_records(cands, recs), {})
+        contested: set[int] = set()
+        self.assertEqual(rc.match_records(cands, recs, contested), {})
+        self.assertEqual(contested, {0})
+
+    def test_clear_leader_gets_the_contested_record(self):
+        """Ревью #212: «никому» без условия отдавало в `dropped` и явного победителя (XVIII
+        «Грунтозаборные устройства…» 0.695 против 0.633), и карта якорей звала позицию исключённой."""
+        import restructure_changed as rc
+        import structure_kb as sk
+
+        code = ["28.99.39.190"]
+        cands = [sk.Product(okpd2_field=code[0], name_raw=n, okpd2_codes=code) for n in (
+            "Грунтозаборные устройства для земснарядов; система гидравлического рыхления",   # 0.707
+            "Грунтозаборные трубопроводы земснарядов",                                      # 0.800
+            "Устройства для земснарядов прочие")]                                           # 0.703
+        contested: set[int] = set()
+        got = rc.match_records(cands, [_rec(26, "Грунтозаборные устройства для земснарядов", code)], contested)
+        self.assertEqual((got, contested), ({1: 0}, set()))
+
+    def test_tie_without_leader_stops_instead_of_a_wrong_anchor_map(self):
+        import restructure_changed as rc
+
+        old = _parse("30.11.33.190|Суда промерные|требование - 1 балл|")
+        new = _parse("30.11.33.190|Суда промерные малые|требование - 2 балла|",    # 0.824
+                     "30.11.33.190|Суда промерные большие|требование - 3 балла|")  # 0.778
+        recs = [_rec(1, "Суда промерные", ["30.11.33.190"])]
+        with self.assertRaises(SystemExit):
+            rc.plan_steps(new, old, recs, "renumber")
+        with self.assertRaises(SystemExit):   # keep: прежде голый `assert` с трассой
+            rc.patch_jobs(new, old, recs)
+
+    def test_record_whose_notes_cite_the_old_code_goes_to_the_model(self):
+        """Ревью #212: старый код в `notes` уходит в sparse-текст. Пара остаётся — якорь и карта верны."""
+        import restructure_changed as rc
+
+        self.recs[0]["notes"] = "под общим кодом «из 30.11.33.190»"
+        steps, dropped = rc.plan_steps(self.new, self.old, self.recs, "renumber")
+        self.assertEqual([(k, j) for _p, k, j in steps], [("llm", 0), ("reuse", 1)])
+        self.assertEqual(dropped, [])
+        jobs, _removed = rc.patch_jobs(self.new, self.old, self.recs)
+        self.assertEqual([(j, k) for j, _p, k in jobs], [(0, "llm")])
+        self.recs[0]["notes"] = "под общим кодом «из 30.11.33.1900»"   # другой код — не повод
+        self.assertEqual([k for _p, k, _j in rc.plan_steps(self.new, self.old, self.recs, "renumber")[0]],
+                         ["recode", "reuse"])
+
+    def test_reused_position_does_not_make_the_block_ambiguous(self):
+        """`skip_old`: старая позиция с тем же блоком, уже переиспользованная целиком, — не соперник."""
+        import restructure_changed as rc
+
+        old = _parse("30.11.33.190|Суда|требование - 1 балл|", "30.11.33.300|Суда|требование - 1 балл|")
+        new = _parse("30.11.33.191|Суда|требование - 1 балл|", "30.11.33.300|Суда|требование - 1 балл|")
+        recs = [_rec(1, "Суда", ["30.11.33.190"]), _rec(2, "Суда", ["30.11.33.300"])]
+        steps, dropped = rc.plan_steps(new, old, recs, "renumber")
+        self.assertEqual([(k, j) for _p, k, j in steps], [("recode", 0), ("reuse", 1)])
+        self.assertEqual(dropped, [])
 
 
 class TestNoteTableExclusionRows(unittest.TestCase):
@@ -152,6 +206,52 @@ class TestNoteTableExclusionRows(unittest.TestCase):
         self.assertEqual(rows["Изделие А"], ["33.33.33.330"])
         # Контроль: настоящая многострочная ячейка кода по-прежнему склеивается.
         self.assertEqual(rows["Изделие Б"], ["44.44.44.440", "44.44.44.441"])
+
+    @staticmethod
+    def _parse_chunk(text: str) -> list[dict]:
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "chunk.txt"
+            path.write_text(text, encoding="utf-8")
+            orig = thresholds._CHUNK
+            try:
+                thresholds._CHUNK = path
+                thresholds._tables.cache_clear()
+                return thresholds._tables()
+            finally:
+                thresholds._CHUNK = orig
+                thresholds._tables.cache_clear()
+
+    def test_exclusion_right_before_a_live_row(self):
+        """Ревью #212: в прим. 28 за каждым исключением идёт поправка, и сброс делала она — ветка
+        исключения не проверялась ничем."""
+        rows = {r["name"]: r["codes"] for t in self._parse_chunk("\n".join([
+            "28. Продукция … при условии достижения следующего количества баллов:",
+            "Код по ОК 034-2014|Наименование|2026 год|2027 год|",
+            "из 22.22.22.220",
+            "из 22.22.22.221 - Исключено.|",
+            "из 33.33.33.330|Изделие А|не менее 10 баллов|не менее 20 баллов|",
+            "",
+        ])) for r in t["rows"]}
+        self.assertEqual(rows["Изделие А"], ["33.33.33.330"])
+
+    def test_variant_table_survives_amendment_and_exclusion_rows(self):
+        """Ревью #212: одна строка «(в ред. …)|» или «из X - Исключено.|» внутри таблицы прим. 80.1
+        отвергала форму целиком — 95 строк исчезали из `_tables()`."""
+        real = [t for t in thresholds._tables() if t["note"] == "80.1"]
+        self.assertEqual(len(real), 1)
+        lines = thresholds._CHUNK.read_text(encoding="utf-8").split("\n")
+        start = next(i for i, ln in enumerate(lines) if ln.startswith("80.1. "))
+        groups = [i for i in range(start + 1, len(lines)) if thresholds._ROW_START_RE.match(lines[i].strip())][:3]
+        self.assertEqual(len(groups), 3, "строки-группы 80.1 не найдены")
+        # Вставка — только на ГРАНИЦЕ логической строки: ячейка кодов группы бывает многострочной.
+        after_group = next(e for e in range(groups[1], len(lines)) if lines[e].rstrip().endswith("|")) + 1
+        before_group = next(e for e in range(groups[2] - 1, start, -1) if lines[e].rstrip().endswith("|")) + 1
+        self.assertLess(after_group, before_group)
+        patched = list(lines)
+        patched.insert(before_group, "из 99.99.99.999 - Исключено.|")
+        patched.insert(after_group, "(в ред. Постановления Правительства РФ от 29.09.2026 N 1257)|")
+        got = [t for t in self._parse_chunk("\n".join(patched)) if t["note"] == "80.1"]
+        self.assertEqual(got, real)
 
     def test_exclusion_mark_is_the_one_of_the_section_parser(self):
         """Два разбора — разделов (`structure_kb`) и таблиц примечаний — обязаны узнавать исключение
