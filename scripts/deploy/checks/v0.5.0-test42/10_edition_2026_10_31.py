@@ -60,8 +60,11 @@ def main() -> int:
 
     # --- 1. текст корпуса -------------------------------------------------------------------
     edition.corpus_edition.cache_clear()
-    edition.edition_key.cache_clear()
-    got, key = edition.corpus_edition(), edition.edition_key()
+    # Код прошлого релиза ключа ссылки не знает — это провал пункта, а не падение проверки.
+    key_fn = getattr(edition, "edition_key", None)
+    if key_fn is not None:
+        key_fn.cache_clear()
+    got, key = edition.corpus_edition(), (key_fn() if key_fn else "нет edition_key")
     check(got == EDITION and key == KEY, f"текст корпуса — {got}; ключ ссылки — {key}",
           f"текст корпуса на «{got}» (ключ «{key}»), ждали «{EDITION}» / «{KEY}»")
     url = edition.kontur_719_url() or ""

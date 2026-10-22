@@ -119,6 +119,31 @@ class TestNote10OwnRule(unittest.TestCase):
         self.assertIn('25.93.18.110 - "Иглы швейные из черных металлов" - не менее 115 баллов', lines[k + 1])
         self.assertTrue(thresholds._OWN_RULE_RE.search(lines[k + 1]))
 
+    def test_flat_row_steps_stop_at_an_own_rule_sentence(self):
+        """Вторая ветка сбора ступеней — многострочная строка «код "имя":» (прим. 9): та же граница."""
+        chunk = "\n".join([
+            "9. Продукция … при условии достижения следующего количества баллов:",
+            '28.11.11.111 "Изделие А":',
+            "с 1 января 2026 г. - не менее 50 баллов;",
+            "Продукция отрасли может быть отнесена к российской промышленной продукции при условии … "
+            '22.22.22.222 - "Изделие Б" - не менее 115 баллов.',
+            "",
+        ])
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "chunk.txt"
+            path.write_text(chunk, encoding="utf-8")
+            orig = thresholds._CHUNK
+            try:
+                thresholds._CHUNK = path
+                thresholds._flat_thresholds.cache_clear()
+                rows = [r for r in thresholds._flat_thresholds() if "Изделие А" in r["names"]]
+            finally:
+                thresholds._CHUNK = orig
+                thresholds._flat_thresholds.cache_clear()
+        self.assertEqual(len(rows), 1)
+        self.assertIn("50 баллов", rows[0]["threshold"])
+        self.assertNotIn("115", rows[0]["threshold"])
+
     def test_own_rule_sentence_forms(self):
         for s in ("Продукция … может быть отнесена к российской промышленной продукции",
                   "Изделия могут быть отнесены к российской промышленной продукции",
