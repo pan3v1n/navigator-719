@@ -71,6 +71,27 @@ class TestCorpusEdition(unittest.TestCase):
                 edition.edition_key.cache_clear()
 
 
+    def test_next_edition_key_does_not_inherit_n1257(self):
+        """Ревью `A7`: N 1257 останется в тексте навсегда; акт следующей редакции (условно N 1400) даёт
+        ключ по своей подписи, без «+ N 1257» — строку в таблицу добавляют по подписи."""
+        text = (KB / "chunks" / "01_postanovlenie.txt").read_text(encoding="utf-8")
+        newer = text.replace("от 05.10.2026 N 1297", "от 05.10.2026 N 1297, от 10.11.2026 N 1400")
+        self.assertNotEqual(newer, text)
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "01_postanovlenie.txt"
+            path.write_text(newer, encoding="utf-8")
+            orig = edition._BODY
+            try:
+                edition._BODY = path
+                edition.corpus_edition.cache_clear()
+                edition.edition_key.cache_clear()
+                self.assertEqual(edition.edition_key(), "ред. от 10.11.2026 N 1400")
+            finally:
+                edition._BODY = orig
+                edition.corpus_edition.cache_clear()
+                edition.edition_key.cache_clear()
+
+
 class TestNeedlesPosition(unittest.TestCase):
     def test_position_is_parsed_from_the_source_cells(self):
         r = _xxiii()["3"]
@@ -96,7 +117,8 @@ class TestNeedlesPosition(unittest.TestCase):
         self.assertEqual(r["min_threshold"], "не менее 115 баллов")
 
     def test_neighbours_renumbered_not_reparsed(self):
-        """Позиция вставлена третьей: прежние 3–10 стали 4–11 без перепарса (записи побайтно те же)."""
+        """Позиция вставлена третьей: прежние 3–10 стали 4–11 без перепарса. Здесь — имена на местах;
+        побайтное равенство записей (кроме якоря) сверено при сборке и ревью `A7`."""
         v = _xxiii()
         self.assertEqual(len(v), 11)
         self.assertEqual(v["4"]["product_name"], "Магниты редкоземельные постоянные")

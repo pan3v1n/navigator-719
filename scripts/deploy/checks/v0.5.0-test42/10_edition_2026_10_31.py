@@ -80,9 +80,11 @@ def main() -> int:
     coll = settings.QDRANT_COLLECTION
     total = _count(coll, None)
     stale = _count(coll, models.Filter(must_not=[_match("edition", EDITION)]))
-    # ⚠ Положительный контроль: «устаревших 0» при пустой коллекции — не результат.
+    # ⚠ Штамп у этой и прошлой редакции ОДИН («ред. от 05.10.2026 N 1297» — подпись по дате последнего
+    # акта), поэтому этот пункт непересобранный индекс НЕ различает (ревью `A7`): его ловят XXIII = 12
+    # и поиск ниже. Здесь — только что индекс не пуст и не смешан с чужой редакцией.
     check(total > 1000 and stale == 0, f"{coll}: {total} точек, все со штампом {EDITION}",
-          f"{coll}: точек {total}, без штампа редакции {stale} — индекс не пересобран")
+          f"{coll}: точек {total}, со штампом не этой редакции {stale}")
     n23 = _count(coll, models.Filter(must=[_match("section_roman", "XXIII")]))
     check(n23 == XXIII_POINTS, f"{coll}: раздел XXIII — {n23} точек",
           f"{coll}: раздел XXIII — {n23} точек, ждали {XXIII_POINTS} (прошлая редакция — 11)")
