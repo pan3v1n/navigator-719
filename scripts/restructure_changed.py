@@ -22,6 +22,11 @@
              наименование, а ячейки требований те же, — имя берётся из ячейки источника,
              модель не зовётся. Новая позиция без пары — отказ (её место — renumber).
 
+СМЕНА ТОЛЬКО КОДА (оба режима, #212): исходный блок (имя + требования) побайтно тот же, а ячейка
+кода другая — так N 1002 перевела суда 30.11.33.190 → .191–.197 при тех же требованиях. Запись
+переиспользуется с НОВЫМИ кодами и поправками, модель не зовётся. Только однозначная пара: блок
+встречается ровно у одной новой и ровно у одной старой позиции из ещё не сопоставленных.
+
 Запуск (из корня; старый чанк берётся из git):
   .venv/Scripts/python.exe scripts/restructure_changed.py VII --anchors renumber            # план
   .venv/Scripts/python.exe scripts/restructure_changed.py VII --anchors renumber --write    # + DeepSeek
@@ -92,6 +97,12 @@ def match_records(products: list, records: list[dict]) -> dict[int, int]:
         if len(scored) > 1 and scored[1][0] > scored[0][0] - NAME_GAP:
             continue
         pairs[i] = scored[0][1]
+    # Одна запись у двух кандидатов — неоднозначно: не достаётся никому (#212). Прежде это был
+    # голый `assert` ниже: на XVIII ред. 29.09 (187 → 344 позиций) скрипт падал трассой, а не отказом.
+    claims: dict[int, int] = {}
+    for j in pairs.values():
+        claims[j] = claims.get(j, 0) + 1
+    pairs = {i: j for i, j in pairs.items() if claims[j] == 1}
     # Остаток: ровно один несопоставленный кандидат и ровно одна свободная запись с теми же кодами.
     used = set(pairs.values())
     for i, p in enumerate(products):
@@ -109,6 +120,23 @@ def match_records(products: list, records: list[dict]) -> dict[int, int]:
     return pairs
 
 
+def recode_pairs(new: list, old: list, skip_new=frozenset(), skip_old=frozenset()) -> dict[int, int]:
+    """Новая позиция (индекс) → старая, у которых исходный блок побайтно тот же, а ячейка кода
+    другая: редакция сменила ТОЛЬКО код. Неоднозначный блок (у двух новых или двух старых) —
+    не пара: здесь догадка подменила бы коды чужой позиции."""
+    nb: dict[str, list[int]] = {}
+    ob: dict[str, list[int]] = {}
+    for i, p in enumerate(new):
+        if i not in skip_new:
+            nb.setdefault(p.raw_block(), []).append(i)
+    for k, q in enumerate(old):
+        if k not in skip_old:
+            ob.setdefault(q.raw_block(), []).append(k)
+    return {ns[0]: ob[b][0] for b, ns in nb.items()
+            if len(ns) == 1 and len(ob.get(b, [])) == 1
+            and new[ns[0]].okpd2_field.strip() != old[ob[b][0]].okpd2_field.strip()}
+
+
 def plan(roman: str, rev: str, anchors: str):
     chunk = sk.find_chunk(roman, None)
     new_text = chunk.read_text(encoding="utf-8")
@@ -122,6 +150,13 @@ def plan(roman: str, rev: str, anchors: str):
 
     products_recs = [j for j, r in enumerate(old_records) if r.get("record_type") != "section_methodology"]
     recs = [old_records[j] for j in products_recs]
+    steps, dropped = plan_steps(new, old, recs, anchors)
+    return chunk, title, out_path, old_records, recs, steps, dropped, new_text, json_indent(old_json)
+
+
+def plan_steps(new: list, old: list, recs: list[dict], anchors: str):
+    """Шаги перепарса по разобранным кандидатам — ядро `plan` без файлов и git.
+    Шаг — (кандидат, "reuse"|"recode"|"llm", индекс прежней записи|None)."""
     pairs = match_records(old, recs)
     unmatched_old = [old[i].name_raw.strip()[:70] for i in range(len(old)) if i not in pairs]
     if unmatched_old:
@@ -133,7 +168,7 @@ def plan(roman: str, rev: str, anchors: str):
         by_raw.setdefault(reuse_key(p), i)
     # Изменённая позиция (keep): прежняя запись — по тем же правилам, но среди НЕиспользованных.
     reused_old: set[int] = set()
-    steps = []   # (product, "reuse"|"llm", old_record_index|None)
+    steps = []   # (product, "reuse"|"recode"|"llm", old_record_index|None)
     for p in new:
         i = by_raw.get(reuse_key(p))
         if i is not None and i not in reused_old:
@@ -141,6 +176,12 @@ def plan(roman: str, rev: str, anchors: str):
             steps.append((p, "reuse", pairs[i]))
         else:
             steps.append((p, "llm", None))
+    # Смена только кода: прежняя запись с новыми кодами. Без этой ветки позиция уходила в модель,
+    # а её запись — в `dropped`, и карта якорей объявляла её исключённой (#212).
+    taken_new = {n for n, (_, kind, _) in enumerate(steps) if kind != "llm"}
+    for n, i in recode_pairs(new, old, skip_new=taken_new, skip_old=reused_old).items():
+        reused_old.add(i)
+        steps[n] = (new[n], "recode", pairs[i])
     # Изменённая позиция → её прежняя запись (тем же сопоставлением, среди неиспользованных).
     # keep: обязательна — оттуда берётся якорь; renumber: только для карты якорей и отчёта.
     rest = [k for k in range(len(old)) if k not in reused_old]
@@ -157,7 +198,32 @@ def plan(roman: str, rev: str, anchors: str):
         elif anchors == "keep":
             sys.exit(f"--anchors keep: у новой позиции «{p.name_raw.strip()[:60]}» нет прежней записи")
     dropped = sorted(set(range(len(recs))) - {j for _, _, j in steps if j is not None})
-    return chunk, title, out_path, old_records, recs, steps, dropped, new_text, json_indent(old_json)
+    return steps, dropped
+
+
+def renumber_records(steps: list, recs: list[dict], fresh: dict, roman: str) -> tuple[list[dict], dict]:
+    """Записи раздела в нынешней нумерации + карта «старый якорь → новый» (без методички)."""
+    out, amap = [], {}
+    for n, (p, kind, j) in enumerate(steps):
+        # Прежняя запись — целиком, включая поправки: исходник позиции не изменился, а поправки
+        # разбора у старых JSON собраны другой версией парсера (смена их — шум, а не правка).
+        if kind == "reuse":
+            rec = copy.deepcopy(recs[j])
+        elif kind == "recode":   # смена кода — сама поправка редакции: коды и поправки новые
+            rec = copy.deepcopy(recs[j])
+            rec["okpd2_codes"] = p.okpd2_codes
+            rec["amendments"] = p.amendments
+        else:
+            rec = fresh[n]
+            rec["amendments"] = p.amendments
+        new_anchor = f"Приложение к ПП №719, Раздел {roman}, позиция {p.position}"
+        rec["source_anchor"] = new_anchor
+        if j is not None:
+            amap[recs[j]["source_anchor"]] = new_anchor
+        out.append(rec)
+    anchors_all = [r["source_anchor"] for r in out]
+    assert len(anchors_all) == len(set(anchors_all)), "дубли source_anchor"
+    return out, amap
 
 
 def clean_name(p) -> str:
@@ -177,50 +243,13 @@ def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -
     header, new = sk.parse_section(new_text)
     _, old = sk.parse_section(git_text(rev, chunk))
     title = sk.section_title(header, chunk.stem)
-
-    old_raw = {reuse_key(p) for p in old}
-    new_raw = {reuse_key(p) for p in new}
-    changed = [p for p in new if reuse_key(p) not in old_raw]
-    gone = [p for p in old if reuse_key(p) not in new_raw]
-    # Пара по исходным ячейкам: тот же набор кодов, ближайшее имя (однозначно). Близость — доля
-    # КОРОТКОГО имени, совпавшая с длинным: редакция чаще ДОПИСЫВАЕТ оговорку («Матрасы, кроме
-    # матрасных основ (за исключением продукции … раздела VII …)»), и обычный ratio падает ниже порога.
-    def near(a: str, b: str) -> float:
-        a, b = _norm(a), _norm(b)
-        if not a or not b:
-            return 0.0
-        hit = sum(m.size for m in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
-        return hit / min(len(a), len(b))
-
-    pairs: dict[int, int] = {}
-    for i, p in enumerate(changed):
-        scored = sorted(
-            ((near(q.name_raw, p.name_raw), k)
-             for k, q in enumerate(gone) if sorted(q.okpd2_codes) == sorted(p.okpd2_codes)), reverse=True)
-        if scored and scored[0][0] >= NAME_MIN and (len(scored) == 1 or scored[1][0] < scored[0][0] - NAME_GAP):
-            pairs[i] = scored[0][1]
-    assert len(set(pairs.values())) == len(pairs), "одна старая позиция в паре с двумя новыми"
-    unpaired = [p.name_raw.strip()[:60] for i, p in enumerate(changed) if i not in pairs]
-    if unpaired:
-        sys.exit(f"новые позиции без пары ({len(unpaired)}): {unpaired} — это раздел для --anchors renumber")
-    # Старая позиция → её запись.
-    plain = [j for j, r in enumerate(records) if r.get("record_type") != "section_methodology"]
-    rec_of = match_records(gone, [records[j] for j in plain])
-    lost = [q.name_raw.strip()[:60] for k, q in enumerate(gone) if k not in rec_of]
-    if lost:
-        sys.exit(f"у изменённых старых позиций не найдена запись: {lost}")
-    jobs = []   # (record index, new product, "rename"|"llm")
-    for i, p in enumerate(changed):
-        q = gone[pairs[i]]
-        j = plain[rec_of[pairs[i]]]
-        same_reqs = [c.strip() for c in q.component_cells] == [c.strip() for c in p.component_cells]
-        jobs.append((j, p, "rename" if same_reqs else "llm"))
-    removed = [plain[rec_of[k]] for k in range(len(gone)) if k not in set(pairs.values())]
+    jobs, removed = patch_jobs(new, old, records)
 
     print(f"Раздел {roman}: записей {len(records)}; изменено позиций {len(jobs)}, исключено {len(removed)}")
     for j, p, kind in jobs:
         print(f"  [{kind}] {records[j]['source_anchor'].rsplit(', ', 1)[-1]}: "
-              f"{records[j]['product_name'][:50]!r} → {clean_name(p)[:70]!r}")
+              f"{records[j]['product_name'][:50]!r} → {clean_name(p)[:70]!r}"
+              + (f" | коды {records[j]['okpd2_codes']} → {p.okpd2_codes}" if kind == "recode" else ""))
     for j in removed:
         print(f"  [удалить] {records[j]['source_anchor'].rsplit(', ', 1)[-1]}: {records[j]['product_name'][:70]}")
     if not write:
@@ -235,6 +264,70 @@ def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
             futs = {j: ex.submit(sk.normalize_product, client, p, roman, title, usage, max_chars) for j, p in llm}
             fresh = {j: f.result() for j, f in futs.items()}
+    out = patch_records(records, jobs, removed, fresh)
+    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=json_indent(old_json)), encoding="utf-8")
+    print(f"\nЗаписано: {out_path.relative_to(ROOT)} ({len(out)} записей); вызовов API {usage.calls}, "
+          f"≈ ¥{usage.cost_usd() * sk.USD_TO_CNY:.2f}")
+
+
+def patch_jobs(new: list, old: list, records: list[dict]) -> tuple[list, list[int]]:
+    """--anchors keep без файлов и git: задания (индекс записи, новый кандидат,
+    "recode"|"rename"|"llm") и индексы записей исключённых позиций."""
+    old_raw = {reuse_key(p) for p in old}
+    new_raw = {reuse_key(p) for p in new}
+    changed = [p for p in new if reuse_key(p) not in old_raw]
+    gone = [p for p in old if reuse_key(p) not in new_raw]
+    # Смена только кода — пара по исходному блоку; до правки #212 здесь был `sys.exit`
+    # с советом «это раздел для --anchors renumber».
+    recoded = recode_pairs(changed, gone)
+    # Пара по исходным ячейкам: тот же набор кодов, ближайшее имя (однозначно). Близость — доля
+    # КОРОТКОГО имени, совпавшая с длинным: редакция чаще ДОПИСЫВАЕТ оговорку («Матрасы, кроме
+    # матрасных основ (за исключением продукции … раздела VII …)»), и обычный ratio падает ниже порога.
+    def near(a: str, b: str) -> float:
+        a, b = _norm(a), _norm(b)
+        if not a or not b:
+            return 0.0
+        hit = sum(m.size for m in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+        return hit / min(len(a), len(b))
+
+    pairs: dict[int, int] = {}
+    taken = set(recoded.values())
+    for i, p in enumerate(changed):
+        if i in recoded:
+            continue
+        scored = sorted(
+            ((near(q.name_raw, p.name_raw), k)
+             for k, q in enumerate(gone)
+             if k not in taken and sorted(q.okpd2_codes) == sorted(p.okpd2_codes)), reverse=True)
+        if scored and scored[0][0] >= NAME_MIN and (len(scored) == 1 or scored[1][0] < scored[0][0] - NAME_GAP):
+            pairs[i] = scored[0][1]
+    assert len(set(pairs.values())) == len(pairs), "одна старая позиция в паре с двумя новыми"
+    unpaired = [p.name_raw.strip()[:60] for i, p in enumerate(changed) if i not in pairs and i not in recoded]
+    if unpaired:
+        sys.exit(f"новые позиции без пары ({len(unpaired)}): {unpaired} — это раздел для --anchors renumber")
+    # Старая позиция → её запись.
+    plain = [j for j, r in enumerate(records) if r.get("record_type") != "section_methodology"]
+    rec_of = match_records(gone, [records[j] for j in plain])
+    lost = [q.name_raw.strip()[:60] for k, q in enumerate(gone) if k not in rec_of]
+    if lost:
+        sys.exit(f"у изменённых старых позиций не найдена запись: {lost}")
+    jobs = []   # (record index, new product, "recode"|"rename"|"llm")
+    for i, p in enumerate(changed):
+        if i in recoded:
+            jobs.append((plain[rec_of[recoded[i]]], p, "recode"))
+            continue
+        q = gone[pairs[i]]
+        j = plain[rec_of[pairs[i]]]
+        same_reqs = [c.strip() for c in q.component_cells] == [c.strip() for c in p.component_cells]
+        jobs.append((j, p, "rename" if same_reqs else "llm"))
+    paired = set(pairs.values()) | taken
+    removed = [plain[rec_of[k]] for k in range(len(gone)) if k not in paired]
+    return jobs, removed
+
+
+def patch_records(records: list[dict], jobs: list, removed: list[int], fresh: dict) -> list[dict]:
+    """JSON раздела с заплатками: `rename` — имя из ячейки и коды, `recode` — только коды (имя
+    записи уже сверено с той же ячейкой), `llm` — свежий разбор под прежним якорем."""
     out = copy.deepcopy(records)
     for j, p, kind in jobs:
         if kind == "llm":
@@ -242,14 +335,12 @@ def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -
             rec["source_anchor"] = records[j]["source_anchor"]
         else:
             rec = out[j]
-            rec["product_name"] = clean_name(p)
+            if kind == "rename":
+                rec["product_name"] = clean_name(p)
             rec["okpd2_codes"] = p.okpd2_codes
         rec["amendments"] = p.amendments
         out[j] = rec
-    out = [r for j, r in enumerate(out) if j not in set(removed)]
-    out_path.write_text(json.dumps(out, ensure_ascii=False, indent=json_indent(old_json)), encoding="utf-8")
-    print(f"\nЗаписано: {out_path.relative_to(ROOT)} ({len(out)} записей); вызовов API {usage.calls}, "
-          f"≈ ¥{usage.cost_usd() * sk.USD_TO_CNY:.2f}")
+    return [r for j, r in enumerate(out) if j not in set(removed)]
 
 
 def main() -> None:
@@ -270,9 +361,14 @@ def main() -> None:
 
     chunk, title, out_path, old_records, recs, steps, dropped, new_text, indent = plan(roman, args.rev, args.anchors)
     n_reuse = sum(k == "reuse" for _, k, _ in steps)
+    n_recode = sum(k == "recode" for _, k, _ in steps)
     print(f"Раздел {roman}: позиций сейчас {len(steps)}, было записей {len(recs)}")
     print(f"  прежняя запись (исходник побайтно тот же): {n_reuse}")
-    print(f"  в модель (новые и изменённые):            {len(steps) - n_reuse}")
+    print(f"  прежняя запись с новыми кодами:            {n_recode}")
+    for p, kind, j in steps:
+        if kind == "recode":
+            print(f"    [{p.position}] {p.name_raw.strip()[:50]}: {recs[j]['okpd2_codes']} → {p.okpd2_codes}")
+    print(f"  в модель (новые и изменённые):            {len(steps) - n_reuse - n_recode}")
     for p, kind, j in steps:
         if kind == "llm":
             was = f" ← {recs[j]['source_anchor'].rsplit(', ', 1)[-1]}" if j is not None else ""
@@ -285,30 +381,17 @@ def main() -> None:
         print("\n(план: DeepSeek не вызывался, ничего не записано — повтори с --write)")
         return
 
-    client = sk.make_client()
     usage = sk.Usage()
     llm_idx = [n for n, (_, k, _) in enumerate(steps) if k == "llm"]
-    with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
-        futs = {n: ex.submit(sk.normalize_product, client, steps[n][0], roman, title, usage, args.max_chars)
-                for n in llm_idx}
-        fresh = {n: f.result() for n, f in futs.items()}
+    fresh = {}
+    if llm_idx:
+        client = sk.make_client()
+        with ThreadPoolExecutor(max_workers=max(1, args.workers)) as ex:
+            futs = {n: ex.submit(sk.normalize_product, client, steps[n][0], roman, title, usage, args.max_chars)
+                    for n in llm_idx}
+            fresh = {n: f.result() for n, f in futs.items()}
 
-    out, amap = [], {}
-    for n, (p, kind, j) in enumerate(steps):
-        # Прежняя запись — целиком, включая поправки: исходник позиции не изменился, а поправки
-        # разбора у старых JSON собраны другой версией парсера (смена их — шум, а не правка).
-        if kind == "reuse":
-            rec = copy.deepcopy(recs[j])
-        else:
-            rec = fresh[n]
-            rec["amendments"] = p.amendments
-        new_anchor = f"Приложение к ПП №719, Раздел {roman}, позиция {p.position}"
-        rec["source_anchor"] = new_anchor
-        if j is not None:
-            amap[recs[j]["source_anchor"]] = new_anchor
-        out.append(rec)
-    anchors_all = [r["source_anchor"] for r in out]
-    assert len(anchors_all) == len(set(anchors_all)), "дубли source_anchor"
+    out, amap = renumber_records(steps, recs, fresh, roman)
     if any(r.get("record_type") == "section_methodology" for r in old_records):
         metho = sk.collect_section_thresholds(new_text)
         if metho:
