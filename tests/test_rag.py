@@ -1469,8 +1469,9 @@ class TestKonturLinks(unittest.TestCase):
 
     def test_corpus_edition_has_link(self):
         # Актуализировали корпус, а documentId новой редакции добавить забыли → красный тест.
-        from app.rag.edition import KONTUR_719_BY_EDITION, corpus_edition
-        ed = corpus_edition()
+        # Ключ — подпись редакции плюс акты, вступившие позже последнего (`edition_key`, `A7`).
+        from app.rag.edition import KONTUR_719_BY_EDITION, edition_key
+        ed = edition_key()
         self.assertIn(
             ed, KONTUR_719_BY_EDITION,
             f"Редакции корпуса «{ed}» нет в KONTUR_719_BY_EDITION (app/rag/edition.py): "
@@ -1478,8 +1479,8 @@ class TestKonturLinks(unittest.TestCase):
             f"documentId действующей версии и добавь строку в таблицу.")
 
     def test_url_points_to_current_edition(self):
-        from app.rag.edition import KONTUR_719_BY_EDITION, corpus_edition, kontur_719_url
-        self.assertIn(f"documentId={KONTUR_719_BY_EDITION[corpus_edition()]}", kontur_719_url())
+        from app.rag.edition import KONTUR_719_BY_EDITION, edition_key, kontur_719_url
+        self.assertIn(f"documentId={KONTUR_719_BY_EDITION[edition_key()]}", kontur_719_url())
 
     def test_no_hardcoded_doc_id_left(self):
         """Ни в бэкенде, ни во фронте не должно остаться собственной копии documentId.
