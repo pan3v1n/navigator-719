@@ -45,6 +45,14 @@ _YEAR_ANY_RE = re.compile(r"(?:с 1 января\s+|с\s+)?(\d{4})\s*(?:г\.|г�
 _CODE_RE = re.compile(r"\d{2}\.\d{2}(?:\.\d+)*")
 # Начало НОВОЙ строки таблицы: «28.30.59.114|…» или «из 26.51.66.190|…».
 _ROW_START_RE = re.compile(r"(?:из\s+)?\d{2}\.\d{2}(?:\.\d+)*\s*\|")
+# Ячейка кода ИСКЛЮЧЁННОЙ строки таблицы — те же написания, что `structure_kb._EXCLUDED_MARK_RE`
+# у разбора разделов (согласованность держит тест, а не память): «Позиция исключена» / «Код
+# исключен» и голое «- Исключено.» в конце ячейки (форма N 1297).
+_EXCLUDED_ROW_RE = re.compile(
+    r"(?:[Пп]озици[яи]|[Кк]од[ыа]?)\s+исключен[аыо]?|-\s*[Ии]сключен[аыо]?\.?\s*$"
+)
+# Строка-поправка «(в ред. Постановления …)» — правило `structure_kb.classify` («amendment»).
+_AMENDMENT_ROW_RE = re.compile(r"\(.*(?:ред\.|Постановлени)")
 
 
 # --- Таблица с ЕДИНИЦЕЙ В ШАПКЕ (прим. 17(3), ред. 29.09.2026 N 1002) -----------------------
@@ -167,10 +175,19 @@ def _logical_rows(lines: list[str], k: int) -> tuple[list[str], list[str], int]:
 
 
 def _variant_cells(row: str, n_years: int):
-    """→ ("sep",) | ("code", ячейка кодов, имя, значения) | ("var", имя, значения) | None."""
+    """→ ("sep",) | ("excluded",) | ("code", ячейка кодов, имя, значения) | ("var", имя, значения)
+    | None."""
     c = [x.replace("\xa0", " ") for x in row.split("|")[:-1]]
     if len(c) == 1 and not c[0].strip():
         return ("sep",)
+    # ⚠ Поправка «(в ред. … от 29.09.2026 N 1257)|» и исключение «из X - Исключено.|» — не строки
+    # таблицы (ревью #212): дата в поправке совпадает с `_CODE_RE`, строка не делилась на колонки,
+    # и форма отвергалась ЦЕЛИКОМ — прим. 80.1 (95 строк) исчезала из `_tables()`.
+    first = c[0].strip() if c else ""
+    if _AMENDMENT_ROW_RE.match(first):
+        return ("sep",)
+    if _EXCLUDED_ROW_RE.search(first):
+        return ("excluded",)
     if _CODE_RE.search(c[0]):
         if len(c) == 2 + n_years:
             return ("code", c[0], c[1].strip(), [x.strip() for x in c[2:]])
@@ -201,6 +218,9 @@ def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: st
     cur: dict | None = None
     for p in parsed:
         if p[0] == "sep":
+            continue
+        if p[0] == "excluded":   # исключённая группа: виды ниже без своей группы — отказ от формы
+            cur = None
             continue
         if p[0] == "code":
             vals = p[3]
@@ -313,7 +333,17 @@ def _tables() -> list[dict]:
                 break
             cells = raw.split("|")
             if len([c for c in cells if c.strip()]) < 3:  # ячейка кода на отдельной строке
-                pending = (pending + " " + raw.strip()).strip()
+                # ⚠ Строка исключения («из 21.20.24.110 - Исключено.|») и поправка под ней
+                # («(в ред. … от 05.10.2026 N 1297)|») — не продолжение ячейки кода (#212). Копясь
+                # в `pending`, они приклеивались к следующей ЖИВОЙ строке: у «Игла двусторонняя…»
+                # прим. 28 в кодах стояли коды исключённых позиций и «05.10.2026». Исключение
+                # сбрасывает и накопленное до него: многострочная ячейка («из 21.20.24.160» /
+                # «из 21.20.24.161» / «из 21.20.24.169 - Исключено.|») целиком принадлежит ему.
+                first = cells[0].strip()
+                if _EXCLUDED_ROW_RE.search(first) or _AMENDMENT_ROW_RE.match(first):
+                    pending = ""
+                else:
+                    pending = (pending + " " + raw.strip()).strip()
                 k += 1
                 continue
             code_cell = (pending + " " + cells[0]).strip()
@@ -733,6 +763,11 @@ _INTRO_NAME_RE = re.compile(
     r"^\s*\d+(?:\(\d+\))?\.\s+(.+?)\s+мог(?:ут|ет)\s+быть\s+отнесен", re.IGNORECASE)
 # Величина порога целиком, вместе с единицей: «не менее 20 баллов».
 _INLINE_VALUE_RE = re.compile(r"не менее\s+[\d\s.,]+\s*балл\w*", re.IGNORECASE)
+# ⚠ ФРАЗА, САМА ОТНОСЯЩАЯ ПРОДУКЦИЮ К РОССИЙСКОЙ, — НОВОЕ ПРАВИЛО, А НЕ СТУПЕНЬ ПРЕДЫДУЩЕГО (`A7`).
+# N 1257 дописала под ступени прим. 10 (магниты) фразу без своего номера: «Продукция отрасли
+# металлургии … может быть отнесена … 25.93.18.110 - "Иглы швейные из черных металлов" - не менее
+# 115 баллов». В ней есть «не менее … баллов», и порог магнитов втягивал её целиком.
+_OWN_RULE_RE = re.compile(r"(?:может|могут)\s+быть\s+отнесен|относ[ия]тся\s+к\s+российской", re.IGNORECASE)
 
 
 def _intro_name(line: str) -> str | None:
@@ -832,7 +867,8 @@ def _flat_thresholds() -> list[dict]:
                     k = i + 1
                     while (k < n and lines[k].strip()
                            and not _FLAT_ROW_RE.match(lines[k])
-                           and not _NOTE_START_RE.match(lines[k])):
+                           and not _NOTE_START_RE.match(lines[k])
+                           and not _OWN_RULE_RE.search(lines[k])):
                         # ⚠ Ступень бывает и БЕЗ «не менее»: «до 1 января 2022 г. - 70 баллов»
                         # (прим. 10, редкоземельные магниты). Без второго признака примечание не
                         # давало ни одной строки, и позиция оставалась без порога.
@@ -878,7 +914,8 @@ def _flat_thresholds() -> list[dict]:
                 k = i + 1
                 while (k < n and lines[k].strip()
                        and not _FLAT_ROW_RE.match(lines[k])
-                       and not _NOTE_START_RE.match(lines[k])):
+                       and not _NOTE_START_RE.match(lines[k])
+                       and not _OWN_RULE_RE.search(lines[k])):
                     if _STEP_RE.search(lines[k]):
                         steps.append(_clean_step(lines[k]))
                     k += 1

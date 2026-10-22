@@ -54,6 +54,7 @@ from app.rag.edition import (  # noqa: E402
     KONTUR_719_BY_EDITION,
     UNKNOWN,
     corpus_edition,
+    edition_key,
 )
 
 # «(в ред. Постановлений Правительства РФ от 22.07.2026 N 923, …)» — та же форма, что в
@@ -217,7 +218,7 @@ def check_corpus() -> dict:
         "разделов всего": len(section_files()),
         "разделов с пометками": len(sec_last),
         "разделов с последним актом": sum(1 for v in sec_last.values() if newest and v == label(newest)),
-        "ссылка на первоисточник известна": ed in KONTUR_719_BY_EDITION,
+        "ссылка на первоисточник известна": edition_key() in KONTUR_719_BY_EDITION,  # ключ, а не подпись (`A7`)
     }
 
 
