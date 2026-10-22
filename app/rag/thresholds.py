@@ -763,6 +763,11 @@ _INTRO_NAME_RE = re.compile(
     r"^\s*\d+(?:\(\d+\))?\.\s+(.+?)\s+мог(?:ут|ет)\s+быть\s+отнесен", re.IGNORECASE)
 # Величина порога целиком, вместе с единицей: «не менее 20 баллов».
 _INLINE_VALUE_RE = re.compile(r"не менее\s+[\d\s.,]+\s*балл\w*", re.IGNORECASE)
+# ⚠ ФРАЗА, САМА ОТНОСЯЩАЯ ПРОДУКЦИЮ К РОССИЙСКОЙ, — НОВОЕ ПРАВИЛО, А НЕ СТУПЕНЬ ПРЕДЫДУЩЕГО (`A7`).
+# N 1257 дописала под ступени прим. 10 (магниты) фразу без своего номера: «Продукция отрасли
+# металлургии … может быть отнесена … 25.93.18.110 - "Иглы швейные из черных металлов" - не менее
+# 115 баллов». В ней есть «не менее … баллов», и порог магнитов втягивал её целиком.
+_OWN_RULE_RE = re.compile(r"(?:может|могут)\s+быть\s+отнесен|относ[ия]тся\s+к\s+российской", re.IGNORECASE)
 
 
 def _intro_name(line: str) -> str | None:
@@ -862,7 +867,8 @@ def _flat_thresholds() -> list[dict]:
                     k = i + 1
                     while (k < n and lines[k].strip()
                            and not _FLAT_ROW_RE.match(lines[k])
-                           and not _NOTE_START_RE.match(lines[k])):
+                           and not _NOTE_START_RE.match(lines[k])
+                           and not _OWN_RULE_RE.search(lines[k])):
                         # ⚠ Ступень бывает и БЕЗ «не менее»: «до 1 января 2022 г. - 70 баллов»
                         # (прим. 10, редкоземельные магниты). Без второго признака примечание не
                         # давало ни одной строки, и позиция оставалась без порога.
@@ -908,7 +914,8 @@ def _flat_thresholds() -> list[dict]:
                 k = i + 1
                 while (k < n and lines[k].strip()
                        and not _FLAT_ROW_RE.match(lines[k])
-                       and not _NOTE_START_RE.match(lines[k])):
+                       and not _NOTE_START_RE.match(lines[k])
+                       and not _OWN_RULE_RE.search(lines[k])):
                     if _STEP_RE.search(lines[k]):
                         steps.append(_clean_step(lines[k]))
                     k += 1
