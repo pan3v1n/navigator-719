@@ -1272,10 +1272,20 @@ def note_scope(note: str | None) -> str:
 # Замер 27.10.2026 по всем примечаниям: эта форма (даты + «(для <вида>)») и закупочный абзац за
 # головой — только у прим. 5. У прим. 53 похожее «(для производства изделий из тканей)» без дат —
 # там это условие ступени, и строка уже доходит до позиции дословно (`_flat_thresholds`).
-_KIND_STEP_RE = re.compile(r"(с\s+1\s+января\s+\d{4}\s*г\.)\s*(не\s+менее\s+\d[\d\s]*?\s*балл\w*)",
-                           re.IGNORECASE)
+#
+# ⚠⚠ ТОЛЬКО ЗАКУПОЧНАЯ ОБЛАСТЬ И ТОЛЬКО ПОЛНОСТЬЮ РАЗОБРАННЫЙ АБЗАЦ (ревью K2-3, 2 MED). Абзац по видам
+# без формулы «Для целей осуществления закупок» (переформулировка редакции; абзац господдержки ПП 191,
+# разбитый по видам) уходил бы через `lookup_threshold` в строку «Порог:» как порог ПОДТВЕРЖДЕНИЯ
+# производства, а проверка выкатки смотрит область на уровне примечания и этого не видит. Ступень,
+# не узнанная разбором (иная дата, «г» без точки), уезжала в промежуток: число молча терялось или
+# приписывалось СОСЕДНЕМУ виду. Оба отказа — тихие и в сторону неверного числа; здесь — громкий
+# отказ: абзац не берётся, позиция остаётся без порога, как до правки.
+_KIND_DATE = r"(?:с|до)\s+\d{1,2}\s+[а-яё]+\s+\d{4}\s*г\.?"
+_KIND_STEP_RE = re.compile(rf"({_KIND_DATE})\s*(не\s+менее\s+\d[\d\s]*?\s*балл\w*)", re.IGNORECASE)
 _KIND_OPEN_RE = re.compile(r"\s*\(\s*для\s+", re.IGNORECASE)
 _KIND_END_RE = re.compile(r"\)?\s*\.\s+[А-ЯЁ]")     # «… (электробусы). Условием подтверждения …»
+# Число ступени, оставшееся в промежутке, — ступень, которую разбор не узнал: абзац не берём.
+_KIND_STRAY_RE = re.compile(r"не\s+менее\s+\d|\d\s*балл", re.IGNORECASE)
 
 
 def _kind_text(gap: str) -> str | None:
@@ -1283,8 +1293,8 @@ def _kind_text(gap: str) -> str | None:
 
     ⚠ Скобка «(для» в первоисточнике у электро-видов НЕ ЗАКРЫТА: «(для автомобилей легковых, …
     электроэнергии (электромобили), с 1 января …» — закрывается только внутренняя «(электромобили)».
-    Поэтому вид берётся до следующей ступени (или до конца предложения у последнего), а лишняя
-    закрывающая скобка снимается только при дисбалансе."""
+    Поэтому вид берётся до следующей ступени (или до конца предложения у последнего), а лишние
+    закрывающие скобки снимаются только при дисбалансе."""
     m = _KIND_OPEN_RE.match(gap)
     if not m:
         return None
@@ -1292,17 +1302,18 @@ def _kind_text(gap: str) -> str | None:
     end = _KIND_END_RE.search(text)
     if end:
         text = text[:end.start()] + (")" if text[end.start()] == ")" else "")
-    text = " ".join(text.split()).rstrip(" ,;")
-    if text.count(")") > text.count("("):
-        text = text[:text.rfind(")")].rstrip(" ,;")
+    text = " ".join(text.split()).rstrip(" ,;.")
+    while text.count(")") > text.count("(") and ")" in text:
+        text = text[:text.rfind(")")].rstrip(" ,;.")
     return text or None
 
 
 @lru_cache(maxsize=1)
 def _kind_schedules() -> list[dict]:
-    """[{note, section, scope, kinds: [(вид, [(подпись, значение)…])…]}] — абзацы формы «ступени
-    (для <вида>)» с ДВУМЯ и более видами. Абзац, где хоть одна ступень осталась без вида, не берём:
-    форма не та, и привязать ступени не к чему."""
+    """[{note, section, kinds: [(вид, [(подпись, значение)…])…]}] — ЗАКУПОЧНЫЕ абзацы формы «ступени
+    (для <вида>)» с ДВУМЯ и более видами. Не берём абзац, где хоть одна ступень осталась без вида или
+    в промежутке между ступенями осталось нераспознанное число: форма не та, и привязать не к чему.
+    Хвосты «(в ред. …)» снимаются до разбора — иначе они уезжали в текст вида."""
     if not _CHUNK.exists():
         return []
     lines = _chunk_text().splitlines()
@@ -1310,39 +1321,54 @@ def _kind_schedules() -> list[dict]:
     out: list[dict] = []
     for k, (num, i) in enumerate(bounds):
         j = bounds[k + 1][1] if k + 1 < len(bounds) else len(lines)
-        for para in lines[i:j]:
+        for raw in lines[i:j]:
+            para = _AMEND_STRIP_RE.sub("", raw)
             steps = list(_KIND_STEP_RE.finditer(para))
-            if len(steps) < 2:
+            if len(steps) < 2 or not _PROCUREMENT_RE.search(para):
                 continue
             kinds: list[tuple[str, list[tuple[str, str]]]] = []
             cur: list[tuple[str, str]] = []
+            stray = False
             for n, m in enumerate(steps):
                 cur.append((" ".join(m.group(1).split()), " ".join(m.group(2).split())))
                 nxt = steps[n + 1].start() if n + 1 < len(steps) else len(para)
-                kind = _kind_text(para[m.end():nxt])
+                gap = para[m.end():nxt]
+                end = _KIND_END_RE.search(gap)
+                stray = stray or bool(_KIND_STRAY_RE.search(gap[:end.start()] if end else gap))
+                kind = _kind_text(gap)
                 if kind:
                     kinds.append((kind, cur))
                     cur = []
             sec = _INTRO_SECTION_RE.search(para)
-            if cur or len(kinds) < 2 or not sec:
+            if cur or stray or len(kinds) < 2 or not sec:
+                if steps and (cur or stray):
+                    logger.warning("прим. {}: абзац с графиками по видам разобран не полностью — "
+                                   "не используется", num)
                 continue
-            out.append({"note": num, "section": sec.group(1), "kinds": kinds,
-                        "scope": "procurement" if _PROCUREMENT_RE.search(para) else "general"})
+            out.append({"note": num, "section": sec.group(1), "kinds": kinds})
     return out
 
 
 def _stem_hit(a: str, b: str) -> bool:
-    """Основы совпали. Snowball режет «автомобилей» до «автомобил», а «автомобили» — до «автомоб»;
-    префикс допускается только у основ от 6 знаков: «легк» (лёгкие) не должна совпасть с «легков»
-    (легковые) — иначе электро-график легковых ушёл бы лёгким коммерческим."""
-    return a == b or (min(len(a), len(b)) >= 6 and (a.startswith(b) or b.startswith(a)))
+    """Основы совпали. Snowball режет «автомобилей» до «автомобил», а «автомобили» — до «автомоб»:
+    префикс допускается у основ от 6 знаков и с разницей длины не больше 2. Иначе «легк» (лёгкие)
+    совпала бы с «легков» (легковые) и электро-график легковых ушёл бы лёгким коммерческим, а
+    «легков» — с «легковоспламеня…» (ревью K2-3, LOW-1)."""
+    if a == b:
+        return True
+    lo, hi = sorted((a, b), key=len)
+    return len(lo) >= 6 and len(hi) - len(lo) <= 2 and hi.startswith(lo)
 
 
 def _kind_applies(kind: str, product_name: str | None) -> bool:
     """Вид относится к позиции: все основы хотя бы одной части вида (через запятую) есть в
     наименовании. «автомобилей легковых, легких коммерческих автомобилей» — две части, каждая
     называет свою позицию; уточнение «приводимых в движение … электрическим двигателем» —
-    длинная часть, в наименовании её нет, и вид держится на своей первой части."""
+    длинная часть, в наименовании её нет, и вид держится на своей первой части.
+    ⚠ Чужие разделы держит только фильтр раздела в `_kind_schedule`: «Шины … для легковых
+    автомобилей» (XXI) по одним словам получили бы график ТС. Позиция-компонент в самом разделе II
+    («… для легковых автомобилей») получила бы его тоже — при появлении такой позиции правило надо
+    пересмотреть (ревью K2-3, LOW-1)."""
     have = _stems(_strip_fn(product_name))
     for part in kind.split(","):
         want = _stems(part)
@@ -1352,9 +1378,26 @@ def _kind_applies(kind: str, product_name: str | None) -> bool:
 
 
 def _kind_schedule(product_name: str | None, section: str | None, scope: str) -> str | None:
-    """Графики видов, относящихся к позиции, из абзаца `_kind_schedules` её раздела, либо None."""
-    if not product_name or not section:
+    """Закупочные графики видов, относящихся к позиции, из абзаца `_kind_schedules` её раздела.
+    Не закупочная область, нет раздела или абзацев с видами позиции два — None: не гадаем."""
+    if scope != "procurement" or not product_name or not section:
         return None
+    found = []
+    for p in _kind_schedules():
+        if p["section"] != section:
+            continue
+        hits = [(kind, steps) for kind, steps in p["kinds"] if _kind_applies(kind, product_name)]
+        if hits:
+            found.append((p, hits))
+    if len(found) != 1:
+        if found:
+            logger.warning("графики по видам для «{}»: абзацев {} — не выбираем",
+                           product_name[:60], len(found))
+        return None
+    p, hits = found[0]
+    body = "\n".join(f"      — для {kind}: " + "; ".join(f"{lbl} — {val}" for lbl, val in steps)
+                     for kind, steps in hits)
+    return f"{BY_KIND}прим. {p['note']} к разд. {p['section']}]:\n{body}"
     for p in _kind_schedules():
         if p["scope"] != scope or p["section"] != section:
             continue

@@ -54,21 +54,23 @@ class TestNote5Paragraph(unittest.TestCase):
     def test_seven_kinds_verbatim(self):
         """Семь графиков абзаца — с числами дословно (прим. 5, ред. N 1762 / N 400)."""
         (p,) = t._kind_schedules()
-        self.assertEqual((p["note"], p["section"], p["scope"]), ("5", "II", "procurement"))
-        got = [(k.split(",")[0].split(" (")[0], [v for _, v in s]) for k, s in p["kinds"]]
-        n = lambda *xs: [f"не менее {x} баллов" for x in xs]  # noqa: E731
+        self.assertEqual((p["note"], p["section"]), ("5", "II"))
+        got = [(k.split(",")[0].split(" (")[0], [(lbl[-7:-3], v[9:-7]) for lbl, v in s])
+               for k, s in p["kinds"]]
+        # (вид, [(год, баллы)…]) — годы у каждого вида свои (легковые 2028, грузовые 2029), закреплены все
         self.assertEqual(got, [
-            ("автомобилей легковых", n(3200, 3500, 3700)),
-            ("автомобилей легковых", n(1100, 1500)),
-            ("легких коммерческих автомобилей", n(1100, 1600, 2300)),
-            ("автомобилей грузовых", n(3200, 3500, 3700)),
-            ("автомобилей грузовых", n(2000, 2300)),
-            ("автобусов", n(2900, 3200, 3400)),
-            ("автобусов", n(1900, 2300)),
+            ("автомобилей легковых", [("2023", "3200"), ("2027", "3500"), ("2028", "3700")]),
+            ("автомобилей легковых", [("2023", "1100"), ("2026", "1500")]),
+            ("легких коммерческих автомобилей", [("2023", "1100"), ("2027", "1600"), ("2029", "2300")]),
+            ("автомобилей грузовых", [("2023", "3200"), ("2027", "3500"), ("2029", "3700")]),
+            ("автомобилей грузовых", [("2023", "2000"), ("2027", "2300")]),
+            ("автобусов", [("2023", "2900"), ("2027", "3200"), ("2029", "3400")]),
+            ("автобусов", [("2023", "1900"), ("2027", "2300")]),
         ])
-        # годы ступеней — свои у каждого вида (легковые 2028, грузовые 2029)
-        self.assertEqual([lbl for lbl, _ in p["kinds"][0][1]][-1], "с 1 января 2028 г.")
-        self.assertEqual([lbl for lbl, _ in p["kinds"][3][1]][-1], "с 1 января 2029 г.")
+        for _, steps in p["kinds"]:
+            for lbl, val in steps:
+                self.assertRegex(lbl, r"^с 1 января \d{4} г\.$")
+                self.assertRegex(val, r"^не менее \d+ баллов$")
 
     def test_kind_text_survives_unclosed_parenthesis(self):
         """«(для автомобилей легковых, … (электромобили), с 1 января …» — скобка «(для» не закрыта."""
@@ -130,6 +132,17 @@ class TestPositions(unittest.TestCase):
         self.assertIsNone(t._kind_schedule(r["product_name"], "III", "procurement"))
         self.assertIsNone(t._kind_schedule(r["product_name"], "II", "general"))
 
+    def test_other_sections_never_get_kinds(self):
+        """Ревью K2-3, LOW-1: «Шины … для легковых автомобилей» (XXI) по одним словам подошли бы
+        видам ТС — держит фильтр раздела; «легков» ≠ «легковоспламеня…» — держит правило основ."""
+        tyres = [r for r in RECORDS if r["section_roman"] != "II"
+                 and "легков" in r["product_name"].lower()]
+        self.assertTrue(tyres)
+        for r in tyres:
+            self.assertFalse((_proc(r) or "").startswith("по видам продукции [прим. 5"), r["product_name"][:50])
+        self.assertFalse(t._kind_applies("автомобилей легковых",
+                                         "Автомобили для перевозки легковоспламеняющихся жидкостей"))
+
 
 class TestMatching(unittest.TestCase):
     def test_stem_hit(self):
@@ -146,8 +159,12 @@ class TestMatching(unittest.TestCase):
 class TestFormGuards(unittest.TestCase):
     """Абзац, где форма не та, не даёт ничего: ступень без вида, один вид, нет раздела."""
 
-    def _parse(self, para: str) -> list[dict]:
-        text = f"5. Вводная.\n{para}\n6. Следующее примечание.\n"
+    GOOD = ("Для целей осуществления закупок, указанными в разделе II настоящего приложения (с 1 января "
+            "2023 г. не менее 10 баллов (для тракторов), с 1 января 2023 г. не менее 20 баллов (для "
+            "комбайнов). Условием …")
+
+    def _parse(self, para: str, *more: str) -> list[dict]:
+        text = "5. Вводная.\n" + "\n".join((para,) + more) + "\n6. Следующее примечание.\n"
         t._kind_schedules.cache_clear()
         try:
             with mock.patch.object(t, "_chunk_text", lambda: text):
@@ -167,6 +184,40 @@ class TestFormGuards(unittest.TestCase):
             "Для целей осуществления закупок, указанными в разделе II настоящего приложения (с 1 января "
             "2023 г. не менее 10 баллов (для тракторов), с 1 января 2023 г. не менее 20 баллов (для "
             "комбайнов), с 1 января 2023 г. не менее 30 баллов, с 1 января 2024 г. не менее 40 баллов."), [])
+
+    def test_not_procurement_is_never_parsed(self):
+        """Ревью K2-3, MED-1: абзац по видам без формулы закупок (переформулировка редакции, абзац
+        господдержки) НЕ становится общим порогом «Порог:» — он не берётся вовсе."""
+        self.assertEqual(self._parse(self.GOOD.replace("Для целей осуществления закупок",
+                                                       "В целях получения мер государственной поддержки")), [])
+
+    def test_unrecognised_step_drops_paragraph(self):
+        """Ревью K2-3, MED-2: ступень, не узнанная разбором, не теряется молча и не переезжает к
+        соседнему виду — абзац не берётся. Иная дата («с 1 июля») ступенью узнаётся."""
+        self.assertEqual(self._parse(self.GOOD.replace("(для тракторов), с", "(для тракторов), с 2024 г. "
+                                                       "не менее 15 баллов, с")), [])
+        july = self._parse(self.GOOD.replace("2023 г. не менее 20", "1 июля 2024 г. не менее 20")
+                           .replace("с 1 января 1 июля", "с 1 июля"))
+        self.assertEqual(july[0]["kinds"][1][1], [("с 1 июля 2024 г.", "не менее 20 баллов")])
+
+    def test_amendment_tail_and_double_paren(self):
+        """Ревью K2-3, LOW-2/3: «(в ред. …)» внутри и после вида не попадает в его текст; «))» —
+        снимаются обе лишние скобки."""
+        got = self._parse(self.GOOD.replace("(для тракторов)", "(для тракторов) (в ред. Постановления "
+                                            "Правительства РФ от 01.01.2026 N 1))")
+                          .replace("(для комбайнов).", "(для комбайнов). (в ред. Постановления N 2)"))
+        self.assertEqual([k for k, _ in got[0]["kinds"]], ["тракторов", "комбайнов"])
+
+    def test_two_paragraphs_for_one_position_are_not_guessed(self):
+        """Ревью K2-3, LOW-4: два закупочных абзаца с видом позиции — не выбираем ни один."""
+        t._kind_schedules.cache_clear()
+        try:
+            with mock.patch.object(t, "_chunk_text",
+                                   lambda: "5. Вводная.\n" + self.GOOD + "\n" + self.GOOD + "\n6. Далее.\n"):
+                self.assertEqual(len(t._kind_schedules()), 2)
+                self.assertIsNone(t._kind_schedule("Тракторы колёсные", "II", "procurement"))
+        finally:
+            t._kind_schedules.cache_clear()
 
     def test_single_kind_or_no_section(self):
         self.assertEqual(self._parse("Указанными в разделе II настоящего приложения: с 1 января 2023 г. "
