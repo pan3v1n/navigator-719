@@ -124,10 +124,23 @@ def is_okpd2_code(token: str | None) -> bool:
     return True
 
 
+def _without_footnote_marks(text: str | None) -> str:
+    """Текст без маркеров сносок приложения («<38.12>», «<22.1>»): код ОКПД2 в угловых скобках не
+    пишут, а маркер сноски с точкой читался кодом.
+
+    ⚠ D15 #155 (ревью): «что означает <38.12>» уходило в ТОВАРНУЮ ветку как вопрос с кодом 38.12 —
+    там сносок нет вовсе. В тексте приложения такая форма ссылки встречается даже чаще, чем
+    «<38(12)>». Форма маркера — `topics.FOOTNOTE_MARK`, одна на все места."""
+    from app.rag.topics import FOOTNOTE_MARK, FOOTNOTE_WORD_MARK
+    blank = lambda m: " " * len(m.group(0))  # noqa: E731 — длина та же, позиции не съезжают
+    text = re.sub(FOOTNOTE_MARK, blank, text or "")
+    return re.sub(FOOTNOTE_WORD_MARK, blank, text, flags=re.IGNORECASE)
+
+
 def extract_codes(text: str | None) -> list[str]:
-    """ВСЕ коды ОКПД2 из текста, в порядке появления, без повторов."""
+    """ВСЕ коды ОКПД2 из текста, в порядке появления, без повторов (маркеры сносок — не коды)."""
     out: list[str] = []
-    for m in _CODE_IN_TEXT.finditer(text or ""):
+    for m in _CODE_IN_TEXT.finditer(_without_footnote_marks(text)):
         tok = m.group(0)
         if is_okpd2_code(tok) and tok not in out:
             out.append(tok)
@@ -135,8 +148,9 @@ def extract_codes(text: str | None) -> list[str]:
 
 
 def has_okpd2_code(text: str | None) -> bool:
-    r"""В тексте есть код ОКПД2. ⚠ Не `\d{2}\.\d{2}`: дата в вопросе выключала мультитёрн."""
-    for m in _CODE_IN_TEXT.finditer(text or ""):
+    r"""В тексте есть код ОКПД2. ⚠ Не `\d{2}\.\d{2}`: дата в вопросе выключала мультитёрн.
+    Маркер сноски («<38.12>») кодом не считается (`_without_footnote_marks`)."""
+    for m in _CODE_IN_TEXT.finditer(_without_footnote_marks(text)):
         if is_okpd2_code(m.group(0)):
             return True
     return False
