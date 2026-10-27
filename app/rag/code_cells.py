@@ -70,16 +70,16 @@ def render(codes: list[str] | None, m: list[str] | None) -> str:
     # «(за исключением …)» — к СВОЕМУ коду: исключённый код лежит под ним в иерархии ОКПД2. Свой
     # код один у всех четырёх таких позиций корпуса, но при нескольких скобка в конце прилипла бы
     # к последнему (ревью D16, LOW-5). Исключение без своего предка — в конец, как в ячейке.
-    under: dict[int, list[str]] = {}
+    attached: dict[int, list[str]] = {}
     loose: list[str] = []
     for e in excepted:
-        i = next((i for i, (c, _) in enumerate(own) if _under(e, c)), None)
-        (under.setdefault(i, []) if i is not None else loose).append(e)
+        i = next((i for i, (c, _) in enumerate(own) if under(e, c)), None)
+        (attached.setdefault(i, []) if i is not None else loose).append(e)
     parts = []
     for i, (c, mk) in enumerate(own):
         part = f"из {c}" if mk == IZ else c
-        if i in under:
-            part += f" (за исключением {', '.join(under[i])})"
+        if i in attached:
+            part += f" (за исключением {', '.join(attached[i])})"
         parts.append(part)
     out = ", ".join(parts)
     if loose:
@@ -87,8 +87,10 @@ def render(codes: list[str] | None, m: list[str] | None) -> str:
     return out
 
 
-def _under(code: str, ancestor: str) -> bool:
-    """`code` лежит под `ancestor` (или равен ему) в иерархии ОКПД2 — поразрядно, как `D14`."""
+def under(code: str, ancestor: str) -> bool:
+    """`code` лежит под `ancestor` (или равен ему) в иерархии ОКПД2 — поразрядно, как `D14`. Одна
+    функция на все проверки исключённых кодов: поиск (`retriever.code_match`), порог (`thresholds._lookup`),
+    классификатор непокрытых порогов. Пустой ключ не покрывает ничего."""
     a, c = okpd2_ref.okpd2_key(ancestor), okpd2_ref.okpd2_key(code)
     return bool(a) and c.startswith(a)
 
@@ -98,7 +100,7 @@ def excepted_covers(question_code: str, codes: list[str] | None, m: list[str] | 
     распространяется."""
     if m is None:
         return False
-    return any(mk == EXCEPT and _under(question_code, c) for c, mk in zip(codes or [], m))
+    return any(mk == EXCEPT and under(question_code, c) for c, mk in zip(codes or [], m))
 
 
 def note(m: list[str] | None) -> list[str]:

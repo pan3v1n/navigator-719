@@ -137,6 +137,29 @@ class TestSearch(unittest.TestCase):
         self.assertTrue(by["Портативные"].okpd2_match)
 
 
+class TestSearchD14Fetch(unittest.TestCase):
+    """Ревью D20 (LOW-3): добор точных форм кода (D14) тоже не берёт позицию по исключённому коду.
+    Пул пуст; добор по ветке (`should`) приносит только исключающую позицию — она не совпала и не
+    взята; тогда идёт добор точных форм (`must`), и он не должен вернуть её совпавшей."""
+
+    def test_exact_forms_fetch_skips_excluding_position(self):
+        laptops, own = _rec(LAPTOPS), _rec("Портативные персональные компьютеры")
+        pt = lambda r, s: SimpleNamespace(id=r["source_anchor"], score=s, payload=r)  # noqa: E731
+
+        def fake(query, limit, qfilter=None, collection=None, qvec=None, **kw):
+            if qfilter is None:
+                return []
+            if getattr(qfilter, "should", None):
+                return [pt(laptops, 0.9)]
+            return [pt(laptops, 0.9), pt(own, 0.5)]
+
+        with mock.patch.object(retriever, "_hybrid", side_effect=fake),                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
+            hits = retriever.search("ноутбук", okpd2="26.20.11.120", limit=8)
+        names = [h.product_name.split(" ")[0] for h in hits]
+        self.assertIn("Портативные", names)
+        self.assertNotIn("Компьютеры", names)
+
+
 class TestContext(unittest.TestCase):
     def test_context_shows_cell_of_a_qdrant_hit(self):
         """Хит из Qdrant несёт свои коды, а ячейку — по полному списку из payload (`code_cells.of_hit`)."""
@@ -155,13 +178,49 @@ class TestThresholds(unittest.TestCase):
 
     def test_rows_with_exclusions_are_parsed(self):
         got = {tuple(r["codes"]): r["excluded"] for r in t._flat_thresholds() if r.get("excluded")}
+        # «(за исключением …)» и «(кроме [ОКПД 2] …)» — в списке кодов и внутри закавыченного имени
         self.assertEqual(got, {
             ("26.20.11",): ["26.20.11.120", "26.20.11.130"],
             ("26.20.16",): ["26.20.16.120"],
             ("26.20.2",): ["26.20.21", "26.20.22"],
+            ("26.20.22",): ["26.20.22.110", "26.20.22.120", "26.20.22.160"],
+            ("26.30.2",): ["26.30.23.140", "26.30.23.141", "26.30.23.142"],
+            ("26.30.11",): ["26.30.11.110", "26.30.11.121", "26.30.11.122", "26.30.11.125", "26.30.11.150"],
             ("26.40.20",): ["26.40.20.122"],
             ("26.51.20",): ["26.51.20.121"],
+            ("14.12", "32.99.11.140"): ["14.12.30.150"],
+            ("15.20.14",): ["15.20.14.120", "15.20.14.130", "15.20.14.141", "15.20.14.142", "15.20.14.143"],
+            ("15.20.3",): ["15.20.32.130", "15.20.32.131", "15.20.32.132", "15.20.32.139"],
+            ("15.20.32.130",): ["15.20.32.131", "15.20.32.132"],
         })
+
+    def test_krome_form_gives_own_procurement_threshold(self):
+        """Ревью D20: «(кроме ОКПД 2 …)» прим. 53 — коды оговорки становились кодами строки, и обувь
+        получала закупочный порог строки, которая её исключает (80/110/90 вместо своих)."""
+        def proc(start, code):
+            r = _rec(start, code)
+            return t.lookup_procurement_threshold(r["okpd2_codes"], r["product_name"], r["section_roman"])
+        self.assertTrue(proc("Обувь валяная", "15.20.14.130").startswith("не менее 60 баллов"))
+        self.assertTrue(proc("Обувь детская валяная", "15.20.14.143").startswith("не менее 60 баллов"))
+        self.assertIn("не менее 90 баллов", proc("Обувь детская прочая", "15.20.32.130"))
+
+    def test_krome_in_note_26_1(self):
+        """Общая строка «из 26.30.11 … (кроме …, классифицируемых кодами 26.30.11.122, …150 …)» отдавала
+        свои 40/55/72 позициям, у которых своя строка: 35/50/72 и 22/47/72."""
+        for start, code, own in (("Оборудование коммутации и маршрутизации", "26.30.11.122", "не менее 35 баллов"),
+                                 ("Средства связи радиоэлектронные", "26.30.11.150", "не менее 22 баллов")):
+            r = _rec(start, code)
+            self.assertTrue((self._thr(r) or "").startswith(own), (start, self._thr(r)))
+
+    def test_scanner_ignores_parens_inside_quotes(self):
+        """Непарная скобка внутри закавыченного имени не закрывает оговорку раньше времени."""
+        line = '26.30.11 "А" (кроме 26.30.11.110 "Б :) скобка"; 26.30.11.121 "В"): - не менее 40 баллов'
+        self.assertEqual(t._row_excluded(line), ["26.30.11.110", "26.30.11.121"])
+
+    def test_under_never_matches_empty_key(self):
+        self.assertFalse(code_cells.under("26.20.11.120", ""))
+        self.assertFalse(code_cells.under("", "26.20"))
+        self.assertTrue(code_cells.under("26.20.11.121", "26.20.11.120"))
 
     def test_own_threshold_instead_of_excluded_codes(self):
         io = self._thr(_rec(IO))

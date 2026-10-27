@@ -625,7 +625,6 @@ _CODE_TOKEN = r"(?:из\s+)?\d{2}(?:\.\d+)*(?:\s*<[^>\n]{1,16}>)?"
 _EXC_PAREN = r"(?:\s*\(\s*за\s+исключением\s+[^)\n]*\))?"
 _FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}{_EXC_PAREN}(?:\s*,\s*{_CODE_TOKEN}{_EXC_PAREN})*\s*[":]',
                           re.IGNORECASE)
-_ROW_EXC_RE = re.compile(r"\(\s*за\s+исключением\s+([^)\n]*)\)", re.IGNORECASE)
 # ⚠ ДВА ГРАФИКА В ОДНОЙ СТРОКЕ (найдено ревью 20.08.2026, дефект внесён самой K2).
 # Приняв строку с «голым» двоеточием, разбор впустил прим. 17, где ОДНО предложение несёт ДВА
 # графика: общий и оговорку «за исключением судов, инвестиционные проекты по строительству
@@ -893,15 +892,44 @@ def _intro_codes(line: str) -> list[str]:
     return out
 
 
+_ROW_EXC_OPEN_RE = re.compile(r"\(\s*(?:за\s+исключением|кроме)\s+", re.IGNORECASE)
+_QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+
+
 def _row_excluded(line: str) -> list[str]:
-    """Коды из оговорок «(за исключением …)» в СПИСКЕ КОДОВ строки-порога (до имени и порога; имена в
-    кавычках затёрты — у них свои «за исключением товаров, классифицируемых кодами …»)."""
-    body = _blank_names(_blank_amend(line))
+    """Коды из оговорок «(за исключением …)» и «(кроме [ОКПД 2] …)» строки-порога — до порога.
+
+    ⚠ Ревью D20: в прим. 53 та же оговорка записана «(кроме ОКПД 2 15.20.14.130 "Обувь валяная"; …)»,
+    и её коды становились кодами САМОЙ строки: «Обувь валяная», «Обувь детская валяная» и «Обувь
+    детская прочая» получали закупочный порог строки, которая их прямо исключает (80/110/90 вместо
+    своих 60 и 90/120/100). Бывает оговорка и ВНУТРИ закавыченного имени: «14.12 "Спецодежда (кроме
+    ОКПД 2 14.12.30.150 "Рукавицы…"), в том числе …"». Поэтому оговорка ищется в сыром тексте и
+    читается до ПАРНОЙ скобки; скобки внутри кавычек не считаются, коды берутся только вне кавычек
+    (в именах бывают свои числа)."""
+    raw = _blank_amend(line)
+    blanked = _blank_names(raw)          # та же длина — позиции совпадают
+    end = len(raw)
     for cut in (":", "не менее", "не оцениваются"):
-        pos = body.find(cut)
+        pos = blanked.find(cut)
         if pos > 0:
-            body = body[:pos]
-    return [c for m in _ROW_EXC_RE.finditer(body) for c in _CODE_ONLY_RE.findall(m.group(1)) if "." in c]
+            end = min(end, pos)
+    out: list[str] = []
+    for m in _ROW_EXC_OPEN_RE.finditer(raw, 0, end):
+        depth, quoted, j = 1, False, m.end()
+        while j < end and depth:
+            ch = raw[j]
+            if ch == '"':
+                quoted = not quoted
+            elif not quoted and ch == "(":
+                depth += 1
+            elif not quoted and ch == ")":
+                depth -= 1
+            j += 1
+        seg = _QUOTED_SPAN_RE.sub(" ", raw[m.end():j])
+        for c in _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", seg)):
+            if "." in c and c not in out:
+                out.append(c)
+    return out
 
 
 @lru_cache(maxsize=1)
@@ -1855,7 +1883,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             exact = None
             for c in codes:
                 # D20: строка «X (за исключением Y)» к позиции с кодом под Y не относится.
-                if any(_code_applies(e, c) for e in r.get("excluded") or ()):
+                if any(code_cells.under(c, e) for e in r.get("excluded") or ()):
                     continue
                 for rc in r["codes"]:
                     if _code_applies(rc, c):

@@ -162,7 +162,7 @@ def code_match(h: "Hit", query_code: str) -> bool:
     который позиция исключает (D20 #225: «Компьютеры портативные» 26.20.11 «за исключением
     26.20.11.120» не совпадают с 26.20.11.120 и его подкодами, хотя 26.20.11 — их предок)."""
     return okpd2_match(h.okpd2_codes, query_code) and not any(
-        okpd2_ref.okpd2_key(query_code).startswith(okpd2_ref.okpd2_key(e)) for e in h.excluded_codes)
+        code_cells.under(query_code, e) for e in h.excluded_codes)
 
 
 def okpd2_match(rec_codes: list[str], query_code: str) -> bool:

@@ -74,6 +74,7 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.rag import code_cells  # noqa: E402
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _list_items,
@@ -270,7 +271,7 @@ def classify(rec: dict, rows: list[dict]) -> dict:
         for c in codes:
             # D20 #225: строка «X (за исключением Y)» позицию с кодом под Y НЕ покрывает — то же правило,
             # что в рантайме (`thresholds._lookup`); иначе гейт краснел бы на верном отказе.
-            if any(_code_applies(e, c) for e in row.get("excluded") or ()):
+            if any(code_cells.under(c, e) for e in row.get("excluded") or ()):
                 continue
             for rc in row["codes"]:
                 if _code_applies(rc, c):
