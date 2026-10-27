@@ -732,7 +732,9 @@ function addFeedbackBar(wrap, messageId, sid, withRating = true) {
     };
   };
 
-  // «Оценить ответ» → звёзды 0..5 (клик = сразу, повтор по активной = сброс в 0) + комментарий к ответу
+  // «Оценить ответ» → звёзды 1..5 (клик = сразу) + комментарий к ответу. Повторный клик по активной звезде
+  // СНИМАЕТ оценку (решение владельца 27.10.2026): уходит rating 0, и приёмка этот ответ не считает вовсе —
+  // прежде он шёл в неё нулём («0 — учтено»), а в базе все нули получены именно так, поверх оценки.
   const ratePanel = mkPanel((w) => {
     const stars = el("fb-stars");
     let current = 0;
@@ -747,7 +749,7 @@ function addFeedbackBar(wrap, messageId, sid, withRating = true) {
         current = current === i ? 0 : i;
         paint(current);
         if (await postFeedback({ kind: "answer", message_id: messageId, session_id: sid, rating: current }))
-          flash(w, current === 0 ? "0 — учтено" : "оценка сохранена");
+          flash(w, current === 0 ? "оценка снята" : "оценка сохранена");
       });
       glyphs.push(s); stars.appendChild(s);
     }

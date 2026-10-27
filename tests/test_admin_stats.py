@@ -81,13 +81,15 @@ class TestAdminStats(unittest.TestCase):
         with self.Session() as db:
             u = self._user(db, "u", region="Курская область")
             t = datetime(2026, 7, 20, 9, 0)
-            for i, r in enumerate([2, 0, 1, 5]):  # 5★ не должен попасть в триаж
+            # 0 — СНЯТАЯ оценка (решение владельца 27.10.2026): в триаж не идёт, как и 5★
+            for i, r in enumerate([2, 0, 1, 5]):
                 self._msg(db, u, f"s{i}", "user", f"вопрос {i}", t)
                 a = self._msg(db, u, f"s{i}", "assistant", f"ответ {i}", t)
                 self._fb(db, u, t, kind="answer", rating=r, message_id=a.id, session_id=f"s{i}")
             st = build_admin_view(db)["stats"]
-        self.assertEqual(st["bad_count"], 3)  # 0,1,2 — да; 5 — нет
-        self.assertEqual([b["rating"] for b in st["bad_answers"]], [0, 1, 2])  # худшие первыми
+        self.assertEqual(st["bad_count"], 2)  # 1, 2 — да; 5 и снятая (0) — нет
+        self.assertEqual([b["rating"] for b in st["bad_answers"]], [1, 2])  # худшие первыми
+        self.assertEqual(st["withdrawn_ratings"], 1)
 
     def test_date_filter_isolates_cohort(self):
         with self.Session() as db:
@@ -241,6 +243,37 @@ class TestAdminStats(unittest.TestCase):
             st = build_admin_view(db)["stats"]
         self.assertEqual(st["answer_ratings"], 1)
         self.assertEqual(st["repeat_ratings"], 0)
+
+
+    # --- снятие оценки (решение владельца 27.10.2026): 0 = оценка снята, в приёмку не идёт ------------
+    def test_zero_after_rating_withdraws_it(self):
+        t0 = datetime(2026, 10, 20, 10, 0)
+        with self.Session() as db:
+            u = self._user(db, "u1")
+            a = self._rated_answer(db, u, "s1", t0)
+            self._fb(db, u, t0 + timedelta(minutes=1), kind="answer", message_id=a.id, rating=4)
+            self._fb(db, u, t0 + timedelta(minutes=2), kind="answer", message_id=a.id, rating=0)
+            st = build_admin_view(db)["stats"]
+        self.assertEqual(st["answer_ratings"], 0, "снятая оценка в приёмку не идёт")
+        self.assertEqual((st["withdrawn_ratings"], st["repeat_ratings"]), (1, 1))
+        self.assertEqual(st["answer_rows"], [])
+
+    def test_rating_again_after_withdrawal_counts(self):
+        t0 = datetime(2026, 10, 20, 10, 0)
+        with self.Session() as db:
+            u = self._user(db, "u1")
+            a = self._rated_answer(db, u, "s1", t0)
+            for k, r in enumerate((4, 0, 3), start=1):
+                self._fb(db, u, t0 + timedelta(minutes=k), kind="answer", message_id=a.id, rating=r)
+            st = build_admin_view(db)["stats"]
+        self.assertEqual([r["rating"] for r in st["answer_rows"]], [3])
+        self.assertEqual(st["withdrawn_ratings"], 0)
+
+    def test_chat_says_rating_withdrawn(self):
+        from pathlib import Path as _P
+        js = (_P(__file__).resolve().parents[1] / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertIn('current === 0 ? "оценка снята"', js)
+        self.assertNotIn('"0 — учтено"', js)
 
 
 if __name__ == "__main__":
