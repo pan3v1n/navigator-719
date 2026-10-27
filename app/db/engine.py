@@ -30,7 +30,8 @@ def _ensure_columns() -> None:
     (SQLite ALTER ADD COLUMN). Нужна, т.к. схема приложения эволюционирует между версиями,
     а create_all не меняет уже созданные таблицы."""
     wanted = {
-        "messages": [("prompt_tokens", "INTEGER"), ("completion_tokens", "INTEGER")],
+        "messages": [("prompt_tokens", "INTEGER"), ("completion_tokens", "INTEGER"),
+                     ("corpus", "VARCHAR(48)")],  # L2 #147
         "feedback": [
             ("matched", "VARCHAR(16)"),
             ("kind", "VARCHAR(16) DEFAULT 'service'"),  # answer|dialog|service; легаси-строки → service

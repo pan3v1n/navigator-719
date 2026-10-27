@@ -411,6 +411,7 @@ def log_message(
     unverified: list | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    corpus: str | None = None,
 ) -> Message:
     m = Message(
         user_id=user_id,
@@ -422,6 +423,7 @@ def log_message(
         unverified_json=json.dumps(unverified, ensure_ascii=False) if unverified else None,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        corpus=corpus,
     )
     db.add(m)
     db.commit()

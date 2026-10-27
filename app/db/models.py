@@ -93,6 +93,9 @@ class Message(Base):
     # токены DeepSeek за этот ответ (для учёта затрат в админ-логах; эмбеддинг/Qdrant локальны)
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    # L2 #147: «корпус|режим» (`app/rag/corpora.stored`) — по чему собран ответ и кто выбрал
+    # корпус. Нужен выгрузкам и переоткрытой беседе; у реплик до L2 — NULL (подписи нет).
+    corpus: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="messages")
 

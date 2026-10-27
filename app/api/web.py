@@ -44,8 +44,11 @@ from app.core.inn import inn_valid
 from app.core.config import settings
 from app.core.release import release_label
 from app.core.regions import REGIONS, region_from_username
-from app.rag import followup
+from app.rag import corpora, followup
 from app.rag.edition import corpus_edition, kontur_719_url
+
+# L1 #146: переключатель корпуса в поле ввода — значения и подписи из `corpora`, своих у шаблона нет.
+CORPUS_MODES = [(m, corpora.MODE_TITLES[m]) for m in corpora.MODES]
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
@@ -278,7 +281,7 @@ def _guest_chat_page(request: Request) -> HTMLResponse:
         tv = trial.trial_view(db, gid)
     resp = templates.TemplateResponse(
         "chat.html", _ctx(request, user=None, guest=tv, kontur_719_url=kontur_719_url(),
-                          input_hint=followup.START_HINT, quota=None))
+                          input_hint=followup.START_HINT, quota=None, corpus_modes=CORPUS_MODES))
     if fresh:
         trial.set_guest_cookie(resp, gid)
     return resp
@@ -311,7 +314,7 @@ def chat_page(request: Request):
         qv = quota.quota_view(db, user)
     return templates.TemplateResponse(
         "chat.html", _ctx(request, user=user, kontur_719_url=kontur_719_url(),
-                          input_hint=followup.START_HINT, quota=qv))
+                          input_hint=followup.START_HINT, quota=qv, corpus_modes=CORPUS_MODES))
 
 
 # --------------------------------------------------------------------------- #

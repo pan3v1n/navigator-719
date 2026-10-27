@@ -45,6 +45,7 @@ from app.core import plans
 from app.core.config import settings
 from app.db import queries as q
 from app.db.engine import get_session
+from app.rag import corpora
 from app.rag.pipeline import answer, answer_stream
 from app.tools.navigator import extract_okpd2
 
@@ -198,7 +199,8 @@ class GuestChatResponse(ChatResponse):
 
 def _engine_kwargs(req: ChatRequest, history: list[dict]) -> dict:
     return {"okpd2": extract_okpd2(req.message), "history": history,
-            "limit": settings.GUEST_CONTEXT_LIMIT, "brief": True}
+            "limit": settings.GUEST_CONTEXT_LIMIT, "brief": True,
+            "corpus": req.corpus}  # L1 #146 — тот же переключатель, что у вошедшего
 
 
 def _trial(gid: str) -> dict:
@@ -239,7 +241,8 @@ def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     return GuestChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=None,
-        input_hint=ans.input_hint, trial=_trial(gid))
+        input_hint=ans.input_hint, corpus_label=corpora.answered_by(ans.corpus, req.corpus),
+        trial=_trial(gid))
 
 
 @router.post("/api/guest/chat/stream")
@@ -280,6 +283,7 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                     "low_relevance": ans.low_relevance,
                     "unverified_numbers": ans.unverified_numbers,
                     "session_id": session_id, "input_hint": ans.input_hint, "trial": _trial(gid),
+                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus),  # L2
                 })
         except Exception:  # noqa: BLE001 — сигнал фолбэка фронту
             logger.exception("гость: стрим упал")

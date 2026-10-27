@@ -79,6 +79,7 @@ class _Ans:
     completion_tokens = 5
     input_hint = ""
     metered = True
+    corpus = ""  # L2: по чему собран ответ
 
 
 class _MetaAns(_Ans):
