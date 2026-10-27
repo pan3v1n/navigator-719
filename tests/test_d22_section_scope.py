@@ -75,7 +75,21 @@ class TestParsing(unittest.TestCase):
 
     def test_rows_carry_excluded_sections(self):
         got = {r["codes"][0]: r["excluded_sections"] for r in t._flat_thresholds() if r.get("excluded_sections")}
-        self.assertEqual(got, {"22.21": ["X"], "22.22": ["VII"], "22.29": ["VII"], "20.20.14.000": ["VII"]})
+        self.assertEqual(got, {"22.21": ["X"], "22.22": ["VII"], "22.29": ["VII"], "20.20.14.000": ["VII"],
+                               "26.30.50": ["XVIII"], "26.51.20": ["XVIII"]})
+
+    def test_section_named_inside_row_exclusion(self):
+        """Ревью D22 (MED): прим. 26.1 исключает раздел XVIII без кавычек и точки — «…, а также продукции,
+        предусмотренной разделом XVIII настоящего приложения)», «(кроме продукции судостроения из раздела
+        XVIII …)». Судовой позиции, которой нет в таблице прим. 17(3), порог строки 26.51.20 не достаётся."""
+        self.assertIsNone(t.lookup_threshold(["26.51.20.120"], "Эхолот навигационный судовой", "XVIII"))
+        self.assertTrue(t.lookup_threshold(["26.51.20.120"], "Эхолот навигационный", "IX"))
+
+    def test_threshold_text_is_not_an_exclusion(self):
+        """Признак ищется ДО порога: оговорка после «не менее» к области строки не относится."""
+        self.assertEqual(t._row_excluded_sections(
+            '22.21 "Плиты" - не менее 75 баллов (за исключением продукции, предусмотренной разделом "X. Продукция")'),
+            [])
 
     def test_section_phrase_outside_exclusion_does_not_exclude(self):
         self.assertEqual(t._row_excluded_sections(
@@ -92,7 +106,8 @@ class TestParsing(unittest.TestCase):
 
 
 class TestSyntheticRows(unittest.TestCase):
-    """Ветка 1а (строка по имени, без кодов) — в текущем корпусе строк с разделом там нет."""
+    """Ветка 1а (строка по имени, без кодов): в корпусе такие строки с разделом есть (26(2), 26(3) — IX; 72.1,
+    72.3 — IV), но позиций чужого раздела с их именами нет — случай «то же имя в чужом разделе» синтетический."""
 
     def test_named_row_respects_section(self):
         row = {"codes": [], "names": ["Кресло судовое"], "threshold": "не менее 40 баллов", "exception": None,

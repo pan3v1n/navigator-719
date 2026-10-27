@@ -1145,13 +1145,23 @@ _ROW_SECTION_EXC_RE = re.compile(r"(?:за\s+исключением|кроме)\
                                  r"раздел(?:ом|ами)\s+\"?([IVXLC]+)\.", re.IGNORECASE)
 
 
+# Раздел, названный ВНУТРИ оговорки «(кроме / за исключением …)» строки, — в любой форме: прим. 26.1 пишет
+# «…, а также продукции, предусмотренной разделом XVIII настоящего приложения)» и «(кроме продукции
+# судостроения из раздела XVIII настоящего приложения)» — без кавычек и точки (ревью D22, MED).
+_EXC_SECTION_RE = re.compile(r"раздел(?:ом|ами|а|е)?\s+\"?([IVXLC]+)\b")
+
+
 def _row_excluded_sections(line: str) -> list[str]:
-    """Разделы, которые строка исключает оговоркой «за исключением продукции, предусмотренной разделом
-    "X. …"» — до порога. Признак — сама фраза: в прим. 7 она стоит после запятой внутри имени, без скобки,
-    и сканер оговорок (`_exclusion_spans`) её не видит."""
+    """Разделы, которые строка исключает, — до порога. Два признака: фраза «за исключением продукции,
+    предусмотренной разделом "X. …"» (в прим. 7 она стоит после запятой внутри имени, без скобки, и сканер
+    оговорок `_exclusion_spans` её не видит) и раздел, названный внутри оговорки строки
+    (`_row_exclusion_texts`)."""
     raw = _AMEND_STRIP_RE.sub("", line)
     end = raw.find("не менее")
-    return _ROW_SECTION_EXC_RE.findall(raw if end < 0 else raw[:end])
+    out = _ROW_SECTION_EXC_RE.findall(raw if end < 0 else raw[:end])
+    for clause in _row_exclusion_texts(line):
+        out += _EXC_SECTION_RE.findall(clause)
+    return list(dict.fromkeys(out))
 
 
 def _note_sections(lines: list[str]) -> dict[str, str]:
