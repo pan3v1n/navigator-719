@@ -22,6 +22,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from app.rag.thresholds import (  # noqa: E402
+    BY_KIND,
     _split_exception,
     _tables,
     lookup_procurement_threshold,
@@ -103,12 +104,17 @@ class TestTwoSchedulesInOneLine(unittest.TestCase):
                 if not thr:
                     continue
                 general = thr.split(_MARKER, 1)[0]
-                seen: dict[str, set[str]] = {}
-                for date, value in _STEP_RE.findall(general):
-                    seen.setdefault(date, set()).add(value)
-                dup = {d: sorted(v) for d, v in seen.items() if len(v) > 1}
-                if dup:
-                    offenders.append(f"[{label}] {name[:38]}: {dup}")
+                # Порог ПО ВИДАМ (прим. 80.1; закупочный прим. 5, `K2-3` #174) — несколько графиков,
+                # каждый строкой «— для <вида>: …». У легковых и электромобилей с 2023 г. законно
+                # разные значения: инвариант держится ВНУТРИ графика вида, а не на всю строку.
+                schedules = general.split("\n      — ") if general.startswith(BY_KIND) else [general]
+                for sched in schedules:
+                    seen: dict[str, set[str]] = {}
+                    for date, value in _STEP_RE.findall(sched):
+                        seen.setdefault(date, set()).add(value)
+                    dup = {d: sorted(v) for d, v in seen.items() if len(v) > 1}
+                    if dup:
+                        offenders.append(f"[{label}] {name[:38]}: {dup}")
         self.assertEqual(offenders, [], "одна дата с разными значениями в строке порога")
 
 
