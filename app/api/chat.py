@@ -17,6 +17,7 @@ event loop не держим.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -29,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from app.api import quota
 from app.api.auth import require_user, require_user_profiled
+from app.api.events import log_answer_event
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core import plans, sensitive
@@ -327,6 +329,7 @@ def _log_question(user_id: int, session_id: str, text: str) -> None:
 
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
+    started = time.monotonic()  # O8: время ответа — в событие журнала
     _enforce_chat_limit(user.id)
     charge = _enforce_plan_quota(user, req)
     _reject_sensitive(req.message, user.id)
@@ -358,6 +361,8 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
                 q.record_answer_usage(db, user.id)
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
         logger.exception(f"chat: не удалось записать лог диалога (user_id={user.id})")
+    log_answer_event(ans, endpoint="chat", mode=req.corpus, started=started, sources=len(sources),
+                     message_id=message_id)
 
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
@@ -386,6 +391,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     ПЕРЕД вызовом движка уже записывает. Пиши мы его и здесь — при каждом фолбэке в беседе
     появлялся бы дубль вопроса, искажая и историю мультитёрна, и счётчики админки. Так что
     потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
+    started = time.monotonic()  # O8: время до первого куска и полное — в событие журнала
     _enforce_chat_limit(user.id)
     charge = _enforce_plan_quota(user, req)  # 402 до старта потока: фронт показывает причину
     _reject_sensitive(req.message, user.id)
@@ -394,10 +400,12 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     okpd2 = extract_okpd2(req.message)
 
     def gen():
+        first_token = None
         try:
             for kind, payload in answer_stream(req.message, okpd2=okpd2, history=history,
                                                corpus=req.corpus):
                 if kind == "delta":
+                    first_token = first_token or time.monotonic()
                     yield _sse({"type": "delta", "text": payload})
                     continue
                 # kind == "done": payload — Answer. Логируем диалог и отдаём метаданные.
@@ -420,6 +428,8 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                             q.record_answer_usage(db, user.id)
                 except Exception:  # noqa: BLE001 — лог не должен ронять стрим (как в /api/chat)
                     logger.exception(f"chat_stream: не удалось записать лог (user_id={user.id})")
+                log_answer_event(ans, endpoint="stream", mode=req.corpus, started=started,
+                                 sources=len(sources), first_token=first_token, message_id=message_id)
                 yield _sse({
                     "type": "done", "message_id": message_id,
                     "sources": [s.model_dump() for s in sources],

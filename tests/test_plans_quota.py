@@ -97,6 +97,7 @@ class _Ans:
     input_hint = ""
     metered = True
     corpus = ""  # L2: по чему собран ответ
+    phantom_documents: list = []  # O8
 
 
 class _MetaAns(_Ans):

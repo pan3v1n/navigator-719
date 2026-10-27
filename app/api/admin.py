@@ -634,23 +634,25 @@ def _suggest_login(lead, taken: set[str]) -> str:
 
 
 @router.get("/admin/leads", response_class=HTMLResponse)
-def admin_leads_page(request: Request, status: str = ""):
-    """Заявки с лендинга: статус, заметка, «Создать учётку из заявки»."""
+def admin_leads_page(request: Request, status: str = "", lead: int | None = None):
+    """Заявки с лендинга: статус, заметка, «Создать учётку из заявки». `lead` — одна заявка (ссылка
+    из «Тестировщиков»: в общем списке, усечённом до `LEADS_ON_PAGE`, её якоря могло не быть, #200)."""
     gate = _gate(request)
     if isinstance(gate, RedirectResponse):
         return gate
-    return _leads_response(request, gate, status=status)
+    return _leads_response(request, gate, status=status, lead_id=lead)
 
 
 def _leads_response(request: Request, admin: User, *, status: str = "", error: str = "",
-                    error_lead: int | None = None, form: dict | None = None, status_code: int = 200):
+                    error_lead: int | None = None, form: dict | None = None, status_code: int = 200,
+                    lead_id: int | None = None):
     """Единственное место, где читаются заявки (ПДн): раздел «Заявки» и ре-рендер его ошибки.
     Просроченные (срок из политики ПДн) удаляются при каждом открытии; на страницу — не больше
     LEADS_ON_PAGE."""
     status = status if status in LEAD_STATUSES else ""
     with get_session() as db:
         q.purge_old_leads(db)
-        leads = q.list_leads(db, limit=LEADS_ON_PAGE, status=status or None)
+        leads = q.list_leads(db, limit=LEADS_ON_PAGE, status=status or None, lead_id=lead_id)
         counts = {s: q.count_leads(db, s) for s in LEAD_STATUSES}
         leads_total = q.count_leads(db)
         linked_users = q.users_by_ids(db, (lead.user_id for lead in leads))
@@ -665,7 +667,7 @@ def _leads_response(request: Request, admin: User, *, status: str = "", error: s
                          "created": _msk(lead.created_at)})
     return _page(request, admin, "leads", "leads", "Заявки", status_code=status_code, rows=rows,
                  leads_total=leads_total, shown=len(leads), counts=counts, statuses=LEAD_STATUSES,
-                 status=status, error=error, error_lead=error_lead, form=form or {},
+                 status=status, error=error, error_lead=error_lead, form=form or {}, one_lead=lead_id,
                  roles=ACCOUNT_ROLES, paid_plans=list(PLAN_LIMITS), internal_plans=list(plans.INTERNAL_PLANS))
 
 
@@ -760,6 +762,7 @@ def admin_testers(request: Request, ok: str = ""):
     with get_session() as db:
         q.purge_old_leads(db)   # срок хранения заявок — и на этом пути их чтения
         pending = q.list_tester_leads(db, limit=LEADS_ON_PAGE)
+        pending_total = q.count_tester_leads(db)   # #200, п. 6: счётчик — не по усечённому списку
         testers = q.list_testers(db)
         people = q.users_by_ids(db, [lead.user_id for lead in pending] + [u.tester_verified_by for u in testers])
         requests = []
@@ -769,13 +772,27 @@ def admin_testers(request: Request, ok: str = ""):
                              "status": LEAD_STATUSES.get(lead.status, lead.status),
                              "user_id": u.id if u else None, "login": u.username if u else "",
                              "name": (u.full_name or "") if u else "",
-                             "is_tester": bool(u and u.plan == plans.TESTER_PLAN)})
+                             # действующий: истёкший снова подаёт заявку (#200, п. 5) — не «дубль»
+                             "is_tester": bool(u and u.plan == plans.TESTER_PLAN and not plans.plan_expired(u))})
         rows = [{"id": u.id, "login": u.username, "name": u.full_name or "", "org": u.org or "",
                  "region": u.region or "", "verified": _tester_verified(db, u, people),
                  "expires": f"{plans.msk_date(u.plan_expires_at):%d.%m.%Y}" if u.plan_expires_at else "",
                  "expired": plans.plan_expired(u)} for u in testers]
+    # #200, п. 2: сервер принимает срок только ПОЗЖЕ сегодняшнего дня — поле не пускает сегодняшний,
+    # иначе админ получал голый JSON 422 вместо страницы.
+    min_until = (plans.msk_today() + timedelta(days=1)).isoformat()
     return _page(request, gate, "testers", "testers", "Тестировщики", requests=requests, rows=rows,
-                 done=TESTER_DONE.get(ok, ""), today=plans.msk_today().isoformat(), tester=plans.TESTER_PLAN)
+                 pending_total=pending_total, done=TESTER_DONE.get(ok, ""), min_until=min_until,
+                 tester=plans.TESTER_PLAN)
+
+
+def _ensure_undecided(lead) -> None:
+    """#200, п. 1: решение по заявке тестировщика принимается ОДИН раз — 409 иначе. Устаревшая вкладка
+    подключала бы безлимит по уже отклонённой заявке (и затирала срок повторным «Подтвердить») или
+    помечала отказом заявку, по которой тариф уже подключён (ревью этапа 2)."""
+    if lead.status not in ("new", "in_work"):
+        raise HTTPException(status_code=409, detail="Заявка уже обработана: "
+                            + LEAD_STATUSES.get(lead.status, lead.status or "—").lower())
 
 
 @router.post("/api/admin/testers/{lead_id}/approve")
@@ -794,6 +811,7 @@ def admin_tester_approve(lead_id: int, expires: str = Form(default=""),
         lead = q.get_lead(db, lead_id)
         if lead is None or not _is_tester_lead(lead):
             raise HTTPException(status_code=404, detail="Заявка на тестирование не найдена")
+        _ensure_undecided(lead)
         if not lead.user_id or q.get_user(db, lead.user_id) is None:
             raise HTTPException(status_code=422, detail="У заявки нет учётки — создайте её в разделе «Заявки»")
         uid = lead.user_id
@@ -811,6 +829,7 @@ def admin_tester_reject(lead_id: int, admin: User = Depends(require_admin)) -> R
         lead = q.get_lead(db, lead_id)
         if lead is None or not _is_tester_lead(lead):
             raise HTTPException(status_code=404, detail="Заявка на тестирование не найдена")
+        _ensure_undecided(lead)  # ревью этапа 2: та же защита, что у «Подтвердить»
         q.set_lead_status(db, lead_id, "rejected")
     logger.info(f"тестировщик: admin_id={admin.id} отклонил lead_id={lead_id}")
     return RedirectResponse("/admin/testers?ok=rejected", status_code=303)
@@ -977,7 +996,7 @@ def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
     scalar = ("users_total", "users", "experts", "admins", "conversations", "requests", "answers",
               "tokens", "cost", "answer_ratings", "avg_stars", "accept_pct", "accept_user",
               "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
-              "demand_product", "demand_procedural", "orphan_ratings")
+              "demand_product", "demand_procedural", "orphan_ratings", "repeat_ratings")
     payload = {
         # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
         "disclaimer": EXPERT_DISCLAIMER,

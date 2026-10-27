@@ -224,7 +224,7 @@ class TestAdminTesters(_Accounts):
         self.assertNotIn(f'id="tester-lead-{other}"', html)
         self.assertIn(f'action="/api/admin/testers/{cabinet}/approve"', html)
         self.assertNotIn(f'action="/api/admin/testers/{landing}/approve"', html, "без учётки подтверждать некого")
-        self.assertIn(f'href="/admin/leads#lead-{landing}">Создать учётку</a>', html)
+        self.assertIn(f'href="/admin/leads?lead={landing}#lead-{landing}">Создать учётку</a>', html)
         for pii in ("lead.secret@example.ru", "+7 900 333-33-33", "Секретное Имя"):
             self.assertNotIn(pii, html, "ПДн заявки читаются только в «Заявках»")
 
@@ -345,6 +345,114 @@ class TestAdminTesters(_Accounts):
             html = adm.admin_user_card(_get(f"/admin/users/{u.id}"), u.id).body.decode("utf-8")
         self.assertIn("Тестировщик подтверждён:", html)
         self.assertIn('<a href="/admin/testers">все тестировщики</a>', html)
+
+
+class TestReviewR38(_Accounts):
+    """`R38` #200 — шесть LOW облачного ревью `feat/tester-plan` (15.10.2026)."""
+
+    page, lead = TestAdminTesters.page, TestAdminTesters.lead   # хелперы — без чужих тестов
+
+    def test_decided_lead_is_not_approved_again(self):
+        """П. 1: устаревшая вкладка не подключает тариф по отклонённой заявке и не затирает срок."""
+        u = self.user()
+        lid = self.lead(u)
+        until = plans.msk_today() + timedelta(days=30)
+        adm.admin_tester_approve(lid, expires=until.isoformat(), admin=ADMIN)
+        started = self.get(u.id).plan_started_at
+        with self.assertRaises(HTTPException) as e:
+            adm.admin_tester_approve(lid, expires="", admin=ADMIN)
+        self.assertEqual(e.exception.status_code, 409)
+        got = self.get(u.id)
+        self.assertEqual((got.plan_started_at, plans.msk_date(got.plan_expires_at)), (started, until),
+                         "повторное «Подтвердить» затёрло срок")
+        other = self.user("kursk.tester2")
+        rejected = self.lead(other)
+        adm.admin_tester_reject(rejected, admin=ADMIN)
+        with self.assertRaises(HTTPException) as e:
+            adm.admin_tester_approve(rejected, expires="", admin=ADMIN)
+        self.assertEqual(e.exception.status_code, 409)
+        self.assertIsNone(self.get(other.id).plan, "отклонённая заявка подключила тариф")
+
+    def test_date_field_starts_tomorrow(self):
+        """П. 2: поле не пускает сегодняшний день — сервер его не примет."""
+        self.lead(self.user())
+        tomorrow = (plans.msk_today() + timedelta(days=1)).isoformat()
+        self.assertIn(f'name="expires" min="{tomorrow}"', self.page())
+
+    def test_counter_counts_the_whole_queue(self):
+        """П. 6: очередь на странице усечена — счётчик и пометка об этом, а не длина списка."""
+        u = self.user()
+        for _ in range(3):
+            self.lead(u)
+        with mock.patch.object(adm, "LEADS_ON_PAGE", 2):
+            html = self.page()
+        self.assertIn("заявок ждут решения: 3 (показаны первые 2)", " ".join(html.split()))
+
+    def test_lead_link_opens_that_lead(self):
+        """П. 6: «Создать учётку» ведёт на страницу ОДНОЙ заявки — в усечённом списке якоря могло не быть."""
+        lid = self.lead()
+        other = self.lead()
+        self.assertIn(f'href="/admin/leads?lead={lid}#lead-{lid}">Создать учётку</a>', self.page())
+        with mock.patch.object(adm, "current_user", return_value=ADMIN):
+            html = adm.admin_leads_page(_get("/admin/leads"), lead=lid).body.decode("utf-8")
+        self.assertIn(f'id="lead-{lid}"', html)
+        self.assertNotIn(f'id="lead-{other}"', html)
+        self.assertIn(f"показана заявка №{lid}", html)
+        with mock.patch.object(adm, "current_user", return_value=ADMIN):
+            gone = adm.admin_leads_page(_get("/admin/leads"), lead=987654).body.decode("utf-8")
+        self.assertIn("заявки №987654 нет", gone)
+
+    def test_reject_of_decided_lead_is_refused(self):
+        """Ревью этапа 2: «Отклонить» в устаревшей вкладке не помечает отказом подключённую заявку."""
+        u = self.user()
+        lid = self.lead(u)
+        adm.admin_tester_approve(lid, expires="", admin=ADMIN)
+        with self.assertRaises(HTTPException) as e:
+            adm.admin_tester_reject(lid, admin=ADMIN)
+        self.assertEqual(e.exception.status_code, 409)
+        with self.Session() as db:
+            self.assertEqual(q.get_lead(db, lid).status, "connected")
+
+    def test_expired_tester_request_is_not_marked_as_tester(self):
+        """Истёкший тестировщик подаёт заявку снова — отметка «уже тестировщик» её не порочит."""
+        u = self.user(plan=TESTER)
+        with self.Session() as db:
+            q.get_user(db, u.id).plan_expires_at = plans.anchor_from_date(plans.msk_today() - timedelta(days=1))
+            db.commit()
+        lid = self.lead(u)
+        row = self.page()
+        row = row[row.index(f'id="tester-lead-{lid}"'):]
+        self.assertNotIn("уже тестировщик", row[:row.index("</tr>")])
+
+
+class TestCabinetR38(_Accounts):
+    page = TestCabinet.page   # хелпер — без чужих тестов
+
+    def test_expired_tester_can_apply_again(self):
+        """П. 5: истёкший тестировщик видит «Подать заявку», а не «Подключён» без кнопки."""
+        u = self.user(plan=TESTER)
+        with self.Session() as db:
+            q.get_user(db, u.id).plan_expires_at = plans.anchor_from_date(plans.msk_today() - timedelta(days=1))
+            db.commit()
+        panel = _panel(self.page(self.get(u.id)), "tester")
+        self.assertIn(">Подать заявку</button>", panel)
+        self.assertNotIn(">Подключён</button>", panel)
+
+    def test_corporate_popup_shows_the_price(self):
+        """П. 3: цена корпоративного тарифа видна и в попапе связи с заказчиком."""
+        html = self.page(self.user(), "confirm=1&tariff=Профи&kind=corporate&period=year&seats=5")
+        pop = html[html.index('class="pop-back"'):]
+        pop = pop[:pop.index("</form>")]
+        price = pricing.price_line("Профи", kind="corporate", period="year", seats=5)
+        self.assertTrue(price)
+        self.assertIn(f"Стоимость — {price} без НДС", " ".join(pop.split()))
+
+    def test_sum_is_recomputed_on_load(self):
+        """П. 4: сумма пересчитывается при загрузке и при возврате «Назад» — в кабинете и на лендинге."""
+        profile = (ROOT / "app" / "web" / "templates" / "profile.html").read_text(encoding="utf-8")
+        landing = (ROOT / "landing" / "app.js").read_text(encoding="utf-8")
+        self.assertIn('window.addEventListener("pageshow", reprice);', profile)
+        self.assertIn("window.addEventListener('pageshow', reprice);", landing)
 
 
 class TestSchema(unittest.TestCase):

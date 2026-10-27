@@ -154,7 +154,8 @@
         <form class="pop" role="dialog" aria-modal="true" aria-labelledby="contact-h" method="post" action="/api/plan-request">
           <h2 id="contact-h">Связаться с нами</h2>
           <p>{% if confirm.tariff == pricing.ORG_TARIFF %}Расскажите, что нужно организации, — менеджер свяжется с вами
-            и подготовит условия.{% else %}Тариф «{{ confirm.tariff }}»: {{ confirm.summary }} Корпоративный тариф
+            и подготовит условия.{% else %}Тариф «{{ confirm.tariff }}»: {{ confirm.summary }}
+            {% if confirm.price %}Стоимость — {{ confirm.price }} без НДС. {% endif %}Корпоративный тариф
             подключается через связь с заказчиком — менеджер свяжется с вами и согласует условия и оплату.{% endif %}</p>
           {{ req_message() }}
           {{ req_who() }}
@@ -186,7 +187,8 @@
           <div class="tcard-price"><div class="price">{{ pricing.TESTER_PRICE }}</div><div class="price-sub">{{ pricing.TESTER_NOTE }}</div></div>
           <div class="addon incl"><span class="incl-check" aria-hidden="true"><svg width="10" height="8" viewBox="0 0 12 10" fill="none"><path d="M1 5l3.5 3.5L11 1.5" stroke="currentColor" stroke-width="1.8"/></svg></span>
             <span><b>{{ pricing.SOURCES }}</b><small>{{ pricing.SOURCES_NOTE }}</small></span></div>
-          {% if user.plan == pricing.TESTER_TARIFF %}<button class="ds-btn block tcard-btn" type="button" disabled>Подключён</button>
+          {# #200, п. 5: истёкший тестировщик — снова с кнопкой заявки, а не «Подключён» без выхода #}
+          {% if user.plan == pricing.TESTER_TARIFF and not (plan and plan.expired) %}<button class="ds-btn block tcard-btn" type="button" disabled>Подключён</button>
           {% else %}<button class="ds-btn block tcard-btn" type="submit">Подать заявку</button>{% endif %}
         </form>
         <div class="tcard org">
@@ -519,6 +521,10 @@
           reprice();
         });
       });
+      // #200, п. 4: после перезагрузки или «Назад» браузер восстанавливает поля (год, 5 пользователей),
+      // а сумма оставалась месячной за одного — пересчёт и при загрузке, и при возврате на страницу.
+      reprice();
+      window.addEventListener("pageshow", reprice);
     });
   })();
 </script>

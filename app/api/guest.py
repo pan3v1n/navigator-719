@@ -24,6 +24,7 @@
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 
@@ -39,6 +40,7 @@ from app.api.chat import (
     _sources_from_rules,
     _sse,
 )
+from app.api.events import log_answer_event
 from app.api.ratelimit import SlidingWindow, client_ip
 from app.api.trial import guest_id, trial_view
 from app.core import plans
@@ -222,6 +224,7 @@ def _stored_payload(row, gid: str, session_id: str) -> dict:
 
 @router.post("/api/guest/chat", response_model=GuestChatResponse)
 def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
+    started = time.monotonic()  # O8
     gid = _require_guest(request)
     _reject_sensitive(req.message, "guest")   # до счёта: отклонённый вопрос пробу не тратит
     last, stored = _last_same(gid, req)
@@ -243,6 +246,8 @@ def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     _log(gid, session_id, "assistant", ans.text, sources=[s.model_dump() for s in sources],
          low_relevance=ans.low_relevance, prompt_tokens=ans.prompt_tokens,
          completion_tokens=ans.completion_tokens, corpus=corpora.stored(ans.corpus, req.corpus))
+    log_answer_event(ans, endpoint="chat", mode=req.corpus, started=started, sources=len(sources),
+                     guest=True)
     return GuestChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=None,
@@ -255,6 +260,7 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     """SSE как у `/api/chat/stream`; на 'done' — ещё остаток пробных вопросов. Вопрос бронируется
     ДО стрима: клиент, оборвавший соединение после текста, вопрос уже потратил. Упал стрим —
     бронь снимается целиком: фолбэк фронта придёт на `/api/guest/chat` и запишет вопрос сам."""
+    started = time.monotonic()  # O8
     gid = _require_guest(request)
     _reject_sensitive(req.message, "guest")
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
@@ -270,9 +276,11 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     question_id = _reserve(request, gid, session_id, req.message, unanswered=last)
 
     def gen():
+        first_token = None
         try:
             for kind, payload in answer_stream(req.message, **_engine_kwargs(req, history)):
                 if kind == "delta":
+                    first_token = first_token or time.monotonic()
                     yield _sse({"type": "delta", "text": payload})
                     continue
                 ans = payload
@@ -283,6 +291,8 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                      sources=[s.model_dump() for s in sources], low_relevance=ans.low_relevance,
                      prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
                      corpus=corpora.stored(ans.corpus, req.corpus))
+                log_answer_event(ans, endpoint="stream", mode=req.corpus, started=started,
+                                 sources=len(sources), first_token=first_token, guest=True)
                 yield _sse({
                     "type": "done", "message_id": None,
                     "sources": [s.model_dump() for s in sources],

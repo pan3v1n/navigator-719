@@ -187,5 +187,61 @@ class TestAdminStats(unittest.TestCase):
         self.assertEqual(days, ["30.06", "01.07"])  # 30 июня раньше 1 июля
 
 
+    # --- #166: повторный клик по звёздам одного ответа — переоценка, а не второй голос ---------------
+    def _rated_answer(self, db, u, sid, t0):
+        self._msg(db, u, sid, "user", "вопрос", t0)
+        return self._msg(db, u, sid, "assistant", "ответ", t0 + timedelta(seconds=5))
+
+    def test_repeated_rating_counts_once_last_wins(self):
+        t0 = datetime(2026, 10, 20, 10, 0)
+        with self.Session() as db:
+            u = self._user(db, "u1")
+            a = self._rated_answer(db, u, "s1", t0)
+            self._fb(db, u, t0 + timedelta(minutes=1), kind="answer", message_id=a.id, rating=2)
+            self._fb(db, u, t0 + timedelta(minutes=2), kind="answer", message_id=a.id, rating=5)
+            st = build_admin_view(db)["stats"]
+        self.assertEqual(st["answer_ratings"], 1, "один ответ — один голос")
+        self.assertEqual(st["repeat_ratings"], 1)
+        self.assertEqual(st["accept_pct"], 100, "учтена ПОСЛЕДНЯЯ оценка (5), а не первая (2)")
+        self.assertEqual([r["rating"] for r in st["answer_rows"]], [5])
+
+    def test_tie_on_time_resolved_by_id(self):
+        t0 = datetime(2026, 10, 20, 10, 0)
+        with self.Session() as db:
+            u = self._user(db, "u1")
+            a = self._rated_answer(db, u, "s1", t0)
+            same = t0 + timedelta(minutes=1)
+            self._fb(db, u, same, kind="answer", message_id=a.id, rating=1)
+            self._fb(db, u, same, kind="answer", message_id=a.id, rating=4)
+            st = build_admin_view(db)["stats"]
+        self.assertEqual([r["rating"] for r in st["answer_rows"]], [4])
+
+    def test_different_answers_and_users_are_not_repeats(self):
+        t0 = datetime(2026, 10, 20, 10, 0)
+        with self.Session() as db:
+            u1, u2 = self._user(db, "u1"), self._user(db, "u2")
+            a = self._rated_answer(db, u1, "s1", t0)
+            b = self._rated_answer(db, u1, "s2", t0 + timedelta(minutes=10))
+            self._fb(db, u1, t0 + timedelta(minutes=20), kind="answer", message_id=a.id, rating=5)
+            self._fb(db, u1, t0 + timedelta(minutes=21), kind="answer", message_id=b.id, rating=3)
+            self._fb(db, u2, t0 + timedelta(minutes=22), kind="answer", message_id=a.id, rating=4)
+            st = build_admin_view(db)["stats"]
+        self.assertEqual(st["answer_ratings"], 3)
+        self.assertEqual(st["repeat_ratings"], 0)
+
+    def test_comment_and_correction_are_not_ratings(self):
+        """Комментарий и исправление к тому же ответу — отдельные строки без звёзд, повтором не считаются."""
+        t0 = datetime(2026, 10, 20, 10, 0)
+        with self.Session() as db:
+            u = self._user(db, "u1")
+            a = self._rated_answer(db, u, "s1", t0)
+            self._fb(db, u, t0 + timedelta(minutes=1), kind="answer", message_id=a.id, rating=4)
+            self._fb(db, u, t0 + timedelta(minutes=2), kind="answer", message_id=a.id, comment="уточнение")
+            self._fb(db, u, t0 + timedelta(minutes=3), kind="answer", message_id=a.id, correction="верно так")
+            st = build_admin_view(db)["stats"]
+        self.assertEqual(st["answer_ratings"], 1)
+        self.assertEqual(st["repeat_ratings"], 0)
+
+
 if __name__ == "__main__":
     unittest.main()
