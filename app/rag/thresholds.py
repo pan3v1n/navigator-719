@@ -1082,6 +1082,7 @@ def _flat_thresholds() -> list[dict]:
                 if codes and thr:
                     rows.append({"codes": codes, "names": _quoted_names(left), "excluded": excluded,
                                  "subject_names": _subject_names(ln), "exclusions": _row_exclusion_texts(ln),
+                                 "excluded_sections": _row_excluded_sections(ln),
                                  "threshold": thr, "exception": exc, "note": note})
             elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
                 excluded = _row_excluded(ln)
@@ -1105,6 +1106,7 @@ def _flat_thresholds() -> list[dict]:
                 if codes and thr:
                     rows.append({"codes": codes, "names": names, "excluded": excluded,
                                  "subject_names": _subject_names(ln), "exclusions": _row_exclusion_texts(ln),
+                                 "excluded_sections": _row_excluded_sections(ln),
                                  "threshold": thr, "exception": exc, "note": note})
                 i = k
                 continue
@@ -1124,7 +1126,59 @@ def _flat_thresholds() -> list[dict]:
             r["codes"] = []
     rows.extend(_qualified_list_rows(lines))
     rows.extend(_named_block_rows(lines))
+    # D22 #235: примечание, назвавшее раздел во вводной («…продукции, включенной в раздел XI настоящего
+    # приложения…»), к позициям других разделов не относится — как таблица (`_tables`). До правки фильтр
+    # раздела был только у таблиц, и закупочные прим. 52 (XI) и 53 (XVII) уходили по коду мебели судовой
+    # XVIII и противопролежневым матрацам VII.
+    sections = _note_sections(lines)
+    for r in rows:
+        r.setdefault("section", sections.get(r.get("note")))
     return rows
+
+
+# --- D22 #235: ОГОВОРКИ ПО РАЗДЕЛУ ----------------------------------------------------------------
+#
+# Строка прим. 7 «22.21 "Плиты, листы, трубы и профили пластмассовые, за исключением продукции,
+# предусмотренной разделом "X. Продукция промышленности строительных материалов" …" - не менее 75 баллов»
+# исключает РАЗДЕЛ, а не код: позиция раздела X с кодом 22.21 порог строки не получает.
+_ROW_SECTION_EXC_RE = re.compile(r"(?:за\s+исключением|кроме)\s+продукции,?\s+предусмотренн\w+\s+"
+                                 r"раздел(?:ом|ами)\s+\"?([IVXLC]+)\.", re.IGNORECASE)
+
+
+def _row_excluded_sections(line: str) -> list[str]:
+    """Разделы, которые строка исключает оговоркой «за исключением продукции, предусмотренной разделом
+    "X. …"» — до порога. Признак — сама фраза: в прим. 7 она стоит после запятой внутри имени, без скобки,
+    и сканер оговорок (`_exclusion_spans`) её не видит."""
+    raw = _AMEND_STRIP_RE.sub("", line)
+    end = raw.find("не менее")
+    return _ROW_SECTION_EXC_RE.findall(raw if end < 0 else raw[:end])
+
+
+def _note_sections(lines: list[str]) -> dict[str, str]:
+    """{номер примечания: раздел} — по вводной примечания, тем же признаком, что у таблиц
+    (`_INTRO_SECTION_RE`). Подпункт («26.1.») берёт раздел только из СВОЕЙ вводной: если она раздела не
+    называет, строка подпункта остаётся без раздела, как была. ⚠ Наследовать раздел родителя нельзя:
+    вводная прим. 80 называет раздел V (коэффициенты СЭЗ), а подпункт 80.1 — таблица раздела VII. Замер
+    27.10: наследование сейчас не меняет ни одной позиции (17.1, 17(2), 26.1, 80.1), то есть ничего не
+    чинит, а 80.1 ломало бы на первой же строке-списке."""
+    out: dict[str, str] = {}
+    for ln in lines:
+        h = _NOTE_START_RE.match(ln)
+        if h:
+            sm = _INTRO_SECTION_RE.search(ln)
+            if sm:
+                out[h.group(1)] = sm.group(1)
+    return out
+
+
+def _row_in_section(r: dict, section: str | None) -> bool:
+    """Строка примечания применима к позиции раздела `section` (D22 #235). Раздел позиции неизвестен —
+    не фильтруем (как у таблиц)."""
+    if not section:
+        return True
+    if r.get("section") and r["section"] != section:
+        return False
+    return section not in (r.get("excluded_sections") or ())
 
 
 # --- ⚠ ПЯТАЯ ФОРМА: «классифицируемой кодом … из CODE "ИМЯ" - N баллов» (прим. 27) ------------
@@ -1942,7 +1996,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
     #     («одномодовые» и «многомодовые» отличаются одним словом из шести).
     if name:
         named = [r for r in _flat_thresholds()
-                 if not r["codes"] and note_scope(r.get("note")) == scope
+                 if not r["codes"] and note_scope(r.get("note")) == scope and _row_in_section(r, section)
                  and any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
                          for nm in r["names"])]
         if len(named) == 1:
@@ -2055,6 +2109,8 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
         cands: list[tuple[dict, bool]] = []  # (строка примечания, точное ли совпадение кода)
         for r in _flat_thresholds():
             if note_scope(r.get("note")) != scope:
+                continue
+            if not _row_in_section(r, section):               # D22 #235
                 continue
             exact = None
             # D20: строка «X (за исключением Y)» к позиции с кодом под Y не относится — ни точным кодом,
