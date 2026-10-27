@@ -584,28 +584,39 @@ def create_lead(
     return lead
 
 
-def list_leads(db: Session, limit: int | None = None, status: str | None = None) -> list[Lead]:
+def list_leads(db: Session, limit: int | None = None, status: str | None = None,
+               lead_id: int | None = None) -> list[Lead]:
     """Заявки, свежие сверху; `limit` — сколько показать (админка не тянет все ПДн разом).
     Фильтр статуса — в запросе, ДО лимита: иначе на странице «Новые» были бы лишь новые среди
-    последних `limit`, а старые новые недостижимы (ревью PR #182)."""
+    последних `limit`, а старые новые недостижимы (ревью PR #182). `lead_id` — одна заявка (#200)."""
     stmt = select(Lead).order_by(Lead.created_at.desc(), Lead.id.desc())
     if status:
         stmt = stmt.where(Lead.status == status)
+    if lead_id is not None:
+        stmt = stmt.where(Lead.id == lead_id)
     if limit:
         stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def _tester_leads_pending():
+    """Условие очереди «Тестировщиков» — одно на список и на счётчик (#200, п. 6)."""
+    return (or_(Lead.kind == "tester", Lead.tariff == plans.TESTER_PLAN),
+            Lead.status.in_(("new", "in_work")))
 
 
 def list_tester_leads(db: Session, limit: int | None = None) -> list[Lead]:
     """Очередь раздела «Тестировщики» (14.10.2026): заявки на тариф «Тестировщик», ждущие решения
     (новые и в работе), старые сверху. Вид — данными (`kind`), тариф — для заявок без вида."""
-    stmt = (select(Lead)
-            .where(or_(Lead.kind == "tester", Lead.tariff == plans.TESTER_PLAN),
-                   Lead.status.in_(("new", "in_work")))
-            .order_by(Lead.created_at, Lead.id))
+    stmt = select(Lead).where(*_tester_leads_pending()).order_by(Lead.created_at, Lead.id)
     if limit:
         stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def count_tester_leads(db: Session) -> int:
+    """Сколько заявок в очереди «Тестировщиков» всего — список на странице усечён (#200, п. 6)."""
+    return db.execute(select(func.count(Lead.id)).where(*_tester_leads_pending())).scalar_one()
 
 
 def list_testers(db: Session) -> list[User]:
