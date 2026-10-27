@@ -916,6 +916,31 @@ def _doc_filter(only_docs: tuple[str, ...]) -> list:
     return [models.FieldCondition(key="doc_type",
                                   match=models.MatchAny(any=list(only_docs)))]
 
+_MARK_RE = re.compile(FOOTNOTE_MARK)
+_MARK_PAREN = re.compile(r"^<(\d{1,2})\((\d{1,2})\)>$")
+_MARK_DOT = re.compile(r"^<(\d{1,2})\.(\d{1,2})>$")
+
+
+def footnote_forms(query: str) -> list[tuple[str, ...]]:
+    """Маркеры сносок вопроса — каждый с формой-двойником: «<38(3)>» → («<38(3)>», «<38.3>»).
+
+    ⚠ D15 #155: определения сносок 38 записаны как «<38.1>»…«<38.14>», а ссылки в требованиях
+    приложения — «<38(1)>»…«<38(14)>» (~22 на каждую), и пользователь пишет так, как видит в
+    требовании. Своя форма идёт первой: у «<12(1)>», «<40(1)>» запись и ссылка совпадают."""
+    out: list[tuple[str, ...]] = []
+    for m in _MARK_RE.finditer(query or ""):
+        mark = re.sub(r"\s+", "", m.group(0))
+        if (p := _MARK_PAREN.match(mark)):
+            forms = (mark, f"<{p.group(1)}.{p.group(2)}>")
+        elif (d := _MARK_DOT.match(mark)):
+            forms = (mark, f"<{d.group(1)}({d.group(2)})>")
+        else:
+            forms = (mark,)
+        if forms not in out:
+            out.append(forms)
+    return out
+
+
 def alive_only(*must):
     """Фильтр Qdrant «документ действует» (`K8`, issue #39) плюс переданные условия.
 
@@ -1095,7 +1120,36 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
         except Exception as e:  # noqa: BLE001 — добор необязателен, ответ не валим
             logger.warning("добор состава документов не удался: {}: {}", type(e).__name__, e)
 
-    chosen: set[int] = set(doc_list_idxs[:RULES_QUOTA_DOC_LIST])
+    # D15 #155: маркер сноски в вопросе — запись ЭТОЙ сноски добираем по ключу (`point`), а не
+    # ждём её от ранга. Замер 27.10.2026: на «что значит <38(3)>» первой шла чужая <38.13>, своя
+    # <38.3> в тройку не попадала — ключ записи «<38.3>», а ссылка в требованиях «<38(3)>». Место в
+    # окне ей гарантировано; первой она идёт, когда вопрос — о сносках (тема `appendix_footnotes`).
+    footnote_idxs: list[int] = []
+    marks = footnote_forms(query)[:2]
+    if marks and (not only_docs or "appendix_footnotes" in only_docs):
+        try:
+            from qdrant_client import models
+            got = _hybrid(query, 2 * len(marks) + 2, collection=name, qvec=qvec, qfilter=alive_only(
+                models.FieldCondition(key="doc_type", match=models.MatchValue(value="appendix_footnotes")),
+                models.FieldCondition(key="point", match=models.MatchAny(any=[f for fs in marks for f in fs]))))
+            by_point = {(p.payload or {}).get("point"): p for p in got}
+            known = {((p.payload or {}).get("doc_type"), (p.payload or {}).get("point")): i
+                     for i, p in enumerate(points)}
+            for forms in marks:
+                p = next((by_point[f] for f in forms if f in by_point), None)
+                if p is None:
+                    continue
+                key = ("appendix_footnotes", (p.payload or {}).get("point"))
+                if key in known:
+                    footnote_idxs.append(known[key])
+                else:
+                    known[key] = len(points)
+                    footnote_idxs.append(len(points))
+                    points.append(p)
+        except Exception as e:  # noqa: BLE001 — добор необязателен, ответ не валим
+            logger.warning("добор сноски по маркеру не удался: {}: {}", type(e).__name__, e)
+
+    chosen: set[int] = set(doc_list_idxs[:RULES_QUOTA_DOC_LIST]) | set(footnote_idxs)
 
     def _quota_of(doc_type: str) -> int:
         if doc_type == primary:
@@ -1154,7 +1208,9 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     # K9 показал, что ответ строится вокруг первого источника: 4.1 в хвосте окна модель
     # использовала как ссылку («предусмотрено разделом 4»), а не как перечень.
     doc_list_set = set(doc_list_idxs)
+    footnote_first = set(footnote_idxs) if primary == "appendix_footnotes" else set()
     order = sorted(chosen, key=lambda i: (
+        0 if i in footnote_first else 1,
         0 if i in doc_list_set else 1,
         0 if (points[i].payload or {}).get("doc_type") == primary else 1, i))
 
