@@ -1,6 +1,6 @@
 """D16 #173: пометка «из» (прим. 3 к приложению) и «за исключением» у кодов позиции.
 
-Корень: `structure_kb` разбирал «из 32.50.22.110» в `okpd2_codes: ["32.50.22.110"]` — у 980 позиций из
+Корень: `structure_kb` разбирал «из 32.50.22.110» в `okpd2_codes: ["32.50.22.110"]` — у 977 позиций из
 1573 модель не знала, что требования относятся ТОЛЬКО к товарам, названным в наименовании; у четырёх
 позиций исключённые коды стояли в `okpd2_codes` наравне со своими. Канал — рантайм-файл
 `code_cells.json` (`scripts/build_code_cells.py`), без переиндексации.
@@ -75,17 +75,33 @@ class TestFileMatchesCorpus(unittest.TestCase):
                 self.assertTrue(set(e["marks"]) <= {IZ, PLAIN, EXCEPT}, k[:80])
 
     def test_population(self):
-        """Радиус на дату сборки: у 980 из 1573 позиций хотя бы один код с «из», не определено 0.
+        """Радиус на дату сборки: у 977 из 1573 позиций хотя бы один код с «из», не определено 3.
         Сдвиг — повод посмотреть, что изменилось в корпусе, а не поправить число."""
         ms = [_marks(r) for r in RECORDS]
-        self.assertEqual(sum(m is None for m in ms), 0)
-        self.assertEqual(sum(bool(m) and IZ in m for m in ms), 980)
+        self.assertEqual(sum(m is None for m in ms), 3)
+        self.assertEqual(sum(bool(m) and IZ in m for m in ms), 977)
         self.assertEqual(sum(bool(m) and EXCEPT in m for m in ms), 4)
+
+    def test_code_only_match_is_undetermined(self):
+        """Ревью D16, LOW-2: запись, чьё наименование со строкой первоисточника не совпало ничем
+        (заголовок раздела вместо пустой графы, пересказ перечня), пометки не получает — пояснение
+        «только товары, названные в наименовании» отсылало бы к имени, которого в первоисточнике нет."""
+        positions = json.loads(build.OUT.read_text(encoding="utf-8"))["positions"]
+        for sec, start in (("III", "Продукция отрасли специального машиностроения"),
+                           ("IX", "Продукция радиоэлектроники"),
+                           ("XV", "Отдельные виды технологического оборудования")):
+            r = _rec(sec, start)
+            self.assertIsNone(_marks(r), start)
+            e = positions[code_cells.key(r["section_roman"], r["product_name"], r["okpd2_codes"])]
+            self.assertIn("сопоставлено только по коду", e["reason"])
 
     def test_marks_agree_with_raw_text(self):
         """НЕЗАВИСИМЫЙ ОРАКУЛ — голый текст раздела, без разборщика строк. Каждый код с «из» обязан
-        встречаться в разделе как «из <код>», каждый код без пометки — без «из» перед ним. Разборщик,
-        перепутавший пометки (или приписавший «из» соседней строки), здесь краснеет."""
+        встречаться в разделе как «из <код>», каждый код без пометки — без «из» перед ним.
+
+        ⚠ СИЛА ОРАКУЛА — НЕ ПОЛНАЯ (ревью D16, LOW-4). Он смотрит на множества кодов РАЗДЕЛА, и у кода,
+        который в разделе стоит и с «из», и без (132 из 1322 кодов с «из», 34 из 614 без), перепутанную
+        пометку не видит. Такие пары держат точечные тесты (`test_same_code_both_ways_in_section`)."""
         chunks = {}
         for f in build.CHUNKS.glob("*.txt"):
             m = build._CHUNK_STEM.match(f.stem)
@@ -151,6 +167,18 @@ class TestSourceCells(unittest.TestCase):
         self.assertEqual(_marks(_rec("XXI", "Жидкость Б-1")), [IZ])
         self.assertEqual(_marks(_rec("XIV", "Катализаторы гидрокрекинга")), [IZ])   # «Из 20|» заглавная
 
+    def test_same_code_both_ways_in_section(self):
+        """Класс, слепой для оракула по разделу: «30.11.21.120 Суда речные пассажирские» и ниже
+        «из 30.11.21.120 … несамоходные» — один код, две позиции, разные пометки."""
+        self.assertEqual(_marks(_rec("XVIII", "Суда речные пассажирские", "30.11.21.120")), [PLAIN])
+        self.assertEqual(_marks(_rec("XVIII", "Суда речные пассажирские несамоходные")), [IZ])
+
+    def test_excepted_code_attaches_to_its_own_code(self):
+        """Ревью D16, LOW-5: «(за исключением …)» — к своему коду-предку, а не в конец списка."""
+        self.assertEqual(code_cells.render(["26.20.11", "27.11", "26.20.11.120"], [PLAIN, IZ, EXCEPT]),
+                         "26.20.11 (за исключением 26.20.11.120), из 27.11")
+        self.assertEqual(code_cells.render(["27.11", "99.9"], [PLAIN, EXCEPT]), "27.11 (за исключением 99.9)")
+
     def test_plain_code(self):
         self.assertEqual(_marks(_rec("I", "Оправки для крепления деталей на станках")), [PLAIN])
         self.assertEqual(_marks(_rec("XXI", "Углеводороды ациклические насыщенные")), [PLAIN])
@@ -189,13 +217,32 @@ class TestRuntimeDegrades(unittest.TestCase):
 
 
 class TestContext(unittest.TestCase):
+    def test_marks_add_no_numbers_to_context(self):
+        """Ревью D16, MED-1: пояснение «(прим. 3 к приложению)» добавило в контекст число 3 у 583
+        позиций — и выдуманное «не менее 3 баллов» переставало ловиться гардом. Пометки и пояснения
+        не добавляют в контекст ни одного числа, которого там не было: по всем позициям корпуса."""
+        num = re.compile(r"(?<!\d)\d+(?:[.,]\d+)?(?!\d)")
+        bad = []
+        with mock.patch.object(retriever, "has_exact_position", lambda c: False):
+            for r in RECORDS:
+                if not r.get("okpd2_codes"):
+                    continue
+                h = _hit(r)
+                after = pipeline.format_context([h], "вопрос", r["okpd2_codes"][0])
+                with mock.patch.object(code_cells, "marks", lambda *a, **k: None):
+                    before = pipeline.format_context([h], "вопрос", r["okpd2_codes"][0])
+                extra = set(num.findall(after)) - set(num.findall(before))
+                if extra:
+                    bad.append((r["product_name"][:40], sorted(extra)))
+        self.assertEqual(bad, [])
+
     def test_target_with_iz_gets_code_line_and_note(self):
         """Случай ⑤ отчёта 22.09: «Бедренная ножка» 32.50.22.110. С ред. N 1297 позицию «Протезы
         верхних конечностей» исключили — код стоит у «Эндопротезов суставов» с «из»."""
         r = _rec("VII", "Эндопротезы суставов конечностей", "32.50.22.110")
         ctx = pipeline.format_context([_hit(r)], "Бедренная ножка SL-Stem", "32.50.22.110")
         self.assertIn("ОКПД2: из 32.50.13.130, из 32.50.13.190, из 32.50.22.110", ctx)
-        self.assertIn("⚠ Код указан с пометкой «из» (прим. 3 к приложению): требования этой позиции "
+        self.assertIn("⚠ Код указан с пометкой «из» (примечания к приложению): требования этой позиции "
                       "распространяются только на товары, названные в её наименовании", ctx)
 
     def test_plain_target_gets_no_note(self):
@@ -243,7 +290,23 @@ class TestGroupNote(unittest.TestCase):
     def test_unknown_mark_keeps_conditional_wording(self):
         rec = {**_rec("XXI", "Углеводороды ациклические насыщенные"), "section_roman": "?"}
         ctx = self._ctx(rec, "20.14.11.112")
-        self.assertIn("(при пометке «из» — только к ним, прим. 3 к приложению)", ctx)
+        self.assertIn("(при пометке «из» — только к ним).", ctx)
+
+    def test_grouping_with_exceptions_is_not_whole(self):
+        """Ревью D16, LOW-3: «Компьютеры портативные» 26.20.11 (за исключением …120, …130) —
+        позиция-группировка, но охватывает её не всю."""
+        ctx = self._ctx(_rec("IX", "Компьютеры портативные"), "26.20.11.110")
+        self.assertIn("26.20.11.110 ВХОДИТ В ГРУППИРОВКУ ОКПД2 26.20.11", ctx)
+        self.assertIn("охватывает группировку, кроме кодов, указанных «за исключением»", ctx)
+        self.assertNotIn("охватывает всю группировку", ctx)
+
+    def test_no_group_note_under_excepted_code(self):
+        """Код вопроса под исключённым кодом — позиция на него НЕ распространяется: строки нет,
+        даже если охватывающим окажется свой код (защита в коде, а не в данных)."""
+        r = _rec("IX", "Компьютеры портативные")
+        with mock.patch.object(pipeline, "covers", lambda codes, name, q: "26.20.11"):
+            ctx = self._ctx(r, "26.20.11.121")
+        self.assertNotIn("ГРУППИРОВКУ", ctx)
 
 
 class TestPanel(unittest.TestCase):
