@@ -187,6 +187,13 @@ class TestThresholds(unittest.TestCase):
             got = t.lookup_threshold(full, "Периферия", "IX")
         self.assertIn("не менее 55 баллов", got or "")
 
+    def test_note_parsers_are_cached(self):
+        """Разбор примечаний — на процесс, а не на вызов. Первая редакция D20 вставила `_row_excluded`
+        между `@lru_cache` и `_flat_thresholds`: кэш ушёл к новой функции, и каждый поиск порога
+        заново разбирал все примечания (~0.07 с на вызов; модуль K2-3 — 162 с вместо 0.5)."""
+        for fn in (t._flat_thresholds, t._tables, t._note_scopes, t._kind_schedules):
+            self.assertTrue(hasattr(fn, "cache_info"), fn.__name__)
+
     def test_full_and_own_codes_give_the_same_threshold(self):
         """`_lookup` снимает исключённые коды сам: полный список записи и свой список хита — одно."""
         for start in (LAPTOPS, IO, STORAGE, "Субстанции фармацевтические"):

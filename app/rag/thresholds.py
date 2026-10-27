@@ -893,7 +893,6 @@ def _intro_codes(line: str) -> list[str]:
     return out
 
 
-@lru_cache(maxsize=1)
 def _row_excluded(line: str) -> list[str]:
     """Коды из оговорок «(за исключением …)» в СПИСКЕ КОДОВ строки-порога (до имени и порога; имена в
     кавычках затёрты — у них свои «за исключением товаров, классифицируемых кодами …»)."""
@@ -905,6 +904,7 @@ def _row_excluded(line: str) -> list[str]:
     return [c for m in _ROW_EXC_RE.finditer(body) for c in _CODE_ONLY_RE.findall(m.group(1)) if "." in c]
 
 
+@lru_cache(maxsize=1)
 def _flat_thresholds() -> list[dict]:
     """Строки-пороги «код "имя" - не менее N баллов» из примечаний-списков (прим. 7/8/9/31/52/53…).
     Два формата: ИНЛАЙН — порог на той же строке, что и код («…"имя": … - не менее N баллов…»);
