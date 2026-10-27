@@ -1220,11 +1220,18 @@ def plan_procedural(query: str, search_query: str,
     # пользователя за то, чего он не писал. Без темы блок уезжал бы в чужие вопросы: четыре цифры
     # рядом со словом «позиция» встречаются и вне этой оси.
     st1_block = None
-    if topic == topics.ST1_ORIGIN:
+    # L1: при ручном сужении корпуса (`only_docs`, «Методрекомендации») в контекст не идёт ничего из
+    # других документов (ревью): ни Перечень условий СТ-1, ни фрагмент темы — фрагменты называют
+    # «раздел 4 Приказа №52», «пункты тела постановления», а фильтр эти документы убрал, и модель
+    # приписала бы им пункты Методрекомендаций. Закрытый справочник документов (`K15`) остаётся —
+    # это предохранитель от выдуманного документа, а не корпус.
+    narrowed = bool(only_docs)
+    if topic == topics.ST1_ORIGIN and not narrowed:
         tnved = okpd2_ref.extract_tnved_position(search_query)
         if tnved:
             st1_block = st1_ref.format_for_context(tnved) or None
-    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
+    user = build_procedural_user_prompt(query, ctx,
+                                        topic_fragment="" if narrowed else topics.fragment(topic),
                                         documents=docs_ref, st1_conditions=st1_block)
     # ⚠⚠ ЗАЗЕМЛЕНИЕ ШИРЕ ОКНА, И ЭТО НАЙДЕНО ПЛАТНЫМ ПРОГОНОМ, А НЕ РАССУЖДЕНИЕМ.
     # Пока фактами были только пункты, `grounding = ctx` совпадало с истиной. Детерминированный
@@ -1496,7 +1503,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     `corpus` — режим, выбранный пользователем (`L1` #146, `app/rag/corpora.py`). `auto` — прежний
     автомат побайтно; `appendix` — только приложение (гейт и пункты Приказа №52 не зовутся);
     `rules`/`metodrek` — процедурная ветка с жёстким фильтром документов. Заготовки (приветствие)
-    и перевод кодов идут до выбора корпуса — у них корпуса нет."""
+    идут до выбора корпуса в любом режиме — корпуса у них нет. Перевод кодов ТН ВЭД↔ОКПД2 — только
+    в «Авто» (ревью: при ручном выборе сервис подменял выбор пользователя справочником, а подпись
+    говорила «выбран вручную»); в «Приложении» код ТН ВЭД переводится и ищется по приложению."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import followup, meta, topics
     if meta.is_meta(query):
@@ -1506,7 +1515,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # T9: прямой запрос на ПЕРЕВОД кода ТН ВЭД↔ОКПД2 — отвечаем детерминированно из справочника
     # переходных ключей (без LLM: навигатор строго по 719 и на такой вопрос раньше отказывал).
     from app.rag import translate
-    if translate.is_translate(query):
+    if corpus == corpora.AUTO and translate.is_translate(query):
         return Answer(text=translate.answer(query), hits=[], input_hint=followup.ask_for_product(),
                       corpus=corpora.USED_CLASSIFIER)
 

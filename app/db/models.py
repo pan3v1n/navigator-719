@@ -158,6 +158,8 @@ class GuestMessage(Base):
     prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
     charged: Mapped[bool] = mapped_column(Boolean, default=False)
+    # L1/L2: «корпус|режим», как у `Message.corpus` — повтор вопроса сверяется и по режиму источника
+    corpus: Mapped[str | None] = mapped_column(String(48), nullable=True)
 
 
 class Lead(Base):

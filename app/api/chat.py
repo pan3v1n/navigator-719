@@ -88,7 +88,8 @@ def _enforce_plan_quota(user: User, req: "ChatRequest") -> bool:
         with get_session() as db:
             if req.session_id and q.is_answered_repeat(
                     db, user.id, req.session_id, req.message,
-                    since=plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW):
+                    since=plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW,
+                    mode=req.corpus):  # L1: тот же текст в другом источнике — новый ответ
                 logger.info(f"тариф: повтор отвеченного вопроса не списывается, user_id={user.id}")
                 return False
             st = quota.quota_state(db, user)

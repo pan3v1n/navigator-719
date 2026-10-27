@@ -66,6 +66,12 @@ def stored(used: str | None, mode: str | None) -> str | None:
     return f"{used}|{mode or AUTO}" if used else None
 
 
+def mode_of(value: str | None) -> str:
+    """Режим, в котором получен сохранённый ответ. Нет отметки — «Авто»: так отвечали все до `L1`,
+    так же записаны приветствие и отказ (корпуса у них нет, а маршрут шёл автоматом)."""
+    return (value or "").partition("|")[2] or AUTO
+
+
 def label_from_stored(value: str | None) -> str:
     """Подпись по сохранённому значению; у реплик, записанных до `L2`, колонки нет — «»."""
     if not value:

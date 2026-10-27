@@ -70,6 +70,8 @@ def _ensure_columns() -> None:
             ("message", "TEXT"),           # комментарий заявителя (09.10.2026)
             ("kind", "VARCHAR(16)"),       # вид заявки: corporate / NULL (ревью PR #186)
         ],
+        # L1/L2: режим источника у ответа гостю — повтор по нему и подпись сохранённого ответа
+        "guest_messages": [("corpus", "VARCHAR(48)")],
     }
     with engine.begin() as conn:
         for table, cols in wanted.items():

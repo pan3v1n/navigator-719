@@ -940,8 +940,11 @@ async function ask(text) {
   try {
     // T18: сперва пробуем стриминг (постепенный вывод, как Claude/ChatGPT). Если он не стартовал
     // или оборвался до финала — фолбэк на обычный /api/chat (рваная РФ-сеть → длинный SSE хрупок).
-    const streamed = await askStream(text, pending, bubble, isNew);
-    if (!streamed) await askFallback(text, pending, bubble, isNew);
+    // L1: режим источника фиксируется В МОМЕНТ ОТПРАВКИ (ревью): иначе переключатель, тронутый
+    // посреди стрима, увёл бы фолбэк того же вопроса в другой корпус.
+    const corpus = currentCorpus();
+    const streamed = await askStream(text, pending, bubble, isNew, corpus);
+    if (!streamed) await askFallback(text, pending, bubble, isNew, corpus);
   } finally {
     send.disabled = false;
     autoScroll();  // в конце ответа не выдёргиваем пользователя вниз, если он читает выше
@@ -1028,7 +1031,7 @@ if (GUEST) renderTrial(GUEST);   // у гостя тарифа нет — та �
 
 // Стриминг: fetch SSE-поток → дописываем delta в пузырь → на done навешиваем источники+оценку.
 // Возврат: true = завершилось финалом (done / редирект на login|profile); false = нужен фолбэк.
-async function askStream(text, pending, bubble, isNew) {
+async function askStream(text, pending, bubble, isNew, corpus) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);
   let acc = "";
@@ -1037,7 +1040,7 @@ async function askStream(text, pending, bubble, isNew) {
     const r = await fetch(STREAM_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId, corpus: currentCorpus() }),
+      body: JSON.stringify({ message: text, session_id: sessionId, corpus }),
       signal: ctrl.signal,
     });
     if (GUEST && await guestRejected(r, text, pending)) {
@@ -1102,14 +1105,14 @@ async function askStream(text, pending, bubble, isNew) {
 }
 
 // Фолбэк: обычный НЕ-стриминг /api/chat (сохранён как надёжный путь на рваной сети).
-async function askFallback(text, pending, bubble, isNew) {
+async function askFallback(text, pending, bubble, isNew, corpus) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);  // клиентский таймаут (бэкенд режет DeepSeek на 30с/вызов)
   try {
     const r = await fetch(CHAT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId, corpus: currentCorpus() }),
+      body: JSON.stringify({ message: text, session_id: sessionId, corpus }),
       signal: ctrl.signal,
     });
     if (GUEST && await guestRejected(r, text, pending)) {

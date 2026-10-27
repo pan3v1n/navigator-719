@@ -94,6 +94,10 @@ def _last_same(gid: str, req: ChatRequest):
     since = plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW
     if question is None or question.content != req.message or plans.naive_utc(question.ts) < since:
         return None, None
+    # L1: ответ получен в ДРУГОМ режиме источника — это новый вопрос, а не фолбэк того же стрима.
+    # Иначе гость, переключивший источник, получал прежний ответ, и движок с новым режимом не звался.
+    if answer is not None and corpora.mode_of(answer.corpus) != req.corpus:
+        return None, None
     return question, answer
 
 
@@ -212,7 +216,8 @@ def _stored_payload(row, gid: str, session_id: str) -> dict:
     """Сохранённый ответ гостю в форме ответа движка (источники в базе уже без полного текста)."""
     return {"answer": row.content, "sources": json.loads(row.sources_json or "[]"),
             "low_relevance": bool(row.low_relevance), "unverified_numbers": [],
-            "session_id": session_id, "message_id": None, "input_hint": "", "trial": _trial(gid)}
+            "session_id": session_id, "message_id": None, "input_hint": "", "trial": _trial(gid),
+            "corpus_label": corpora.label_from_stored(row.corpus)}  # L2: подпись и у сохранённого
 
 
 @router.post("/api/guest/chat", response_model=GuestChatResponse)
@@ -237,7 +242,7 @@ def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     sources = _guest_sources(ans)
     _log(gid, session_id, "assistant", ans.text, sources=[s.model_dump() for s in sources],
          low_relevance=ans.low_relevance, prompt_tokens=ans.prompt_tokens,
-         completion_tokens=ans.completion_tokens)
+         completion_tokens=ans.completion_tokens, corpus=corpora.stored(ans.corpus, req.corpus))
     return GuestChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=None,
@@ -276,7 +281,8 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 sources = _guest_sources(ans)
                 _log(gid, session_id, "assistant", ans.text,
                      sources=[s.model_dump() for s in sources], low_relevance=ans.low_relevance,
-                     prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens)
+                     prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
+                     corpus=corpora.stored(ans.corpus, req.corpus))
                 yield _sse({
                     "type": "done", "message_id": None,
                     "sources": [s.model_dump() for s in sources],

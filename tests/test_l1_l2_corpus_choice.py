@@ -233,6 +233,91 @@ class TestOnlyDocsReachesTheSearch(unittest.TestCase):
         self.assertEqual(ans.corpus, "", "дефер — не ответ по корпусу, подписывать его нечем")
 
 
+class TestReviewFixes(_Stubbed):
+    """Находки ревью диффа L1/L2 (27.10.2026) — каждая закреплена тестом."""
+
+    ST1_Q = next(c["query"] for c in json.loads(
+        (ROOT / "scripts" / "eval_st1_route.json").read_text(encoding="utf-8"))["cases"] if c["id"] == 16)
+
+    def test_translate_only_in_auto(self):
+        """LOW-3: при ручном выборе перевод кодов не подменяет выбор пользователя."""
+        q_tr = "переведи ТН ВЭД 8471 30 000 0 в ОКПД2"
+        self.assertTrue(translate.is_translate(q_tr))
+        self.assertEqual(pl._plan_answer(q_tr).corpus, corpora.USED_CLASSIFIER)
+        pl._plan_answer(q_tr, corpus=corpora.RULES)
+        self.assertEqual(len(self.proc_calls), 1, "в «Правилах» вопрос ушёл не в выбранный корпус")
+        self.assertNotEqual(pl._plan_answer(q_tr, corpus=corpora.APPENDIX).corpus, corpora.USED_CLASSIFIER)
+
+    def _plan(self, only_docs):
+        return pl.plan_procedural(self.ST1_Q, self.ST1_Q, only_docs=only_docs)  # поиск — заглушка
+
+    def test_narrowed_corpus_gets_no_foreign_material(self):
+        """LOW-4: «Методрекомендации» — без Перечня СТ-1 и без фрагмента темы, называющего чужие
+        документы. Положительный контроль: в полном корпусе норм то и другое есть."""
+        self.assertEqual(topics.classify(self.ST1_Q), topics.ST1_ORIGIN)
+        fragment = topics.fragment(topics.ST1_ORIGIN)
+        self.assertTrue(fragment)
+        full = self._plan(())
+        self.assertNotEqual(full.grounding, full.ctx, "контроль: в полном корпусе блок СТ-1 есть")
+        self.assertIn(fragment, full.user)
+        narrow = self._plan(("metodrek_tpp",))
+        self.assertEqual(narrow.grounding, narrow.ctx, "в «Методрекомендациях» блок СТ-1 не нужен")
+        self.assertNotIn(fragment, narrow.user)
+
+
+class TestRepeatIsTextAndMode(unittest.TestCase):
+    """MED-1, MED-2: повтор вопроса — тот же текст И тот же режим источника."""
+
+    def setUp(self):
+        self.engine = create_engine("sqlite:///:memory:", connect_args={"check_same_thread": False})
+        Base.metadata.create_all(self.engine)
+        self.Session = sessionmaker(bind=self.engine, expire_on_commit=False)
+        with self.Session() as db:
+            self.uid = q.create_user(db, "expert1", "h", role="expert").id
+
+    def _since(self):
+        from datetime import datetime, timedelta
+        return datetime.utcnow() - timedelta(minutes=5)
+
+    def test_chat_repeat_needs_the_same_mode(self):
+        with self.Session() as db:
+            q.log_message(db, user_id=self.uid, session_id="s", role="user", content="Q")
+            q.log_message(db, user_id=self.uid, session_id="s", role="assistant", content="A",
+                          corpus=corpora.stored(corpora.USED_RULES, corpora.RULES))
+            self.assertTrue(q.is_answered_repeat(db, self.uid, "s", "Q", self._since(), mode=corpora.RULES))
+            self.assertFalse(q.is_answered_repeat(db, self.uid, "s", "Q", self._since(), mode=corpora.AUTO),
+                             "тот же текст в другом источнике — новый платный ответ, не повтор")
+
+    def test_unmarked_answer_counts_as_auto(self):
+        with self.Session() as db:
+            q.log_message(db, user_id=self.uid, session_id="s", role="user", content="Q")
+            q.log_message(db, user_id=self.uid, session_id="s", role="assistant", content="A")
+            self.assertTrue(q.is_answered_repeat(db, self.uid, "s", "Q", self._since()))
+            self.assertFalse(q.is_answered_repeat(db, self.uid, "s", "Q", self._since(), mode=corpora.METODREK))
+
+    def test_guest_switching_source_gets_a_new_answer(self):
+        from app.api import guest as guest_mod
+
+        orig = guest_mod.get_session
+        guest_mod.get_session = lambda: self.Session()
+        try:
+            with self.Session() as db:
+                q.log_guest_message(db, guest_id="g", session_id="s", role="user", content="Q")
+                q.log_guest_message(db, guest_id="g", session_id="s", role="assistant", content="A",
+                                    corpus=corpora.stored(corpora.USED_APPENDIX, corpora.AUTO))
+            same = guest_mod._last_same("g", chat_mod.ChatRequest(message="Q", session_id="s"))
+            self.assertIsNotNone(same[1], "тот же режим — повтор, отдаём сохранённое")
+            switched = guest_mod._last_same(
+                "g", chat_mod.ChatRequest(message="Q", session_id="s", corpus=corpora.RULES))
+            self.assertEqual(switched, (None, None), "другой источник — новый вопрос, движок обязан звать")
+            payload = guest_mod._stored_payload(same[1], "g", "s")
+            self.assertEqual(payload["corpus_label"],
+                             corpora.answered_by(corpora.USED_APPENDIX, corpora.AUTO),
+                             "LOW-5: сохранённый ответ гостю — тоже с подписью")
+        finally:
+            guest_mod.get_session = orig
+
+
 class TestCorporaModule(unittest.TestCase):
     def test_modes_and_titles_agree(self):
         self.assertEqual(set(corpora.MODES), set(corpora.MODE_TITLES))
@@ -367,8 +452,15 @@ class TestInterfaceWiring(unittest.TestCase):
 
     def test_both_requests_send_the_choice_and_label_is_drawn(self):
         js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
-        self.assertEqual(js.count("corpus: currentCorpus()"), 2, "стрим и фолбэк обязаны слать выбор")
+        self.assertEqual(js.count("session_id: sessionId, corpus })"), 2, "стрим и фолбэк обязаны слать выбор")
         self.assertEqual(js.count("addCorpusLine("), 4, "определение + стрим + фолбэк + переоткрытие")
+
+    def test_choice_is_fixed_at_submit(self):
+        """LOW-6: выбор читается ОДИН раз при отправке и тот же уходит в фолбэк."""
+        js = (ROOT / "app" / "web" / "static" / "chat.js").read_text(encoding="utf-8")
+        self.assertEqual(js.count("currentCorpus()"), 2, "определение + одно чтение при отправке")
+        self.assertIn("askStream(text, pending, bubble, isNew, corpus)", js)
+        self.assertIn("askFallback(text, pending, bubble, isNew, corpus)", js)
 
 
 if __name__ == "__main__":
