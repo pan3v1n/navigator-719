@@ -75,6 +75,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.rag import code_cells  # noqa: E402
+from app.rag.thresholds import _scope_conflict  # noqa: E402
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _list_items,
@@ -145,7 +146,10 @@ def note_rows() -> list[dict]:
                         "strict_name": bool(r.get("strict_name")),
                         # D20 #225: «X (за исключением Y)» — исключённые коды переносятся из источника,
                         # как `strict_name`: без них классификатор строже рантайма.
-                        "excluded": list(r.get("excluded") or ())})
+                        "excluded": list(r.get("excluded") or ()),
+                        # D21 #230: предмет строки (имена вне её оговорок) — для правила противоположных
+                        # оговорок, то же, что в рантайме.
+                        "subject_names": r.get("subject_names")})
     for t in _tables():
         if note_scope(t["note"]) != "general":
             continue
@@ -272,6 +276,10 @@ def classify(rec: dict, rows: list[dict]) -> dict:
             # D20 #225: строка «X (за исключением Y)» позицию с кодом под Y НЕ покрывает — то же правило,
             # что в рантайме (`thresholds._lookup`); иначе гейт краснел бы на верном отказе.
             if any(code_cells.under(c, e) for e in row.get("excluded") or ()):
+                continue
+            # D21 #230: строка с противоположной оговоркой области позицию не покрывает — то же
+            # правило, что в рантайме (`thresholds._scope_conflict`), импортом, а не копией.
+            if _scope_conflict(row.get("names") or [], name, row.get("subject_names")):
                 continue
             for rc in row["codes"]:
                 if _code_applies(rc, c):
