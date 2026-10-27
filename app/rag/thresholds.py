@@ -1260,6 +1260,112 @@ def note_scope(note: str | None) -> str:
     return _note_scopes().get(str(note or ""), "general")
 
 
+# --- Графики по видам в абзаце примечания (K2-3 #174) ---------------------------------------------
+# Прим. 5 (автомобилестроение) — СМЕШАННОЕ: вводная про сумму баллов, затем абзац «Для целей
+# осуществления закупок …» с графиками, у которых вид продукции стоит ПОСЛЕ чисел:
+#   «(с 1 января 2023 г. не менее 3200 баллов, с 1 января 2027 г. не менее 3500 баллов, …
+#    (для автомобилей легковых, легких коммерческих автомобилей), с 1 января 2023 г. не менее 1100
+#    баллов, … (для автомобилей легковых, приводимых в движение … (электромобили), …»
+# Ни одна из форм `_tables`/`_flat_thresholds` этого не знает, а область примечания определяется по
+# голове (`_note_scopes`, первые 900 знаков) — «общая». Итог до правки: у всех четырёх позиций
+# раздела II закупочного порога нет, хотя эксперт отвечает «он в примечании 5» (отчёт 22.09, ④).
+# Замер 27.10.2026 по всем примечаниям: эта форма (даты + «(для <вида>)») и закупочный абзац за
+# головой — только у прим. 5. У прим. 53 похожее «(для производства изделий из тканей)» без дат —
+# там это условие ступени, и строка уже доходит до позиции дословно (`_flat_thresholds`).
+_KIND_STEP_RE = re.compile(r"(с\s+1\s+января\s+\d{4}\s*г\.)\s*(не\s+менее\s+\d[\d\s]*?\s*балл\w*)",
+                           re.IGNORECASE)
+_KIND_OPEN_RE = re.compile(r"\s*\(\s*для\s+", re.IGNORECASE)
+_KIND_END_RE = re.compile(r"\)?\s*\.\s+[А-ЯЁ]")     # «… (электробусы). Условием подтверждения …»
+
+
+def _kind_text(gap: str) -> str | None:
+    """Текст вида из промежутка «(для <вид>)…» после последней ступени его графика, либо None.
+
+    ⚠ Скобка «(для» в первоисточнике у электро-видов НЕ ЗАКРЫТА: «(для автомобилей легковых, …
+    электроэнергии (электромобили), с 1 января …» — закрывается только внутренняя «(электромобили)».
+    Поэтому вид берётся до следующей ступени (или до конца предложения у последнего), а лишняя
+    закрывающая скобка снимается только при дисбалансе."""
+    m = _KIND_OPEN_RE.match(gap)
+    if not m:
+        return None
+    text = gap[m.end():]
+    end = _KIND_END_RE.search(text)
+    if end:
+        text = text[:end.start()] + (")" if text[end.start()] == ")" else "")
+    text = " ".join(text.split()).rstrip(" ,;")
+    if text.count(")") > text.count("("):
+        text = text[:text.rfind(")")].rstrip(" ,;")
+    return text or None
+
+
+@lru_cache(maxsize=1)
+def _kind_schedules() -> list[dict]:
+    """[{note, section, scope, kinds: [(вид, [(подпись, значение)…])…]}] — абзацы формы «ступени
+    (для <вида>)» с ДВУМЯ и более видами. Абзац, где хоть одна ступень осталась без вида, не берём:
+    форма не та, и привязать ступени не к чему."""
+    if not _CHUNK.exists():
+        return []
+    lines = _chunk_text().splitlines()
+    bounds = [(m.group(1), i) for i, ln in enumerate(lines) if (m := _NOTE_START_RE.match(ln))]
+    out: list[dict] = []
+    for k, (num, i) in enumerate(bounds):
+        j = bounds[k + 1][1] if k + 1 < len(bounds) else len(lines)
+        for para in lines[i:j]:
+            steps = list(_KIND_STEP_RE.finditer(para))
+            if len(steps) < 2:
+                continue
+            kinds: list[tuple[str, list[tuple[str, str]]]] = []
+            cur: list[tuple[str, str]] = []
+            for n, m in enumerate(steps):
+                cur.append((" ".join(m.group(1).split()), " ".join(m.group(2).split())))
+                nxt = steps[n + 1].start() if n + 1 < len(steps) else len(para)
+                kind = _kind_text(para[m.end():nxt])
+                if kind:
+                    kinds.append((kind, cur))
+                    cur = []
+            sec = _INTRO_SECTION_RE.search(para)
+            if cur or len(kinds) < 2 or not sec:
+                continue
+            out.append({"note": num, "section": sec.group(1), "kinds": kinds,
+                        "scope": "procurement" if _PROCUREMENT_RE.search(para) else "general"})
+    return out
+
+
+def _stem_hit(a: str, b: str) -> bool:
+    """Основы совпали. Snowball режет «автомобилей» до «автомобил», а «автомобили» — до «автомоб»;
+    префикс допускается только у основ от 6 знаков: «легк» (лёгкие) не должна совпасть с «легков»
+    (легковые) — иначе электро-график легковых ушёл бы лёгким коммерческим."""
+    return a == b or (min(len(a), len(b)) >= 6 and (a.startswith(b) or b.startswith(a)))
+
+
+def _kind_applies(kind: str, product_name: str | None) -> bool:
+    """Вид относится к позиции: все основы хотя бы одной части вида (через запятую) есть в
+    наименовании. «автомобилей легковых, легких коммерческих автомобилей» — две части, каждая
+    называет свою позицию; уточнение «приводимых в движение … электрическим двигателем» —
+    длинная часть, в наименовании её нет, и вид держится на своей первой части."""
+    have = _stems(_strip_fn(product_name))
+    for part in kind.split(","):
+        want = _stems(part)
+        if want and all(any(_stem_hit(w, h) for h in have) for w in want):
+            return True
+    return False
+
+
+def _kind_schedule(product_name: str | None, section: str | None, scope: str) -> str | None:
+    """Графики видов, относящихся к позиции, из абзаца `_kind_schedules` её раздела, либо None."""
+    if not product_name or not section:
+        return None
+    for p in _kind_schedules():
+        if p["scope"] != scope or p["section"] != section:
+            continue
+        hits = [(kind, steps) for kind, steps in p["kinds"] if _kind_applies(kind, product_name)]
+        if hits:
+            body = "\n".join(f"      — для {kind}: " + "; ".join(f"{lbl} — {val}" for lbl, val in steps)
+                             for kind, steps in hits)
+            return f"{BY_KIND}прим. {p['note']} к разд. {p['section']}]:\n{body}"
+    return None
+
+
 def _segs(code: str) -> list[str]:
     return [s for s in str(code).strip().split(".") if s]
 
@@ -1739,4 +1845,6 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             if _name_overlap(product_name, row["names"]) >= 2:
                 return _fmt_flat(row, group=not is_exact, product_name=product_name)
 
-    return None
+    # 3) ГРАФИКИ ПО ВИДАМ В АБЗАЦЕ ПРИМЕЧАНИЯ (K2-3 #174, прим. 5) — последней ветвью: она только
+    #    ДОБАВЛЯЕТ порог там, где прежние ветви не нашли ничего, и не перебивает ни одной из них.
+    return _kind_schedule(product_name, section, scope)
