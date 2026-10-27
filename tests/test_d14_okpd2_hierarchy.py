@@ -137,8 +137,9 @@ class TestTargetChoice(unittest.TestCase):
     def test_broad_code_keeps_pre_d14_ranking(self):
         """УЗКИЙ D14 (решение владельца 08.10): широкий код («20.14») — ближайшего предка не поднимаем
         (потомки есть), остальное ПО РАНГУ, как до D14. Раунд 2 ставил потомков выше предков — замер
-        показал цену (21.20.10.110 → медизделие, «Мониторы» → «Гидрофоны»): score разных запросов
-        несравнимы (#179), и порядок широких кодов этим правилом не чинится."""
+        показал цену (21.20.10.110 → медизделие, «Мониторы» → «Гидрофоны»): score разных запросов были
+        несравнимы (#179), и порядок широких кодов этим правилом не чинился. С R31 score сравнимы —
+        пересмотр правила отдельным замером (#228), до него тест держит прежнее поведение."""
         hits = [_hit(f"кат{i}", ["20"], 0.9 - i / 100) for i in range(5)] +                [_hit("углеводороды", ["20.14.11.110"], 0.3)]
         self.assertEqual([h.source_anchor for h in pipeline.target_hits(hits, "20.14")], ["кат0"])
         self.assertEqual(retriever.code_tiers([h.okpd2_codes for h in hits], "20.14"), [3] * 6)
@@ -220,14 +221,16 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
             return any(cond_ok(codes, c) for c in qfilter.should or [])
 
         self.rescores = []
+        self.rescore_payload = []
 
-        def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None):
+        def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None, with_payload=True):
             conds = (getattr(qfilter, "should", None) or []) + (getattr(qfilter, "must", None) or [])
             ids = [i for cond in conds for i in (getattr(cond, "has_id", None) or [])]
             if ids:
                 # R31: пересчёт score окна одним запросом по id — score «настоящие» (третий элемент
                 # строки корпуса), сравнимые у всех. `rescore` подменяет ответ (сбой, неполный ответ).
                 self.rescores.append(ids)
+                self.rescore_payload.append(with_payload)
                 rows = [r for r in corpus if r[0] in ids]
                 if rescore is not None:
                     return rescore(rows)
@@ -374,10 +377,19 @@ class TestRescoreR31(unittest.TestCase):
         self.assertEqual(hits[0].source_anchor, "Приёмники")
 
     def test_partial_answer_keeps_old_scores(self):
-        """Вернулись не все кандидаты — новые score со старыми не смешиваем (та же несравнимость)."""
-        hits, _calls = self._go(rescore=lambda rows: [_point(*r) for r in rows if r[0] != "Приёмники"])
+        """Вернулись не все кандидаты — новые score со старыми не смешиваем (та же несравнимость).
+        ⚠ Ревью R31 (LOW-1): вернувшимся «Мониторам» подмена даёт ДРУГОЙ score (0.1), иначе «оставили
+        старые» и «смешали» неразличимы — мутация `got.get(id, h.score)` выживала."""
+        hits, _calls = self._go(rescore=lambda rows: [_point(r[0], r[1], 0.1) for r in rows
+                                                      if r[0] != "Приёмники"])
         self.assertEqual(hits[0].source_anchor, "Приёмники")
         self.assertGreater(hits[0].score, 0.9)                         # score маленькой выдачи
+        self.assertEqual(next(h.score for h in hits if h.source_anchor == "Мониторы"), 0.5)
+
+    def test_rescore_asks_no_payload(self):
+        """Ревью R31 (LOW-5): пересчёту нужны только id и score; прочим запросам — payload."""
+        self._go()
+        self.assertEqual(self.rescore_payload, [False])
 
     def test_no_new_candidates_no_extra_query(self):
         """Доборы ничего не добавили — все score из пула, сравнимы: лишнего запроса нет."""
