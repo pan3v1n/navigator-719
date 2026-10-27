@@ -46,6 +46,79 @@ class TestForeignScopeIsRejected(unittest.TestCase):
         self.assertIn("не менее 50 баллов", _thr(_rec("Сканеры (только в отношении сканеров штрихкодов)")) or "")
 
 
+class TestRoundTwo(unittest.TestCase):
+    """Ревью D21: класс шире трёх позиций — оговорки ВНЕ кавычек, «и кроме» внутри «только»,
+    перечень, разделённый строками, служебные пункты, своё «только» позиции, ветка подкода."""
+
+    def test_row_928_exclusions_outside_quotes(self):
+        """«из 26.30.11 "…" (кроме системы мониторинга окружающей среды, …» — без закрывающей скобки."""
+        for start in ("Система мониторинга окружающей среды", "Система радиочастотной идентификации",
+                      "Щит автоматического управления генератором", "Терминал экстренной связи",
+                      "Волоконно-оптический приемопередатчик", "Корпус шкафа размещения"):
+            self.assertIsNone(_thr(_rec(start)), start)
+
+    def test_and_except_inside_only_clause(self):
+        """«(только в отношении … и кроме турникетов биометрических…)» — турникеты исключены, а сама
+        позиция с той же оговоркой свой порог сохраняет."""
+        self.assertIsNone(_thr(_rec("Турникеты биометрические")))
+        self.assertIn("не менее 40 баллов", _thr(_rec("Устройства охранной или пожарной сигнализации")) or "")
+
+    def test_list_split_between_rows_has_no_common_threshold(self):
+        """«Маммографы, рентгеновские аппараты …» ← строки «Маммографы» (100/110) и «Рентгеновские
+        аппараты … (за исключением маммографов)» (100/100): общего порога нет — не гадаем."""
+        self.assertIsNone(_thr(_rec("Маммографы, рентгеновские аппараты")))
+        self.assertTrue(t._excludes_list_item(["Рентгеновские аппараты (за исключением маммографов)"],
+                                              "Маммографы, рентгеновские аппараты передвижные"))
+        self.assertFalse(t._excludes_list_item(["Рентгеновские аппараты (за исключением маммографов)"],
+                                               "Рентгеновские аппараты передвижные"))
+
+    def test_generic_items_do_not_conflict(self):
+        """Пункт «продукции, классифицируемой кодом …» — служебный: коды решает `D20`."""
+        self.assertFalse(t._scope_conflict(["Аппаратура радиолокационная"],
+                                           "Аппаратура радиолокационная, классифицируемая кодом 26.51.20",
+                                           None, ["продукции, классифицируемой кодом 26.51.20.121"]))
+
+    def test_rule_b_counts_position_own_only_clause(self):
+        self.assertFalse(t._scope_conflict(["Сканеры (только в отношении сканеров штрихкодов)"],
+                                           "Сканеры (только в отношении сканеров штрихкодов ручных)"))
+
+    def test_subcode_branch_respects_exclusions(self):
+        """Подкод 15.20.32.131 исключён строкой «Обувь детская прочая (кроме … "Тапочки детские меховые")»."""
+        self.assertIsNone(t.lookup_procurement_threshold(["15.20.32.131"], "Тапочки детские меховые", "XVII"))
+
+    def test_classifier_keeps_conflict_row_as_evidence(self):
+        """Ревью D21 (LOW-6): строка с противоположной оговоркой — улика «порог другой продукции», а не
+        «улик нет»."""
+        from scripts import classify_missing_thresholds as c
+        rows = c.note_rows()
+        for start in ("Принтеры (кроме принтеров", "Сканеры биометрические", "Система мониторинга окружающей"):
+            self.assertEqual(c.classify(_rec(start), rows).get("class"), "note_other_product", start)
+
+
+class TestSyntheticRows(unittest.TestCase):
+    """Плоские строки, которых в текущем корпусе нет, но которые даст следующая редакция."""
+
+    def _lookup(self, rows, codes, name, section="IX"):
+        from unittest import mock
+        with mock.patch.object(t, "_flat_thresholds", lambda: rows), mock.patch.object(t, "_tables", lambda: []):
+            return t.lookup_threshold(codes, name, section)
+
+    def test_flat_list_split_refuses(self):
+        row = {"codes": ["26.60.11.113"], "names": ["Рентгеновские аппараты (за исключением маммографов)"],
+               "subject_names": ["Рентгеновские аппараты (за исключением маммографов)"], "excluded": [],
+               "exclusions": [], "threshold": "не менее 100 баллов", "exception": None, "note": "33"}
+        self.assertIsNone(self._lookup([row], ["26.60.11.113"], "Маммографы, рентгеновские аппараты"))
+        self.assertTrue(self._lookup([row], ["26.60.11.113"], "Рентгеновские аппараты передвижные"))
+
+    def test_subcode_branch_skips_excluded_code(self):
+        row = {"codes": ["15.20.32.130"], "names": ["Тапочки детские меховые"],
+               "subject_names": ["Тапочки детские меховые"], "excluded": ["15.20.32.131"], "exclusions": [],
+               "threshold": "не менее 90 баллов", "exception": None, "note": "7"}
+        self.assertIsNone(self._lookup([row], ["15.20.32.131"], "Тапочки детские меховые"))
+        row_ok = {**row, "excluded": []}
+        self.assertTrue(self._lookup([row_ok], ["15.20.32.131"], "Тапочки детские меховые"))
+
+
 class TestNarrowerScopeIsNotAConflict(unittest.TestCase):
     """Позиция, чья оговорка исключает ПОДВИД, остаётся при пороге строки — первая редакция правила
     ошибочно снимала его у всех этих позиций (замер радиуса)."""

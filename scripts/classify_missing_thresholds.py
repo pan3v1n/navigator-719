@@ -75,7 +75,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.rag import code_cells  # noqa: E402
-from app.rag.thresholds import _scope_conflict  # noqa: E402
+from app.rag.thresholds import _excludes_list_item, _scope_conflict  # noqa: E402
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _list_items,
@@ -149,7 +149,8 @@ def note_rows() -> list[dict]:
                         "excluded": list(r.get("excluded") or ()),
                         # D21 #230: предмет строки (имена вне её оговорок) — для правила противоположных
                         # оговорок, то же, что в рантайме.
-                        "subject_names": r.get("subject_names")})
+                        "subject_names": r.get("subject_names"),
+                        "exclusions": r.get("exclusions")})
     for t in _tables():
         if note_scope(t["note"]) != "general":
             continue
@@ -277,10 +278,6 @@ def classify(rec: dict, rows: list[dict]) -> dict:
             # что в рантайме (`thresholds._lookup`); иначе гейт краснел бы на верном отказе.
             if any(code_cells.under(c, e) for e in row.get("excluded") or ()):
                 continue
-            # D21 #230: строка с противоположной оговоркой области позицию не покрывает — то же
-            # правило, что в рантайме (`thresholds._scope_conflict`), импортом, а не копией.
-            if _scope_conflict(row.get("names") or [], name, row.get("subject_names")):
-                continue
             for rc in row["codes"]:
                 if _code_applies(rc, c):
                     if row not in coverings:
@@ -318,6 +315,12 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
 
     def _ours(row: dict) -> bool:
+        # D21 #230: строка с противоположной оговоркой области — порог ДРУГОЙ продукции, как чужой раздел:
+        # уликой остаётся («порог написан для другой продукции»), нашим дефектом — нет. То же правило, что
+        # в рантайме (`thresholds._scope_conflict`, `_excludes_list_item`), импортом, а не копией.
+        if (_scope_conflict(row.get("names") or [], name, row.get("subject_names"), row.get("exclusions"))
+                or _excludes_list_item(row.get("names") or [], name, row.get("exclusions"))):
+            return False
         return not _foreign(row) and _speaks_about_us(row)
 
     # Из покрывающих строк выбираем ту, что говорит про ЭТУ позицию; если такой нет — первую,
