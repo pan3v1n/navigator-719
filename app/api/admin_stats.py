@@ -24,7 +24,7 @@ from datetime import date, datetime, timedelta
 from app.core.costs import cost_rub
 from app.core.plans import MSK_OFFSET
 from app.db import queries as q
-from app.rag import procedural
+from app.rag import corpora, procedural
 
 # Оценки 0..2★ считаем «плохими» (гейт приёмки: ≥4★ — пройдено, 3★ — пограничные).
 BAD_RATING_MAX = 2
@@ -272,6 +272,7 @@ def build_admin_view(
                         "answer": ans_txt,
                         "unverified": orig.unverified_json,
                         "low_relevance": bool(orig.low_relevance),
+                        "corpus": corpora.label_from_stored(orig.corpus),  # L2 #147
                         "comment": f.comment or "", "correction": f.correction or "",
                         "session_id": f.session_id, "owner_id": orig.user_id,
                     })

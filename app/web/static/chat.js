@@ -16,6 +16,24 @@ const GUEST = window.GUEST || null;
 const CHAT_URL = GUEST ? "/api/guest/chat" : "/api/chat";
 const STREAM_URL = GUEST ? "/api/guest/chat/stream" : "/api/chat/stream";
 
+// L1 #146: по какому корпусу отвечать. Значения и подписи — из шаблона (app/rag/corpora.py), здесь
+// только память выбора в браузере. Нет переключателя или неизвестное значение — «auto», то есть
+// прежний автомат: правка не должна молча менять поведение.
+const corpusSelect = document.getElementById("corpus-select");
+const CORPUS_KEY = "corpusMode";
+if (corpusSelect) {
+  try {
+    const saved = localStorage.getItem(CORPUS_KEY);
+    if (saved && [...corpusSelect.options].some((o) => o.value === saved)) corpusSelect.value = saved;
+  } catch (e) { /* хранилище недоступно — остаёмся на «Авто» */ }
+  corpusSelect.addEventListener("change", () => {
+    try { localStorage.setItem(CORPUS_KEY, corpusSelect.value); } catch (e) {}
+  });
+}
+function currentCorpus() {
+  return corpusSelect ? corpusSelect.value : "auto";
+}
+
 // Заголовок в шапке — название открытой беседы (макет 08.10.2026); на главной пусто.
 // ⚠ Пока открыта страница истории, шапка принадлежит ей (ревью test32): ответ, дописавшийся в фоне,
 // и удаление беседы зовут setActive → setTitle, и без этой проверки шапка показывала беседу поверх
@@ -328,13 +346,14 @@ function assistantShell() {
 
 // Сообщение из истории беседы. `messageId` есть у ответов, у которых он сохранился в журнале, —
 // тогда под ответом доступны оценка и «Сообщить об ошибке», как у свежего.
-function addAssistant(text, sources, messageId) {
+function addAssistant(text, sources, messageId, corpusLabel) {
   const wrap = assistantShell();
   const b = el("bubble");
   renderAnswer(wrap, b, text);
   wrap.appendChild(b);
   wrap.dataset.raw = text;  // исходный markdown — его и копируем, а не текст из DOM
   messages.appendChild(wrap);
+  addCorpusLine(wrap, corpusLabel);
   if (sources) addSources(wrap, sources);
   addAnswerTools(wrap);
   // ⚠ В переоткрытой беседе — только «Сообщить об ошибке», БЕЗ оценки (ревью 08.10.2026): прежняя
@@ -561,6 +580,15 @@ document.addEventListener("keydown", (e) => {
 });
 
 // пометка о незаземлённых числах: faithfulness-guard поймал число баллов/%, которого нет в источнике
+// L2 #147: «Ответ собран по … · источник выбран автоматически/вручную» — строку собирает сервер
+// (app/rag/corpora.py). Пусто — у ответа нет корпуса (приветствие, отказ) или он записан до L2.
+function addCorpusLine(wrap, label) {
+  if (!label) return;
+  const c = el("answer-corpus");
+  c.textContent = label;
+  wrap.appendChild(c);
+}
+
 function addUnverifiedFlag(wrap, nums) {
   if (!nums || !nums.length) return;
   const f = el("answer-flag");
@@ -856,7 +884,7 @@ async function openConversation(sid) {
     closeSource();
     data.messages.forEach((m) => {
       if (m.role === "user") addUser(m.content);
-      else addAssistant(m.content, m.sources, m.message_id);
+      else addAssistant(m.content, m.sources, m.message_id, m.corpus_label);
     });
     setActive(sid);
     // беседы нет в сайдбаре (открыта со страницы истории, а список загружен раньше) — заголовок
@@ -912,8 +940,11 @@ async function ask(text) {
   try {
     // T18: сперва пробуем стриминг (постепенный вывод, как Claude/ChatGPT). Если он не стартовал
     // или оборвался до финала — фолбэк на обычный /api/chat (рваная РФ-сеть → длинный SSE хрупок).
-    const streamed = await askStream(text, pending, bubble, isNew);
-    if (!streamed) await askFallback(text, pending, bubble, isNew);
+    // L1: режим источника фиксируется В МОМЕНТ ОТПРАВКИ (ревью): иначе переключатель, тронутый
+    // посреди стрима, увёл бы фолбэк того же вопроса в другой корпус.
+    const corpus = currentCorpus();
+    const streamed = await askStream(text, pending, bubble, isNew, corpus);
+    if (!streamed) await askFallback(text, pending, bubble, isNew, corpus);
   } finally {
     send.disabled = false;
     autoScroll();  // в конце ответа не выдёргиваем пользователя вниз, если он читает выше
@@ -1000,7 +1031,7 @@ if (GUEST) renderTrial(GUEST);   // у гостя тарифа нет — та �
 
 // Стриминг: fetch SSE-поток → дописываем delta в пузырь → на done навешиваем источники+оценку.
 // Возврат: true = завершилось финалом (done / редирект на login|profile); false = нужен фолбэк.
-async function askStream(text, pending, bubble, isNew) {
+async function askStream(text, pending, bubble, isNew, corpus) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);
   let acc = "";
@@ -1009,7 +1040,7 @@ async function askStream(text, pending, bubble, isNew) {
     const r = await fetch(STREAM_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId }),
+      body: JSON.stringify({ message: text, session_id: sessionId, corpus }),
       signal: ctrl.signal,
     });
     if (GUEST && await guestRejected(r, text, pending)) {
@@ -1059,6 +1090,7 @@ async function askStream(text, pending, bubble, isNew) {
     renderAnswer(pending, bubble, acc);  // финальный ре-рендер полного текста
     pending.dataset.raw = acc;
     addUnverifiedFlag(pending, done.unverified_numbers);
+    addCorpusLine(pending, done.corpus_label);
     addSources(pending, done.sources);
     addAnswerTools(pending);
     if (GUEST) renderTrial(done.trial);   // оценка ответа — после входа
@@ -1073,14 +1105,14 @@ async function askStream(text, pending, bubble, isNew) {
 }
 
 // Фолбэк: обычный НЕ-стриминг /api/chat (сохранён как надёжный путь на рваной сети).
-async function askFallback(text, pending, bubble, isNew) {
+async function askFallback(text, pending, bubble, isNew, corpus) {
   const ctrl = new AbortController();
   const timer = setTimeout(() => ctrl.abort(), 120000);  // клиентский таймаут (бэкенд режет DeepSeek на 30с/вызов)
   try {
     const r = await fetch(CHAT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId }),
+      body: JSON.stringify({ message: text, session_id: sessionId, corpus }),
       signal: ctrl.signal,
     });
     if (GUEST && await guestRejected(r, text, pending)) {
@@ -1110,6 +1142,7 @@ async function askFallback(text, pending, bubble, isNew) {
     // теперь видны не все строки. Порядок — как в стриминге.
     pending.dataset.raw = data.answer;
     addUnverifiedFlag(pending, data.unverified_numbers);
+    addCorpusLine(pending, data.corpus_label);
     addSources(pending, data.sources);
     addAnswerTools(pending);
     if (GUEST) renderTrial(data.trial);   // как в стриминге

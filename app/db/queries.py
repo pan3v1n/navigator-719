@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core import plans
 from app.db.models import AnswerUsage, Feedback, GuestMessage, Lead, Message, User, _utcnow
+from app.rag import corpora
 
 
 # --- users ---------------------------------------------------------------
@@ -370,24 +371,32 @@ def record_answer_usage(db: Session, user_id: int) -> None:
     db.commit()
 
 
-def is_answered_repeat(db: Session, user_id: int, session_id: str, content: str, since) -> bool:
+def is_answered_repeat(db: Session, user_id: int, session_id: str, content: str, since,
+                       mode: str = corpora.AUTO) -> bool:
     """Тот же вопрос в той же беседе после `since` уже получил ответ (#160, ревью PR #161).
 
     Так выглядит переход фронта со стрима на фолбэк, когда стрим дошёл до конца на сервере, а
     клиент финала не получил: ответ уже списан, повтор списываться и блокироваться не должен.
     Признак берётся из беседы на сервере, а не из ключа от клиента: ключ можно подсунуть, а
-    бесплатным здесь выходит только ответ, который уже получен."""
-    first = db.execute(
-        select(func.min(Message.id)).where(
+    бесплатным здесь выходит только ответ, который уже получен.
+
+    ⚠ ТОТ ЖЕ ВОПРОС = ТОТ ЖЕ ТЕКСТ И ТОТ ЖЕ РЕЖИМ ИСТОЧНИКА (`L1` #146, ревью PR feat/l1-l2). До `L1`
+    повтор давал тот же ответ при temperature 0 и ничего не стоил; с выбором корпуса тот же текст в
+    другом режиме — НОВЫЙ платный ответ, и без режима в признаке лимит обходился переключателем.
+    Режим берём у ответа, который последовал за вопросом (`messages.corpus`, `corpora.mode_of`)."""
+    qids = [r[0] for r in db.execute(
+        select(Message.id).where(
             Message.user_id == user_id, Message.session_id == session_id, Message.role == "user",
-            Message.content == content, Message.ts >= since)
-    ).scalar()
-    if first is None:
-        return False
-    return db.execute(
-        select(Message.id).where(Message.user_id == user_id, Message.session_id == session_id,
-                                 Message.role == "assistant", Message.id > first).limit(1)
-    ).first() is not None
+            Message.content == content, Message.ts >= since).order_by(Message.id))]
+    for qid in qids:
+        reply = db.execute(
+            select(Message.corpus).where(Message.user_id == user_id, Message.session_id == session_id,
+                                         Message.role == "assistant", Message.id > qid)
+            .order_by(Message.id).limit(1)
+        ).first()
+        if reply is not None and corpora.mode_of(reply[0]) == mode:
+            return True
+    return False
 
 
 def count_answer_usage(db: Session, user_id: int, start, end) -> int:
@@ -411,6 +420,7 @@ def log_message(
     unverified: list | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    corpus: str | None = None,
 ) -> Message:
     m = Message(
         user_id=user_id,
@@ -422,6 +432,7 @@ def log_message(
         unverified_json=json.dumps(unverified, ensure_ascii=False) if unverified else None,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        corpus=corpus,
     )
     db.add(m)
     db.commit()
@@ -678,13 +689,13 @@ def delete_lead(db: Session, lead_id: int) -> bool:
 def log_guest_message(
     db: Session, *, guest_id: str, session_id: str, role: str, content: str,
     sources: list | None = None, low_relevance: bool = False, prompt_tokens: int | None = None,
-    completion_tokens: int | None = None, charged: bool = False,
+    completion_tokens: int | None = None, charged: bool = False, corpus: str | None = None,
 ) -> GuestMessage:
     m = GuestMessage(
         guest_id=guest_id, session_id=session_id, role=role, content=content,
         sources_json=json.dumps(sources, ensure_ascii=False) if sources is not None else None,
         low_relevance=low_relevance, prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens, charged=charged,
+        completion_tokens=completion_tokens, charged=charged, corpus=corpus,
     )
     db.add(m)
     db.commit()

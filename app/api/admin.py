@@ -965,10 +965,11 @@ def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
         buf = io.StringIO()
         w = csv.writer(buf, delimiter=";")
         w.writerow(["Дата", "Пользователь", "Регион", "Роль", "Оценка", "Вопрос", "Ответ ИИ",
-                    "Непроверенные числа", "Низкая релевантность", "Комментарий", "Исправление"])
+                    "Источник ответа", "Непроверенные числа", "Низкая релевантность", "Комментарий",
+                    "Исправление"])
         for r in st["answer_rows"]:
             w.writerow([r["ts"], r["user"], r["region"], r["role"], r["rating"],
-                        r["question"], r["answer"], r["unverified"] or "",
+                        r["question"], r["answer"], r["corpus"], r["unverified"] or "",
                         "да" if r["low_relevance"] else "", r["comment"], r["correction"]])
         body = chr(0xFEFF) + buf.getvalue()  # BOM → Excel корректно читает кириллицу
         return _download(body, "text/csv; charset=utf-8", f"navigator719-scorecard-{stamp}.csv")
@@ -981,6 +982,9 @@ def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
         # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
         "disclaimer": EXPERT_DISCLAIMER,
         "corpus": corpus_line(),  # E1: редакция рядом с дисклеймером
+        # L2 #147: у каждой оценённой строки — `corpus`, по чему собран ответ и кто выбрал корпус
+        "corpus_note": "answer_ratings[].corpus — по какому корпусу собран ответ и кто выбрал "
+                       "корпус (сервис или пользователь); пусто — ответ записан до этой подписи.",
         "generated_at": st["generated_at"],
         "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
                     "region": st["filter_region"] or None, "role": st["filter_role"] or None},

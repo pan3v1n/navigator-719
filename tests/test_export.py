@@ -36,6 +36,7 @@ class _Msg:
         self.role, self.content = role, content
         self.ts = datetime(2026, 8, 10, 12, 0)
         self.sources_json = None
+        self.corpus = None  # L2: у реплик до L2 подписи корпуса нет
 
 
 ANSWER = "Позиция: Насосы гидравлические, порог не менее 90 баллов."

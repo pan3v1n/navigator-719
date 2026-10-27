@@ -76,6 +76,7 @@ class TestQuestionSurvivesEngineFailure(unittest.TestCase):
             completion_tokens = 5
             input_hint = ""  # U5
             metered = True  # #160
+            corpus = ""  # L2: по чему собран ответ
 
         chat_mod.answer = lambda *a, **k: _Ans()
         req = chat_mod.ChatRequest(message="Вопрос", session_id="s2")
@@ -99,8 +100,9 @@ class TestQuestionSurvivesEngineFailure(unittest.TestCase):
             completion_tokens = 0
             input_hint = ""  # U5
             metered = True  # #160
+            corpus = ""  # L2: по чему собран ответ
 
-        def spy(msg, okpd2=None, history=None):
+        def spy(msg, okpd2=None, history=None, corpus=None):
             seen["history"] = list(history or [])
             return _Ans()
 

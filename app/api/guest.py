@@ -45,6 +45,7 @@ from app.core import plans
 from app.core.config import settings
 from app.db import queries as q
 from app.db.engine import get_session
+from app.rag import corpora
 from app.rag.pipeline import answer, answer_stream
 from app.tools.navigator import extract_okpd2
 
@@ -92,6 +93,10 @@ def _last_same(gid: str, req: ChatRequest):
         question, answer = q.guest_last_question(db, gid, req.session_id)
     since = plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW
     if question is None or question.content != req.message or plans.naive_utc(question.ts) < since:
+        return None, None
+    # L1: ответ получен в ДРУГОМ режиме источника — это новый вопрос, а не фолбэк того же стрима.
+    # Иначе гость, переключивший источник, получал прежний ответ, и движок с новым режимом не звался.
+    if answer is not None and corpora.mode_of(answer.corpus) != req.corpus:
         return None, None
     return question, answer
 
@@ -198,7 +203,8 @@ class GuestChatResponse(ChatResponse):
 
 def _engine_kwargs(req: ChatRequest, history: list[dict]) -> dict:
     return {"okpd2": extract_okpd2(req.message), "history": history,
-            "limit": settings.GUEST_CONTEXT_LIMIT, "brief": True}
+            "limit": settings.GUEST_CONTEXT_LIMIT, "brief": True,
+            "corpus": req.corpus}  # L1 #146 — тот же переключатель, что у вошедшего
 
 
 def _trial(gid: str) -> dict:
@@ -210,7 +216,8 @@ def _stored_payload(row, gid: str, session_id: str) -> dict:
     """Сохранённый ответ гостю в форме ответа движка (источники в базе уже без полного текста)."""
     return {"answer": row.content, "sources": json.loads(row.sources_json or "[]"),
             "low_relevance": bool(row.low_relevance), "unverified_numbers": [],
-            "session_id": session_id, "message_id": None, "input_hint": "", "trial": _trial(gid)}
+            "session_id": session_id, "message_id": None, "input_hint": "", "trial": _trial(gid),
+            "corpus_label": corpora.label_from_stored(row.corpus)}  # L2: подпись и у сохранённого
 
 
 @router.post("/api/guest/chat", response_model=GuestChatResponse)
@@ -235,11 +242,12 @@ def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     sources = _guest_sources(ans)
     _log(gid, session_id, "assistant", ans.text, sources=[s.model_dump() for s in sources],
          low_relevance=ans.low_relevance, prompt_tokens=ans.prompt_tokens,
-         completion_tokens=ans.completion_tokens)
+         completion_tokens=ans.completion_tokens, corpus=corpora.stored(ans.corpus, req.corpus))
     return GuestChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=None,
-        input_hint=ans.input_hint, trial=_trial(gid))
+        input_hint=ans.input_hint, corpus_label=corpora.answered_by(ans.corpus, req.corpus),
+        trial=_trial(gid))
 
 
 @router.post("/api/guest/chat/stream")
@@ -273,13 +281,15 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 sources = _guest_sources(ans)
                 _log(gid, session_id, "assistant", ans.text,
                      sources=[s.model_dump() for s in sources], low_relevance=ans.low_relevance,
-                     prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens)
+                     prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
+                     corpus=corpora.stored(ans.corpus, req.corpus))
                 yield _sse({
                     "type": "done", "message_id": None,
                     "sources": [s.model_dump() for s in sources],
                     "low_relevance": ans.low_relevance,
                     "unverified_numbers": ans.unverified_numbers,
                     "session_id": session_id, "input_hint": ans.input_hint, "trial": _trial(gid),
+                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus),  # L2
                 })
         except Exception:  # noqa: BLE001 — сигнал фолбэка фронту
             logger.exception("гость: стрим упал")
