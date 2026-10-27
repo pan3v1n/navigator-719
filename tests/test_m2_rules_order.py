@@ -99,9 +99,12 @@ class TestAppliedEverywhere(unittest.TestCase):
         import inspect
 
         src = inspect.getsource(retriever.search_rules)
-        self.assertEqual(src.count("_rules_order("), 3,
-                         "полный порядок применён не ко всем трём источникам "
-                         "(основной пул, добор темы, добор раздела 4)")
+        # Инвариант, а не счёт: КАЖДЫЙ запрос к Qdrant в `search_rules` приводится к полному порядку.
+        # Прежняя редакция считала ровно три источника (пул, добор темы, добор раздела 4) и краснела
+        # бы на четвёртом — добор сноски по маркеру (D15 #155) упорядочен так же.
+        self.assertGreaterEqual(src.count("_hybrid("), 4)
+        self.assertEqual(src.count("_hybrid("), src.count("_rules_order(_hybrid("),
+                         "есть источник окна без полного порядка (M2)")
 
     def test_main_pool_is_ordered_before_anything_reads_indices(self):
         """Пул сортируется СРАЗУ: ниже по индексам идут by_doc, квота, добор остатка и финальный порядок."""
