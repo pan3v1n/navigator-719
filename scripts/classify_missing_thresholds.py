@@ -75,7 +75,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app.rag import code_cells  # noqa: E402
-from app.rag.thresholds import _excludes_list_item, _scope_conflict  # noqa: E402
+from app.rag.thresholds import _excludes_list_item, _row_in_section, _scope_conflict  # noqa: E402
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _list_items,
@@ -150,7 +150,12 @@ def note_rows() -> list[dict]:
                         # D21 #230: предмет строки (имена вне её оговорок) — для правила противоположных
                         # оговорок, то же, что в рантайме.
                         "subject_names": r.get("subject_names"),
-                        "exclusions": r.get("exclusions")})
+                        "exclusions": r.get("exclusions"),
+                        # D22 #235: раздел вводной и исключённые строкой разделы — тот же фильтр, что в
+                        # рантайме; без них позиция раздела X под строкой 22.21 «за исключением … разделом
+                        # X» считалась НАШИМ дефектом привязки.
+                        "section": r.get("section"),
+                        "excluded_sections": list(r.get("excluded_sections") or ())})
     for t in _tables():
         if note_scope(t["note"]) != "general":
             continue
@@ -268,7 +273,8 @@ def classify(rec: dict, rows: list[dict]) -> dict:
     sec = rec.get("section_roman")
 
     def _foreign(row: dict) -> bool:
-        return bool(sec and row.get("section") and row["section"] != sec)
+        # D22 #235: раздел строки и исключённые ею разделы — предикат рантайма, импортом.
+        return not _row_in_section(row, sec)
 
     coverings: list[dict] = []
     narrower, by_name = None, None
