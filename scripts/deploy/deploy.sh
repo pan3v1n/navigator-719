@@ -378,7 +378,9 @@ if [ "$DRY_RUN" = "1" ]; then
   CI_DRY_SRC="$SRC"
   if [ -z "$CI_DRY_SRC" ]; then
     for cand in "$PWD" "$PKG" "$APP" "$SELF_DIR/../.."; do
-      [ -d "$cand/.git" ] || continue
+      # ⚠ `-e`, а не `-d` (#164): в git worktree `.git` — ФАЙЛ `gitdir: …`, и `-d` молча
+      # отбрасывал репозиторий, где тег резолвится. Гейт тогда печатал «CI НЕ ПРОВЕРЕН».
+      [ -e "$cand/.git" ] || continue
       (cd "$cand" && git rev-parse --verify --quiet "$TAG^{commit}" >/dev/null 2>&1) || continue
       CI_DRY_SRC="$cand"; break
     done
@@ -460,7 +462,7 @@ say "=== старт выкатки $TAG ==="
 CI_SRC="${SRC:-}"
 if [ -z "$CI_SRC" ]; then
   for cand in "$PWD" "$PKG" "$APP" "$SELF_DIR/../.."; do
-    [ -d "$cand/.git" ] || continue
+    [ -e "$cand/.git" ] || continue   # `-e`: в git worktree `.git` — файл (#164)
     (cd "$cand" && git rev-parse --verify --quiet "$TAG^{commit}" >/dev/null 2>&1) || continue
     CI_SRC="$cand"; break
   done

@@ -148,4 +148,8 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    import sys
+    sys.path.append(str(Path(__file__).resolve().parents[1]))  # корень репозитория — для app.core
+    from app.core.console import enable_utf8  # #107: значки вне cp1251 роняли бы печать
+    enable_utf8()
     main()

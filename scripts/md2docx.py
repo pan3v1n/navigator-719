@@ -292,4 +292,8 @@ def build(md_path, template, out_path):
 
 
 if __name__ == "__main__":
+    from pathlib import Path
+    sys.path.append(str(Path(__file__).resolve().parents[1]))  # корень репозитория — для app.core
+    from app.core.console import enable_utf8  # #107: значки вне cp1251 роняли бы печать
+    enable_utf8()
     build(sys.argv[1], sys.argv[2], sys.argv[3])

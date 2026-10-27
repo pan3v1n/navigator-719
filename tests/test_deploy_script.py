@@ -729,6 +729,46 @@ PATH="$TD/bin:$PATH" PKG="$TD/pkg" APP="$TD/app"   bash "$TD/tree/deploy/deploy.
                          "гейт доложил о коммите там, где репозитория нет")
         self.assertEqual(r.returncode, 0, "отсутствие репозитория — не провал выкатки")
 
+    def test_worktree_shaped_repository_is_found(self):
+        """#164: в git worktree `.git` — ФАЙЛ `gitdir: …`, а не каталог.
+
+        Прежняя проверка `[ -d "$cand/.git" ]` такой репозиторий отбрасывала, и гейт печатал
+        «CI НЕ ПРОВЕРЕН» там, где тег резолвится. Сценарий тот же, что у отрицательного контроля,
+        но у фальшивого `$APP` — файл `.git`, указывающий на настоящий каталог репозитория; других
+        кандидатов с репозиторием нет, поэтому найти его может только ветка `-e`."""
+        profile, tag = self._profile_with_an_existing_tag()
+        files = sorted({m[0] for m in self.MARKER_FILES_RE.findall(
+            profile.read_text(encoding="utf-8")) if (ROOT / m[0]).is_file()})
+        gitdir = subprocess.run(["git", "rev-parse", "--absolute-git-dir"], capture_output=True,
+                                text=True, cwd=str(ROOT)).stdout.strip()
+        self.assertTrue(gitdir, "не удалось узнать каталог репозитория")
+        setup = self.SETUP_NO_REPO.replace(
+            'cd "$TD/pkg" || exit 3',
+            'printf "gitdir: %s\\n" "$GITDIR" > "$TD/app/.git"\ncd "$TD/pkg" || exit 3')
+        self.assertNotEqual(setup, self.SETUP_NO_REPO, "подмена сценария не применилась")
+        env = {k: v for k, v in os.environ.items() if k != "SKIP_CI_GATE"}
+        env["GITDIR"] = gitdir
+        r = subprocess.run(
+            [shutil.which("bash"), "-c", setup, "_", str(profile), str(ROOT),
+             str(DEPLOY_DIR), tag, *files],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", env=env)
+        self.assertNotIn("COPY-FAILED", r.stdout + r.stderr)
+        self.assertIn("маркеры сошлись", r.stdout,
+                      f"прогон остановился ДО гейта — тест ничего не проверил:\n{r.stdout}")
+        self.assertIn("коммит под проверкой", r.stdout,
+                      f"репозиторий с файлом .git не найден:\n{r.stdout}")
+
+    def test_both_paths_accept_a_git_file(self):
+        """Сухой прогон и реальная выкатка обязаны отбирать кандидатов ОДНОЙ проверкой (#164).
+
+        Поведенческий тест выше идёт через `--dry-run`; реальную выкатку на подставных данных не
+        запустить, поэтому её ветку держит этот сторож: обе проверки — `-e`, ни одной `-d`."""
+        code = code_only(DEPLOY_SH.read_text(encoding="utf-8"))
+        self.assertEqual(len(re.findall(r'\[ -e "\$cand/\.git" \]', code)), 2,
+                         "обе ветки отбора репозитория обязаны принимать и файл .git")
+        self.assertNotIn('[ -d "$cand/.git" ]', code,
+                         "проверка -d отбрасывает git worktree, где .git — файл")
+
 
 class TestBuildkitIsActuallyDisabled(unittest.TestCase):
     """Ревью захода 5.5: `env DOCKER_BUILDKIT=0 sudo docker …` НЕ передаёт переменную.

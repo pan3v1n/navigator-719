@@ -15,10 +15,36 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+
+from loguru import logger
 from pathlib import Path
 
 _CHUNK = (Path(__file__).resolve().parents[2] / "knowledge_base" / "pp719" / "chunks"
           / "130_PRIMECHANIYA_prilozheniya.txt")
+
+# Нулевой ширины пробелы и соединители приезжают из конвертации RTF и рвут сравнения строк.
+# ⚠ ВЫЧИЩАЮТСЯ НА ВХОДЕ, А НЕ В ОДНОМ МЕСТЕ РАЗБОРА (`D17` #207). В тексте ред. 29.09.2026 первая
+# ступень прим. 72.3 несла хвост U+200B, и примечание не разбиралось ВОВСЕ (списков 281 против 282
+# после вычистки): `_clean_step` чистил их только в самой ступени, а признаки границы и строки-
+# порога смотрели на сырой текст. Следующий экспорт Контура может поставить их в любое примечание
+# — поэтому все три читателя чанка берут текст из `_chunk_text`.
+_ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
+
+
+def _chunk_text() -> str:
+    """Текст чанка примечаний без невидимых символов (`D17`).
+
+    ⚠ Строка ИЗ ОДНИХ невидимых выбрасывается целиком, а не очищается (ревью PR #220, MED).
+    Очищенная, она стала бы ПУСТОЙ, а пустая строка — граница таблицы и сборщика ступеней: график
+    под примечанием обрезался бы на ней молча («2026 — 50» вместо «2026 — 50; 2028 — 70»). До
+    вычистки такая строка не была пустой, и разбор читал сквозь неё — это поведение и сохраняется.
+    ⚠ Внутри строки символ удаляется, а не меняется на пробел — как и прежде в `_clean_step`.
+    Склейка соседних слов или кодов («…200​26…») на данных не встречается (все U+200B чанка стоят
+    после «)»); код из склейки ни к чему не применяется, то есть ошибка безопасна."""
+    lines = _CHUNK.read_text(encoding="utf-8").split("\n")
+    kept = [ln for ln in lines
+            if not (_ZERO_WIDTH_RE.search(ln) and not _ZERO_WIDTH_RE.sub("", ln).strip())]
+    return _ZERO_WIDTH_RE.sub("", "\n".join(kept))
 
 # Интро примечания-таблицы: «77. Продукция … в раздел XVI настоящего приложения …»
 # ⚠ ВВОДНАЯ ПРИМЕЧАНИЯ-ТАБЛИЦЫ (K2, #47). Прежний шаблон требовал буквально «Продукция,» и
@@ -199,6 +225,34 @@ def _variant_cells(row: str, n_years: int):
     return None
 
 
+def _is_code_row(row: str) -> bool:
+    """Логическая строка таблицы с кодом ОКПД2 в первой ячейке — для тревоги «разобрано 0».
+
+    ⚠ Ячейку смотрит ЦЕЛИКОМ, а не начало строки (ревью PR #220): `_ROW_START_RE` узнаёт только
+    ячейку с одним кодом на одной строке, а у прим. 80.1 таких 8 из 95 — таблица из одних
+    многокодовых ячеек обнулилась бы без тревоги. Строка таблицы — от ТРЁХ ячеек (код |
+    наименование | значение), и вторая ячейка — наименование, а не подпись года: подзаголовок
+    «таблицы по узлам» прим. 74 («из 28.13.27 "…":|до 31 декабря 2025 г.|с 1 января 2026 г.|») —
+    это шапка, его разбирает другая ветка, и тревога на нём была бы ложной (замер). Поправка
+    «(в ред. … от 05.10.2026 …)|» и строка исключения «из X - Исключено.|» — одна ячейка, их
+    отсекает уже число ячеек; отдельной проверки на них нет намеренно (мутация её не различала)."""
+    cells = row.split("|")
+    if len(cells) < 4 or _YEAR_ANY_RE.search(cells[1]):
+        return False
+    return bool(_CODE_RE.search(cells[0]))
+
+
+def _uniform_schedule(rows: list[dict]) -> dict | None:
+    """График, общий для ВСЕХ строк (видов группы, видов позиции, наименований перечня), либо None.
+
+    Одно правило «одинаковые графики → общий порог» на три места (`K2-4` #211): разбор таблицы по
+    видам, виды позиции под чужой группой и вердикт по наименованиям перечня. Копии уже
+    разъезжались формой — третья сравнивала «больше одного», первые две «ровно один»."""
+    if not rows or len({tuple(r["by_year"].items()) for r in rows}) != 1:
+        return None
+    return dict(rows[0]["by_year"])
+
+
 def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: str,
                          section: str | None):
     """`(таблица, индекс конца)` либо `(None, j)` — форма не та.
@@ -207,13 +261,34 @@ def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: st
     видов — это и есть порог позиции; разные — `by_year` пуст, а графики лежат в `variants`
     (печатает `_fmt`). Строка-вид без значений сразу под группой — перенос наименования группы
     (в ред. 05.10.2026 таких две); такая же строка ПОСЛЕ видов — отказ от формы целиком, потому
-    что её смысл (объединённая ячейка? перенос имени вида?) отсюда не различить."""
+    что её смысл (объединённая ячейка? перенос имени вида?) отсюда не различить.
+
+    ⚠ ОТКАЗ ОТ ФОРМЫ — ВСЁ ИЛИ НИЧЕГО, И ПОЭТОМУ ГРОМКИЙ (`K2-4` #211). Одна непонятая строка
+    (поправка «(в ред. …)» после последней строки, ГОСТ с «dd.dd» в имени вида) снимает форму
+    целиком, а общий разбор после пустой строки за шапкой не берёт ничего — у прим. 80.1 это все
+    позиции раздела VII разом. Отбраковывать одну строку здесь нельзя: смысл непонятой строки в
+    таблице видов отсюда не различить. Поэтому отказ пишется в журнал, если таблица БЫЛА похожа на
+    форму по видам (есть строка-группа: код и пустые значения)."""
     rows, tail, end = _logical_rows(lines, j + 1)
-    if tail:
-        return None, j
     parsed = [_variant_cells(r, len(years)) for r in rows]
-    if not parsed or any(p is None for p in parsed):
+    # Похожа на форму по видам — есть и строка-группа (код без значений), и строка-вид. Одна
+    # строка-группа без видов бывает и в обычной таблице (прим. 40) — это не повод для тревоги.
+    looks_like = (any(p and p[0] == "code" and not any(p[3]) for p in parsed)
+                  and any(p and p[0] == "var" for p in parsed))
+
+    def reject(why: str):
+        if looks_like:
+            logger.warning("thresholds: таблица по видам прим. {} отвергнута ({}) — её пороги "
+                           "уходят в общий разбор", note_no, why)
         return None, j
+
+    if tail:
+        return reject(f"незакрытая строка: {tail[0][:80]!r}")
+    if not parsed:
+        return None, j
+    bad = next((r for r, p in zip(rows, parsed) if p is None), None)
+    if bad is not None:
+        return reject(f"непонятая строка: {bad[:80]!r}")
     out: list[dict] = []
     cur: dict | None = None
     for p in parsed:
@@ -238,20 +313,23 @@ def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: st
             continue
         name, vals = p[1], p[2]
         if cur is None:
-            return None, j                           # вид без группы — не та форма
+            return reject(f"вид без группы: {name[:80]!r}")
         if not any(vals):
             if cur["variants"]:
-                return None, j
+                return reject(f"строка без значений после видов: {name[:80]!r}")
             cur["name"] = f"{cur['name']} {name}".strip()
             continue
         cur["variants"].append(
             {"name": name, "by_year": {years[x]: vals[x] for x in range(len(years)) if vals[x]}})
     groups = [r for r in out if "variants" in r]
-    if not groups or any(not r["variants"] for r in groups):
+    if not groups:
         return None, j
+    if any(not r["variants"] for r in groups):
+        return reject("группа без видов")
     for r in groups:
-        if len({tuple(v["by_year"].items()) for v in r["variants"]}) == 1:
-            r["by_year"] = dict(r["variants"][0]["by_year"])
+        uniform = _uniform_schedule(r["variants"])
+        if uniform is not None:
+            r["by_year"] = uniform
     return {"note": note_no, "section": section, "years": years, "rows": out}, end
 
 
@@ -260,7 +338,7 @@ def _tables() -> list[dict]:
     """Парсит все таблицы-пороги из чанка примечаний. Кэш на процесс."""
     if not _CHUNK.exists():
         return []
-    lines = _CHUNK.read_text(encoding="utf-8").splitlines()
+    lines = _chunk_text().splitlines()
     tables: list[dict] = []
     i, n = 0, len(lines)
     while i < n:
@@ -385,6 +463,14 @@ def _tables() -> list[dict]:
             k += 1
         if rows:
             tables.append({"note": note_no, "section": section, "years": years, "rows": rows})
+        elif any(_is_code_row(r) for r in _logical_rows(lines, j + 1)[0]):
+            # ⚠ ШАПКА С ГОДАМИ ЕСТЬ, СТРОКИ С КОДАМИ ЕСТЬ, РАЗОБРАНО НОЛЬ (`K2-4` #211) — пороги
+            # примечания пропали целиком, и до сих пор это ловил только юнит-тест. Так выглядит,
+            # например, отвергнутая форма по видам: общий разбор останавливается на первой пустой
+            # строке за шапкой. Таблицы без кодов в первой колонке (прим. 11, 37, 74) разбирают
+            # другие ветки — для них ноль строк здесь норма, и тревоги нет.
+            logger.warning("thresholds: у прим. {} в таблице есть строки с кодами, а разобрано 0 — "
+                           "пороги примечания потеряны", note_no)
         i = k
     return tables
 
@@ -435,10 +521,7 @@ def _own_variants(row: dict, product_name: str | None) -> dict | None:
     own = [v for v in row.get("variants") or [] if _variant_of(v["name"], product_name)]
     if not own:
         return None
-    out = {**row, "variants": own, "by_year": {}}
-    if len({tuple(v["by_year"].items()) for v in own}) == 1:
-        out["by_year"] = dict(own[0]["by_year"])
-    return out
+    return {**row, "variants": own, "by_year": _uniform_schedule(own) or {}}
 
 
 _YEAR_LBL = re.compile(r"(\d{4}) год")
@@ -514,8 +597,6 @@ _NOTE_HDR_RE = re.compile(r"^(\d+(?:\(\d+\))?)\.\s")            # «7.», «8(1)
 # оптические многомодовые…»), то есть ЧУЖИЕ числа с подлинной ссылкой — ровно тот дефект, что
 # `EV13` вычищала у прим. 17. Останавливаться надо на ЛЮБОМ новом номере, включая подпункт.
 _NOTE_START_RE = re.compile(r"^\s*(\d+(?:\(\d+\))?(?:\.\d+)*)\.\s")
-# Нулевой ширины пробелы приезжают из конвертации RTF и рвут сравнения строк.
-_ZERO_WIDTH_RE = re.compile(r"[​‌‍﻿]")
 # ⚠ СТУПЕНЬ ПОРОГА — «не менее N баллов/процентов», И ТОЛЬКО ОНА (ревью 20.08.2026).
 # Многострочный сборщик брал ЛЮБУЮ строку со словами «не менее», и у прим. 17 в ступени уезжал
 # абзац прозы на 1402 символа: в нём есть «не менее 5 ЛЕТ» — срок хранения конструкторской
@@ -810,7 +891,7 @@ def _flat_thresholds() -> list[dict]:
     баллов;» до следующего кода/примечания. Кэш на процесс."""
     if not _CHUNK.exists():
         return []
-    lines = _CHUNK.read_text(encoding="utf-8").split("\n")
+    lines = _chunk_text().split("\n")
     rows: list[dict] = []
     note = None
     i, n = 0, len(lines)
@@ -1161,7 +1242,7 @@ def _note_scopes() -> dict[str, str]:
     """Номер примечания → 'procurement' | 'general' (по его вводной фразе)."""
     if not _CHUNK.exists():
         return {}
-    lines = _CHUNK.read_text(encoding="utf-8").splitlines()
+    lines = _chunk_text().splitlines()
     out: dict[str, str] = {}
     # Границы — по тому же правилу, что и нумерация строк-порогов: у подпункта «26.1»
     # должна быть СВОЯ область действия, а не унаследованная от «26». Иначе закупочный
@@ -1243,7 +1324,7 @@ def _list_items_verdict(table: dict, product_name: str | None, codes: list[str])
             and any(_code_applies(rc, c) for c in codes for rc in by_name[it]["codes"])]
     if len(hits) < 2:
         return None
-    if len({tuple(r["by_year"].items()) for r in hits}) > 1:
+    if _uniform_schedule(hits) is None:
         return "conflict"
     return hits[0] if len(hits) == len(items) else None
 
@@ -1498,6 +1579,9 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
     #     если оно не различает, НЕ ГАДАЕМ — лучше не показать, чем показать чужой порог.
     if codes:
         tcands: list[tuple[dict, dict, bool]] = []   # (таблица, строка, точное ли совпадение кода)
+        # Виды позиции под ЧУЖОЙ группой (см. `_own_variants`) — собираются в ЭТОМ ЖЕ обходе: фильтры
+        # области и раздела у них те же, и второй полный обход таблиц повторял их копией (`K2-4` #211).
+        own: list[tuple[dict, dict]] = []
         for t in _tables():
             if note_scope(t["note"]) != scope:
                 continue
@@ -1527,6 +1611,11 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             if isinstance(verdict, dict):
                 return _fmt(verdict, t["note"], t["section"])
             for r in t["rows"]:
+                if r.get("strict_name") and r.get("variants") and any(
+                        _code_applies(rc, c) for c in codes for rc in r["codes"]):
+                    hit = _own_variants(r, product_name)
+                    if hit:
+                        own.append((t, hit))
                 # Строка, у которой имя — ключ (прим. 80.1), кандидат только по ДОСЛОВНОМУ имени
                 # (с точностью до «,»/«;»); позиция-перечень дошла бы сюда через
                 # `_list_items_verdict` выше. ⚠ Виды группы НЕ отбираются по началу имени: в группе
@@ -1554,18 +1643,6 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # кандидатов по коду: вид, названный ИМЕНЕМ позиции, конкретнее строки чужой таблицы,
             # совпавшей только кодом «из 32.50.50.190». ⚠ Но не конкретнее строки, названной ровно
             # как позиция (ревью PR #209) — поэтому только при пустом `same`.
-            own = []
-            for t in _tables():
-                if note_scope(t["note"]) != scope:
-                    continue
-                if section and t["section"] and t["section"] != section:
-                    continue
-                for r in t["rows"]:
-                    if r.get("strict_name") and r.get("variants") and any(
-                            _code_applies(rc, c) for c in codes for rc in r["codes"]):
-                        hit = _own_variants(r, product_name)
-                        if hit:
-                            own.append((t, hit))
             if len(own) == 1:
                 t, r = own[0]
                 return _fmt(r, t["note"], t["section"])
