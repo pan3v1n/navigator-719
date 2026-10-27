@@ -77,6 +77,7 @@ class TestQuestionSurvivesEngineFailure(unittest.TestCase):
             input_hint = ""  # U5
             metered = True  # #160
             corpus = ""  # L2: по чему собран ответ
+            phantom_documents: list = []  # O8
 
         chat_mod.answer = lambda *a, **k: _Ans()
         req = chat_mod.ChatRequest(message="Вопрос", session_id="s2")
@@ -101,6 +102,7 @@ class TestQuestionSurvivesEngineFailure(unittest.TestCase):
             input_hint = ""  # U5
             metered = True  # #160
             corpus = ""  # L2: по чему собран ответ
+            phantom_documents: list = []  # O8
 
         def spy(msg, okpd2=None, history=None, corpus=None):
             seen["history"] = list(history or [])

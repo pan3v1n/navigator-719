@@ -354,6 +354,7 @@ class _FakeAns:
     rule_sources: list = []
     low_relevance = False
     unverified_numbers: list = []
+    phantom_documents: list = []
     prompt_tokens = completion_tokens = 0
     input_hint = ""
     metered = True
