@@ -17,7 +17,7 @@ from loguru import logger
 
 from app.core.config import settings
 from app.rag.embeddings import embed_query
-from app.rag import okpd2_ref
+from app.rag import code_cells, okpd2_ref
 from app.rag.sparse import query_vector
 from app.rag.topics import FOOTNOTE_MARK  # форма маркера сноски — одна на три места (#155)
 
@@ -43,6 +43,9 @@ class Hit:
     code_tier: int = 0
     # R31 #179: id точки Qdrant — по нему score всех кандидатов окна пересчитываются ОДНИМ запросом.
     point_id: object = None
+    # D20 #225: коды, указанные в ячейке первоисточника «за исключением» (`code_cells`). В
+    # `okpd2_codes` хита их нет; вопрос с кодом под ними с позицией не совпадает (`code_match`).
+    excluded_codes: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -154,6 +157,14 @@ def has_exact_position(code: str) -> bool:
         return True
 
 
+def code_match(h: "Hit", query_code: str) -> bool:
+    """Совпадение ХИТА с кодом вопроса: `okpd2_match` по его кодам, и код вопроса не лежит под кодом,
+    который позиция исключает (D20 #225: «Компьютеры портативные» 26.20.11 «за исключением
+    26.20.11.120» не совпадают с 26.20.11.120 и его подкодами, хотя 26.20.11 — их предок)."""
+    return okpd2_match(h.okpd2_codes, query_code) and not any(
+        okpd2_ref.okpd2_key(query_code).startswith(okpd2_ref.okpd2_key(e)) for e in h.excluded_codes)
+
+
 def okpd2_match(rec_codes: list[str], query_code: str) -> bool:
     """True, если код записи и код запроса лежат на одной ветке ОКПД2: один — предок другого
     ПОРАЗРЯДНО (`okpd2_ref.okpd2_key`). Так «29.20.23.110» матчит группу «29.20.23», «29.20» —
@@ -194,13 +205,25 @@ def _clean_section_title(title: str | None) -> str:
 
 
 def _to_hit(p) -> Hit:
+    """Точка Qdrant → `Hit`.
+
+    ⚠ D20 #225: коды «за исключением» — НЕ коды позиции. У четырёх позиций они лежат в payload
+    `okpd2_codes` наравне со своими («26.20.11 (за исключением 26.20.11.120, 26.20.11.130)» → все
+    три), и по исключённому коду позиция становилась целевой ТОЧНЫМ совпадением — вместе со своей
+    («Портативные персональные компьютеры» 26.20.11.120). Здесь они уходят в `excluded_codes`;
+    payload не трогаем — по нему `code_cells` находит ячейку (ключ — полный список кодов)."""
     pl = p.payload or {}
+    codes = pl.get("okpd2_codes") or []
+    marks = code_cells.marks(pl.get("section_roman"), pl.get("product_name"), codes)
+    own = [c for c, mk in zip(codes, marks)
+           if mk != code_cells.EXCEPT] if marks else list(codes)
     return Hit(
         score=p.score,
         section_roman=pl.get("section_roman", "?"),
         section_title=_clean_section_title(pl.get("section_title")),
         product_name=pl.get("product_name", ""),
-        okpd2_codes=pl.get("okpd2_codes") or [],
+        okpd2_codes=own,
+        excluded_codes=[c for c in codes if c not in own],
         min_threshold=pl.get("min_threshold"),
         requirement_blocks=pl.get("requirement_blocks") or [],
         source_anchor=pl.get("source_anchor"),
@@ -361,7 +384,7 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
 
     if okpd2:
         for h in hits:
-            h.okpd2_match = okpd2_match(h.okpd2_codes, okpd2)
+            h.okpd2_match = code_match(h, okpd2)
 
         # Ветку кода (родители + дети) подтягиваем ВСЕГДА, а не только при отсутствии совпадений:
         # пул мог включить родителя (26.51), но пропустить дочерние позиции (26.51.52.120). Две ветви
@@ -377,7 +400,9 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
             seen = {h.source_anchor for h in hits}
             for p in _hybrid(query, max(limit, 12), qfilter=qfilter, qvec=qvec):
                 h = _to_hit(p)
-                if h.source_anchor not in seen:
+                # D20: фильтр Qdrant видит payload, а в нём и исключённые коды — позицию, пришедшую
+                # только по ним, в окно не берём (совпадения по коду у неё нет).
+                if h.source_anchor not in seen and code_match(h, okpd2):
                     h.okpd2_match = True
                     seen.add(h.source_anchor)
                     hits.append(h)
@@ -429,7 +454,7 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
                     continue
                 for p in found:
                     h = _to_hit(p)
-                    if h.source_anchor not in seen and okpd2_match(h.okpd2_codes, okpd2):
+                    if h.source_anchor not in seen and code_match(h, okpd2):
                         h.okpd2_match = True
                         seen.add(h.source_anchor)
                         hits.append(h)

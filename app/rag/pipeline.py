@@ -26,7 +26,7 @@ from app.core.prompts import (
 )
 from app.rag import code_cells, corpora, documents_ref, fragments, inheritance, okpd2_ref, retriever, sparse, st1_ref
 from app.rag.embeddings import embed_query
-from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, okpd2_match, search,
+from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, search,
                                search_cases, search_rules)
 from app.rag.thresholds import BY_KIND, lookup_procurement_threshold, lookup_threshold
 
@@ -292,9 +292,9 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
         lines.insert(0, f"Порог: {mt}")
     # D16 #173: пометка ячейки кода — эксперту тоже. Сразу ПОСЛЕ порога: ветка порога по видам ниже
     # считает первой строкой панели именно порог.
-    cm = code_cells.marks(h.section_roman, h.product_name, h.okpd2_codes)
+    cc, cm = code_cells.of_hit(h)
     if code_cells.note(cm):
-        lines.insert(1 if mt else 0, f"Код в приложении: {code_cells.render(h.okpd2_codes, cm)} — "
+        lines.insert(1 if mt else 0, f"Код в приложении: {code_cells.render(cc, cm)} — "
                                      f"{'; '.join(code_cells.note(cm))}.")
     proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)
     if proc:
@@ -340,8 +340,7 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
     return text
 
 
-def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str],
-                 marks: list[str] | None = None) -> list[str]:
+def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]:
     """Строки «код из вопроса входит в группировку кода этой позиции» для ЦЕЛЕВОЙ позиции (D14).
 
     ⚠ ЗАЧЕМ. На бою эксперт спросил, применимы ли к н-бутану 20.14.11.112 требования позиции
@@ -360,6 +359,7 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str],
     случай», хотя он такого не говорил. Запрет в контексте читается как реплика, которую надо
     опровергнуть; факта иерархии достаточно — оба ответа и без запрета начинались с «да»."""
     notes = []
+    cell, marks = code_cells.of_hit(h)       # пометки — по полному списку кодов ячейки (D20)
     for c in codes + [d for d in dialog_codes if d not in codes]:
         # ⚠ Ревью PR #177. (1) Только ОХВАТЫВАЮЩИЙ предок (`retriever.covers`: позиция — сама
         # группировка, её наименование = наименованию кода): «из 20 Катализаторы» не группировка
@@ -381,8 +381,8 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str],
         # Код вопроса под кодом «за исключением» — позиция на него НЕ распространяется, и строка
         # «распространяется» была бы ложью (ревью D16, LOW-3); сам исключённый код охватывающим
         # не бывает (`is_grouping_name` ложен у всех четырёх), но защита — здесь, а не в данных.
-        mk = code_cells.mark_of(rc, h.okpd2_codes, marks)
-        if mk == code_cells.EXCEPT or code_cells.excepted_covers(c, h.okpd2_codes, marks):
+        mk = code_cells.mark_of(rc, cell, marks)
+        if mk == code_cells.EXCEPT or code_cells.excepted_covers(c, cell, marks):
             continue
         if mk == code_cells.IZ:
             scope = (", ТОЛЬКО если продукция относится к товарам, названным в наименовании позиции "
@@ -429,13 +429,13 @@ def format_context(hits: list[Hit], query: str | None = None,
         lines = [head]
         # D16 #173: коды — как в графе кода первоисточника, с «из» и «за исключением». Пояснение
         # к пометке — только у целевой: у нецелевой требований в контексте нет, пояснять нечего.
-        cm = code_cells.marks(h.section_roman, h.product_name, h.okpd2_codes)
-        if h.okpd2_codes:
-            lines.append(f"    ОКПД2: {code_cells.render(h.okpd2_codes, cm)}")
+        cc, cm = code_cells.of_hit(h)
+        if cc:
+            lines.append(f"    ОКПД2: {code_cells.render(cc, cm)}")
         if is_target or same_cell:
             lines += [f"    ⚠ {n[0].upper()}{n[1:]}." for n in code_cells.note(cm)]
         if is_target:
-            lines += _group_notes(h, _codes(code), _codes(dialog_codes), cm)
+            lines += _group_notes(h, _codes(code), _codes(dialog_codes))
         if same_cell:
             lines.append(
                 "    ⚠ ЭТО ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ требований первоисточника (требования одной "
@@ -512,7 +512,7 @@ def format_context(hits: list[Hit], query: str | None = None,
             # ПП №719, Раздел II, позиция 4»), а полное название раздела длиннее самого
             # наименования продукции. Замер: −630 символов контекста на запрос.
             src = f" · {h.source_anchor}" if h.source_anchor else f" · раздел {sect}"
-            codes = code_cells.render(h.okpd2_codes, cm) if h.okpd2_codes else "—"
+            codes = code_cells.render(cc, cm) if cc else "—"
             # ⚠ Пометку о совпадении по ГРУППЕ кода несём и в свёрнутой строке: пользователь
             # назвал код, который подходит этому кандидату, — модель обязана это видеть, иначе
             # кандидат читается как посторонний. Первая редакция свёртки её потеряла, поймано
@@ -1451,7 +1451,7 @@ def _add_positions_by_code(codes: list[str], hits: list[Hit], limit: int, *,
         # Иначе разрешаем код НЕЙТРАЛЬНО — запросом по самому коду, а не по тексту вопроса о другой
         # продукции. Иначе выбор зависит от того, в каком ПОРЯДКЕ пользователь назвал коды.
         for h in search(c, okpd2=c, limit=2, qvec=None):
-            if not h.okpd2_match or not okpd2_match(h.okpd2_codes or [], c):
+            if not h.okpd2_match or not retriever.code_match(h, c):     # D20: без исключённых кодов
                 continue
             if accept is not None and not accept(h):
                 continue

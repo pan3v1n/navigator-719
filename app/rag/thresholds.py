@@ -19,6 +19,8 @@ from functools import lru_cache
 from loguru import logger
 from pathlib import Path
 
+from app.rag import code_cells
+
 _CHUNK = (Path(__file__).resolve().parents[2] / "knowledge_base" / "pp719" / "chunks"
           / "130_PRIMECHANIYA_prilozheniya.txt")
 
@@ -615,7 +617,15 @@ _CODE_TOKEN = r"(?:из\s+)?\d{2}(?:\.\d+)*(?:\s*<[^>\n]{1,16}>)?"
 # ⚠ Строка-порог начинается со списка кодов, за которым идёт ЛИБО наименование в кавычках,
 # ЛИБО сразу двоеточие: «30.11.31.110, 30.11.31.111, …: до 30 июня 2023 г. не менее 2500 баллов»
 # (прим. 17). Требование кавычки теряло такие строки целиком (K2, #47).
-_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}(?:\s*,\s*{_CODE_TOKEN})*\s*[":]', re.IGNORECASE)
+# ⚠ D20 #225: у кода бывает оговорка «(за исключением …)» — «26.20.16 (за исключением 26.20.16.120)
+# "Устройства ввода или вывода…": … не менее 55 баллов». Без неё в форме строки три такие строки
+# прим. 26 не узнавались вовсе, и позиции получали порог ЧУЖОЙ строки через исключённый код: «Устройства
+# ввода или вывода» — принтеров (70/85/120 вместо своих 55/65/90), «Устройства запоминающие и прочие» —
+# 26.20.21 (23/25/55 вместо 110/120/150). Исключённые коды строке не принадлежат (`_row_excluded`).
+_EXC_PAREN = r"(?:\s*\(\s*за\s+исключением\s+[^)\n]*\))?"
+_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}{_EXC_PAREN}(?:\s*,\s*{_CODE_TOKEN}{_EXC_PAREN})*\s*[":]',
+                          re.IGNORECASE)
+_ROW_EXC_RE = re.compile(r"\(\s*за\s+исключением\s+([^)\n]*)\)", re.IGNORECASE)
 # ⚠ ДВА ГРАФИКА В ОДНОЙ СТРОКЕ (найдено ревью 20.08.2026, дефект внесён самой K2).
 # Приняв строку с «голым» двоеточием, разбор впустил прим. 17, где ОДНО предложение несёт ДВА
 # графика: общий и оговорку «за исключением судов, инвестиционные проекты по строительству
@@ -884,6 +894,17 @@ def _intro_codes(line: str) -> list[str]:
 
 
 @lru_cache(maxsize=1)
+def _row_excluded(line: str) -> list[str]:
+    """Коды из оговорок «(за исключением …)» в СПИСКЕ КОДОВ строки-порога (до имени и порога; имена в
+    кавычках затёрты — у них свои «за исключением товаров, классифицируемых кодами …»)."""
+    body = _blank_names(_blank_amend(line))
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = body.find(cut)
+        if pos > 0:
+            body = body[:pos]
+    return [c for m in _ROW_EXC_RE.finditer(body) for c in _CODE_ONLY_RE.findall(m.group(1)) if "." in c]
+
+
 def _flat_thresholds() -> list[dict]:
     """Строки-пороги «код "имя" - не менее N баллов» из примечаний-списков (прим. 7/8/9/31/52/53…).
     Два формата: ИНЛАЙН — порог на той же строке, что и код («…"имя": … - не менее N баллов…»);
@@ -983,13 +1004,15 @@ def _flat_thresholds() -> list[dict]:
                 left = ln[:ln.find("не менее")]
                 thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip(" -—").rstrip(";. ").strip()
                 thr = _drop_dangling_quote(thr)
-                codes = _codes_before_quote(ln)
+                excluded = _row_excluded(ln)
+                codes = [c for c in _codes_before_quote(ln) if c not in excluded]
                 thr, exc = _split_exception(thr)
                 if codes and thr:
-                    rows.append({"codes": codes, "names": _quoted_names(left),
+                    rows.append({"codes": codes, "names": _quoted_names(left), "excluded": excluded,
                                  "threshold": thr, "exception": exc, "note": note})
             elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
-                codes = _codes_before_quote(ln)
+                excluded = _row_excluded(ln)
+                codes = [c for c in _codes_before_quote(ln) if c not in excluded]
                 names = _quoted_names(ln)
                 steps: list[str] = []
                 k = i + 1
@@ -1007,7 +1030,7 @@ def _flat_thresholds() -> list[dict]:
                 # обязаны одинаково отвечать на один вход.
                 thr, exc = _split_exception("; ".join(steps)) if steps else ("", None)
                 if codes and thr:
-                    rows.append({"codes": codes, "names": names,
+                    rows.append({"codes": codes, "names": names, "excluded": excluded,
                                  "threshold": thr, "exception": exc, "note": note})
                 i = k
                 continue
@@ -1680,6 +1703,12 @@ def lookup_procurement_threshold(codes: list[str], product_name: str,
 def _lookup(codes: list[str], product_name: str, section: str | None, scope: str) -> str | None:
     """Порог по годам для позиции (из примечаний), либо None. Матч по НАИМЕНОВАНИЮ в рамках раздела
     (у одного кода бывают строки «общая категория» и «конкретный продукт» — имя различает)."""
+    # D20 #225: коды, которые позиция ИСКЛЮЧАЕТ, — не её коды, и порог по ним — чужой («Устройства
+    # ввода или вывода» 26.20.16 получали порог принтеров 26.20.16.120). Снимаем здесь, а не у
+    # вызывающих: полный список из записи и свой список хита (`retriever._to_hit`) дают одно и то же.
+    cell = code_cells.marks(section, product_name, codes)
+    if cell:
+        codes = [c for c, mk in zip(codes, cell) if mk != code_cells.EXCEPT]
     name = _norm(product_name)
     # 1) таблицы-пороги по годам (прим.77 и т.п.) — матч по НАИМЕНОВАНИЮ
     if name:
@@ -1825,6 +1854,9 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                 continue
             exact = None
             for c in codes:
+                # D20: строка «X (за исключением Y)» к позиции с кодом под Y не относится.
+                if any(_code_applies(e, c) for e in r.get("excluded") or ()):
+                    continue
                 for rc in r["codes"]:
                     if _code_applies(rc, c):
                         exact = bool(exact) or (_segs(rc) == _segs(c))

@@ -51,6 +51,14 @@ def marks(section: str | None, product_name: str | None, codes: list[str] | None
     return m
 
 
+def of_hit(h) -> tuple[list[str], list[str] | None]:
+    """(полный список кодов ячейки, пометки) для хита. ⚠ D20 #225: у хита из Qdrant
+    `okpd2_codes` — только СВОИ коды (исключённые ушли в `excluded_codes`), а ключ ячейки — полный
+    список, как в записи. Он лежит в payload; хит без payload (тесты, добор) — его `okpd2_codes`."""
+    codes = list((getattr(h, "payload", None) or {}).get("okpd2_codes") or h.okpd2_codes or [])
+    return codes, marks(h.section_roman, h.product_name, codes)
+
+
 def render(codes: list[str] | None, m: list[str] | None) -> str:
     """Коды так, как они стоят в графе кода: «из 32.50.22.110», «26.20.11 (за исключением
     26.20.11.120, 26.20.11.130)». Без пометок — через запятую, как прежде."""
