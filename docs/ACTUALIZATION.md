@@ -153,7 +153,9 @@ API ≈ ¥1.37), точечно XI, XVII, XXI, XXII; карта наследов
    («Лебедки судовые» вместо перечня из десяти видов); `verify_structured` и `reconcile_kb` этого
    не видят. Затем `diag_orphan_requirements.py --fragments …` и `--inheritance …` — ⚠ ДВУМЯ
    ОТДЕЛЬНЫМИ запусками (в одном второй режим молча пропускается); `verify_structured --json
-   …incomplete_thresholds.json`; `backfill_block_thresholds.py`; `build_expert_checklist.py`.
+   …incomplete_thresholds.json`; `backfill_block_thresholds.py`; `build_expert_checklist.py`;
+   `build_code_cells.py` (пометки «из» и «за исключением» у кодов, D16 #173 — отставший файл
+   ловит `tests/test_code_cells.py`; «не определено» в отчёте скрипта — разобрать поимённо).
 7. **Пороги — радиус ПО ВСЕМ разделам** (код до/после на одних данных): новая форма таблицы
    порогов уже один раз раздала пороги судостроения разделам V и IX по коду.
 8. **Переиндексация — в ПАРАЛЛЕЛЬНЫЕ коллекции** (`QDRANT_COLLECTION=pp719_edXXXX`,
