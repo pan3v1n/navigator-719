@@ -188,7 +188,7 @@ python scripts/backup_db.py --verify /path/to/navigator_app-2026-08-10_0300.db
 писать внутрь репозитория. Код 0 — свежая копия проверена; **2 — копия цела, но старше 36 ч (ночной
 бэкап на сервере не работает)**; 1 — копии нет.
 ```bash
-.venv\Scripts\python scripts\pull_backup.py --dest E:\navigator-backups   # папка на зашифрованном носителе
+.venv\Scripts\python scripts\pull_backup.py --dest D:\navigator-backups   # папка вне репозитория
 ```
 По расписанию — Планировщик заданий Windows раз в сутки после 06:00 МСК (команда — в шапке скрипта).
 Прежний ручной способ:
