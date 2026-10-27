@@ -104,7 +104,7 @@ def navigate(query: str, okpd2: str | None = None, limit: int = 5) -> Navigation
     # или из якоря диалога: на `POST /navigate` без явного `okpd2` здесь было None, `_target_hit`
     # уходил в ветку `matched[0]` и мог назвать ДРУГУЮ запись, чем тело ответа. `Answer.codes`
     # ради того и заведён, чтобы «кто целевой» решалось в одном месте.
-    checklist = build_checklist(_target_hit(ans.hits, ans.codes))
+    checklist = build_checklist(_target_hit(ans.hits, ans.codes, ans.target_query))
     return Navigation(
         query=query,
         okpd2_used=code,

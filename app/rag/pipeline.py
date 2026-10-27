@@ -111,6 +111,9 @@ class Answer:
     # `target_hits(hits)` БЕЗ кода даёт другой ответ, чем рантайм, и метрика начинает оценивать не
     # ту позицию, на которой построен ответ (ревью PR #94). Тот же класс, что `grounding`.
     codes: list[str] = field(default_factory=list)
+    # EV8-1 #178: запрос, по которому выбирались целевые (`target_hits(..., query)`) — тот же довод, что
+    # у `codes`: без него метрика выберет целевые иначе, чем рантайм.
+    target_query: str = ""
     # U5: что показать подсказкой в поле ввода ПОСЛЕ этого ответа — готовый текст, «» = пусто.
     # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
     # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
@@ -408,7 +411,7 @@ def format_context(hits: list[Hit], query: str | None = None,
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное
     # место, где это решается); прочие кандидаты идут строкой «наименование + код» как материал
     # для уточнения — см. EV7 ниже.
-    targets = target_hits(hits, code)
+    targets = target_hits(hits, code, query)
     # R29/EV6: строки ОДНОЙ расколотой ячейки первоисточника — это ОДИН источник, разъехавшийся по
     # нескольким строкам кода, а не чужая продукция. Их требования остаются в контексте.
     groups = {g for g in (fragments.group_of(t.product_name) for t in targets) if g is not None}
@@ -709,7 +712,60 @@ def _codes(code: str | list[str] | None) -> list[str]:
     return [c.strip() for c in ([code] if isinstance(code, str) else list(code)) if c and c.strip()]
 
 
-def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hit]:
+# EV8-1 #178: точный код, под которым лежат РАЗНЫЕ изделия. Целевыми были все такие позиции окна (до 8)
+# с полными требованиями — тот же класс утечки чисел чужой продукции, ради которого делалась `EV7`.
+# Замер 27.10.2026: в корпусе 128 ключей кода с ≥ 3 позициями (663 позиции из 1573); в трафике такой код
+# называет каждый пятый вопрос с кодом. Если в вопросе есть слова наименования — целевыми остаются
+# позиции, чьё наименование согласуется с вопросом лучше прочих; остальные идут кандидатами (имя, код).
+# Вопрос из одного кода и ничья — как прежде: «кто из них» без слов наименования не решается.
+EV8_MANY = 3
+# Запас согласия: лучшая позиция обязана опережать остальные минимум на столько слов. С запасом 1 общий
+# вопрос «Машины для измельчения и нарезания 28.93.17.112» сужался до «Машин для нарезания хлеба» — одно
+# общее слово «нарезания» ничего не говорит о том, о каком изделии спросили (замер: имя кода из
+# справочника как вопрос сужалось в 86 случаях из 116, с запасом 2 — в 34, с проверкой имени кода — 0).
+EV8_MARGIN = 2
+# Слова вопроса, которые продукцию не называют (процесс, баллы, документы) — в согласие не идут.
+_EV8_STOP = frozenset({
+    "требован", "балл", "порог", "операц", "код", "окпд", "подтвержден", "производств", "продукц",
+    "товар", "позиц", "как", "какие", "сколько", "нужн", "наш", "это", "реестр", "включен",
+    "российск", "приложен", "постановлен", "услов", "документ", "получ",
+})
+_EV8_CODE_RE = re.compile(r"\d+(?:\.\d+)+")
+
+
+def _name_stems(text: str | None) -> set[str]:
+    """Основы слов наименования (морфология BM25), без кодов, чисел и слов процесса."""
+    return {t for t in sparse.tokenize(_EV8_CODE_RE.sub(" ", text or ""))
+            if len(t) > 3 and not t.isdigit() and t not in _EV8_STOP}
+
+
+def _narrow_by_name(chosen: list[Hit], query: str | None, code: str | None = None) -> list[Hit]:
+    """Точные позиции одного кода — только согласные с наименованием в вопросе (`EV8-1` #178).
+
+    Сужаем, лишь когда позиций ≥ `EV8_MANY` и согласие ЯВНО различает их: лучшая позиция опережает
+    каждую прочую на `EV8_MARGIN` слов. Вопрос, назвавший саму группировку кода (официальное имя кода
+    или его предка по справочнику), — о группировке целиком: не сужаем. Иначе — все, как прежде (у двух
+    записей 26.11.22.210 с противоположными областями сужения нет: решает `EV8`)."""
+    if not query or len(chosen) < EV8_MANY:
+        return chosen
+    qs = _name_stems(query)
+    if not qs:
+        return chosen
+    if code:
+        names = okpd2_ref._okpd2_names()
+        for form in okpd2_ref.okpd2_ancestor_forms(code):
+            official = _name_stems(names.get(form))
+            if official and official <= qs:
+                return chosen
+    agree = [len(qs & _name_stems(h.product_name)) for h in chosen]
+    best = max(agree)
+    rest = [a for a in agree if a < best]
+    if not rest or best - max(rest) < EV8_MARGIN:
+        return chosen
+    return [h for h, a in zip(chosen, agree) if a == best]
+
+def target_hits(hits: list[Hit], code: str | list[str] | None = None,
+                query: str | None = None) -> list[Hit]:
     """Позиции, О КОТОРЫХ идёт ответ. ЕДИНСТВЕННОЕ место, где это решается.
 
     ⚠ СОВПАДЕНИЕ ПО КОДУ БЫВАЕТ ТОЧНЫМ И ПРЕФИКСНЫМ, и это разные вопросы пользователя. `okpd2_match`
@@ -804,6 +860,8 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
                                [h.product_name for h in matched])
             best = min((t for t in tiers if t is not None), default=None)
             chosen = [h for h, t in zip(matched, tiers) if t == best]
+            if best == 0:
+                chosen = _narrow_by_name(chosen, query, c)     # EV8-1 #178
             swap = True
             if best and chosen and all(fragments.is_scope_qualifier(h.product_name) for h in chosen):
                 swap = False
@@ -855,9 +913,10 @@ def _content_sibling(target: Hit, hits: list[Hit]) -> Hit:
     return best if _n_operations(best) > _n_operations(target) else target
 
 
-def _target_hit(hits: list[Hit], code: str | list[str] | None = None) -> Hit | None:
+def _target_hit(hits: list[Hit], code: str | list[str] | None = None,
+                query: str | None = None) -> Hit | None:
     """Позиция, вокруг которой строится ответ, — первая из `target_hits`."""
-    ts = target_hits(hits, code)
+    ts = target_hits(hits, code, query)
     return ts[0] if ts else None
 
 
@@ -1377,6 +1436,7 @@ class _Plan:
     # Готовая таблица баллов, которую печатает КОД (P4). Пусто — печатает модель, как раньше.
     points_table: str = ""
     codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
+    target_query: str = ""  # EV8-1: запрос, по которому выбраны целевые (см. Answer.target_query)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
     corpus: str = corpora.USED_APPENDIX  # L2: см. Answer.corpus
 
@@ -1624,7 +1684,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # ⚠ Если опорой оказалась строка-КВАЛИФИКАТОР расколотой ячейки, содержательного сиблинга может
     # не быть в окне вовсе: поиск по коду приносит записи ровно этого кода (ревью PR #94). Добираем
     # соседей по группе их собственными кодами — иначе правило EV6 нечем исполнить.
-    qual = [t for t in target_hits(hits, all_codes) if fragments.is_scope_qualifier(t.product_name)]
+    qual = [t for t in target_hits(hits, all_codes, search_query) if fragments.is_scope_qualifier(t.product_name)]
     for t in qual:
         sib_codes = list(fragments.group_codes(t.product_name))
         if not sib_codes:
@@ -1769,7 +1829,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # строится по одной — и при этом промпт получает запрет перечислять операции у ВСЕХ.
     # Эксперт увидел бы «дословно из приложения» без пометки неполноты и без баллов сиблинга:
     # ровно тот класс молчаливой потери, против которого заведены R29 и D9.
-    _tgts = target_hits(hits, all_codes)
+    _tgts = target_hits(hits, all_codes, search_query)
     table = points_table(_tgts[0], search_query) if len(_tgts) == 1 else ""
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
@@ -1803,6 +1863,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # когда-нибудь понадобится заземление, расширять нужно `claim_numbers` (учить единицу), а не стог.
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
+                 target_query=search_query,
                  low_relevance=low_rel, points_table=table,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)),
                  corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX)
@@ -1874,6 +1935,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
         codes=planned.codes,
+        target_query=planned.target_query,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
     )
@@ -1948,6 +2010,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
         codes=planned.codes,
+        target_query=planned.target_query,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
     )
