@@ -41,13 +41,18 @@ def _db_bytes(users: int = 2) -> bytes:
 
 
 def _ssh(data: bytes, name: str = NAME, sha: str | None = None, code: int = 0, extra: str = ""):
-    """Подменённый `subprocess.run`: что сервер прислал бы по одному подключению."""
+    """Подменённый `subprocess.run`: что сервер прислал бы по одному подключению.
+
+    Файл пишется в переданный `stdout` — как настоящий ssh: скрипт отдаёт ему файл, а не канал
+    (в канал ssh из Git для Windows терял хвост — первый боевой забор, 27.10)."""
     calls = []
 
-    def run(cmd, **kw):
+    def run(cmd, stdout=None, **kw):
         calls.append(cmd)
+        assert stdout is not None and hasattr(stdout, "write"), "ssh обязан писать в файл, а не в канал"
+        stdout.write(data)
         meta = f"{extra}NAME {name}\nSHA {sha or hashlib.sha256(data).hexdigest()}\n"
-        return SimpleNamespace(returncode=code, stdout=data, stderr=meta.encode("utf-8"))
+        return SimpleNamespace(returncode=code, stdout=None, stderr=meta.encode("utf-8"))
     run.calls = calls
     return run
 
@@ -98,9 +103,18 @@ class TestPullBackup(unittest.TestCase):
 
     def test_no_backup_on_server_is_said(self):
         def run(cmd, **kw):
-            return SimpleNamespace(returncode=3, stdout=b"", stderr=b"NO_BACKUP\n")
+            return SimpleNamespace(returncode=3, stdout=None, stderr=b"NO_BACKUP\n")
         self.assertEqual(self._pull(run), pb.FAILED)
         self.assertTrue(any("нет ни одной копии" in s for s in self.log), self.log)
+        self.assertFalse(list(self.dest.iterdir()), "после отказа остался временный файл")
+
+    def test_truncated_stream_saves_nothing(self):
+        """Хвост потерян в пути (так было на первом боевом заборе): сумма не сходится — не сохраняем."""
+        data = _db_bytes()
+        run = _ssh(data[:-20480] if len(data) > 20480 else data[:-1],
+                   sha=hashlib.sha256(data).hexdigest())
+        self.assertEqual(self._pull(run), pb.FAILED)
+        self.assertFalse(list(self.dest.iterdir()), "оборванная копия или её .part остались")
 
     def test_stale_backup_is_a_third_outcome(self):
         """Копия цела, но старая: забор удался, а ночной бэкап сервера — нет. Это тревога, не «ок»."""

@@ -106,42 +106,51 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
         return FAILED
     dest.mkdir(parents=True, exist_ok=True)
 
+    # ⚠⚠ ssh ПИШЕТ ПРЯМО В ФАЙЛ, А НЕ В КАНАЛ (27.10.2026, первый боевой забор). `ssh` из Git для
+    # Windows — программа MSYS; когда её stdout — нативный канал Windows (`capture_output`), при
+    # выходе процесса терялся хвост: пришло 7 077 888 байт из 7 098 368, код ssh при этом 0. На
+    # сервере все три способа чтения отдавали файл целиком; в файл тот же ssh — целиком, сумма
+    # сошлась. Поймала это сверка sha256 ниже — она здесь не формальность.
+    part = dest / ".incoming.part"
     try:
-        res = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", host,
-                   remote_command(app_dir, docker)],
-                  capture_output=True, timeout=600)
+        with open(part, "wb") as fh:
+            res = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", host,
+                       remote_command(app_dir, docker)],
+                      stdout=fh, stderr=subprocess.PIPE, timeout=600)
     except (OSError, subprocess.TimeoutExpired) as e:
+        part.unlink(missing_ok=True)
         say(f"[ОШИБКА] ssh не выполнился: {type(e).__name__}: {e}")
         return FAILED
     stderr = (res.stderr or b"").decode("utf-8", errors="replace")
     if res.returncode != 0:
+        part.unlink(missing_ok=True)
         why = "на сервере нет ни одной копии в /data/backups" if "NO_BACKUP" in stderr else stderr.strip()[-300:]
         say(f"[ОШИБКА] забор не удался (код {res.returncode}): {why}")
         return FAILED
 
     name, sha = parse_meta(stderr)
     if not name or not NAME_RE.match(name) or not sha:
+        part.unlink(missing_ok=True)
         say(f"[ОШИБКА] сервер не прислал имя и sha256 копии: {stderr.strip()[-300:]}")
         return FAILED
-    data = res.stdout or b""
-    got = hashlib.sha256(data).hexdigest()
-    if got != sha:
-        say(f"[ОШИБКА] sha256 не сошлась ({len(data):,} байт пришло): канал оборвался или файл менялся — копия НЕ сохранена")
+    size = part.stat().st_size
+    if hashlib.sha256(part.read_bytes()).hexdigest() != sha:
+        part.unlink(missing_ok=True)
+        say(f"[ОШИБКА] sha256 не сошлась ({size:,} байт пришло): канал оборвался или файл менялся — копия НЕ сохранена")
         return FAILED
 
     final = dest / name
     if final.exists() and hashlib.sha256(final.read_bytes()).hexdigest() == sha:
+        part.unlink(missing_ok=True)
         say(f"[OK] {name} уже есть в {dest} — та же копия, повторно не пишу")
     else:
-        part = dest / (name + ".part")
-        part.write_bytes(data)
         ok, report = verify_backup(part)
         if not ok:
             part.unlink(missing_ok=True)  # битую не оставляем: она маскирует отсутствие копии
             say(f"[ОШИБКА] {name}: {report} — копия НЕ сохранена")
             return FAILED
         part.replace(final)
-        say(f"[OK] {name} → {dest} ({len(data):,} байт), {report}")
+        say(f"[OK] {name} → {dest} ({size:,} байт), {report}")
 
     for old in rotate(dest, keep_days, now):
         say(f"[rotate] удалена копия старше {keep_days} дн.: {old}")
