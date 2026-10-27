@@ -892,7 +892,8 @@ def _intro_codes(line: str) -> list[str]:
     return out
 
 
-_ROW_EXC_OPEN_RE = re.compile(r"\(\s*(?:за\s+исключением|кроме)\s+", re.IGNORECASE)
+# «… (только в отношении X и кроме Y)» — оговорка «и кроме» внутри «только» (прим. 26.1, турникеты; ревью D21).
+_ROW_EXC_OPEN_RE = re.compile(r"(?:\(\s*|\bи\s+)(?:за\s+исключением|кроме)\s+", re.IGNORECASE)
 _QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
 
 
@@ -914,6 +915,18 @@ def _row_excluded(line: str) -> list[str]:
         if pos > 0:
             end = min(end, pos)
     out: list[str] = []
+    for a, b in _exclusion_spans(raw, end):
+        seg = _QUOTED_SPAN_RE.sub(" ", raw[a:b])
+        for c in _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", seg)):
+            if "." in c and c not in out:
+                out.append(c)
+    return out
+
+
+def _exclusion_spans(raw: str, end: int) -> list[tuple[int, int]]:
+    """Границы текста оговорок «(за исключением …)» / «(кроме …)» до позиции `end` — до ПАРНОЙ скобки,
+    скобки внутри кавычек не считаются."""
+    spans = []
     for m in _ROW_EXC_OPEN_RE.finditer(raw, 0, end):
         depth, quoted, j = 1, False, m.end()
         while j < end and depth:
@@ -925,11 +938,42 @@ def _row_excluded(line: str) -> list[str]:
             elif not quoted and ch == ")":
                 depth -= 1
             j += 1
-        seg = _QUOTED_SPAN_RE.sub(" ", raw[m.end():j])
-        for c in _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", seg)):
-            if "." in c and c not in out:
-                out.append(c)
-    return out
+        spans.append((m.end(), j))
+    return spans
+
+
+def _row_exclusion_texts(line: str) -> list[str]:
+    """Тексты оговорок «(за исключением …)» / «(кроме …)» строки-порога — в том числе ВНЕ кавычек и без
+    закрывающей скобки (прим. 26.1, 26.30.11: «… "Аппаратура коммуникационная …" (кроме системы
+    мониторинга окружающей среды, …»). Правило противоположных оговорок читает их отсюда (ревью D21)."""
+    raw = _blank_amend(line)
+    blanked = _blank_names(raw)
+    end = len(raw)
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = blanked.find(cut)
+        if pos > 0:
+            end = min(end, pos)
+    return [raw[a:b] for a, b in _exclusion_spans(raw, end)]
+
+
+def _subject_names(line: str) -> list[str]:
+    """Наименования, которые строка НАЗЫВАЕТ своим предметом: закавыченные имена ВНЕ её оговорок.
+
+    ⚠ D21 #230: `_quoted_names` берёт и имена из «(кроме ОКПД 2 … "Тапочки детские меховые"; …)» —
+    это то, что строка ИСКЛЮЧАЕТ, а не её предмет; правило противоположных оговорок принимало бы их
+    за предмет строки."""
+    raw = _blank_amend(line)
+    blanked = _blank_names(raw)
+    end = len(raw)
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = blanked.find(cut)
+        if pos > 0:
+            end = min(end, pos)
+    out = list(raw)
+    for a, b in _exclusion_spans(raw, end):
+        for x in range(a, b):
+            out[x] = " "
+    return _quoted_names("".join(out)[:end])
 
 
 @lru_cache(maxsize=1)
@@ -1037,6 +1081,7 @@ def _flat_thresholds() -> list[dict]:
                 thr, exc = _split_exception(thr)
                 if codes and thr:
                     rows.append({"codes": codes, "names": _quoted_names(left), "excluded": excluded,
+                                 "subject_names": _subject_names(ln), "exclusions": _row_exclusion_texts(ln),
                                  "threshold": thr, "exception": exc, "note": note})
             elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
                 excluded = _row_excluded(ln)
@@ -1059,6 +1104,7 @@ def _flat_thresholds() -> list[dict]:
                 thr, exc = _split_exception("; ".join(steps)) if steps else ("", None)
                 if codes and thr:
                     rows.append({"codes": codes, "names": names, "excluded": excluded,
+                                 "subject_names": _subject_names(ln), "exclusions": _row_exclusion_texts(ln),
                                  "threshold": thr, "exception": exc, "note": note})
                 i = k
                 continue
@@ -1658,6 +1704,125 @@ def _stems(text: str) -> set[str]:
     return {t for t in tokenize(text or "") if len(t) > 2 and not t.isdigit()}
 
 
+
+# --- Противоположные оговорки области (D21 #230) -------------------------------------------------
+# Позиция получала порог строки, чья ОБЛАСТЬ ей противоположна: «Принтеры (кроме принтеров для печати
+# этикеток …)» — порог строки «Принтеры (только в отношении принтеров для печати этикеток …)»;
+# «Сканеры биометрические» — порог «Сканеров (только в отношении сканеров штрихкодов)»; «Аппараты для
+# ингаляционного наркоза (за исключением аппаратов ИВЛ)» — порог строки «Аппараты ИВЛ». Код у них общий,
+# строка с точным кодом единственная — и шла в ответ без проверки наименования. Число дословное, ссылка
+# подлинная: гард и эксперт подмены не видят.
+# Радиус 27.10.2026 по всем позициям: порог снят ровно у 11, у каждой своей строки в примечаниях нет:
+#   * три позиции выше;
+#   * шесть позиций IX кода 26.30.11 («Система мониторинга окружающей среды», «Терминал экстренной связи»
+#     …) — строка прим. 26.1 «из 26.30.11 "…" (кроме системы мониторинга окружающей среды, …» исключает их
+#     оговоркой ВНЕ кавычек и без закрывающей скобки (ревью D21, HIGH-1);
+#   * «Турникеты биометрические…» — «(только в отношении … и кроме турникетов биометрических…)»;
+#   * «Маммографы, рентгеновские аппараты …» — перечень, разделённый строками «Маммографы» (100/110) и
+#     «Рентгеновские аппараты … (за исключением маммографов)» (100/100): общего порога нет (HIGH-2).
+# Позиции с оговоркой УЖЕ строки («Краны … (за исключением кранов для самоходной техники)» ← «Краны
+# грузоподъемные прочие») и исключающие ПОДВИД сохраняют порог. Оговорки по РАЗДЕЛУ («за исключением
+# продукции, предусмотренной разделом X») — другой механизм, отдельная задача.
+_SCOPE_ONLY_RE = re.compile(r"\(\s*только\s+в\s+отношении\s+((?:[^()]|\([^()]*\))*)\)", re.IGNORECASE)
+_SCOPE_EXCEPT_RE = re.compile(r"\(\s*(?:кроме|за\s+исключением)\s+((?:[^()]|\([^()]*\))*)\)", re.IGNORECASE)
+# Оговорка, обрезанная разбором имени без закрывающей скобки («Спецодежда (кроме ОКПД 2 … "Рукавицы…»).
+_SCOPE_EXCEPT_TAIL_RE = re.compile(r"\(\s*(?:кроме|за\s+исключением)\s+[^()]*$", re.IGNORECASE)
+_SCOPE_ITEM_SPLIT_RE = re.compile(r"[;,\n]")
+# Слова оговорки, которые продукцию не называют: «(за исключением продукции, классифицируемой кодом X,
+# предусмотренной разделом Y настоящего приложения)». Без них пункт из одних служебных слов совпадал бы
+# с любой строкой «…, классифицируемая кодом …» (ревью D21, MED-4). Коды — задача `D20`.
+_SCOPE_GENERIC = frozenset(_stems("продукция продукции продукцию классифицируемой классифицируемых кодом кодами раздел разделом разделе предусмотренной предусмотрены приложения настоящего требования которой товаров товары изделий изделия"))
+
+
+def _scope_items(text: str) -> list[set[str]]:
+    """Пункты оговорки «X, Y; Z» — каждый основами без служебных слов; пустые отброшены.
+    Закавыченное имя — ОДИН пункт: запятая внутри «"Обувь детская прочая, не включенная в другие
+    группировки"» пункт не делит (иначе хвост «не включенная …» совпал бы с чужим предметом)."""
+    parts = re.findall(r'"([^"]*)"', text) + _SCOPE_ITEM_SPLIT_RE.split(_QUOTED_SPAN_RE.sub(" ; ", text))
+    return [st for part in parts if (st := _stems(part) - _SCOPE_GENERIC)]
+
+
+def _without_exclusions(text: str) -> str:
+    """Текст без СВОИХ оговорок-исключений — в том числе «… и кроме Y» внутри «(только в отношении X …)»:
+    позиция «Устройства охранной сигнализации (только в отношении … и кроме турникетов биометрических)»
+    турникетами не ЯВЛЯЕТСЯ, а их исключает."""
+    out = list(text or "")
+    for a, b in _exclusion_spans(text or "", len(text or "")):
+        for x in range(a, b):
+            out[x] = " "
+    return "".join(out)
+
+
+def _scope_base(text: str) -> str:
+    """Имя без оговорок «только в отношении» и «кроме / за исключением» (в том числе обрезанной)."""
+    return _SCOPE_EXCEPT_TAIL_RE.sub(" ", _SCOPE_ONLY_RE.sub(" ", _SCOPE_EXCEPT_RE.sub(" ", text)))
+
+
+def _scope_conflict(row_names: list[str], product_name: str | None,
+                    subject_names: list[str] | None = None,
+                    row_exclusions: list[str] | None = None) -> bool:
+    """Область строки противоположна позиции — порог строки ей не принадлежит.
+
+    А. Позиция ИСКЛЮЧАЕТ предмет строки: всё, что названо в пункте «(кроме / за исключением X)»
+       позиции, есть в предмете строки — «только в отношении Y», а без такой оговорки её имени («за
+       исключением аппаратов ИВЛ» ↔ строка «Аппараты ИВЛ»).
+    Б. Строка — ТОЛЬКО О X, а позиция X не называет: у X есть слова сверх имени строки
+       («штрихкодов» сверх «Сканеры»), и ни одного из них в наименовании позиции (вместе с её
+       собственной «только в отношении …») нет.
+    В. Строка своей оговоркой ИСКЛЮЧАЕТ позицию: пункт «(кроме / за исключением …)» строки целиком
+       назван в имени позиции. Оговорки строки — из её имён И из самого текста строки
+       (`row_exclusions`): в прим. 26.1 «из 26.30.11 "…" (кроме системы мониторинга окружающей среды,
+       …» стоит ВНЕ кавычек и без закрывающей скобки (ревью D21, HIGH-1).
+    Оговорка делится на пункты, включение пункта СТРОГОЕ, пункт из одного слова для А и В не в счёт,
+    одинаковые имена не конфликтуют. `subject_names` — предмет строки для А и Б (имена ВНЕ её
+    оговорок, `_subject_names`). ⚠ Исключённый ПОДВИД — не конфликт: «Тазобедренный модуль …
+    (за исключением тазобедренного модуля … с использованием полимеров)» к позиции «Тазобедренный
+    модуль …» относится. ⚠ Первая редакция допускала «без одного слова» и путала исключение ПОДВИДА
+    с исключением предмета: «Слуховые аппараты (за исключением … костной проводимости)», «Обувь
+    детская прочая (кроме … Тапочки детские …)», «Чехлы (лайнеры) …» теряли свой порог."""
+    pn = product_name or ""
+    same = lambda nm: _norm(_strip_fn(nm)) == _norm(_strip_fn(pn))  # noqa: E731
+    p_except = [it for m in _SCOPE_EXCEPT_RE.finditer(pn) for it in _scope_items(m.group(1)) if len(it) >= 2]
+    p_own = _stems(_scope_base(_without_exclusions(pn)))
+    # Чем позиция ЯВЛЯЕТСЯ: имя без её исключений, но с её «только в отношении …» (ревью D21, MED-3).
+    p_full = _stems(_SCOPE_EXCEPT_TAIL_RE.sub(" ", _SCOPE_EXCEPT_RE.sub(" ", _without_exclusions(pn))))
+    for nm in (subject_names if subject_names is not None else row_names) or ():
+        if not nm or same(nm):
+            continue
+        r_only = [_stems(m.group(1)) for m in _SCOPE_ONLY_RE.finditer(nm)]
+        r_base = _stems(_scope_base(nm))
+        for subject in (r_only or [r_base]):
+            if subject and any(ex <= subject for ex in p_except):
+                return True
+        for x in r_only:
+            distinct = x - r_base
+            if distinct and not (distinct & p_full):
+                return True
+    r_except = [it for nm in (row_names or ()) if nm and not same(nm)
+                for m in _SCOPE_EXCEPT_RE.finditer(nm) for it in _scope_items(m.group(1))]
+    r_except += [it for clause in (row_exclusions or ()) for it in _scope_items(clause)]
+    return bool(p_own) and any(len(ex) >= 2 and ex <= p_full for ex in r_except)
+
+
+def _excludes_list_item(row_names: list[str], product_name: str | None,
+                        row_exclusions: list[str] | None = None) -> bool:
+    """Строка исключает ОДИН ИЗ ПУНКТОВ позиции-перечня — у перечня нет общего порога, не гадаем.
+
+    Ревью D21 (HIGH-2): «Маммографы, рентгеновские аппараты передвижные палатные, …» получали порог
+    строки «Рентгеновские аппараты … (за исключением маммографов)», хотя у маммографов своя строка с
+    другим графиком (с 2027 г. — на 10 баллов выше). Пункт из одного слова («маммографов») здесь в
+    счёт идёт, но только при ТОЧНОМ совпадении с пунктом перечня позиции."""
+    pn = product_name or ""
+    p_items = [_stems(part) - _SCOPE_GENERIC for part in _SCOPE_ITEM_SPLIT_RE.split(_scope_base(pn))]
+    p_items = [it for it in p_items if it]
+    if len(p_items) < 2:
+        return False
+    r_except = [it for nm in (row_names or ()) if nm
+                for m in _SCOPE_EXCEPT_RE.finditer(nm) for it in _scope_items(m.group(1))]
+    r_except += [it for clause in (row_exclusions or ()) for it in _scope_items(clause)]
+    return any(ex == it for ex in r_except for it in p_items)
+
+
 def _lead_first(r: dict, product_name: str) -> tuple[str, str | None]:
     """`(ведущий график, остальные)` для строки с подблоками «для …» — по ИМЕНИ позиции.
 
@@ -1836,6 +2001,10 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
                 # «Бинты … со средствами гемостатическими…», и такой отбор выбросил бы 15 из 21.
                 if r.get("strict_name") and not _strict_match(r["name"], product_name):
                     continue
+                if _excludes_list_item([r.get("name") or ""], product_name):
+                    return None                                # D21: перечень, разделённый строками
+                if _scope_conflict([r.get("name") or ""], product_name):    # D21 #230
+                    continue
                 exact = None
                 for c in codes:
                     for rc in r["codes"]:
@@ -1888,19 +2057,22 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             if note_scope(r.get("note")) != scope:
                 continue
             exact = None
-            for c in codes:
-                # D20: строка «X (за исключением Y)» к позиции с кодом под Y не относится.
-                if any(code_cells.under(c, e) for e in r.get("excluded") or ()):
-                    continue
+            # D20: строка «X (за исключением Y)» к позиции с кодом под Y не относится — ни точным кодом,
+            # ни подкодом категории (ревью D21, MED-5: ветка подкода исключения обходила).
+            own_codes = [c for c in codes
+                         if not any(code_cells.under(c, e) for e in r.get("excluded") or ())]
+            for c in own_codes:
                 for rc in r["codes"]:
                     if _code_applies(rc, c):
                         exact = bool(exact) or (_segs(rc) == _segs(c))
+            # Имена, которые строка называет СВОИМ предметом: исключённые в её оговорке — не в счёт.
+            subject = r.get("subject_names") or r.get("names") or []
             if exact is None:
                 # Подкод категории «…0» — ТОЛЬКО при дословном совпадении имени (см. `_subcode_of_group`):
                 # без имени это общий подъём к группе, а его радиус не мерили (`D14` #141).
-                if (any(_subcode_of_group(rc, c) for c in codes for rc in r["codes"])
+                if (any(_subcode_of_group(rc, c) for c in own_codes for rc in r["codes"])
                         and any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
-                                for nm in r.get("names") or [])):
+                                for nm in subject)):
                     exact = False
                 else:
                     continue
@@ -1922,6 +2094,11 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # такого правила — в шапке `_names_this_position`.
             if r.get("strict_name") and not _names_this_position(product_name, r["names"]):
                 continue
+            if _excludes_list_item(r.get("names") or [], product_name, r.get("exclusions")):
+                return None                                    # D21: перечень, разделённый строками
+            if _scope_conflict(r.get("names") or [], product_name, r.get("subject_names"),
+                               r.get("exclusions")):          # D21 #230
+                continue
             cands.append((r, exact))
         if len(cands) == 1:
             row, is_exact = cands[0]
@@ -1934,7 +2111,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # написан прямо для неё. Сноски у имени («Ледоколы <9>») снимаем перед сравнением.
             exact_name = [rc for rc in cands
                           if any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
-                                 for nm in rc[0]["names"])]
+                                 for nm in (rc[0].get("subject_names") or rc[0]["names"]))]
             if len(exact_name) == 1:
                 row, is_exact = exact_name[0]
                 return _fmt_flat(row, group=not is_exact, product_name=product_name)
