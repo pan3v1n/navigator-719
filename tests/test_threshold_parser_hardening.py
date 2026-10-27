@@ -68,8 +68,12 @@ class TestInvisibleCharactersD17(unittest.TestCase):
         for line in REAL.split("\n"):
             body, cr = (line[:-1], "\r") if line.endswith("\r") else (line, "")
             if t._STEP_RE.search(body) or "|" in body:
-                body += "​​"
-            out.append(body + cr)
+                out.append(body + "​​" + cr)
+                # ⚠ И строка ИЗ ОДНИХ невидимых между ступенями и строками таблиц (ревью PR #220,
+                # MED): очищенная до пустоты, она стала бы границей и обрезала график молча.
+                out.append("​" + cr)
+            else:
+                out.append(line)
         return "\n".join(out)
 
     def test_dirty_text_parses_like_clean(self):
@@ -120,6 +124,36 @@ class TestAllOrNothingIsLoudK24(unittest.TestCase):
                          "порча не воспроизвела отказ — тест ничего не проверяет")
         self.assertTrue(any("80.1" in w and "отвергнута" in w for w in warnings), warnings)
         self.assertTrue(any("80.1" in w and "разобрано 0" in w for w in warnings), warnings)
+
+
+class TestZeroRowsAlarmSeesMultiCodeCells(unittest.TestCase):
+    """Тревога «разобрано 0» узнаёт строку таблицы по коду В ЯЧЕЙКЕ, а не по началу строки.
+
+    Ревью PR #220: `_ROW_START_RE` узнаёт одну ячейку с одним кодом на одной строке — у прим. 80.1
+    таких 8 из 95, и таблица из одних многокодовых ячеек обнулилась бы без тревоги."""
+
+    SYNTHETIC = ("99. Продукция, классифицируемая кодами по ОК 034-2014 (КПЕС 2008), может быть "
+                 "отнесена к российской промышленной продукции при условии:\n"
+                 "Код|Наименование|с 1 января 2026 г.|с 1 января 2027 г.|\n"
+                 "\n"
+                 "из 26.11.22.200,\nиз 26.11.22.210|Изделия первые|не менее 10 баллов|не менее 20 баллов|\n"
+                 "из 26.11.22.220,\nиз 26.11.22.230|Изделия вторые|не менее 15 баллов|не менее 25 баллов|\n")
+
+    def test_table_of_multi_code_cells_lost_whole_is_logged(self):
+        with chunk(self.SYNTHETIC) as warnings:
+            tables = t._tables()
+        self.assertFalse(any(tb["note"] == "99" for tb in tables),
+                         "синтетическая таблица разобралась — тест ничего не проверяет")
+        self.assertTrue(any("99" in w and "разобрано 0" in w for w in warnings), warnings)
+
+    def test_code_row_shapes(self):
+        self.assertTrue(t._is_code_row("из 26.11.22.200,\nиз 26.11.22.210|Имя|не менее 10 баллов|"))
+        # поправка с датой, похожей на код, и исключение — одна ячейка, их отсекает число ячеек
+        self.assertFalse(t._is_code_row("(в ред. Постановления Правительства РФ от 05.10.2026 N 1297)|"))
+        self.assertFalse(t._is_code_row("из 21.20.24.169 - Исключено.|"))
+        self.assertFalse(t._is_code_row('из 28.13.27 "Компрессорная установка":|до 31 декабря 2025 г.|'
+                                        "с 1 января 2026 г.|"),
+                         "подзаголовок таблицы по узлам (прим. 74) — шапка, а не строка с кодом")
 
 
 class TestUniformSchedule(unittest.TestCase):
