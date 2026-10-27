@@ -201,6 +201,7 @@ def build_admin_view(
     ans_ratings: list[int] = []                              # звёзды ответов 0..5 (kind='answer')
     orphan_ratings = 0                                       # оценки без найденного ответа — вне метрики (R2)
     repeat_ratings = 0                                       # #166: перебитые повторной оценкой того же ответа
+    withdrawn_ratings = 0                                    # последняя оценка — 0, то есть снята (27.10.2026)
     ans_ratings_by_role: dict[str, list[int]] = defaultdict(list)
     region_acc: dict[str, dict] = defaultdict(
         lambda: {"users": 0, "ratings": [], "requests": 0, "tokens": 0, "cost": 0.0}
@@ -289,6 +290,11 @@ def build_admin_view(
                     orphan_ratings += 1
                 elif f.rating is not None and f.id in superseded:
                     repeat_ratings += 1   # #166: перебита более поздней оценкой того же ответа
+                elif f.rating == 0:
+                    # Оценка СНЯТА (решение владельца 27.10.2026): 0 ставит только повторный клик по
+                    # активной звезде — в базе все нули получены так, поверх ненулевой оценки. Ответ без
+                    # оценки в приёмку не идёт; прежде он шёл в неё нулём.
+                    withdrawn_ratings += 1
                 elif f.rating is not None:
                     ans_ratings.append(f.rating)
                     ans_ratings_by_role[u.role].append(f.rating)
@@ -425,6 +431,7 @@ def build_admin_view(
         # что часть сигнала качества потеряна вместе с удалёнными беседами.
         "orphan_ratings": orphan_ratings,
         "repeat_ratings": repeat_ratings,  # #166
+        "withdrawn_ratings": withdrawn_ratings,
         "per_user": per_user_stat,
         "per_day": per_day_list,
         "max_requests": per_user_stat[0]["requests"] if per_user_stat else 0,
