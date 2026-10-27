@@ -977,7 +977,7 @@ def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
     scalar = ("users_total", "users", "experts", "admins", "conversations", "requests", "answers",
               "tokens", "cost", "answer_ratings", "avg_stars", "accept_pct", "accept_user",
               "accept_expert", "gate", "gate_pass", "flags_unverified", "flags_lowrel",
-              "demand_product", "demand_procedural", "orphan_ratings")
+              "demand_product", "demand_procedural", "orphan_ratings", "repeat_ratings")
     payload = {
         # R3: выгрузка админки тоже уносит ответы ИИ наружу (в отчёты, заказчику) — маркируем.
         "disclaimer": EXPERT_DISCLAIMER,

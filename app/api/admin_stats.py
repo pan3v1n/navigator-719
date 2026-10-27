@@ -60,6 +60,30 @@ def _accept_pct(ratings: list[int]) -> int | None:
     return round(100 * sum(1 for r in ratings if r >= 4) / len(ratings)) if ratings else None
 
 
+def _superseded_ratings(fb_by_user: dict[int, list]) -> set[int]:
+    """id оценок ответа, ПЕРЕБИТЫХ более поздней оценкой того же пользователя на тот же ответ (#166).
+
+    Повторный клик по звёздам (3 → 4) — переоценка, а не второй голос: `/api/feedback` пишет
+    каждую оценку новой строкой, и приёмочная доля считала один ответ дважды. Учитывается
+    ПОСЛЕДНЯЯ (по времени, при равенстве — по id), прежние уходят отдельным счётчиком в «Сигналы
+    качества». ⚠ Метрика меняется задним числом — замер до/после записан в задачнике."""
+    out: set[int] = set()
+    for lst in fb_by_user.values():
+        last: dict[int, object] = {}
+        for f in lst:
+            if (f.kind or "service") != "answer" or f.rating is None or f.message_id is None:
+                continue
+            prev = last.get(f.message_id)
+            if prev is None:
+                last[f.message_id] = f
+            elif (f.ts or datetime.min, f.id) > (prev.ts or datetime.min, prev.id):
+                out.add(prev.id)
+                last[f.message_id] = f
+            else:
+                out.add(f.id)
+    return out
+
+
 def _fmt_trend(cur: float, prev: float, good_up: bool | None = True) -> dict:
     """Готовый к отрисовке тренд-чип (текущее окно к предыдущему): стрелка, %-подпись, css-класс.
     Зелёный = «хорошо»: направление сверяется с good_up (для затрат good_up=False — рост это плохо;
@@ -163,6 +187,7 @@ def build_admin_view(
     for f in all_fb:
         if f.user_id in sel_ids and _in_window(f.ts, date_from, date_to):
             fb_by_user[f.user_id].append(f)
+    superseded = _superseded_ratings(fb_by_user)
 
     # --- аккумуляторы ------------------------------------------------------
     data = []                       # детальные логи (юзер → беседы → реплики)
@@ -175,6 +200,7 @@ def build_admin_view(
     ratings: list[int] = []                                  # service-оценки 1..5
     ans_ratings: list[int] = []                              # звёзды ответов 0..5 (kind='answer')
     orphan_ratings = 0                                       # оценки без найденного ответа — вне метрики (R2)
+    repeat_ratings = 0                                       # #166: перебитые повторной оценкой того же ответа
     ans_ratings_by_role: dict[str, list[int]] = defaultdict(list)
     region_acc: dict[str, dict] = defaultdict(
         lambda: {"users": 0, "ratings": [], "requests": 0, "tokens": 0, "cost": 0.0}
@@ -261,6 +287,8 @@ def build_admin_view(
                 snippet = (ans_txt[:220] + "…") if len(ans_txt) > 220 else ans_txt
                 if f.rating is not None and orphan:
                     orphan_ratings += 1
+                elif f.rating is not None and f.id in superseded:
+                    repeat_ratings += 1   # #166: перебита более поздней оценкой того же ответа
                 elif f.rating is not None:
                     ans_ratings.append(f.rating)
                     ans_ratings_by_role[u.role].append(f.rating)
@@ -396,6 +424,7 @@ def build_admin_view(
         # Оценки, чей ответ не найден: в приёмку НЕ включены (R2). Ненулевое значение — сигнал,
         # что часть сигнала качества потеряна вместе с удалёнными беседами.
         "orphan_ratings": orphan_ratings,
+        "repeat_ratings": repeat_ratings,  # #166
         "per_user": per_user_stat,
         "per_day": per_day_list,
         "max_requests": per_user_stat[0]["requests"] if per_user_stat else 0,
