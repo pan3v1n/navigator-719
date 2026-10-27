@@ -398,6 +398,31 @@ class TestReviewR38(_Accounts):
         self.assertIn(f'id="lead-{lid}"', html)
         self.assertNotIn(f'id="lead-{other}"', html)
         self.assertIn(f"показана заявка №{lid}", html)
+        with mock.patch.object(adm, "current_user", return_value=ADMIN):
+            gone = adm.admin_leads_page(_get("/admin/leads"), lead=987654).body.decode("utf-8")
+        self.assertIn("заявки №987654 нет", gone)
+
+    def test_reject_of_decided_lead_is_refused(self):
+        """Ревью этапа 2: «Отклонить» в устаревшей вкладке не помечает отказом подключённую заявку."""
+        u = self.user()
+        lid = self.lead(u)
+        adm.admin_tester_approve(lid, expires="", admin=ADMIN)
+        with self.assertRaises(HTTPException) as e:
+            adm.admin_tester_reject(lid, admin=ADMIN)
+        self.assertEqual(e.exception.status_code, 409)
+        with self.Session() as db:
+            self.assertEqual(q.get_lead(db, lid).status, "connected")
+
+    def test_expired_tester_request_is_not_marked_as_tester(self):
+        """Истёкший тестировщик подаёт заявку снова — отметка «уже тестировщик» её не порочит."""
+        u = self.user(plan=TESTER)
+        with self.Session() as db:
+            q.get_user(db, u.id).plan_expires_at = plans.anchor_from_date(plans.msk_today() - timedelta(days=1))
+            db.commit()
+        lid = self.lead(u)
+        row = self.page()
+        row = row[row.index(f'id="tester-lead-{lid}"'):]
+        self.assertNotIn("уже тестировщик", row[:row.index("</tr>")])
 
 
 class TestCabinetR38(_Accounts):

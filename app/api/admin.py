@@ -772,7 +772,8 @@ def admin_testers(request: Request, ok: str = ""):
                              "status": LEAD_STATUSES.get(lead.status, lead.status),
                              "user_id": u.id if u else None, "login": u.username if u else "",
                              "name": (u.full_name or "") if u else "",
-                             "is_tester": bool(u and u.plan == plans.TESTER_PLAN)})
+                             # действующий: истёкший снова подаёт заявку (#200, п. 5) — не «дубль»
+                             "is_tester": bool(u and u.plan == plans.TESTER_PLAN and not plans.plan_expired(u))})
         rows = [{"id": u.id, "login": u.username, "name": u.full_name or "", "org": u.org or "",
                  "region": u.region or "", "verified": _tester_verified(db, u, people),
                  "expires": f"{plans.msk_date(u.plan_expires_at):%d.%m.%Y}" if u.plan_expires_at else "",
@@ -783,6 +784,15 @@ def admin_testers(request: Request, ok: str = ""):
     return _page(request, gate, "testers", "testers", "Тестировщики", requests=requests, rows=rows,
                  pending_total=pending_total, done=TESTER_DONE.get(ok, ""), min_until=min_until,
                  tester=plans.TESTER_PLAN)
+
+
+def _ensure_undecided(lead) -> None:
+    """#200, п. 1: решение по заявке тестировщика принимается ОДИН раз — 409 иначе. Устаревшая вкладка
+    подключала бы безлимит по уже отклонённой заявке (и затирала срок повторным «Подтвердить») или
+    помечала отказом заявку, по которой тариф уже подключён (ревью этапа 2)."""
+    if lead.status not in ("new", "in_work"):
+        raise HTTPException(status_code=409, detail="Заявка уже обработана: "
+                            + LEAD_STATUSES.get(lead.status, lead.status or "—").lower())
 
 
 @router.post("/api/admin/testers/{lead_id}/approve")
@@ -801,11 +811,7 @@ def admin_tester_approve(lead_id: int, expires: str = Form(default=""),
         lead = q.get_lead(db, lead_id)
         if lead is None or not _is_tester_lead(lead):
             raise HTTPException(status_code=404, detail="Заявка на тестирование не найдена")
-        # #200, п. 1: решение по заявке принимается ОДИН раз. Устаревшая вкладка с уже отклонённой
-        # заявкой подключала бы безлимит, а повторное «Подтвердить» затирало срок и дату подключения.
-        if lead.status not in ("new", "in_work"):
-            raise HTTPException(status_code=409, detail="Заявка уже обработана: "
-                                + LEAD_STATUSES.get(lead.status, lead.status or "—").lower())
+        _ensure_undecided(lead)
         if not lead.user_id or q.get_user(db, lead.user_id) is None:
             raise HTTPException(status_code=422, detail="У заявки нет учётки — создайте её в разделе «Заявки»")
         uid = lead.user_id
@@ -823,6 +829,7 @@ def admin_tester_reject(lead_id: int, admin: User = Depends(require_admin)) -> R
         lead = q.get_lead(db, lead_id)
         if lead is None or not _is_tester_lead(lead):
             raise HTTPException(status_code=404, detail="Заявка на тестирование не найдена")
+        _ensure_undecided(lead)  # ревью этапа 2: та же защита, что у «Подтвердить»
         q.set_lead_status(db, lead_id, "rejected")
     logger.info(f"тестировщик: admin_id={admin.id} отклонил lead_id={lead_id}")
     return RedirectResponse("/admin/testers?ok=rejected", status_code=303)

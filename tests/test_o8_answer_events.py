@@ -109,6 +109,48 @@ class TestAnswerEventIsWritten(unittest.TestCase):
         self.assertEqual(self._events(), [], "битое событие не пишется, но и не роняет ответ")
 
 
+class TestTracebacksWithoutValues(unittest.TestCase):
+    """Ревью этапа 2: трассировка `logger.exception` вне `development` — без значений переменных.
+
+    Loguru по умолчанию подписывает строки стека значениями переменных, и текст вопроса уезжал в
+    журнал при каждом падении движка. Положительный контроль: в `development` значения видны."""
+
+    def _trace(self, env: str) -> str:
+        import io
+
+        import main
+        from app.core.config import settings
+
+        buf = io.StringIO()
+        orig_env = settings.APP_ENV
+        settings.APP_ENV = env
+        try:
+            logger.remove()
+            if env == "development":
+                logger.add(buf, level="INFO")             # прежнее поведение: значения видны
+            main.configure_logging(stream=buf)
+
+            def engine(message):
+                raise RuntimeError("DeepSeek недоступен")
+            try:
+                engine(QUESTION)
+            except RuntimeError:
+                logger.exception("chat: движок упал")
+        finally:
+            settings.APP_ENV = orig_env
+            logger.remove()
+            logger.add(sys.stderr)
+        return buf.getvalue()
+
+    def test_production_trace_has_no_question(self):
+        out = self._trace("production")
+        self.assertIn("chat: движок упал", out)
+        self.assertNotIn("Ромашка", out, "текст вопроса утёк в журнал трассировкой")
+
+    def test_development_still_shows_values(self):
+        self.assertIn("Ромашка", self._trace("development"), "контроль: без правки значения видны")
+
+
 class TestDailySummary(unittest.TestCase):
     LINES = [
         'INFO uvicorn: "POST /api/chat HTTP/1.1" 200',

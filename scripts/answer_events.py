@@ -1,13 +1,15 @@
 """Сводка событий ответов из журнала боя — `O8` #144.
 
-Читает строки `answer_event {json}` (их пишет `app/api/events.py`, одна на ответ) и печатает: сколько
-ответов, доля веток по корпусу (`L2`), режимы источника (`L1`), срабатывания проверок, p50/p95 времени
-ответа и времени до первого куска. В строках событий нет ни текста вопросов, ни логинов — сводку можно
-снимать на боевом сервере и переносить без ПДн.
+Читает строки `answer_event {json}` (их пишет `app/api/events.py`, одна на ответ движка) и печатает:
+сколько ответов, корпуса (`L2`), режимы источника (`L1`), срабатывания проверок, p50/p95 времени
+ответа и времени до первого куска. `procedural_share` — доля ответов, СОБРАННЫХ по корпусу норм
+(rules/metodrek); честные отказы процедурной ветки и приветствия корпуса не имеют («-») и в долю не
+входят. В строках событий нет ни текста вопросов, ни логинов — сводку можно снимать на сервере и
+переносить без ПДн.
 
-Запуск (на сервере):
-  docker compose logs app --since 24h --no-log-prefix | python scripts/answer_events.py
-  python scripts/answer_events.py журнал.txt
+Скрипт самостоятельный (только стандартная библиотека) — запускается и системным `python3` сервера:
+  docker compose logs app --since 24h --no-log-prefix | python3 scripts/answer_events.py
+  python3 scripts/answer_events.py журнал.txt
 """
 
 from __future__ import annotations
@@ -37,7 +39,8 @@ def parse(lines) -> list[dict]:
 
 def pct(values: list[int], q: float) -> int | None:
     """Перцентиль ближайшего ранга (ceil(q·n)-й по возрастанию); None — данных нет.
-    ⚠ Через `ceil`, а не `round`: банковское округление Python давало p50 из двух значений — большее."""
+    Важно: через `ceil`, а не `round` — банковское округление Python давало p50 из двух значений большим.
+    Скрипт без `app.core.console`, чтобы шёл системным `python3` сервера: значков вне cp1251 в нём нет."""
     vals = sorted(v for v in values if v is not None)
     if not vals:
         return None
@@ -64,12 +67,15 @@ def summary(events: list[dict]) -> dict:
 
 
 def main() -> None:
+    # Журнал — UTF-8; на консоли Windows stdin по умолчанию cp1251 и падал на кириллице (ревью этапа 2).
+    for stream in (sys.stdin, sys.stdout):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
     src = Path(sys.argv[1]).read_text(encoding="utf-8").splitlines() if len(sys.argv) > 1 else sys.stdin
     print(json.dumps(summary(parse(src)), ensure_ascii=False, indent=2))
 
 
 if __name__ == "__main__":
-    sys.path.append(str(Path(__file__).resolve().parents[1]))  # корень репозитория — для app.core
-    from app.core.console import enable_utf8  # #107: кириллица в выводе на консоли Windows
-    enable_utf8()
     main()
