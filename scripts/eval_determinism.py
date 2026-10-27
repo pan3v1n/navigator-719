@@ -232,7 +232,7 @@ def _case_about_target(case: dict, target) -> bool:
 
 
 def foreign_numbers(query: str, hits: list, cases: list | None = None,
-                    code: "str | list[str] | None" = None) -> set[str]:
+                    code: "str | list[str] | None" = None, target_query: str | None = None) -> set[str]:
     """Числа, принадлежащие ЧУЖИМ позициям окна, но не целевой и не её законным источникам.
 
     ⚠⚠ ПРЕЖНЯЯ ВЕРСИЯ ЭТОЙ ФУНКЦИИ БЫЛА ТАВТОЛОГИЕЙ, и на ней построен отчёт `EV7` от 17.08.2026
@@ -277,7 +277,8 @@ def foreign_numbers(query: str, hits: list, cases: list | None = None,
     формулирует (упомянула «2 балла» — не упомянула), и когда она тащит в ответ ПОРОГ СОСЕДНЕЙ
     ПОЗИЦИИ. Первое — шум, второе — дефект: эксперт читает число как относящееся к своей продукции.
     Здесь считается именно вредная половина."""
-    target = _target_hit(hits, code)
+    # EV8-1 #178: целевые — тем же запросом, что рантайм (`Answer.target_query`); без него — сам вопрос.
+    target = _target_hit(hits, code, target_query if target_query is not None else query)
     if target is None:                     # ранний путь (meta/процедурный) — кандидатов нет
         return set()
     own = _own_numbers(target, hits, code)
@@ -321,7 +322,7 @@ def evaluate(runs: int, limit: int, progress: bool):
             num_sets.append(nums)
             # Атрибуция — по ЦЕЛЕВОЙ позиции, а не по hits[0]: с EV6 это разные записи (у
             # расколотой ячейки опорой становится содержательный сиблинг, а не квалификатор).
-            tgt = _target_hit(ans.hits, ans.codes)  # ⚠ теми же кодами, что рантайм
+            tgt = _target_hit(ans.hits, ans.codes, ans.target_query)  # ⚠ теми же кодами и запросом, что рантайм
             secs.append(tgt.section_roman if tgt else "—")
             # EV10: из чисел ответа оставляем только РЕШАЮЩИЕ — порог и баллы операций.
             parent = (inheritance.lookup(tgt.section_roman, tgt.product_name) if tgt else None)
@@ -336,7 +337,7 @@ def evaluate(runs: int, limit: int, progress: bool):
             # по `ans.codes`, а оракул утечки продолжал брать одиночный `code` фикстуры и выводить
             # СВОЮ целевую из него. На вопросе с двумя кодами рантайм держит две опоры, оракул —
             # одну, и числа законной второй опоры считались утечкой.
-            pool = foreign_numbers(q, ans.hits, ans.cases, ans.codes)
+            pool = foreign_numbers(q, ans.hits, ans.cases, ans.codes, ans.target_query)
             alien_pool |= pool
             leaked = (nums - set(ans.echoed_numbers)) & pool
             if leaked:

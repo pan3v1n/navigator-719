@@ -24,7 +24,8 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import code_cells, corpora, documents_ref, fragments, inheritance, okpd2_ref, retriever, sparse, st1_ref
+from app.rag import (code_cells, corpora, documents_ref, fragments, inheritance, okpd2_ref, retriever, sparse, st1_ref,
+                     thresholds)
 from app.rag.embeddings import embed_query
 from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, search,
                                search_cases, search_rules)
@@ -111,6 +112,9 @@ class Answer:
     # `target_hits(hits)` БЕЗ кода даёт другой ответ, чем рантайм, и метрика начинает оценивать не
     # ту позицию, на которой построен ответ (ревью PR #94). Тот же класс, что `grounding`.
     codes: list[str] = field(default_factory=list)
+    # EV8-1 #178: запрос, по которому выбирались целевые (`target_hits(..., query)`) — тот же довод, что у
+    # `codes`: без него метрика выберет целевые иначе, чем рантайм.
+    target_query: str = ""
     # U5: что показать подсказкой в поле ввода ПОСЛЕ этого ответа — готовый текст, «» = пусто.
     # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
     # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
@@ -408,7 +412,7 @@ def format_context(hits: list[Hit], query: str | None = None,
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное
     # место, где это решается); прочие кандидаты идут строкой «наименование + код» как материал
     # для уточнения — см. EV7 ниже.
-    targets = target_hits(hits, code)
+    targets = target_hits(hits, code, query)
     # R29/EV6: строки ОДНОЙ расколотой ячейки первоисточника — это ОДИН источник, разъехавшийся по
     # нескольким строкам кода, а не чужая продукция. Их требования остаются в контексте.
     groups = {g for g in (fragments.group_of(t.product_name) for t in targets) if g is not None}
@@ -424,8 +428,11 @@ def format_context(hits: list[Hit], query: str | None = None,
             # («28.13» подходит 52 записям). Прежняя безусловная подпись «наиболее вероятная
             # позиция» спорила бы с телом блока, где стоит «она НЕ целевая», — а по уроку проекта
             # модель следует за контекстом, и противоречие внутри одного блока разрешала бы она.
+            # EV8-1 #178: тот же код, но наименование вопросу не отвечает — это не «группа кода».
+            same_code = not is_target and _exact_code(h, code)
             head += ("  СОВПАДЕНИЕ ПО КОДУ ОКПД2 (наиболее вероятная позиция)" if is_target
-                     else "  совпадение по ГРУППЕ кода ОКПД2 (не эта позиция — целевая)")
+                     else "  тот же код ОКПД2, но наименование не совпадает с вопросом (не эта позиция — целевая)"
+                     if same_code else "  совпадение по ГРУППЕ кода ОКПД2 (не эта позиция — целевая)")
         lines = [head]
         # D16 #173: коды — как в графе кода первоисточника, с «из» и «за исключением». Пояснение
         # к пометке — только у целевой: у нецелевой требований в контексте нет, пояснять нечего.
@@ -517,7 +524,10 @@ def format_context(hits: list[Hit], query: str | None = None,
             # назвал код, который подходит этому кандидату, — модель обязана это видеть, иначе
             # кандидат читается как посторонний. Первая редакция свёртки её потеряла, поймано
             # тестом `test_exact_code_keeps_all_matched_positions_but_prefix_does_not`.
-            grp = "  совпадение по ГРУППЕ кода ОКПД2 (не эта позиция — целевая)" if h.okpd2_match else ""
+            # EV8-1 #178: тот же код, но наименование вопросу не отвечает — это не «группа кода».
+            grp = (("  тот же код ОКПД2, но наименование не совпадает с вопросом (не эта позиция — целевая)"
+                    if _exact_code(h, code) else "  совпадение по ГРУППЕ кода ОКПД2 (не эта позиция — целевая)")
+                   if h.okpd2_match else "")
             tail.append(f"    [{i}] {h.product_name} (ОКПД2 {codes}){have}{src}{grp}")
             continue
         # Порог: из самой позиции, иначе (для ЦЕЛЕВОГО хита) — из примечаний-таблиц по годам
@@ -709,7 +719,131 @@ def _codes(code: str | list[str] | None) -> list[str]:
     return [c.strip() for c in ([code] if isinstance(code, str) else list(code)) if c and c.strip()]
 
 
-def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hit]:
+# EV8-1 #178: точный код, под которым лежат РАЗНЫЕ изделия (у 26.51.12 — 14, у 28.99.39.190 — 77). Целевыми были
+# все такие позиции окна (до 8) с полными требованиями — тот же класс утечки чисел чужой продукции, ради
+# которого делалась `EV7`. Сужаем, только когда вопрос НАЗВАЛ изделие: голова наименования позиции целиком
+# есть в вопросе. Целевыми остаются ВСЕ названные позиции, их подвиды и позиции, у которых с вопросом есть
+# слова, не объяснённые названными; отбрасываются только те, о ком вопрос не говорит ничего.
+# ⚠ Первая версия (27.10, отклонена ревью) брала ОДНУ позицию с наибольшим числом общих слов: слова из
+# оговорки «(за исключением вакуумных пробирок)» шли в согласие, и целевой становилась позиция, которая
+# продукт ИСКЛЮЧАЕТ; синонимы и общие определения («для крупного рогатого скота») выбирали чужое изделие;
+# вопрос о двух изделиях одного кода терял одно. Здесь оговорки вырезаны, позиция «названа» только целиком,
+# ничья и синоним — «никто не назван» — ничего не меняют. Замер — `scripts/eval_ev8_probes.py`.
+EV8_MANY = 3
+# Слова, которые изделие не называют: служебные части речи и лексика вопросов о 719 (`R39`: предлоги
+# совпадают с тысячами наименований).
+_EV8_STOP = frozenset(sparse.tokenize(
+    "для из в во на с со по к ко от до за при без под над про или и а но не ни как что чем какой какая "
+    "какое какие каких каким сколько это этот эта эти наш наша наши ваш мы вы нужно надо можно ли же бы "
+    "требование требования требований балл баллы баллов порог операция операции код коды окпд окпд2 "
+    "позиция продукция продукции товар изделие изделия производство производства подтверждение подтвердить "
+    "реестр российский приложение постановление условие условия документ документы получить включение "
+    "внесение критерий критерии"))
+_EV8_NUM_RE = re.compile(r"\d+(?:[.,]\d+)*")
+# Оговорка-исключение без скобки — после запятой внутри имени: «…, за исключением …» до «;» или конца.
+_EV8_EXC_TAIL_RE = re.compile(r",?\s*(?:за\s+исключением|кроме)\b[^;]*", re.IGNORECASE)
+_EV8_PAREN_RE = re.compile(r"\([^()]*\)")
+_EV8_EXC_WORD_RE = re.compile(r"за\s+исключением|кроме", re.IGNORECASE)
+
+
+def _ev8_stems(text: str | None) -> set[str]:
+    """Основы слов (морфология BM25) без чисел, кодов и слов, которые изделие не называют. Беглая гласная
+    родительного падежа множественного числа сведена к форме прочих падежей: Snowball даёт «пробирок» против
+    «пробирк» (пробирки), «станок» против «станк» — и оговорка «за исключением вакуумных одноразовых пробирок»
+    не узнавалась в вопросе о вакуумных пробирках (пробы)."""
+    out = set()
+    for t in sparse.tokenize(_EV8_NUM_RE.sub(" ", text or "")):
+        if t in _EV8_STOP:
+            continue
+        if len(t) >= 5 and t[-2:] in ("ок", "ек", "ёк"):
+            t = t[:-2] + "к"
+        out.add(t)
+    return out
+
+
+def _ev8_base(name: str | None) -> str:
+    """Наименование без СВОИХ оговорок-исключений — в скобках и после запятой. Что позиция исключает,
+    тем она не является: слова оговорки в согласие с вопросом не идут."""
+    return _EV8_EXC_TAIL_RE.sub(" ", thresholds._without_exclusions(name or ""))
+
+
+def _ev8_heads(name: str | None) -> list[set[str]]:
+    """Головы наименования — пункты «A; B» без скобок, каждый основами. Запятая пункт не делит: «Маммографы,
+    рентгеновские аппараты …» и «…, для крупного рогатого скота» лексически неразличимы, и пункт-определение
+    назвал бы позицию по общему слову."""
+    text = _ev8_base(name)
+    while _EV8_PAREN_RE.search(text):
+        text = _EV8_PAREN_RE.sub(" ", text)
+    return [st for part in text.split(";") if (st := _ev8_stems(part.split("(")[0]))]
+
+
+def _ev8_excluded(name: str | None) -> list[set[str]]:
+    """Пункты СВОИХ оговорок-исключений позиции — «(за исключением X, Y; Z)», «…, кроме X» — каждый основами,
+    без самого оборота «за исключением». Пункт из одного слова («медицинских изделий» → «медицинск») в счёт не
+    идёт: он совпал бы с любым вопросом отрасли."""
+    raw = name or ""
+    texts = [raw[a:b] for a, b in thresholds._exclusion_spans(raw, len(raw))]
+    texts += [_EV8_EXC_WORD_RE.sub(" ", m.group(0)) for m in _EV8_EXC_TAIL_RE.finditer(raw)]
+    return [st for t in texts for part in re.split(r"[,;]", _EV8_PAREN_RE.sub(" ", t))
+            if len(st := _ev8_stems(part)) >= 2]
+
+
+def _ev8_excludes_query(name: str | None, heads: list[set[str]], q: set[str]) -> bool:
+    """Позиция ИСКЛЮЧАЕТ то, что назвал вопрос: пункт её оговорки целиком в вопросе, и всё, чем вопрос
+    называет саму позицию (её головы в вопросе), — часть этого пункта. «Чехлы (лайнеры) на культи … (за
+    исключением чехлов трикотажных на культи …)» на вопрос о трикотажных чехлах; «…; стенты (за исключением
+    стентов для коронарных артерий)» — о коронарных стентах. ⚠ Голова, названная ОТДЕЛЬНО от оговорки, —
+    свой предмет вопроса: «оборудование для содержания птицы и для кур-несушек» про позицию «… птицы (кроме
+    кур-несушек)» спрашивает тоже."""
+    named = [hd for hd in heads if hd <= q]
+    return any(e <= q and all(hd <= e for hd in named) for e in _ev8_excluded(name))
+
+
+def _narrow_by_name(chosen: list[Hit], query: str | None, code: str | None = None) -> list[Hit]:
+    """Точные позиции одного кода — без тех, о ком вопрос не говорит (`EV8-1` #178). Не сужаем: позиций
+    меньше `EV8_MANY`; вопрос назвал саму группировку кода (официальное имя кода или предка по
+    справочнику); ни одна позиция не названа целиком."""
+    if not query or len(chosen) < EV8_MANY:
+        return chosen
+    q = _ev8_stems(query)
+    if not q:
+        return chosen
+    if code:
+        names = okpd2_ref._okpd2_names()
+        for form in okpd2_ref.okpd2_ancestor_forms(code):
+            official = _ev8_stems(names.get(form))
+            if official and official <= q:
+                return chosen
+    # Позиция, ИСКЛЮЧАЮЩАЯ то, что назвал вопрос, о нём не говорит — даже если её голова в вопросе целиком:
+    # «Чехлы (лайнеры) на культи … (за исключением чехлов трикотажных …)» на вопрос о трикотажных чехлах,
+    # «…; стенты (за исключением стентов для коронарных артерий)» на вопрос о коронарных стентах (пробы).
+    all_heads = [_ev8_heads(h.product_name) for h in chosen]
+    excluding = [_ev8_excludes_query(h.product_name, hs, q) for h, hs in zip(chosen, all_heads)]
+    heads = [[] if ex else hs for hs, ex in zip(all_heads, excluding)]
+    named = [hd for hs in heads for hd in hs if hd <= q]
+    if not named:
+        return chosen
+    explained = set().union(*named)
+    keep = []
+    for h, hs, ex in zip(chosen, heads, excluding):
+        if ex:
+            continue
+        own = _ev8_stems(_ev8_base(h.product_name))
+        if (any(hd <= q for hd in hs)                     # названа
+                or any(n <= own for n in named)           # подвид названного («Насосы» → «Насосы центробежные»)
+                or (own & q) - explained):                # слова вопроса, которых названные не объясняют
+            keep.append(h)
+    return keep if 0 < len(keep) < len(chosen) else chosen
+
+
+def _exact_code(h: Hit, code: str | list[str] | None) -> bool:
+    """У позиции есть код, равный названному (поразрядный ключ), — не группа кода."""
+    keys = {okpd2_ref.okpd2_key(c) for c in _codes(code)} - {""}
+    return any(okpd2_ref.okpd2_key(hc) in keys for hc in (h.okpd2_codes or []))
+
+
+def target_hits(hits: list[Hit], code: str | list[str] | None = None,
+                query: str | None = None) -> list[Hit]:
     """Позиции, О КОТОРЫХ идёт ответ. ЕДИНСТВЕННОЕ место, где это решается.
 
     ⚠ СОВПАДЕНИЕ ПО КОДУ БЫВАЕТ ТОЧНЫМ И ПРЕФИКСНЫМ, и это разные вопросы пользователя. `okpd2_match`
@@ -724,7 +858,8 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
     26.11.22.210 — две, с противоположными областями «в части белого диапазона» / «за исключением»),
     и назвавший этот код эксперт спрашивает про них все. Такие записи остаются целевыми все.
     ⚠ Ревью PR #177 (раунд 3) заметило цену: у 26.51.12 таких позиций 14, и все с полными
-    требованиями — тот же класс, что `EV7`. Поведение прежнее (до D14), вынесено отдельно — #178.
+    требованиями — тот же класс, что `EV7`. `EV8-1` #178: если вопрос НАЗВАЛ изделие (`query`), позиции, о
+    которых он не говорит, уходят в кандидаты — `_narrow_by_name`.
 
     ⚠ ОСТАТОК, ЗАМЕРЕННЫЙ И ОСТАВЛЕННЫЙ СОЗНАТЕЛЬНО (ревью PR #94). В вопросе с НЕСКОЛЬКИМИ
     ГРУППОВЫМИ кодами выбор записи внутри группы зависит от состава окна, а тот — от того, каким
@@ -804,6 +939,8 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
                                [h.product_name for h in matched])
             best = min((t for t in tiers if t is not None), default=None)
             chosen = [h for h, t in zip(matched, tiers) if t == best]
+            if best == 0:
+                chosen = _narrow_by_name(chosen, query, c)     # EV8-1 #178
             swap = True
             if best and chosen and all(fragments.is_scope_qualifier(h.product_name) for h in chosen):
                 swap = False
@@ -855,9 +992,10 @@ def _content_sibling(target: Hit, hits: list[Hit]) -> Hit:
     return best if _n_operations(best) > _n_operations(target) else target
 
 
-def _target_hit(hits: list[Hit], code: str | list[str] | None = None) -> Hit | None:
+def _target_hit(hits: list[Hit], code: str | list[str] | None = None,
+                query: str | None = None) -> Hit | None:
     """Позиция, вокруг которой строится ответ, — первая из `target_hits`."""
-    ts = target_hits(hits, code)
+    ts = target_hits(hits, code, query)
     return ts[0] if ts else None
 
 
@@ -1377,6 +1515,7 @@ class _Plan:
     # Готовая таблица баллов, которую печатает КОД (P4). Пусто — печатает модель, как раньше.
     points_table: str = ""
     codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
+    target_query: str = ""  # EV8-1: запрос, по которому выбраны целевые (см. Answer.target_query)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
     corpus: str = corpora.USED_APPENDIX  # L2: см. Answer.corpus
 
@@ -1624,7 +1763,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # ⚠ Если опорой оказалась строка-КВАЛИФИКАТОР расколотой ячейки, содержательного сиблинга может
     # не быть в окне вовсе: поиск по коду приносит записи ровно этого кода (ревью PR #94). Добираем
     # соседей по группе их собственными кодами — иначе правило EV6 нечем исполнить.
-    qual = [t for t in target_hits(hits, all_codes) if fragments.is_scope_qualifier(t.product_name)]
+    qual = [t for t in target_hits(hits, all_codes, search_query) if fragments.is_scope_qualifier(t.product_name)]
     for t in qual:
         sib_codes = list(fragments.group_codes(t.product_name))
         if not sib_codes:
@@ -1769,7 +1908,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # строится по одной — и при этом промпт получает запрет перечислять операции у ВСЕХ.
     # Эксперт увидел бы «дословно из приложения» без пометки неполноты и без баллов сиблинга:
     # ровно тот класс молчаливой потери, против которого заведены R29 и D9.
-    _tgts = target_hits(hits, all_codes)
+    _tgts = target_hits(hits, all_codes, search_query)
     table = points_table(_tgts[0], search_query) if len(_tgts) == 1 else ""
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
@@ -1803,6 +1942,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # когда-нибудь понадобится заземление, расширять нужно `claim_numbers` (учить единицу), а не стог.
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
+                 target_query=search_query,
                  low_relevance=low_rel, points_table=table,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)),
                  corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX)
@@ -1874,6 +2014,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
         codes=planned.codes,
+        target_query=planned.target_query,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
     )
@@ -1948,6 +2089,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
         codes=planned.codes,
+        target_query=planned.target_query,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
     )

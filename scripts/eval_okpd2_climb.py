@@ -87,7 +87,7 @@ def run(out: Path) -> None:
         res[name] = []
         for k, row in enumerate(rows, 1):
             hits = search(row["query"], okpd2=row["code"], limit=8)
-            tg = target_hits(hits, [row["code"]])
+            tg = target_hits(hits, [row["code"]], row["query"])   # EV8-1: тем же запросом, что поиск
             res[name].append({**row, "targets": [h.source_anchor for h in tg],
                               "window": [h.source_anchor for h in hits],
                               "matched": [h.source_anchor for h in hits if h.okpd2_match]})

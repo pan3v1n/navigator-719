@@ -38,6 +38,8 @@ class Navigation:
     # Коды, по которым рантайм строил ответ (`Answer.codes`): их может быть больше одного (`EV8`),
     # и «кто целевой» обязано решаться по ним — одно решение, одно место.
     codes: list[str] = field(default_factory=list)
+    # EV8-1 #178: запрос, по которому рантайм выбирал целевые (`Answer.target_query`) — тот же довод, что у `codes`.
+    target_query: str = ""
     sources: list[Hit] = field(default_factory=list)
     checklist: list[str] = field(default_factory=list)
     disclaimer: str = EXPERT_DISCLAIMER
@@ -104,12 +106,13 @@ def navigate(query: str, okpd2: str | None = None, limit: int = 5) -> Navigation
     # или из якоря диалога: на `POST /navigate` без явного `okpd2` здесь было None, `_target_hit`
     # уходил в ветку `matched[0]` и мог назвать ДРУГУЮ запись, чем тело ответа. `Answer.codes`
     # ради того и заведён, чтобы «кто целевой» решалось в одном месте.
-    checklist = build_checklist(_target_hit(ans.hits, ans.codes))
+    checklist = build_checklist(_target_hit(ans.hits, ans.codes, ans.target_query))
     return Navigation(
         query=query,
         okpd2_used=code,
         answer=ans.text,
         codes=list(ans.codes or []),
+        target_query=ans.target_query,
         sources=ans.hits,
         checklist=checklist,
     )

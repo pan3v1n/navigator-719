@@ -38,7 +38,7 @@ def check(case: dict, plan) -> list[str]:
     if isinstance(plan, pipeline.Answer):
         return [f"ранний ответ без плана: {plan.text[:80]!r}"]
     fails: list[str] = []
-    targets = [h.source_anchor for h in pipeline.target_hits(plan.hits, plan.codes)]
+    targets = [h.source_anchor for h in pipeline.target_hits(plan.hits, plan.codes, plan.target_query)]
     window = [h.source_anchor for h in plan.hits]
     if case.get("expect_target_any") and not set(case["expect_target_any"]) & set(targets):
         fails.append(f"целевая {short(targets)} вместо {short(case['expect_target_any'])}")
@@ -77,7 +77,7 @@ def main() -> int:
         fails = check(case, plan)
         failed += bool(fails)
         tg = ([] if isinstance(plan, pipeline.Answer)
-              else [h.source_anchor for h in pipeline.target_hits(plan.hits, plan.codes)])
+              else [h.source_anchor for h in pipeline.target_hits(plan.hits, plan.codes, plan.target_query)])
         print(f"{'OK  ' if not fails else 'FAIL'} {case['id']:24} целевая: {short(tg)[:70]}")
         for f in fails:
             print(f"       ✗ {f}")
