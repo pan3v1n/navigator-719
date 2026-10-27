@@ -197,7 +197,7 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
     """`search` добирает новые связи отдельными запросами и ставит ближайшего предка первым."""
 
     def _run(self, code, pool_has_category=False, corpus=None, hidden=(CAT,), query="Н-бутан очищенный",
-             fail_must=False):
+             fail_must=False, inflate=False, rescore=None):
         """Подмена `_hybrid` ФИЛЬТРУЕТ маленький корпус по правилам Qdrant (MatchAny по
         `okpd2_codes` и по посегментным префиксам, `must` и `should`), а не отвечает заготовкой:
         иначе тест проверял бы подмену. Катализаторы класса «20» — score выше, чем у подкатегории.
@@ -219,8 +219,19 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
                 return all(cond_ok(codes, c) for c in qfilter.must)
             return any(cond_ok(codes, c) for c in qfilter.should or [])
 
+        self.rescores = []
+
         def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None):
             conds = (getattr(qfilter, "should", None) or []) + (getattr(qfilter, "must", None) or [])
+            ids = [i for cond in conds for i in (getattr(cond, "has_id", None) or [])]
+            if ids:
+                # R31: пересчёт score окна одним запросом по id — score «настоящие» (третий элемент
+                # строки корпуса), сравнимые у всех. `rescore` подменяет ответ (сбой, неполный ответ).
+                self.rescores.append(ids)
+                rows = [r for r in corpus if r[0] in ids]
+                if rescore is not None:
+                    return rescore(rows)
+                return [_point(*r) for r in sorted(rows, key=lambda r: -r[2])]
             calls.append([v for cond in conds for v in cond.match.any])
             if fail_must and getattr(qfilter, "must", None) and (
                     fail_must is True or fail_must(calls[-1])):
@@ -228,7 +239,12 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
             rows = [r for r in corpus if ok(r[1], qfilter)]
             if qfilter is None and not pool_has_category:
                 rows = [r for r in rows if r[0] not in hidden]    # текстом пул их не находит
-            return [_point(*r) for r in sorted(rows, key=lambda r: -r[2])[:limit]]
+            rows = sorted(rows, key=lambda r: -r[2])[:limit]
+            if inflate and qfilter is not None:
+                # RRF ранговый: первая позиция МАЛЕНЬКОЙ отфильтрованной выдачи получает максимальный
+                # score при любом тексте (#179) — так и отвечает подмена добора.
+                return [_point(r[0], r[1], 0.99 - k / 100) for k, r in enumerate(rows)]
+            return [_point(*r) for r in rows]
 
         with mock.patch.object(retriever, "_hybrid", side_effect=fake_hybrid),                 mock.patch.object(retriever, "embed_query", return_value=[0.0] * 8):
             hits = retriever.search(query, okpd2=code, limit=8)
@@ -325,6 +341,48 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         hits, calls = self._run("20.14.11.112", fail_must=lambda vals: "20.14.11.112" in vals)
         self.assertEqual(len(calls), 3, calls)            # пул, прежний добор, упавший точный
         self.assertNotIn(CAT, [h.source_anchor for h in hits])
+
+
+class TestRescoreR31(unittest.TestCase):
+    """R31 #179: score кандидатов из разных запросов несравнимы — окно пересчитывается одним запросом.
+
+    Широкий код «26.40»: «Мониторы» (26.40.34.110) пул находит сам по тексту, «Приёмники» (26.40.20)
+    — только добор по ветке, и маленькая отфильтрованная выдача даёт им score 0.99 против 0.5 у
+    мониторов. Оба — потомки кода, ярус один, порядок решает score; до R31 первыми шли «Приёмники»."""
+
+    _run = TestSearchFetchesNewRelations._run          # та же подмена Qdrant, без повтора её тестов
+    CORPUS = [("Мониторы", ["26.40.34.110"], 0.5), ("Приёмники", ["26.40.20"], 0.2),
+              ("Прочее", ["28.13.14.110"], 0.4)]
+
+    def _go(self, **kw):
+        return self._run("26.40", corpus=self.CORPUS, hidden=("Приёмники",), query="Мониторы",
+                         inflate=True, **kw)
+
+    def test_window_is_rescored_by_one_query(self):
+        hits, _calls = self._go()
+        self.assertEqual(len(self.rescores), 1)
+        self.assertEqual(set(self.rescores[0]), {h.point_id for h in hits})
+        self.assertEqual(hits[0].source_anchor, "Мониторы")
+        self.assertEqual([h.score for h in hits[:2]], [0.5, 0.2])     # score из ОДНОЙ выдачи
+
+    def test_without_rescore_inflated_dobor_wins(self):
+        """Отрицательный контроль: сбой пересчёта — прежние score, и «Приёмники» снова первыми.
+        Ответ не роняется: пересчёт уточняет порядок, без него окно — как до R31."""
+        def fail(rows):
+            raise RuntimeError("Qdrant недоступен")
+        hits, _calls = self._go(rescore=fail)
+        self.assertEqual(hits[0].source_anchor, "Приёмники")
+
+    def test_partial_answer_keeps_old_scores(self):
+        """Вернулись не все кандидаты — новые score со старыми не смешиваем (та же несравнимость)."""
+        hits, _calls = self._go(rescore=lambda rows: [_point(*r) for r in rows if r[0] != "Приёмники"])
+        self.assertEqual(hits[0].source_anchor, "Приёмники")
+        self.assertGreater(hits[0].score, 0.9)                         # score маленькой выдачи
+
+    def test_no_new_candidates_no_extra_query(self):
+        """Доборы ничего не добавили — все score из пула, сравнимы: лишнего запроса нет."""
+        self._run("20")
+        self.assertEqual(self.rescores, [])
 
 
 class TestHasExactPosition(unittest.TestCase):

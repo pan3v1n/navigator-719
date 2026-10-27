@@ -41,6 +41,8 @@ class Hit:
     # группировкой · 2 прочие позиции ближайшего предка · 3 прочие связанные, по рангу. Решает
     # порядок окна ВНУТРИ совпавших, см. `_order_key`.
     code_tier: int = 0
+    # R31 #179: id точки Qdrant — по нему score всех кандидатов окна пересчитываются ОДНИМ запросом.
+    point_id: object = None
 
 
 # --------------------------------------------------------------------------- #
@@ -202,6 +204,7 @@ def _to_hit(p) -> Hit:
         requirement_blocks=pl.get("requirement_blocks") or [],
         source_anchor=pl.get("source_anchor"),
         payload=pl,
+        point_id=getattr(p, "id", None),
     )
 
 
@@ -301,12 +304,47 @@ def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
         h.code_tier = 3 if t is None else t
 
 
+def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
+    """R31 #179: score всех кандидатов окна ОДНИМ запросом — гибрид с фильтром по их id.
+
+    ⚠ ЗАЧЕМ. Окно с кодом собирается из нескольких запросов: пул (top-40 без фильтра), добор по
+    ветке кода (лимит 12), с `D14` — доборы точных форм и новых предков. RRF-score ранговый и
+    считается ВНУТРИ своей выдачи, поэтому первая позиция маленькой отфильтрованной выдачи получает
+    максимальный score при любом тексте, а `_order_key` сравнивал эти числа как одно. Замер 08.10:
+    «Мониторы и проекторы» 26.40.34 → «Гидрофоны» (добор предков), «Шлюпки» → «Катера»; три
+    раунда ревью PR #177 находили соседний случай, потому что правило «внутри яруса — по score» на
+    несравнимых числах устойчивым быть не может.
+    Здесь все кандидаты ранжируются в ОДНИХ двух списках (dense и sparse по тем же точкам) — score
+    сравнимы. Состав окна не меняется, только порядок. Сбой запроса — прежние score: пересчёт
+    уточняет порядок, без него остаётся окно до R31."""
+    from qdrant_client import models
+
+    ids = [h.point_id for h in hits]
+    if not ids or any(i is None for i in ids):
+        return
+    try:
+        pts = _hybrid(query, len(ids), qvec=qvec,
+                      qfilter=models.Filter(must=[models.HasIdCondition(has_id=ids)]))
+    except Exception as exc:  # noqa: BLE001 — пересчёт уточняет порядок, сбой не роняет ответ
+        logger.warning("пересчёт score окна ({} кандидатов): {}", len(ids), exc)
+        return
+    got = {p.id: p.score for p in pts}
+    if any(i not in got for i in ids):
+        # Кандидат не вернулся (не должно быть: dense-префетч отдаёт все точки фильтра) — смешивать
+        # новые score со старыми нельзя, это та же несравнимость. Остаёмся на прежних.
+        logger.warning("пересчёт score окна: вернулось {} из {}", len(got), len(ids))
+        return
+    for h in hits:
+        h.score = got[h.point_id]
+
+
 def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
            qvec: list[float] | None = None) -> list[Hit]:
     """Гибридный поиск. При наличии okpd2 — буст совпадающих по коду позиций и
     жёсткая подстраховка: фильтрованный запрос по префиксам кода и, без точной позиции среди
     найденного, до двух доборов D14 — точные формы кода и новые предки (последние — только когда
-    потомков среди совпавших нет). Итого до четырёх запросов к Qdrant на вопрос с кодом.
+    потомков среди совпавших нет). Если доборы принесли кандидатов — ещё один запрос: пересчёт score
+    всего окна (`_rescore`, R31 #179). Итого до пяти запросов к Qdrant на вопрос с кодом.
 
     `qvec` — заранее посчитанный вектор запроса (см. `_hybrid`). Если не передан, считаем ОДИН
     раз здесь и переиспользуем в подстраховке по коду — раньше второй запрос эмбеддил тот же
@@ -316,6 +354,7 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
     if qvec is None:
         qvec = embed_query(query)
     hits = [_to_hit(p) for p in _hybrid(query, pool, qvec=qvec)]
+    n_pool = len(hits)
 
     if okpd2:
         for h in hits:
@@ -390,6 +429,10 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
                         h.okpd2_match = True
                         seen.add(h.source_anchor)
                         hits.append(h)
+        # R31 #179: доборы принесли кандидатов со score СВОИХ выдач — до сортировки окна пересчитываем
+        # всех одним запросом. Без доборов все score из одной выдачи (пула) — сравнимы, запрос не нужен.
+        if len(hits) > n_pool:
+            _rescore(query, hits, qvec)
         _set_code_tiers(hits, okpd2)
 
     # Полный порядок ДО усечения окна: совпавшие по коду выше, далее score, далее якорь.
