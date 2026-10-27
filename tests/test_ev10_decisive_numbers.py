@@ -61,16 +61,17 @@ class TestDecisiveNumbers(unittest.TestCase):
     def test_procurement_threshold_is_excluded(self):
         """Закупочный порог — ДРУГОЙ вопрос; его наличие в ответе не про воспроизводимость.
 
-        Берём реальную позицию корпуса: у «Медицинских масок» общий порог 25 баллов, а
-        закупочный (прим. 53) несёт 80 / 100 / 40 / 50 / 60 — именно они и плавали."""
+        Берём реальную позицию корпуса: закупочный порог прим. 53 несёт 80 / 100 / 40 / 50 / 60 —
+        именно они и плавали. ⚠ Прежде фикстурой были «Медицинские маски» раздела VII, но прим. 53
+        ограничено разделом XVII, и `D22` #235 этот порог у масок снял (он был чужим) — взята позиция
+        самого раздела XVII."""
         from app.rag.thresholds import lookup_procurement_threshold
 
-        name = ("Медицинские маски (за исключением полумасок фильтрующих классов защиты "
-                "FFP1, FFP2, FFP3)")
-        codes = ["13.95.10.190", "14.12.30.190", "14.19.32.120", "32.50.50.190", "32.99.11.160"]
-        h = make_hit(product_name=name, okpd2_codes=codes, section_roman="VII",
+        name = "Одежда защитная огнестойкая"
+        codes = ["32.99.11.140"]
+        h = make_hit(product_name=name, okpd2_codes=codes, section_roman="XVII",
                      min_threshold=None)
-        proc = lookup_procurement_threshold(codes, name, "VII")
+        proc = lookup_procurement_threshold(codes, name, "XVII")
         # ⚠ Без этой проверки тест был бы фикцией: пустой закупочный порог проходит любую
         # проверку исключения. Первая редакция уходила в skip именно из-за неверного кода.
         self.assertTrue(proc and "80" in proc,
