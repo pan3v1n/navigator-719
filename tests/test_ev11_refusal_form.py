@@ -77,5 +77,56 @@ class TestRefusalByForm(unittest.TestCase):
         self.assertIs(eval_completeness._COMMIT_RE, R.COMMIT_RE)
 
 
+
+class TestPointsTableOnlyUnderAnAnalysisEV11_1(unittest.TestCase):
+    """`EV11-1`: таблицу баллов код дописывает только к ответу, назвавшему позицию. Под отказом она
+    показывала баллы ЧУЖОЙ позиции («водка» → оборудование для спиртовой промышленности)."""
+
+    TABLE = ("\n**Операции и баллы — дословно из приложения:**\n\n| Операция или условие | Баллы |\n"
+             "|---|---|\n| рама | 10 балл. |")
+
+    def _run(self, model_text):
+        from types import SimpleNamespace
+        from unittest import mock
+
+        from app.rag import pipeline
+        plan = pipeline._Plan(messages=[{"role": "user", "content": "в"}], grounding="", hits=[], cases=[],
+                              low_relevance=True, points_table=self.TABLE)
+        usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
+
+        def create(**kw):
+            if kw.get("stream"):
+                d = SimpleNamespace(content=model_text)
+                return iter([SimpleNamespace(choices=[SimpleNamespace(delta=d, finish_reason="stop")], usage=None),
+                             SimpleNamespace(choices=[], usage=usage)])
+            msg = SimpleNamespace(content=model_text)
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=usage)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        with mock.patch.object(pipeline, "_plan_answer", return_value=plan), \
+                mock.patch.object(pipeline, "_client", return_value=client):
+            sync = pipeline.answer("в").text
+            done = [p for k, p in pipeline.answer_stream("в") if k == "done"][0].text
+        return sync, done
+
+    def test_refusal_gets_no_table(self):
+        for text in self._run(REFUSAL_NO_OLD_WORDS):
+            self.assertNotIn("дословно из приложения", text)
+            self.assertTrue(R.declines(text), "отказ остался чистым — проверка формы это видит")
+
+    def test_clarification_gets_no_table(self):
+        for text in self._run(CLARIFICATION):
+            self.assertNotIn("дословно из приложения", text)
+
+    def test_analysis_keeps_the_table(self):
+        for text in self._run(ANALYSIS):
+            self.assertIn("дословно из приложения", text, "разбор позиции обязан получить таблицу")
+
+    def test_rule_4_template_matches_the_runtime_sign(self):
+        """Признак берётся из шаблона правила 4: сменят шаблон — таблица пропадёт у всех разборов."""
+        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT
+        from app.rag.pipeline import _COMMITS_RE
+        self.assertTrue(_COMMITS_RE.search(NAVIGATOR_SYSTEM_PROMPT), "шаблон «**Позиция:**» ушёл из правила 4")
+
+
 if __name__ == "__main__":
     unittest.main()
