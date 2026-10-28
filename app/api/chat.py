@@ -273,7 +273,8 @@ def _answer_sources(ans) -> list[SourceItem]:
 
 
 def _sources_from_rules(rules) -> list[SourceItem]:
-    """Источники процедурного ответа в порядке [n]: метка пункта (source_anchor) + прямая ссылка на
+    """Источники-пункты норм в порядке [n] (процедурный ответ; в товарном — после позиций, `UI-1`):
+    метка пункта (source_anchor) + прямая ссылка на
     первоисточник. ОКПД2 у норм нет — клик ведёт по `url`, а не по коду (см. фронт addSources)."""
     out: list[SourceItem] = []
     for r in rules:

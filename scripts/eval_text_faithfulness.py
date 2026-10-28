@@ -135,6 +135,24 @@ def novel_words(claim: str, ctx_words: set[str]) -> list[str]:
                    if len(w) >= 4 and w not in ctx_words and w not in GENERIC and not w.isdigit()})
 
 
+def rules_text(rule_sources: list[dict]) -> str:
+    """Тексты пунктов норм, на которые ответ может сослаться [N] (`UI-1` #165) — из ДАННЫХ пунктов, а не
+    из рендера рантайма: оракул, повторяющий код, слеп к его ошибке (урок `O3`)."""
+    return "\n".join(f"{r.get('source_anchor') or ''} {r.get('parent_intro') or ''} {r.get('text') or ''}"
+                     for r in rule_sources or [])
+
+
+def cited_scope(claim: str, n_hits: int) -> str:
+    """На что ссылается утверждение: «hits» (только позиции), «rules» (только номера после позиций —
+    пункты Приказа №52 в товарном ответе, `UI-1` #165) или «both»."""
+    nums = [int(x) for x in re.findall(r"\[\s*(\d+)\s*\]", claim)]
+    if nums and all(n > n_hits for n in nums):
+        return "rules"
+    if any(n > n_hits for n in nums):
+        return "both"
+    return "hits"
+
+
 def evaluate(limit: int, cases_limit: int, threshold: float) -> list[dict]:
     cases = [c for c in json.loads(GOLDEN.read_text(encoding="utf-8"))["cases"] if c["in_scope"]]
     if cases_limit:
@@ -148,6 +166,13 @@ def evaluate(limit: int, cases_limit: int, threshold: float) -> list[dict]:
         ctx = ans.grounding  # ⚠ заземление ответа, а не пересборка (см. eval_answers)
         ctx_grams = _ngrams(ctx) | _ngrams(c["query"])  # вопрос пользователя — тоже законный источник
         ctx_words = set(tokenize(ctx)) | set(tokenize(c["query"]))
+        # ⚠ `UI-1` #165 (ревью PR #261, MED): товарный ответ на смешанный вопрос ссылается на пункты
+        # Приказа №52 метками [len(hits)+1 …], а блок документов в заземление НЕ входит (решение в
+        # `_plan_answer`). Сверка такого утверждения с контекстом позиций штрафовала бы предписанное
+        # поведение — его сверяем с текстом самих пунктов.
+        rtext = rules_text(ans.rule_sources)
+        r_grams, r_words = _ngrams(rtext) | _ngrams(c["query"]), set(tokenize(rtext)) | set(tokenize(c["query"]))
+        n_hits = len(ans.hits)
         scored, unmarked, meta, novel = [], [], 0, []
         for cl in claims(text):
             if META_RE.search(cl):     # утверждение про сам ответ/контекст — не факт о продукции
@@ -155,8 +180,11 @@ def evaluate(limit: int, cases_limit: int, threshold: float) -> list[dict]:
                 continue
             if CITE_RE.search(cl):
                 bare = CITE_RE.sub(" ", cl)
-                scored.append((cl, grounded_share(bare, ctx_grams)))
-                nw = novel_words(bare, ctx_words)
+                scope = cited_scope(cl, n_hits) if rtext else "hits"
+                grams = {"hits": ctx_grams, "rules": r_grams, "both": ctx_grams | r_grams}[scope]
+                words = {"hits": ctx_words, "rules": r_words, "both": ctx_words | r_words}[scope]
+                scored.append((cl, grounded_share(bare, grams)))
+                nw = novel_words(bare, words)
                 if nw:
                     novel.append((cl, nw))
             elif FACTUAL_RE.search(cl):

@@ -171,7 +171,7 @@ class TestMixedQuestionGetsDocuments(unittest.TestCase):
         # источниках ответа они на тех же местах. Метка позиции к пункту Приказа не приписывается, иначе
         # эксперт пойдёт сверять номер не туда.
         self.assertIn("у пунктов Приказа свои метки [N]", user)
-        self.assertIn("ПОСЛЕ позиций приложения", user)
+        self.assertIn("продолжают нумерацию позиций", user)
         self.assertIn("метку позиции к пункту Приказа не приписывай", user)
 
     def test_block_without_order_points_does_not_demand_paragraph_numbers(self):

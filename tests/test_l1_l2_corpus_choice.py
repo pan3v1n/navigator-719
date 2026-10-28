@@ -234,6 +234,32 @@ class TestOrder52PointsNumberedAfterPositionsUI1(_Stubbed):
                          "[3] обязан открывать пункт Приказа, а не позицию")
         self.assertIn("4.2.1", src[2].product_name)
 
+    def test_every_endpoint_builds_sources_through_one_function(self):
+        """Ревью PR #261, LOW: откат к «позиции ИЛИ пункты» в ОДНОМ эндпоинте из трёх (чат, поток, гость)
+        прошёл бы зелёным — фейковые ответы тестов эндпоинтов несут либо позиции, либо пункты. Сторож —
+        по именам в КОД-объектах (вложенные генераторы потока тоже), не по тексту: комментарий с именем
+        функции его не обманет (урок раунда 10)."""
+        import types
+
+        from app.api import chat, guest
+
+        def names(code):
+            out = set(code.co_names)
+            for c in code.co_consts:
+                if isinstance(c, types.CodeType):
+                    out |= names(c)
+            return out
+
+        for mod in (chat, guest):
+            for attr, fn in vars(mod).items():
+                if not isinstance(fn, types.FunctionType) or fn.__module__ != mod.__name__:
+                    continue
+                if attr in ("_answer_sources", "_sources_from_hits", "_sources_from_rules"):
+                    continue
+                used = names(fn.__code__) & {"_sources_from_hits", "_sources_from_rules"}
+                self.assertFalse(used, f"{mod.__name__}.{attr} строит источники мимо _answer_sources: {used}")
+        self.assertIn("_answer_sources", names(chat.chat.__code__) | names(chat.chat_stream.__code__))
+
     def test_procedural_answer_sources_unchanged(self):
         """Контроль: у процедурного ответа позиций нет — источники пункты с [1], как прежде."""
         from app.api.chat import _answer_sources

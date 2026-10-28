@@ -443,13 +443,18 @@ function addSources(wrap, sources) {
     const more = document.createElement("button");
     more.type = "button";
     more.className = "src-more";
+    // UI-1 #165: в товарном ответе на смешанный вопрос среди источников есть и пункты Приказа №52 —
+    // считать их «позициями» неверно. Слово — по составу непроцитированного: позиции, пункты или источники.
+    const restKinds = new Set(sources.filter((s, i) => !cited.has(i)).map((s) => isRuleSource(s)));
+    const words = restKinds.size > 1 ? ["источник", "источника", "источников", "источники"]
+      : restKinds.has(true) ? ["пункт", "пункта", "пунктов", "пункты"] : ["позиция", "позиции", "позиций", "позиции"];
     const label = (chips.children.length ? "Ещё " : "Найдено поиском: ") + rest.children.length + " "
-      + plural(rest.children.length, "позиция", "позиции", "позиций") + " — в ответе не цитируются";
+      + plural(rest.children.length, words[0], words[1], words[2]) + " — в ответе не цитируются";
     more.textContent = label;
     more.setAttribute("aria-expanded", "false");
     more.addEventListener("click", () => {
       const open = rest.classList.toggle("hidden") === false;
-      more.textContent = open ? "Скрыть позиции из поиска" : label;
+      more.textContent = open ? "Скрыть " + words[3] + " из поиска" : label;
       more.setAttribute("aria-expanded", open ? "true" : "false");
     });
     box.appendChild(more);
@@ -529,10 +534,15 @@ function paintActiveSource() {
   wrap.querySelectorAll('[data-src="' + i + '"]').forEach((x) => x.classList.add("on"));
 }
 
+// Источник — пункт нормы (а не позиция приложения). Одно определение на панель и на подписи списка (UI-1).
+function isRuleSource(s) {
+  return s.kind === "rule" || (!!s.url && !(s.okpd2 || []).length);
+}
+
 function openSource(wrap, i) {
   const s = (wrap._sources || [])[i];
   if (!s || !srcPanel) return;
-  const isRule = s.kind === "rule" || (!!s.url && !(s.okpd2 || []).length);
+  const isRule = isRuleSource(s);
   document.getElementById("src-doc").textContent = isRule
     ? (s.section || "Документ корпуса")
     : "Постановление Правительства РФ от 17.07.2015 № 719 · Приложение";
