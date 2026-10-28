@@ -110,10 +110,6 @@ class TestBothReachTheReport(unittest.TestCase):
         self.assertIn('"coherent": (topically_coherent(', src)
 
 
-if __name__ == "__main__":
-    unittest.main()
-
-
 class TestTitleWithFootnoteOrAmendmentEV20(unittest.TestCase):
     """`EV20` #117: у трёх разделов к имени в данных приклеены маркер сноски или редакционная пометка.
 
@@ -162,3 +158,7 @@ class TestTitleWithFootnoteOrAmendmentEV20(unittest.TestCase):
         for roman, title in titles.items():
             text = f"**Позиция:** «{section_name(title)}», изделие (ОКПД2 01.01) [1]."
             self.assertTrue(m.attributed(text, roman, [_Hit(roman, title)]), f"{roman}: {title!r}")
+
+
+if __name__ == "__main__":
+    unittest.main()

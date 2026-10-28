@@ -214,7 +214,7 @@ def _clean_section_title(title: str | None) -> str:
 # текста ей не о чем говорит. Показываем (контекст, панель «Источник», реранкер) — чистое имя, а маркеры
 # отдаём отдельно (`section_footnotes`), чтобы указатель на сноску не пропал. `Hit.section_title` —
 # сырой: он данные, его читают замеры.
-_SECTION_FOOTNOTE_RE = re.compile(r"<\d+(?:\(\d+\)|\.\d+)?>")
+_SECTION_FOOTNOTE_RE = re.compile(FOOTNOTE_MARK)  # форма маркера — одна на все места (#155)
 _SECTION_AMEND_RE = re.compile(r"\((?:в\s+ред\.|введ[её]н|утратил)[^()]*\)", re.IGNORECASE)
 
 

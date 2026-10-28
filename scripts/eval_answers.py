@@ -130,10 +130,12 @@ def topically_coherent(text: str, expected_roman: str, hits) -> bool:
     ⚠ Порог не назначается намеренно: пока не замерено, КАК ЧАСТО ответ вообще называет раздел,
     неизвестно, чего от него требовать. Это и есть открытый вопрос `EV17`.
     """
-    title = expected_section_title(hits, expected_roman)
+    # ⚠ По имени БЕЗ хвоста (ревью `EV20`): у XXIX в сыром названии «(в ред. Постановления Правительства
+    # …)» — и лексика засчитывалась любому ответу со словами «Постановления Правительства РФ №719».
+    title = _bare_title(expected_section_title(hits, expected_roman) or "")
     if not title:
         return False
-    return any(w.lower() in text.lower() for w in re.findall(r"[А-Яа-яЁёA-Za-z]{6,}", title))
+    return any(w in text.lower() for w in re.findall(r"[а-яёa-z]{6,}", title))
 
 
 def evaluate(limit: int, cases_limit: int, kind: str = "all"):
