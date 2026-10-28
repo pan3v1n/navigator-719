@@ -64,6 +64,13 @@ GOLDEN = ROOT / "scripts" / "eval_golden.json"
 from eval_refusal import declines  # noqa: E402
 # Иероглифы (утечка DeepSeek): CJK + хирагана/катакана.
 CJK_RE = re.compile(r"[぀-ヿ一-鿿]")
+
+
+def leaked_cjk(text: str, ans) -> bool:
+    """Протечка иероглифов (#264): в тексте ответа ИЛИ вычищена рантаймом (`Answer.cjk_removed`).
+    Только по тексту метрика давала бы 1.00 по построению — рантайм чистит до неё (ревью PR #265).
+    Первое ловит обход чистки, второе — что модель течёт вопреки правилу 7 промпта."""
+    return bool(CJK_RE.search(text or "")) or getattr(ans, "cjk_removed", 0) > 0
 # Инлайн-цитата на позицию-источник: [1], [2]… (P1-промпт).
 CITE_RE = re.compile(r"\[\d+\]")
 
@@ -187,7 +194,7 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
                          if c["in_scope"] and c["expected_section"] else None),
             "declined": declines(text),
             "cited": bool(CITE_RE.search(text)),  # есть ли инлайн-ссылка [N] на позицию
-            "cjk": bool(CJK_RE.search(text)),
+            "cjk": leaked_cjk(text, ans),
             "low_relevance": ans.low_relevance,
             # Наблюдаемая величина: как ТОТ ЖЕ текст прочитал предохранитель продукта. Расхождение
             # с `term_affirmed` — сигнал сам по себе: одно из двух чтений неверно.
