@@ -17,6 +17,7 @@ event loop не держим.
 from __future__ import annotations
 
 import json
+import time
 import uuid
 from datetime import datetime, timedelta, timezone
 from functools import lru_cache
@@ -29,6 +30,7 @@ from pydantic import BaseModel, Field
 
 from app.api import quota
 from app.api.auth import require_user, require_user_profiled
+from app.api.events import log_answer_event
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
 from app.core import plans, sensitive
@@ -42,6 +44,7 @@ from app.rag.edition import (
 from app.db import queries as q
 from app.db.engine import get_session
 from app.db.models import User
+from app.rag import corpora
 from app.rag.pipeline import SOURCE_TEXT_CAP, answer, answer_stream, source_text
 from app.tools.navigator import extract_okpd2
 
@@ -87,7 +90,8 @@ def _enforce_plan_quota(user: User, req: "ChatRequest") -> bool:
         with get_session() as db:
             if req.session_id and q.is_answered_repeat(
                     db, user.id, req.session_id, req.message,
-                    since=plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW):
+                    since=plans.naive_utc(datetime.now(timezone.utc)) - REPEAT_WINDOW,
+                    mode=req.corpus):  # L1: тот же текст в другом источнике — новый ответ
                 logger.info(f"тариф: повтор отвеченного вопроса не списывается, user_id={user.id}")
                 return False
             st = quota.quota_state(db, user)
@@ -127,6 +131,8 @@ def _reject_sensitive(text: str, user_id: int) -> None:
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=2000)
     session_id: str | None = None  # None → начать новую беседу
+    # L1 #146: по какому корпусу отвечать. `auto` — прежний автомат; чужое значение → 422.
+    corpus: corpora.Mode = corpora.AUTO
 
 
 class SourceItem(BaseModel):
@@ -153,6 +159,8 @@ class ChatResponse(BaseModel):
     # Считает сервер (`app/rag/followup.py`): только он знает, какой веткой отвечено и на что
     # движок реально способен ответить следующим ходом.
     input_hint: str = ""
+    # L2 #147: «Ответ собран по … · источник выбран автоматически/вручную»; «» — корпуса нет.
+    corpus_label: str = ""
 
 
 def _sources_from_hits(hits) -> list[SourceItem]:
@@ -321,6 +329,7 @@ def _log_question(user_id: int, session_id: str, text: str) -> None:
 
 @router.post("/api/chat", response_model=ChatResponse)
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
+    started = time.monotonic()  # O8: время ответа — в событие журнала
     _enforce_chat_limit(user.id)
     charge = _enforce_plan_quota(user, req)
     _reject_sensitive(req.message, user.id)
@@ -331,7 +340,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     _log_question(user.id, session_id, req.message)
     okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а
     try:
-        ans = answer(req.message, okpd2=okpd2, history=history)
+        ans = answer(req.message, okpd2=okpd2, history=history, corpus=req.corpus)
     except Exception:  # noqa: BLE001 — наружу дружелюбно, детали в лог (рваная сеть/DeepSeek)
         logger.exception(f"chat: движок упал на запросе от user_id={user.id}")
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
@@ -345,17 +354,20 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
                 sources=[s.model_dump() for s in sources],
                 low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
                 prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
+                corpus=corpora.stored(ans.corpus, req.corpus),
             )
             message_id = asst.id
             if charge and ans.metered:  # #160: списание — отдельной таблицей, удаление бесед его не трогает
                 q.record_answer_usage(db, user.id)
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
         logger.exception(f"chat: не удалось записать лог диалога (user_id={user.id})")
+    log_answer_event(ans, endpoint="chat", mode=req.corpus, started=started, sources=len(sources),
+                     message_id=message_id)
 
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=message_id,
-        input_hint=ans.input_hint,
+        input_hint=ans.input_hint, corpus_label=corpora.answered_by(ans.corpus, req.corpus),
     )
 
 
@@ -379,6 +391,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     ПЕРЕД вызовом движка уже записывает. Пиши мы его и здесь — при каждом фолбэке в беседе
     появлялся бы дубль вопроса, искажая и историю мультитёрна, и счётчики админки. Так что
     потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
+    started = time.monotonic()  # O8: время до первого куска и полное — в событие журнала
     _enforce_chat_limit(user.id)
     charge = _enforce_plan_quota(user, req)  # 402 до старта потока: фронт показывает причину
     _reject_sensitive(req.message, user.id)
@@ -387,9 +400,12 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     okpd2 = extract_okpd2(req.message)
 
     def gen():
+        first_token = None
         try:
-            for kind, payload in answer_stream(req.message, okpd2=okpd2, history=history):
+            for kind, payload in answer_stream(req.message, okpd2=okpd2, history=history,
+                                               corpus=req.corpus):
                 if kind == "delta":
+                    first_token = first_token or time.monotonic()
                     yield _sse({"type": "delta", "text": payload})
                     continue
                 # kind == "done": payload — Answer. Логируем диалог и отдаём метаданные.
@@ -405,12 +421,15 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                             content=ans.text, sources=[s.model_dump() for s in sources],
                             low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
                             prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
+                            corpus=corpora.stored(ans.corpus, req.corpus),
                         )
                         message_id = asst.id
                         if charge and ans.metered:  # #160: списание на финале, как в /api/chat
                             q.record_answer_usage(db, user.id)
                 except Exception:  # noqa: BLE001 — лог не должен ронять стрим (как в /api/chat)
                     logger.exception(f"chat_stream: не удалось записать лог (user_id={user.id})")
+                log_answer_event(ans, endpoint="stream", mode=req.corpus, started=started,
+                                 sources=len(sources), first_token=first_token, message_id=message_id)
                 yield _sse({
                     "type": "done", "message_id": message_id,
                     "sources": [s.model_dump() for s in sources],
@@ -418,6 +437,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                     "unverified_numbers": ans.unverified_numbers,
                     "session_id": session_id,
                     "input_hint": ans.input_hint,  # U5: подсказка следующего шага (см. ChatResponse)
+                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus),  # L2
                 })
         except Exception:  # noqa: BLE001 — движок упал (рваная сеть/DeepSeek) → сигнал фолбэка фронту
             logger.exception(f"chat_stream: движок упал на запросе от user_id={user.id}")
@@ -464,6 +484,7 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
                 # Б2: id ответа — чтобы и в переоткрытой беседе можно было оценить ответ и сообщить
                 # об ошибке. Чужой ответ так не оценить: `/api/feedback` сверяет владельца сообщения.
                 item["message_id"] = m.id
+                item["corpus_label"] = corpora.label_from_stored(m.corpus)  # L2
             out.append(item)
     return {"session_id": session_id, "messages": out}
 
@@ -485,6 +506,8 @@ def _serialize_messages(msgs, include_sources: bool = True) -> list[dict]:
         d = {"role": m.role, "content": m.content, "ts": m.ts.isoformat() if m.ts else None}
         if include_sources and m.sources_json:
             d["sources"] = json.loads(m.sources_json)
+        if _corpus_label(m):
+            d["corpus_label"] = _corpus_label(m)  # L2
         out.append(d)
     return out
 
@@ -513,6 +536,27 @@ def _who(role: str) -> str:
     return _HUMAN_LABEL if role == "user" else _AI_LABEL
 
 
+# L2 #147: выгрузка уносит ответ без интерфейса, поэтому «по чему собран» едет вместе с ним — строкой
+# в шапке (что это значит) и подписью под КАЖДЫМ ответом (переживает копирование одного ответа).
+_CORPUS_NOTE = ("Под каждым ответом указано, по какому корпусу он собран и кто выбрал корпус — "
+                "сервис или пользователь; проверяйте и этот выбор.")
+
+
+def _corpus_label(m) -> str:
+    return corpora.label_from_stored(m.corpus) if m.role == "assistant" else ""
+
+
+def _md_reply(m) -> list[str]:
+    lines = [f"**{_who(m.role)}:**", "", m.content, ""]
+    label = _corpus_label(m)
+    return lines + ([f"_{label}._", ""] if label else [])
+
+
+def _txt_reply(m) -> list[str]:
+    label = _corpus_label(m)
+    return [f"{_who(m.role)}:", m.content] + ([f"[{label}]"] if label else []) + [""]
+
+
 def _export_stamp() -> str:
     return datetime.now().strftime("%d.%m.%Y %H:%M")
 
@@ -525,6 +569,7 @@ def _md_head(title: str) -> list[str]:
         # E1: редакция корпуса — рядом с дисклеймером. Выгрузка уносит ответ за пределы сервиса,
         # и читатель должен видеть, на какой редакции он основан: 719 правится 6+ раз в год.
         f"> {corpus_line()}.", ">",
+        f"> {_CORPUS_NOTE}", ">",  # L2
         f"> Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.", "",
         "---", "",
     ]
@@ -536,6 +581,7 @@ def _txt_head(title: str) -> list[str]:
         title, "=" * 60, "",
         EXPERT_DISCLAIMER,
         f"{corpus_line()}.",  # E1
+        _CORPUS_NOTE,  # L2
         f"Выгружено из сервиса «{settings.APP_TITLE}» {_export_stamp()}.",
         "=" * 60, "",
     ]
@@ -549,7 +595,7 @@ def _convs_to_markdown(user_name: str, picked) -> str:
             lines.append(f"_{s['ts'].strftime('%d.%m.%Y %H:%M')}_")
         lines.append("")
         for m in msgs:
-            lines += [f"**{_who(m.role)}:**", "", m.content, ""]
+            lines += _md_reply(m)
         lines += ["---", ""]
     return "\n".join(lines)
 
@@ -560,7 +606,7 @@ def _convs_to_text(user_name: str, picked) -> str:
         stamp = f"  [{s['ts'].strftime('%d.%m.%Y %H:%M')}]" if s["ts"] else ""
         lines += [(s["title"] or "Диалог") + stamp, "-" * 30]
         for m in msgs:
-            lines += [f"{_who(m.role)}:", m.content, ""]
+            lines += _txt_reply(m)
         lines.append("")
     return "\n".join(lines)
 
@@ -584,14 +630,14 @@ def _download(content: str, media_type: str, filename: str) -> Response:
 def _conv_to_markdown(title: str, msgs) -> str:
     lines = _md_head(title)
     for m in msgs:
-        lines += [f"**{_who(m.role)}:**", "", m.content, ""]
+        lines += _md_reply(m)
     return "\n".join(lines)
 
 
 def _conv_to_text(title: str, msgs) -> str:
     lines = _txt_head(title)
     for m in msgs:
-        lines += [f"{_who(m.role)}:", m.content, ""]
+        lines += _txt_reply(m)
     return "\n".join(lines)
 
 
@@ -625,6 +671,7 @@ def export_conversations(
     ]
     return _json_download(
         {"disclaimer": EXPERT_DISCLAIMER, "corpus": corpus_line(),  # R3 + E1: маркировка первым полем
+         "corpus_note": _CORPUS_NOTE,  # L2
          "exported_at": _export_stamp(), "source": settings.APP_TITLE,
          "user": user.username,
          "filters": {"date_from": date_from or None, "date_to": date_to or None, "sources": incl_sources},
@@ -646,6 +693,7 @@ def export_conversation(session_id: str, fmt: str = "json", user: User = Depends
         return _download(_conv_to_text(title, msgs), "text/plain; charset=utf-8", base + ".txt")
     return _json_download(
         {"disclaimer": EXPERT_DISCLAIMER, "corpus": corpus_line(),  # R3 + E1
+         "corpus_note": _CORPUS_NOTE,  # L2
          "exported_at": _export_stamp(), "source": settings.APP_TITLE,
          "user": user.username, "conversation": {
             "session_id": session_id, "title": title, "messages": _serialize_messages(msgs)}},

@@ -3,7 +3,7 @@
 <div class="adm-head">
   <h1>Заявки</h1>
   {% set pool = counts[status] if status else leads_total %}
-  <span class="muted">{{ leads_total }} всего{% if pool > shown %} · показаны последние {{ shown }}{% endif %}</span>
+  <span class="muted">{{ leads_total }} всего{% if one_lead %} · {% if shown %}показана заявка №{{ one_lead }}{% else %}заявки №{{ one_lead }} нет (удалена по сроку хранения?){% endif %} · <a href="/admin/leads">все заявки</a>{% elif pool > shown %} · показаны последние {{ shown }}{% endif %}</span>
 </div>
 <nav class="adm-filters" aria-label="Статус заявки">
   <a class="seg-chip{% if not status %} on{% endif %}" href="/admin/leads">Все</a>

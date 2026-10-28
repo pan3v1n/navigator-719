@@ -1,3 +1,4 @@
+import sys
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -21,8 +22,22 @@ from app.db.engine import init_db
 _DEFAULT_SECRET = "dev-insecure-secret-change-in-env"
 
 
+def configure_logging(stream=None) -> None:
+    """Журнал вне `development` — без значений переменных в трассировках (152-ФЗ, ревью этапа 2).
+
+    Loguru по умолчанию (`diagnose=True`) печатает в трассировке `logger.exception` значения
+    переменных на каждой строке стека — и текст вопроса пользователя уезжал в stdout и `/data/app.log`
+    при каждом падении движка (`chat: движок упал …` подписывает `req.message`). Локально подробные
+    трассировки нужны для отладки — там поведение прежнее."""
+    if settings.APP_ENV == "development":
+        return
+    logger.remove()
+    logger.add(stream or sys.stderr, level=settings.LOG_LEVEL, diagnose=False)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    configure_logging()
     # Гард секрета: публичный дефолт SESSION_SECRET (лежит в репо) позволяет подделать сессию и
     # войти как admin. Локально (development) — громкое предупреждение; в проде — не стартуем.
     if settings.SESSION_SECRET == _DEFAULT_SECRET:
@@ -39,7 +54,8 @@ async def lifespan(app: FastAPI):
                        "За HTTPS-прокси (Caddy) задайте COOKIE_SECURE=true." % settings.APP_ENV)
     if settings.LOG_FILE:  # персистентный файловый лог (на VM — на томе, переживает редеплой)
         logger.add(settings.LOG_FILE, rotation="10 MB", retention="14 days",
-                   encoding="utf-8", enqueue=True, level=settings.LOG_LEVEL)
+                   encoding="utf-8", enqueue=True, level=settings.LOG_LEVEL,
+                   diagnose=settings.APP_ENV == "development")  # см. configure_logging
     init_db()  # таблицы приложения (users/messages/feedback), идемпотентно
     yield
 

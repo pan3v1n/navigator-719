@@ -194,4 +194,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from app.core.console import enable_utf8  # #107: значки вне cp1251 роняли бы печать
+    enable_utf8()
     raise SystemExit(main())

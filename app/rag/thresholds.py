@@ -15,10 +15,38 @@ from __future__ import annotations
 
 import re
 from functools import lru_cache
+
+from loguru import logger
 from pathlib import Path
+
+from app.rag import code_cells
 
 _CHUNK = (Path(__file__).resolve().parents[2] / "knowledge_base" / "pp719" / "chunks"
           / "130_PRIMECHANIYA_prilozheniya.txt")
+
+# Нулевой ширины пробелы и соединители приезжают из конвертации RTF и рвут сравнения строк.
+# ⚠ ВЫЧИЩАЮТСЯ НА ВХОДЕ, А НЕ В ОДНОМ МЕСТЕ РАЗБОРА (`D17` #207). В тексте ред. 29.09.2026 первая
+# ступень прим. 72.3 несла хвост U+200B, и примечание не разбиралось ВОВСЕ (списков 281 против 282
+# после вычистки): `_clean_step` чистил их только в самой ступени, а признаки границы и строки-
+# порога смотрели на сырой текст. Следующий экспорт Контура может поставить их в любое примечание
+# — поэтому все три читателя чанка берут текст из `_chunk_text`.
+_ZERO_WIDTH_RE = re.compile("[​‌‍⁠﻿]")
+
+
+def _chunk_text() -> str:
+    """Текст чанка примечаний без невидимых символов (`D17`).
+
+    ⚠ Строка ИЗ ОДНИХ невидимых выбрасывается целиком, а не очищается (ревью PR #220, MED).
+    Очищенная, она стала бы ПУСТОЙ, а пустая строка — граница таблицы и сборщика ступеней: график
+    под примечанием обрезался бы на ней молча («2026 — 50» вместо «2026 — 50; 2028 — 70»). До
+    вычистки такая строка не была пустой, и разбор читал сквозь неё — это поведение и сохраняется.
+    ⚠ Внутри строки символ удаляется, а не меняется на пробел — как и прежде в `_clean_step`.
+    Склейка соседних слов или кодов («…200​26…») на данных не встречается (все U+200B чанка стоят
+    после «)»); код из склейки ни к чему не применяется, то есть ошибка безопасна."""
+    lines = _CHUNK.read_text(encoding="utf-8").split("\n")
+    kept = [ln for ln in lines
+            if not (_ZERO_WIDTH_RE.search(ln) and not _ZERO_WIDTH_RE.sub("", ln).strip())]
+    return _ZERO_WIDTH_RE.sub("", "\n".join(kept))
 
 # Интро примечания-таблицы: «77. Продукция … в раздел XVI настоящего приложения …»
 # ⚠ ВВОДНАЯ ПРИМЕЧАНИЯ-ТАБЛИЦЫ (K2, #47). Прежний шаблон требовал буквально «Продукция,» и
@@ -199,6 +227,34 @@ def _variant_cells(row: str, n_years: int):
     return None
 
 
+def _is_code_row(row: str) -> bool:
+    """Логическая строка таблицы с кодом ОКПД2 в первой ячейке — для тревоги «разобрано 0».
+
+    ⚠ Ячейку смотрит ЦЕЛИКОМ, а не начало строки (ревью PR #220): `_ROW_START_RE` узнаёт только
+    ячейку с одним кодом на одной строке, а у прим. 80.1 таких 8 из 95 — таблица из одних
+    многокодовых ячеек обнулилась бы без тревоги. Строка таблицы — от ТРЁХ ячеек (код |
+    наименование | значение), и вторая ячейка — наименование, а не подпись года: подзаголовок
+    «таблицы по узлам» прим. 74 («из 28.13.27 "…":|до 31 декабря 2025 г.|с 1 января 2026 г.|») —
+    это шапка, его разбирает другая ветка, и тревога на нём была бы ложной (замер). Поправка
+    «(в ред. … от 05.10.2026 …)|» и строка исключения «из X - Исключено.|» — одна ячейка, их
+    отсекает уже число ячеек; отдельной проверки на них нет намеренно (мутация её не различала)."""
+    cells = row.split("|")
+    if len(cells) < 4 or _YEAR_ANY_RE.search(cells[1]):
+        return False
+    return bool(_CODE_RE.search(cells[0]))
+
+
+def _uniform_schedule(rows: list[dict]) -> dict | None:
+    """График, общий для ВСЕХ строк (видов группы, видов позиции, наименований перечня), либо None.
+
+    Одно правило «одинаковые графики → общий порог» на три места (`K2-4` #211): разбор таблицы по
+    видам, виды позиции под чужой группой и вердикт по наименованиям перечня. Копии уже
+    разъезжались формой — третья сравнивала «больше одного», первые две «ровно один»."""
+    if not rows or len({tuple(r["by_year"].items()) for r in rows}) != 1:
+        return None
+    return dict(rows[0]["by_year"])
+
+
 def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: str,
                          section: str | None):
     """`(таблица, индекс конца)` либо `(None, j)` — форма не та.
@@ -207,13 +263,34 @@ def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: st
     видов — это и есть порог позиции; разные — `by_year` пуст, а графики лежат в `variants`
     (печатает `_fmt`). Строка-вид без значений сразу под группой — перенос наименования группы
     (в ред. 05.10.2026 таких две); такая же строка ПОСЛЕ видов — отказ от формы целиком, потому
-    что её смысл (объединённая ячейка? перенос имени вида?) отсюда не различить."""
+    что её смысл (объединённая ячейка? перенос имени вида?) отсюда не различить.
+
+    ⚠ ОТКАЗ ОТ ФОРМЫ — ВСЁ ИЛИ НИЧЕГО, И ПОЭТОМУ ГРОМКИЙ (`K2-4` #211). Одна непонятая строка
+    (поправка «(в ред. …)» после последней строки, ГОСТ с «dd.dd» в имени вида) снимает форму
+    целиком, а общий разбор после пустой строки за шапкой не берёт ничего — у прим. 80.1 это все
+    позиции раздела VII разом. Отбраковывать одну строку здесь нельзя: смысл непонятой строки в
+    таблице видов отсюда не различить. Поэтому отказ пишется в журнал, если таблица БЫЛА похожа на
+    форму по видам (есть строка-группа: код и пустые значения)."""
     rows, tail, end = _logical_rows(lines, j + 1)
-    if tail:
-        return None, j
     parsed = [_variant_cells(r, len(years)) for r in rows]
-    if not parsed or any(p is None for p in parsed):
+    # Похожа на форму по видам — есть и строка-группа (код без значений), и строка-вид. Одна
+    # строка-группа без видов бывает и в обычной таблице (прим. 40) — это не повод для тревоги.
+    looks_like = (any(p and p[0] == "code" and not any(p[3]) for p in parsed)
+                  and any(p and p[0] == "var" for p in parsed))
+
+    def reject(why: str):
+        if looks_like:
+            logger.warning("thresholds: таблица по видам прим. {} отвергнута ({}) — её пороги "
+                           "уходят в общий разбор", note_no, why)
         return None, j
+
+    if tail:
+        return reject(f"незакрытая строка: {tail[0][:80]!r}")
+    if not parsed:
+        return None, j
+    bad = next((r for r, p in zip(rows, parsed) if p is None), None)
+    if bad is not None:
+        return reject(f"непонятая строка: {bad[:80]!r}")
     out: list[dict] = []
     cur: dict | None = None
     for p in parsed:
@@ -238,20 +315,23 @@ def _group_variant_table(lines: list[str], j: int, years: list[str], note_no: st
             continue
         name, vals = p[1], p[2]
         if cur is None:
-            return None, j                           # вид без группы — не та форма
+            return reject(f"вид без группы: {name[:80]!r}")
         if not any(vals):
             if cur["variants"]:
-                return None, j
+                return reject(f"строка без значений после видов: {name[:80]!r}")
             cur["name"] = f"{cur['name']} {name}".strip()
             continue
         cur["variants"].append(
             {"name": name, "by_year": {years[x]: vals[x] for x in range(len(years)) if vals[x]}})
     groups = [r for r in out if "variants" in r]
-    if not groups or any(not r["variants"] for r in groups):
+    if not groups:
         return None, j
+    if any(not r["variants"] for r in groups):
+        return reject("группа без видов")
     for r in groups:
-        if len({tuple(v["by_year"].items()) for v in r["variants"]}) == 1:
-            r["by_year"] = dict(r["variants"][0]["by_year"])
+        uniform = _uniform_schedule(r["variants"])
+        if uniform is not None:
+            r["by_year"] = uniform
     return {"note": note_no, "section": section, "years": years, "rows": out}, end
 
 
@@ -260,7 +340,7 @@ def _tables() -> list[dict]:
     """Парсит все таблицы-пороги из чанка примечаний. Кэш на процесс."""
     if not _CHUNK.exists():
         return []
-    lines = _CHUNK.read_text(encoding="utf-8").splitlines()
+    lines = _chunk_text().splitlines()
     tables: list[dict] = []
     i, n = 0, len(lines)
     while i < n:
@@ -385,6 +465,14 @@ def _tables() -> list[dict]:
             k += 1
         if rows:
             tables.append({"note": note_no, "section": section, "years": years, "rows": rows})
+        elif any(_is_code_row(r) for r in _logical_rows(lines, j + 1)[0]):
+            # ⚠ ШАПКА С ГОДАМИ ЕСТЬ, СТРОКИ С КОДАМИ ЕСТЬ, РАЗОБРАНО НОЛЬ (`K2-4` #211) — пороги
+            # примечания пропали целиком, и до сих пор это ловил только юнит-тест. Так выглядит,
+            # например, отвергнутая форма по видам: общий разбор останавливается на первой пустой
+            # строке за шапкой. Таблицы без кодов в первой колонке (прим. 11, 37, 74) разбирают
+            # другие ветки — для них ноль строк здесь норма, и тревоги нет.
+            logger.warning("thresholds: у прим. {} в таблице есть строки с кодами, а разобрано 0 — "
+                           "пороги примечания потеряны", note_no)
         i = k
     return tables
 
@@ -435,10 +523,7 @@ def _own_variants(row: dict, product_name: str | None) -> dict | None:
     own = [v for v in row.get("variants") or [] if _variant_of(v["name"], product_name)]
     if not own:
         return None
-    out = {**row, "variants": own, "by_year": {}}
-    if len({tuple(v["by_year"].items()) for v in own}) == 1:
-        out["by_year"] = dict(own[0]["by_year"])
-    return out
+    return {**row, "variants": own, "by_year": _uniform_schedule(own) or {}}
 
 
 _YEAR_LBL = re.compile(r"(\d{4}) год")
@@ -514,8 +599,6 @@ _NOTE_HDR_RE = re.compile(r"^(\d+(?:\(\d+\))?)\.\s")            # «7.», «8(1)
 # оптические многомодовые…»), то есть ЧУЖИЕ числа с подлинной ссылкой — ровно тот дефект, что
 # `EV13` вычищала у прим. 17. Останавливаться надо на ЛЮБОМ новом номере, включая подпункт.
 _NOTE_START_RE = re.compile(r"^\s*(\d+(?:\(\d+\))?(?:\.\d+)*)\.\s")
-# Нулевой ширины пробелы приезжают из конвертации RTF и рвут сравнения строк.
-_ZERO_WIDTH_RE = re.compile(r"[​‌‍﻿]")
 # ⚠ СТУПЕНЬ ПОРОГА — «не менее N баллов/процентов», И ТОЛЬКО ОНА (ревью 20.08.2026).
 # Многострочный сборщик брал ЛЮБУЮ строку со словами «не менее», и у прим. 17 в ступени уезжал
 # абзац прозы на 1402 символа: в нём есть «не менее 5 ЛЕТ» — срок хранения конструкторской
@@ -534,7 +617,14 @@ _CODE_TOKEN = r"(?:из\s+)?\d{2}(?:\.\d+)*(?:\s*<[^>\n]{1,16}>)?"
 # ⚠ Строка-порог начинается со списка кодов, за которым идёт ЛИБО наименование в кавычках,
 # ЛИБО сразу двоеточие: «30.11.31.110, 30.11.31.111, …: до 30 июня 2023 г. не менее 2500 баллов»
 # (прим. 17). Требование кавычки теряло такие строки целиком (K2, #47).
-_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}(?:\s*,\s*{_CODE_TOKEN})*\s*[":]', re.IGNORECASE)
+# ⚠ D20 #225: у кода бывает оговорка «(за исключением …)» — «26.20.16 (за исключением 26.20.16.120)
+# "Устройства ввода или вывода…": … не менее 55 баллов». Без неё в форме строки три такие строки
+# прим. 26 не узнавались вовсе, и позиции получали порог ЧУЖОЙ строки через исключённый код: «Устройства
+# ввода или вывода» — принтеров (70/85/120 вместо своих 55/65/90), «Устройства запоминающие и прочие» —
+# 26.20.21 (23/25/55 вместо 110/120/150). Исключённые коды строке не принадлежат (`_row_excluded`).
+_EXC_PAREN = r"(?:\s*\(\s*за\s+исключением\s+[^)\n]*\))?"
+_FLAT_ROW_RE = re.compile(rf'^\s*{_CODE_TOKEN}{_EXC_PAREN}(?:\s*,\s*{_CODE_TOKEN}{_EXC_PAREN})*\s*[":]',
+                          re.IGNORECASE)
 # ⚠ ДВА ГРАФИКА В ОДНОЙ СТРОКЕ (найдено ревью 20.08.2026, дефект внесён самой K2).
 # Приняв строку с «голым» двоеточием, разбор впустил прим. 17, где ОДНО предложение несёт ДВА
 # графика: общий и оговорку «за исключением судов, инвестиционные проекты по строительству
@@ -802,6 +892,90 @@ def _intro_codes(line: str) -> list[str]:
     return out
 
 
+# «… (только в отношении X и кроме Y)» — оговорка «и кроме» внутри «только» (прим. 26.1, турникеты; ревью D21).
+_ROW_EXC_OPEN_RE = re.compile(r"(?:\(\s*|\bи\s+)(?:за\s+исключением|кроме)\s+", re.IGNORECASE)
+_QUOTED_SPAN_RE = re.compile(r'"[^"]*"')
+
+
+def _row_excluded(line: str) -> list[str]:
+    """Коды из оговорок «(за исключением …)» и «(кроме [ОКПД 2] …)» строки-порога — до порога.
+
+    ⚠ Ревью D20: в прим. 53 та же оговорка записана «(кроме ОКПД 2 15.20.14.130 "Обувь валяная"; …)»,
+    и её коды становились кодами САМОЙ строки: «Обувь валяная», «Обувь детская валяная» и «Обувь
+    детская прочая» получали закупочный порог строки, которая их прямо исключает (80/110/90 вместо
+    своих 60 и 90/120/100). Бывает оговорка и ВНУТРИ закавыченного имени: «14.12 "Спецодежда (кроме
+    ОКПД 2 14.12.30.150 "Рукавицы…"), в том числе …"». Поэтому оговорка ищется в сыром тексте и
+    читается до ПАРНОЙ скобки; скобки внутри кавычек не считаются, коды берутся только вне кавычек
+    (в именах бывают свои числа)."""
+    raw = _blank_amend(line)
+    blanked = _blank_names(raw)          # та же длина — позиции совпадают
+    end = len(raw)
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = blanked.find(cut)
+        if pos > 0:
+            end = min(end, pos)
+    out: list[str] = []
+    for a, b in _exclusion_spans(raw, end):
+        seg = _QUOTED_SPAN_RE.sub(" ", raw[a:b])
+        for c in _CODE_ONLY_RE.findall(_FOOTNOTE_RE.sub(" ", seg)):
+            if "." in c and c not in out:
+                out.append(c)
+    return out
+
+
+def _exclusion_spans(raw: str, end: int) -> list[tuple[int, int]]:
+    """Границы текста оговорок «(за исключением …)» / «(кроме …)» до позиции `end` — до ПАРНОЙ скобки,
+    скобки внутри кавычек не считаются."""
+    spans = []
+    for m in _ROW_EXC_OPEN_RE.finditer(raw, 0, end):
+        depth, quoted, j = 1, False, m.end()
+        while j < end and depth:
+            ch = raw[j]
+            if ch == '"':
+                quoted = not quoted
+            elif not quoted and ch == "(":
+                depth += 1
+            elif not quoted and ch == ")":
+                depth -= 1
+            j += 1
+        spans.append((m.end(), j))
+    return spans
+
+
+def _row_exclusion_texts(line: str) -> list[str]:
+    """Тексты оговорок «(за исключением …)» / «(кроме …)» строки-порога — в том числе ВНЕ кавычек и без
+    закрывающей скобки (прим. 26.1, 26.30.11: «… "Аппаратура коммуникационная …" (кроме системы
+    мониторинга окружающей среды, …»). Правило противоположных оговорок читает их отсюда (ревью D21)."""
+    raw = _blank_amend(line)
+    blanked = _blank_names(raw)
+    end = len(raw)
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = blanked.find(cut)
+        if pos > 0:
+            end = min(end, pos)
+    return [raw[a:b] for a, b in _exclusion_spans(raw, end)]
+
+
+def _subject_names(line: str) -> list[str]:
+    """Наименования, которые строка НАЗЫВАЕТ своим предметом: закавыченные имена ВНЕ её оговорок.
+
+    ⚠ D21 #230: `_quoted_names` берёт и имена из «(кроме ОКПД 2 … "Тапочки детские меховые"; …)» —
+    это то, что строка ИСКЛЮЧАЕТ, а не её предмет; правило противоположных оговорок принимало бы их
+    за предмет строки."""
+    raw = _blank_amend(line)
+    blanked = _blank_names(raw)
+    end = len(raw)
+    for cut in (":", "не менее", "не оцениваются"):
+        pos = blanked.find(cut)
+        if pos > 0:
+            end = min(end, pos)
+    out = list(raw)
+    for a, b in _exclusion_spans(raw, end):
+        for x in range(a, b):
+            out[x] = " "
+    return _quoted_names("".join(out)[:end])
+
+
 @lru_cache(maxsize=1)
 def _flat_thresholds() -> list[dict]:
     """Строки-пороги «код "имя" - не менее N баллов» из примечаний-списков (прим. 7/8/9/31/52/53…).
@@ -810,7 +984,7 @@ def _flat_thresholds() -> list[dict]:
     баллов;» до следующего кода/примечания. Кэш на процесс."""
     if not _CHUNK.exists():
         return []
-    lines = _CHUNK.read_text(encoding="utf-8").split("\n")
+    lines = _chunk_text().split("\n")
     rows: list[dict] = []
     note = None
     i, n = 0, len(lines)
@@ -902,13 +1076,17 @@ def _flat_thresholds() -> list[dict]:
                 left = ln[:ln.find("не менее")]
                 thr = _AMEND_STRIP_RE.sub("", ln[j:]).strip(" -—").rstrip(";. ").strip()
                 thr = _drop_dangling_quote(thr)
-                codes = _codes_before_quote(ln)
+                excluded = _row_excluded(ln)
+                codes = [c for c in _codes_before_quote(ln) if c not in excluded]
                 thr, exc = _split_exception(thr)
                 if codes and thr:
-                    rows.append({"codes": codes, "names": _quoted_names(left),
+                    rows.append({"codes": codes, "names": _quoted_names(left), "excluded": excluded,
+                                 "subject_names": _subject_names(ln), "exclusions": _row_exclusion_texts(ln),
+                                 "excluded_sections": _row_excluded_sections(ln),
                                  "threshold": thr, "exception": exc, "note": note})
             elif _AMEND_STRIP_RE.sub("", ln).rstrip().endswith(":"):  # многостроч. (прим.9): «код "имя":» + ступени
-                codes = _codes_before_quote(ln)
+                excluded = _row_excluded(ln)
+                codes = [c for c in _codes_before_quote(ln) if c not in excluded]
                 names = _quoted_names(ln)
                 steps: list[str] = []
                 k = i + 1
@@ -926,7 +1104,9 @@ def _flat_thresholds() -> list[dict]:
                 # обязаны одинаково отвечать на один вход.
                 thr, exc = _split_exception("; ".join(steps)) if steps else ("", None)
                 if codes and thr:
-                    rows.append({"codes": codes, "names": names,
+                    rows.append({"codes": codes, "names": names, "excluded": excluded,
+                                 "subject_names": _subject_names(ln), "exclusions": _row_exclusion_texts(ln),
+                                 "excluded_sections": _row_excluded_sections(ln),
                                  "threshold": thr, "exception": exc, "note": note})
                 i = k
                 continue
@@ -946,7 +1126,69 @@ def _flat_thresholds() -> list[dict]:
             r["codes"] = []
     rows.extend(_qualified_list_rows(lines))
     rows.extend(_named_block_rows(lines))
+    # D22 #235: примечание, назвавшее раздел во вводной («…продукции, включенной в раздел XI настоящего
+    # приложения…»), к позициям других разделов не относится — как таблица (`_tables`). До правки фильтр
+    # раздела был только у таблиц, и закупочные прим. 52 (XI) и 53 (XVII) уходили по коду мебели судовой
+    # XVIII и противопролежневым матрацам VII.
+    sections = _note_sections(lines)
+    for r in rows:
+        r.setdefault("section", sections.get(r.get("note")))
     return rows
+
+
+# --- D22 #235: ОГОВОРКИ ПО РАЗДЕЛУ ----------------------------------------------------------------
+#
+# Строка прим. 7 «22.21 "Плиты, листы, трубы и профили пластмассовые, за исключением продукции,
+# предусмотренной разделом "X. Продукция промышленности строительных материалов" …" - не менее 75 баллов»
+# исключает РАЗДЕЛ, а не код: позиция раздела X с кодом 22.21 порог строки не получает.
+_ROW_SECTION_EXC_RE = re.compile(r"(?:за\s+исключением|кроме)\s+продукции,?\s+предусмотренн\w+\s+"
+                                 r"раздел(?:ом|ами)\s+\"?([IVXLC]+)\.", re.IGNORECASE)
+
+
+# Раздел, названный ВНУТРИ оговорки «(кроме / за исключением …)» строки, — в любой форме: прим. 26.1 пишет
+# «…, а также продукции, предусмотренной разделом XVIII настоящего приложения)» и «(кроме продукции
+# судостроения из раздела XVIII настоящего приложения)» — без кавычек и точки (ревью D22, MED).
+_EXC_SECTION_RE = re.compile(r"раздел(?:ом|ами|а|е)?\s+\"?([IVXLC]+)\b")
+
+
+def _row_excluded_sections(line: str) -> list[str]:
+    """Разделы, которые строка исключает, — до порога. Два признака: фраза «за исключением продукции,
+    предусмотренной разделом "X. …"» (в прим. 7 она стоит после запятой внутри имени, без скобки, и сканер
+    оговорок `_exclusion_spans` её не видит) и раздел, названный внутри оговорки строки
+    (`_row_exclusion_texts`)."""
+    raw = _AMEND_STRIP_RE.sub("", line)
+    end = raw.find("не менее")
+    out = _ROW_SECTION_EXC_RE.findall(raw if end < 0 else raw[:end])
+    for clause in _row_exclusion_texts(line):
+        out += _EXC_SECTION_RE.findall(clause)
+    return list(dict.fromkeys(out))
+
+
+def _note_sections(lines: list[str]) -> dict[str, str]:
+    """{номер примечания: раздел} — по вводной примечания, тем же признаком, что у таблиц
+    (`_INTRO_SECTION_RE`). Подпункт («26.1.») берёт раздел только из СВОЕЙ вводной: если она раздела не
+    называет, строка подпункта остаётся без раздела, как была. ⚠ Наследовать раздел родителя нельзя:
+    вводная прим. 80 называет раздел V (коэффициенты СЭЗ), а подпункт 80.1 — таблица раздела VII. Замер
+    27.10: наследование сейчас не меняет ни одной позиции (17.1, 17(2), 26.1, 80.1), то есть ничего не
+    чинит, а 80.1 ломало бы на первой же строке-списке."""
+    out: dict[str, str] = {}
+    for ln in lines:
+        h = _NOTE_START_RE.match(ln)
+        if h:
+            sm = _INTRO_SECTION_RE.search(ln)
+            if sm:
+                out[h.group(1)] = sm.group(1)
+    return out
+
+
+def _row_in_section(r: dict, section: str | None) -> bool:
+    """Строка примечания применима к позиции раздела `section` (D22 #235). Раздел позиции неизвестен —
+    не фильтруем (как у таблиц)."""
+    if not section:
+        return True
+    if r.get("section") and r["section"] != section:
+        return False
+    return section not in (r.get("excluded_sections") or ())
 
 
 # --- ⚠ ПЯТАЯ ФОРМА: «классифицируемой кодом … из CODE "ИМЯ" - N баллов» (прим. 27) ------------
@@ -1161,7 +1403,7 @@ def _note_scopes() -> dict[str, str]:
     """Номер примечания → 'procurement' | 'general' (по его вводной фразе)."""
     if not _CHUNK.exists():
         return {}
-    lines = _CHUNK.read_text(encoding="utf-8").splitlines()
+    lines = _chunk_text().splitlines()
     out: dict[str, str] = {}
     # Границы — по тому же правилу, что и нумерация строк-порогов: у подпункта «26.1»
     # должна быть СВОЯ область действия, а не унаследованная от «26». Иначе закупочный
@@ -1179,6 +1421,155 @@ def note_scope(note: str | None) -> str:
     return _note_scopes().get(str(note or ""), "general")
 
 
+# --- Графики по видам в абзаце примечания (K2-3 #174) ---------------------------------------------
+# Прим. 5 (автомобилестроение) — СМЕШАННОЕ: вводная про сумму баллов, затем абзац «Для целей
+# осуществления закупок …» с графиками, у которых вид продукции стоит ПОСЛЕ чисел:
+#   «(с 1 января 2023 г. не менее 3200 баллов, с 1 января 2027 г. не менее 3500 баллов, …
+#    (для автомобилей легковых, легких коммерческих автомобилей), с 1 января 2023 г. не менее 1100
+#    баллов, … (для автомобилей легковых, приводимых в движение … (электромобили), …»
+# Ни одна из форм `_tables`/`_flat_thresholds` этого не знает, а область примечания определяется по
+# голове (`_note_scopes`, первые 900 знаков) — «общая». Итог до правки: у всех четырёх позиций
+# раздела II закупочного порога нет, хотя эксперт отвечает «он в примечании 5» (отчёт 22.09, ④).
+# Замер 27.10.2026 по всем примечаниям: эта форма (даты + «(для <вида>)») и закупочный абзац за
+# головой — только у прим. 5. У прим. 53 похожее «(для производства изделий из тканей)» без дат —
+# там это условие ступени, и строка уже доходит до позиции дословно (`_flat_thresholds`).
+#
+# ⚠⚠ ТОЛЬКО ЗАКУПОЧНАЯ ОБЛАСТЬ И ТОЛЬКО ПОЛНОСТЬЮ РАЗОБРАННЫЙ АБЗАЦ (ревью K2-3, 2 MED). Абзац по видам
+# без формулы «Для целей осуществления закупок» (переформулировка редакции; абзац господдержки ПП 191,
+# разбитый по видам) уходил бы через `lookup_threshold` в строку «Порог:» как порог ПОДТВЕРЖДЕНИЯ
+# производства, а проверка выкатки смотрит область на уровне примечания и этого не видит. Ступень,
+# не узнанная разбором (иная дата, «г» без точки), уезжала в промежуток: число молча терялось или
+# приписывалось СОСЕДНЕМУ виду. Оба отказа — тихие и в сторону неверного числа; здесь — громкий
+# отказ: абзац не берётся, позиция остаётся без порога, как до правки.
+_KIND_DATE = r"(?:с|до)\s+\d{1,2}\s+[а-яё]+\s+\d{4}\s*г\.?"
+_KIND_STEP_RE = re.compile(rf"({_KIND_DATE})\s*(не\s+менее\s+\d[\d\s]*?\s*балл\w*)", re.IGNORECASE)
+_KIND_OPEN_RE = re.compile(r"\s*\(\s*для\s+", re.IGNORECASE)
+_KIND_END_RE = re.compile(r"\)?\s*\.\s+[А-ЯЁ]")     # «… (электробусы). Условием подтверждения …»
+# Число ступени, оставшееся в промежутке, — ступень, которую разбор не узнал: абзац не берём.
+_KIND_STRAY_RE = re.compile(r"не\s+менее\s+\d|\d\s*балл", re.IGNORECASE)
+
+
+def _kind_text(gap: str) -> str | None:
+    """Текст вида из промежутка «(для <вид>)…» после последней ступени его графика, либо None.
+
+    ⚠ Скобка «(для» в первоисточнике у электро-видов НЕ ЗАКРЫТА: «(для автомобилей легковых, …
+    электроэнергии (электромобили), с 1 января …» — закрывается только внутренняя «(электромобили)».
+    Поэтому вид берётся до следующей ступени (или до конца предложения у последнего), а лишние
+    закрывающие скобки снимаются только при дисбалансе."""
+    m = _KIND_OPEN_RE.match(gap)
+    if not m:
+        return None
+    text = gap[m.end():]
+    end = _KIND_END_RE.search(text)
+    if end:
+        text = text[:end.start()] + (")" if text[end.start()] == ")" else "")
+    text = " ".join(text.split()).rstrip(" ,;.")
+    while text.count(")") > text.count("(") and ")" in text:
+        text = text[:text.rfind(")")].rstrip(" ,;.")
+    return text or None
+
+
+@lru_cache(maxsize=1)
+def _kind_schedules() -> list[dict]:
+    """[{note, section, kinds: [(вид, [(подпись, значение)…])…]}] — ЗАКУПОЧНЫЕ абзацы формы «ступени
+    (для <вида>)» с ДВУМЯ и более видами. Не берём абзац, где хоть одна ступень осталась без вида или
+    в промежутке между ступенями осталось нераспознанное число: форма не та, и привязать не к чему.
+    Хвосты «(в ред. …)» снимаются до разбора — иначе они уезжали в текст вида."""
+    if not _CHUNK.exists():
+        return []
+    lines = _chunk_text().splitlines()
+    bounds = [(m.group(1), i) for i, ln in enumerate(lines) if (m := _NOTE_START_RE.match(ln))]
+    out: list[dict] = []
+    for k, (num, i) in enumerate(bounds):
+        j = bounds[k + 1][1] if k + 1 < len(bounds) else len(lines)
+        for raw in lines[i:j]:
+            para = _AMEND_STRIP_RE.sub("", raw)
+            steps = list(_KIND_STEP_RE.finditer(para))
+            if len(steps) < 2 or not _PROCUREMENT_RE.search(para):
+                continue
+            kinds: list[tuple[str, list[tuple[str, str]]]] = []
+            cur: list[tuple[str, str]] = []
+            stray = False
+            for n, m in enumerate(steps):
+                cur.append((" ".join(m.group(1).split()), " ".join(m.group(2).split())))
+                nxt = steps[n + 1].start() if n + 1 < len(steps) else len(para)
+                gap = para[m.end():nxt]
+                end = _KIND_END_RE.search(gap)
+                stray = stray or bool(_KIND_STRAY_RE.search(gap[:end.start()] if end else gap))
+                kind = _kind_text(gap)
+                if kind:
+                    kinds.append((kind, cur))
+                    cur = []
+            sec = _INTRO_SECTION_RE.search(para)
+            if cur or stray or len(kinds) < 2 or not sec:
+                if steps and (cur or stray):
+                    logger.warning("прим. {}: абзац с графиками по видам разобран не полностью — "
+                                   "не используется", num)
+                continue
+            out.append({"note": num, "section": sec.group(1), "kinds": kinds})
+    return out
+
+
+def _stem_hit(a: str, b: str) -> bool:
+    """Основы совпали. Snowball режет «автомобилей» до «автомобил», а «автомобили» — до «автомоб»:
+    префикс допускается у основ от 6 знаков и с разницей длины не больше 2. Иначе «легк» (лёгкие)
+    совпала бы с «легков» (легковые) и электро-график легковых ушёл бы лёгким коммерческим, а
+    «легков» — с «легковоспламеня…» (ревью K2-3, LOW-1)."""
+    if a == b:
+        return True
+    lo, hi = sorted((a, b), key=len)
+    return len(lo) >= 6 and len(hi) - len(lo) <= 2 and hi.startswith(lo)
+
+
+def _kind_applies(kind: str, product_name: str | None) -> bool:
+    """Вид относится к позиции: все основы хотя бы одной части вида (через запятую) есть в
+    наименовании. «автомобилей легковых, легких коммерческих автомобилей» — две части, каждая
+    называет свою позицию; уточнение «приводимых в движение … электрическим двигателем» —
+    длинная часть, в наименовании её нет, и вид держится на своей первой части.
+    ⚠ Чужие разделы держит только фильтр раздела в `_kind_schedule`: «Шины … для легковых
+    автомобилей» (XXI) по одним словам получили бы график ТС. Позиция-компонент в самом разделе II
+    («… для легковых автомобилей») получила бы его тоже — при появлении такой позиции правило надо
+    пересмотреть (ревью K2-3, LOW-1)."""
+    have = _stems(_strip_fn(product_name))
+    for part in kind.split(","):
+        want = _stems(part)
+        if want and all(any(_stem_hit(w, h) for h in have) for w in want):
+            return True
+    return False
+
+
+def _kind_schedule(product_name: str | None, section: str | None, scope: str) -> str | None:
+    """Закупочные графики видов, относящихся к позиции, из абзаца `_kind_schedules` её раздела.
+    Не закупочная область, нет раздела или абзацев с видами позиции два — None: не гадаем."""
+    if scope != "procurement" or not product_name or not section:
+        return None
+    found = []
+    for p in _kind_schedules():
+        if p["section"] != section:
+            continue
+        hits = [(kind, steps) for kind, steps in p["kinds"] if _kind_applies(kind, product_name)]
+        if hits:
+            found.append((p, hits))
+    if len(found) != 1:
+        if found:
+            logger.warning("графики по видам для «{}»: абзацев {} — не выбираем",
+                           product_name[:60], len(found))
+        return None
+    p, hits = found[0]
+    body = "\n".join(f"      — для {kind}: " + "; ".join(f"{lbl} — {val}" for lbl, val in steps)
+                     for kind, steps in hits)
+    return f"{BY_KIND}прим. {p['note']} к разд. {p['section']}]:\n{body}"
+    for p in _kind_schedules():
+        if p["scope"] != scope or p["section"] != section:
+            continue
+        hits = [(kind, steps) for kind, steps in p["kinds"] if _kind_applies(kind, product_name)]
+        if hits:
+            body = "\n".join(f"      — для {kind}: " + "; ".join(f"{lbl} — {val}" for lbl, val in steps)
+                             for kind, steps in hits)
+            return f"{BY_KIND}прим. {p['note']} к разд. {p['section']}]:\n{body}"
+    return None
+
+
 def _segs(code: str) -> list[str]:
     return [s for s in str(code).strip().split(".") if s]
 
@@ -1194,7 +1585,14 @@ def _code_applies(note_code: str, pos_code: str) -> bool:
     «Детандер-генераторов жидкостных для СПГ» (27.11.32.120); «Обувь с верхом из текстильных
     материалов» (15.20.14) — порог «Обуви валяной» (15.20.14.130). Число дословно из первоисточника,
     поэтому faithfulness-гард молчит: он проверяет заземлённость, а не правильность привязки.
-    Порог — самый дорогой факт продукта, поэтому здесь лучше не показать, чем показать чужой."""
+    Порог — самый дорогой факт продукта, поэтому здесь лучше не показать, чем показать чужой.
+
+    ⚠ ПОСЕГМЕНТНО, А НЕ ПОРАЗРЯДНО, — и это решено замером (`D14-1` #176, 27.10.2026). Поиск позиции с
+    `D14` поразрядный, а здесь перевод дал бы порог 21 позиции и снял у двух: верны 1–2 приобретения.
+    Строка с кодом «…YZ0» или короткой группировкой называет КОНКРЕТНОЕ изделие («Части компрессоров»,
+    «роторные управляемые системы»), и подъём к ней отдаёт число чужого изделия без его имени. Вердикт по
+    каждой позиции — `docs/eval_runs/2026-10-27_d14_1_thresholds_digitwise.md`; сторож —
+    `tests/test_d14_1_threshold_hierarchy.py`. Узкий случай «подкод + дословно то же имя» — `_subcode_of_group`."""
     n, p = _segs(note_code), _segs(pos_code)
     return bool(n) and len(n) <= len(p) and p[:len(n)] == n
 
@@ -1243,7 +1641,7 @@ def _list_items_verdict(table: dict, product_name: str | None, codes: list[str])
             and any(_code_applies(rc, c) for c in codes for rc in by_name[it]["codes"])]
     if len(hits) < 2:
         return None
-    if len({tuple(r["by_year"].items()) for r in hits}) > 1:
+    if _uniform_schedule(hits) is None:
         return "conflict"
     return hits[0] if len(hits) == len(items) else None
 
@@ -1370,6 +1768,125 @@ def _stems(text: str) -> set[str]:
     return {t for t in tokenize(text or "") if len(t) > 2 and not t.isdigit()}
 
 
+
+# --- Противоположные оговорки области (D21 #230) -------------------------------------------------
+# Позиция получала порог строки, чья ОБЛАСТЬ ей противоположна: «Принтеры (кроме принтеров для печати
+# этикеток …)» — порог строки «Принтеры (только в отношении принтеров для печати этикеток …)»;
+# «Сканеры биометрические» — порог «Сканеров (только в отношении сканеров штрихкодов)»; «Аппараты для
+# ингаляционного наркоза (за исключением аппаратов ИВЛ)» — порог строки «Аппараты ИВЛ». Код у них общий,
+# строка с точным кодом единственная — и шла в ответ без проверки наименования. Число дословное, ссылка
+# подлинная: гард и эксперт подмены не видят.
+# Радиус 27.10.2026 по всем позициям: порог снят ровно у 11, у каждой своей строки в примечаниях нет:
+#   * три позиции выше;
+#   * шесть позиций IX кода 26.30.11 («Система мониторинга окружающей среды», «Терминал экстренной связи»
+#     …) — строка прим. 26.1 «из 26.30.11 "…" (кроме системы мониторинга окружающей среды, …» исключает их
+#     оговоркой ВНЕ кавычек и без закрывающей скобки (ревью D21, HIGH-1);
+#   * «Турникеты биометрические…» — «(только в отношении … и кроме турникетов биометрических…)»;
+#   * «Маммографы, рентгеновские аппараты …» — перечень, разделённый строками «Маммографы» (100/110) и
+#     «Рентгеновские аппараты … (за исключением маммографов)» (100/100): общего порога нет (HIGH-2).
+# Позиции с оговоркой УЖЕ строки («Краны … (за исключением кранов для самоходной техники)» ← «Краны
+# грузоподъемные прочие») и исключающие ПОДВИД сохраняют порог. Оговорки по РАЗДЕЛУ («за исключением
+# продукции, предусмотренной разделом X») — другой механизм, отдельная задача.
+_SCOPE_ONLY_RE = re.compile(r"\(\s*только\s+в\s+отношении\s+((?:[^()]|\([^()]*\))*)\)", re.IGNORECASE)
+_SCOPE_EXCEPT_RE = re.compile(r"\(\s*(?:кроме|за\s+исключением)\s+((?:[^()]|\([^()]*\))*)\)", re.IGNORECASE)
+# Оговорка, обрезанная разбором имени без закрывающей скобки («Спецодежда (кроме ОКПД 2 … "Рукавицы…»).
+_SCOPE_EXCEPT_TAIL_RE = re.compile(r"\(\s*(?:кроме|за\s+исключением)\s+[^()]*$", re.IGNORECASE)
+_SCOPE_ITEM_SPLIT_RE = re.compile(r"[;,\n]")
+# Слова оговорки, которые продукцию не называют: «(за исключением продукции, классифицируемой кодом X,
+# предусмотренной разделом Y настоящего приложения)». Без них пункт из одних служебных слов совпадал бы
+# с любой строкой «…, классифицируемая кодом …» (ревью D21, MED-4). Коды — задача `D20`.
+_SCOPE_GENERIC = frozenset(_stems("продукция продукции продукцию классифицируемой классифицируемых кодом кодами раздел разделом разделе предусмотренной предусмотрены приложения настоящего требования которой товаров товары изделий изделия"))
+
+
+def _scope_items(text: str) -> list[set[str]]:
+    """Пункты оговорки «X, Y; Z» — каждый основами без служебных слов; пустые отброшены.
+    Закавыченное имя — ОДИН пункт: запятая внутри «"Обувь детская прочая, не включенная в другие
+    группировки"» пункт не делит (иначе хвост «не включенная …» совпал бы с чужим предметом)."""
+    parts = re.findall(r'"([^"]*)"', text) + _SCOPE_ITEM_SPLIT_RE.split(_QUOTED_SPAN_RE.sub(" ; ", text))
+    return [st for part in parts if (st := _stems(part) - _SCOPE_GENERIC)]
+
+
+def _without_exclusions(text: str) -> str:
+    """Текст без СВОИХ оговорок-исключений — в том числе «… и кроме Y» внутри «(только в отношении X …)»:
+    позиция «Устройства охранной сигнализации (только в отношении … и кроме турникетов биометрических)»
+    турникетами не ЯВЛЯЕТСЯ, а их исключает."""
+    out = list(text or "")
+    for a, b in _exclusion_spans(text or "", len(text or "")):
+        for x in range(a, b):
+            out[x] = " "
+    return "".join(out)
+
+
+def _scope_base(text: str) -> str:
+    """Имя без оговорок «только в отношении» и «кроме / за исключением» (в том числе обрезанной)."""
+    return _SCOPE_EXCEPT_TAIL_RE.sub(" ", _SCOPE_ONLY_RE.sub(" ", _SCOPE_EXCEPT_RE.sub(" ", text)))
+
+
+def _scope_conflict(row_names: list[str], product_name: str | None,
+                    subject_names: list[str] | None = None,
+                    row_exclusions: list[str] | None = None) -> bool:
+    """Область строки противоположна позиции — порог строки ей не принадлежит.
+
+    А. Позиция ИСКЛЮЧАЕТ предмет строки: всё, что названо в пункте «(кроме / за исключением X)»
+       позиции, есть в предмете строки — «только в отношении Y», а без такой оговорки её имени («за
+       исключением аппаратов ИВЛ» ↔ строка «Аппараты ИВЛ»).
+    Б. Строка — ТОЛЬКО О X, а позиция X не называет: у X есть слова сверх имени строки
+       («штрихкодов» сверх «Сканеры»), и ни одного из них в наименовании позиции (вместе с её
+       собственной «только в отношении …») нет.
+    В. Строка своей оговоркой ИСКЛЮЧАЕТ позицию: пункт «(кроме / за исключением …)» строки целиком
+       назван в имени позиции. Оговорки строки — из её имён И из самого текста строки
+       (`row_exclusions`): в прим. 26.1 «из 26.30.11 "…" (кроме системы мониторинга окружающей среды,
+       …» стоит ВНЕ кавычек и без закрывающей скобки (ревью D21, HIGH-1).
+    Оговорка делится на пункты, включение пункта СТРОГОЕ, пункт из одного слова для А и В не в счёт,
+    одинаковые имена не конфликтуют. `subject_names` — предмет строки для А и Б (имена ВНЕ её
+    оговорок, `_subject_names`). ⚠ Исключённый ПОДВИД — не конфликт: «Тазобедренный модуль …
+    (за исключением тазобедренного модуля … с использованием полимеров)» к позиции «Тазобедренный
+    модуль …» относится. ⚠ Первая редакция допускала «без одного слова» и путала исключение ПОДВИДА
+    с исключением предмета: «Слуховые аппараты (за исключением … костной проводимости)», «Обувь
+    детская прочая (кроме … Тапочки детские …)», «Чехлы (лайнеры) …» теряли свой порог."""
+    pn = product_name or ""
+    same = lambda nm: _norm(_strip_fn(nm)) == _norm(_strip_fn(pn))  # noqa: E731
+    p_except = [it for m in _SCOPE_EXCEPT_RE.finditer(pn) for it in _scope_items(m.group(1)) if len(it) >= 2]
+    p_own = _stems(_scope_base(_without_exclusions(pn)))
+    # Чем позиция ЯВЛЯЕТСЯ: имя без её исключений, но с её «только в отношении …» (ревью D21, MED-3).
+    p_full = _stems(_SCOPE_EXCEPT_TAIL_RE.sub(" ", _SCOPE_EXCEPT_RE.sub(" ", _without_exclusions(pn))))
+    for nm in (subject_names if subject_names is not None else row_names) or ():
+        if not nm or same(nm):
+            continue
+        r_only = [_stems(m.group(1)) for m in _SCOPE_ONLY_RE.finditer(nm)]
+        r_base = _stems(_scope_base(nm))
+        for subject in (r_only or [r_base]):
+            if subject and any(ex <= subject for ex in p_except):
+                return True
+        for x in r_only:
+            distinct = x - r_base
+            if distinct and not (distinct & p_full):
+                return True
+    r_except = [it for nm in (row_names or ()) if nm and not same(nm)
+                for m in _SCOPE_EXCEPT_RE.finditer(nm) for it in _scope_items(m.group(1))]
+    r_except += [it for clause in (row_exclusions or ()) for it in _scope_items(clause)]
+    return bool(p_own) and any(len(ex) >= 2 and ex <= p_full for ex in r_except)
+
+
+def _excludes_list_item(row_names: list[str], product_name: str | None,
+                        row_exclusions: list[str] | None = None) -> bool:
+    """Строка исключает ОДИН ИЗ ПУНКТОВ позиции-перечня — у перечня нет общего порога, не гадаем.
+
+    Ревью D21 (HIGH-2): «Маммографы, рентгеновские аппараты передвижные палатные, …» получали порог
+    строки «Рентгеновские аппараты … (за исключением маммографов)», хотя у маммографов своя строка с
+    другим графиком (с 2027 г. — на 10 баллов выше). Пункт из одного слова («маммографов») здесь в
+    счёт идёт, но только при ТОЧНОМ совпадении с пунктом перечня позиции."""
+    pn = product_name or ""
+    p_items = [_stems(part) - _SCOPE_GENERIC for part in _SCOPE_ITEM_SPLIT_RE.split(_scope_base(pn))]
+    p_items = [it for it in p_items if it]
+    if len(p_items) < 2:
+        return False
+    r_except = [it for nm in (row_names or ()) if nm
+                for m in _SCOPE_EXCEPT_RE.finditer(nm) for it in _scope_items(m.group(1))]
+    r_except += [it for clause in (row_exclusions or ()) for it in _scope_items(clause)]
+    return any(ex == it for ex in r_except for it in p_items)
+
+
 def _lead_first(r: dict, product_name: str) -> tuple[str, str | None]:
     """`(ведущий график, остальные)` для строки с подблоками «для …» — по ИМЕНИ позиции.
 
@@ -1450,6 +1967,12 @@ def lookup_procurement_threshold(codes: list[str], product_name: str,
 def _lookup(codes: list[str], product_name: str, section: str | None, scope: str) -> str | None:
     """Порог по годам для позиции (из примечаний), либо None. Матч по НАИМЕНОВАНИЮ в рамках раздела
     (у одного кода бывают строки «общая категория» и «конкретный продукт» — имя различает)."""
+    # D20 #225: коды, которые позиция ИСКЛЮЧАЕТ, — не её коды, и порог по ним — чужой («Устройства
+    # ввода или вывода» 26.20.16 получали порог принтеров 26.20.16.120). Снимаем здесь, а не у
+    # вызывающих: полный список из записи и свой список хита (`retriever._to_hit`) дают одно и то же.
+    cell = code_cells.marks(section, product_name, codes)
+    if cell:
+        codes = [c for c, mk in zip(codes, cell) if mk != code_cells.EXCEPT]
     name = _norm(product_name)
     # 1) таблицы-пороги по годам (прим.77 и т.п.) — матч по НАИМЕНОВАНИЮ
     if name:
@@ -1483,7 +2006,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
     #     («одномодовые» и «многомодовые» отличаются одним словом из шести).
     if name:
         named = [r for r in _flat_thresholds()
-                 if not r["codes"] and note_scope(r.get("note")) == scope
+                 if not r["codes"] and note_scope(r.get("note")) == scope and _row_in_section(r, section)
                  and any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
                          for nm in r["names"])]
         if len(named) == 1:
@@ -1498,6 +2021,9 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
     #     если оно не различает, НЕ ГАДАЕМ — лучше не показать, чем показать чужой порог.
     if codes:
         tcands: list[tuple[dict, dict, bool]] = []   # (таблица, строка, точное ли совпадение кода)
+        # Виды позиции под ЧУЖОЙ группой (см. `_own_variants`) — собираются в ЭТОМ ЖЕ обходе: фильтры
+        # области и раздела у них те же, и второй полный обход таблиц повторял их копией (`K2-4` #211).
+        own: list[tuple[dict, dict]] = []
         for t in _tables():
             if note_scope(t["note"]) != scope:
                 continue
@@ -1527,12 +2053,21 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             if isinstance(verdict, dict):
                 return _fmt(verdict, t["note"], t["section"])
             for r in t["rows"]:
+                if r.get("strict_name") and r.get("variants") and any(
+                        _code_applies(rc, c) for c in codes for rc in r["codes"]):
+                    hit = _own_variants(r, product_name)
+                    if hit:
+                        own.append((t, hit))
                 # Строка, у которой имя — ключ (прим. 80.1), кандидат только по ДОСЛОВНОМУ имени
                 # (с точностью до «,»/«;»); позиция-перечень дошла бы сюда через
                 # `_list_items_verdict` выше. ⚠ Виды группы НЕ отбираются по началу имени: в группе
                 # «Средства гемостатические» законные виды называются «Губки гемостатические…»,
                 # «Бинты … со средствами гемостатическими…», и такой отбор выбросил бы 15 из 21.
                 if r.get("strict_name") and not _strict_match(r["name"], product_name):
+                    continue
+                if _excludes_list_item([r.get("name") or ""], product_name):
+                    return None                                # D21: перечень, разделённый строками
+                if _scope_conflict([r.get("name") or ""], product_name):    # D21 #230
                     continue
                 exact = None
                 for c in codes:
@@ -1554,18 +2089,6 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # кандидатов по коду: вид, названный ИМЕНЕМ позиции, конкретнее строки чужой таблицы,
             # совпавшей только кодом «из 32.50.50.190». ⚠ Но не конкретнее строки, названной ровно
             # как позиция (ревью PR #209) — поэтому только при пустом `same`.
-            own = []
-            for t in _tables():
-                if note_scope(t["note"]) != scope:
-                    continue
-                if section and t["section"] and t["section"] != section:
-                    continue
-                for r in t["rows"]:
-                    if r.get("strict_name") and r.get("variants") and any(
-                            _code_applies(rc, c) for c in codes for rc in r["codes"]):
-                        hit = _own_variants(r, product_name)
-                        if hit:
-                            own.append((t, hit))
             if len(own) == 1:
                 t, r = own[0]
                 return _fmt(r, t["note"], t["section"])
@@ -1597,17 +2120,25 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
         for r in _flat_thresholds():
             if note_scope(r.get("note")) != scope:
                 continue
+            if not _row_in_section(r, section):               # D22 #235
+                continue
             exact = None
-            for c in codes:
+            # D20: строка «X (за исключением Y)» к позиции с кодом под Y не относится — ни точным кодом,
+            # ни подкодом категории (ревью D21, MED-5: ветка подкода исключения обходила).
+            own_codes = [c for c in codes
+                         if not any(code_cells.under(c, e) for e in r.get("excluded") or ())]
+            for c in own_codes:
                 for rc in r["codes"]:
                     if _code_applies(rc, c):
                         exact = bool(exact) or (_segs(rc) == _segs(c))
+            # Имена, которые строка называет СВОИМ предметом: исключённые в её оговорке — не в счёт.
+            subject = r.get("subject_names") or r.get("names") or []
             if exact is None:
                 # Подкод категории «…0» — ТОЛЬКО при дословном совпадении имени (см. `_subcode_of_group`):
                 # без имени это общий подъём к группе, а его радиус не мерили (`D14` #141).
-                if (any(_subcode_of_group(rc, c) for c in codes for rc in r["codes"])
+                if (any(_subcode_of_group(rc, c) for c in own_codes for rc in r["codes"])
                         and any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
-                                for nm in r.get("names") or [])):
+                                for nm in subject)):
                     exact = False
                 else:
                     continue
@@ -1629,6 +2160,11 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # такого правила — в шапке `_names_this_position`.
             if r.get("strict_name") and not _names_this_position(product_name, r["names"]):
                 continue
+            if _excludes_list_item(r.get("names") or [], product_name, r.get("exclusions")):
+                return None                                    # D21: перечень, разделённый строками
+            if _scope_conflict(r.get("names") or [], product_name, r.get("subject_names"),
+                               r.get("exclusions")):          # D21 #230
+                continue
             cands.append((r, exact))
         if len(cands) == 1:
             row, is_exact = cands[0]
@@ -1641,7 +2177,7 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             # написан прямо для неё. Сноски у имени («Ледоколы <9>») снимаем перед сравнением.
             exact_name = [rc for rc in cands
                           if any(_norm(_strip_fn(nm)) == _norm(_strip_fn(product_name))
-                                 for nm in rc[0]["names"])]
+                                 for nm in (rc[0].get("subject_names") or rc[0]["names"]))]
             if len(exact_name) == 1:
                 row, is_exact = exact_name[0]
                 return _fmt_flat(row, group=not is_exact, product_name=product_name)
@@ -1662,4 +2198,6 @@ def _lookup(codes: list[str], product_name: str, section: str | None, scope: str
             if _name_overlap(product_name, row["names"]) >= 2:
                 return _fmt_flat(row, group=not is_exact, product_name=product_name)
 
-    return None
+    # 3) ГРАФИКИ ПО ВИДАМ В АБЗАЦЕ ПРИМЕЧАНИЯ (K2-3 #174, прим. 5) — последней ветвью: она только
+    #    ДОБАВЛЯЕТ порог там, где прежние ветви не нашли ничего, и не перебивает ни одной из них.
+    return _kind_schedule(product_name, section, scope)

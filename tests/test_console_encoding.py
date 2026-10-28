@@ -36,20 +36,10 @@ SCRIPTS = ROOT / "scripts"
 # (issue #107), а не разрешение: список может только СОКРАЩАТЬСЯ. Тест ниже запрещает добавлять
 # в него новые имена — то есть класс перестаёт расти с сегодняшнего дня.
 #
-# Почему не починены разом: правка механическая, но затрагивает 36 файлов, и делать её в конце
-# длинной сессии — ровно тот способ внести дефект, от которого проект уже страдал. Чинятся по
-# мере того, как файл всё равно открывается по своей задаче.
-KNOWN_UNGUARDED = {
-    "backfill_block_thresholds.py", "backfill_okpd2_prefixes.py", "backup_db.py",
-    "build_classifiers.py", "build_gs_natural.py", "calibrate_cases.py",
-    "classify_missing_thresholds.py", "diag_orphan_requirements.py", "diff_edition.py",
-    "drop_excluded_positions.py", "eval_cases_influence.py", "eval_env.py",
-    "eval_experiments.py", "eval_faithfulness_stress.py", "eval_text_faithfulness.py",
-    "eval_topics.py", "md2docx.py", "parse_rtf.py",
-    "rechunk_appendix.py", "reconcile_kb.py", "run_test_cases.py",
-    "seed_users.py", "structure_kb.py", "sync_payloads.py",
-    "watch_edition.py",
-}
+# ✅ Долг погашен 27.10.2026: оставшиеся 25 скриптов зовут `enable_utf8()` в блоке `__main__`
+# (на импорте поток не трогается). Список оставлен пустым, а не удалён: тест ниже по-прежнему
+# запрещает появление нового незащищённого скрипта.
+KNOWN_UNGUARDED: set[str] = set()
 
 
 def unencodable_in_cp1251(path: Path) -> set[str]:

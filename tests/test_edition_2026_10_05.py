@@ -10,6 +10,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import re
 import sys
 import unittest
 import unittest.mock
@@ -33,10 +34,20 @@ def _thr(rec: dict) -> str | None:
 
 
 class TestCorpusEdition(unittest.TestCase):
-    def test_edition_row_kept_for_rollback(self):
-        """С `A7` #154 корпус на редакции, действующей с 31.10.2026 (N 1297 + N 1257): «корпус на
-        действующей» проверяет `test_edition_2026_10_31`. Строка этой редакции остаётся ради отката."""
-        self.assertEqual(edition.KONTUR_719_BY_EDITION["ред. от 05.10.2026 N 1297"], "508767")
+    def test_corpus_is_on_the_edition_in_force(self):
+        edition.corpus_edition.cache_clear()
+        self.assertEqual(edition.corpus_edition(), "ред. от 05.10.2026 N 1297")
+        self.assertTrue(edition.kontur_719_url().endswith("documentId=508767"))
+
+    def test_next_edition_did_not_leak_in(self):
+        """N 1257 вступает 31.10.2026 (`A7` #154). Текст собран из вёрстки Контура 508574, где он уже
+        есть, — значит его вычитание обязано быть полным: корпус стоит на ДЕЙСТВУЮЩЕЙ редакции."""
+        # ⚠ Форма номера — как у разбора редакции (`edition._AMEND_RE`: «N», «Н», «№», NBSP), а не
+        # литерал «N 1257» (ревью PR #209): в корпусе 2633 неразрывных пробела.
+        act = re.compile(r"[NН№]\s*1257(?!\d)")
+        for p in [KB / "pp719_full.txt", *sorted((KB / "chunks").glob("*.txt"))]:
+            self.assertIsNone(act.search(p.read_text(encoding="utf-8")), f"{p.name}: акт N 1257 до 31.10")
+        self.assertIsNotNone(act.search("от 29.09.2026 № 1257"), "шаблон не узнаёт «№»+NBSP")
 
 
 class TestExcludedRowsParser(unittest.TestCase):

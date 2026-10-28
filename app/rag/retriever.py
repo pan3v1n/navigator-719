@@ -11,15 +11,16 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from fractions import Fraction
 from functools import lru_cache
 
 from loguru import logger
 
 from app.core.config import settings
 from app.rag.embeddings import embed_query
-from app.rag import okpd2_ref
+from app.rag import code_cells, okpd2_ref
 from app.rag.sparse import query_vector
-from app.rag.topics import FOOTNOTE_MARK  # форма маркера сноски — одна на три места (#155)
+from app.rag.topics import FOOTNOTE_MARK, FOOTNOTE_WORD_MARK  # форма маркера сноски — одна на три места (#155)
 
 DENSE = "dense"
 SPARSE = "bm25"
@@ -41,6 +42,11 @@ class Hit:
     # группировкой · 2 прочие позиции ближайшего предка · 3 прочие связанные, по рангу. Решает
     # порядок окна ВНУТРИ совпавших, см. `_order_key`.
     code_tier: int = 0
+    # R31 #179: id точки Qdrant — по нему score всех кандидатов окна пересчитываются ОДНИМ запросом.
+    point_id: object = None
+    # D20 #225: коды, указанные в ячейке первоисточника «за исключением» (`code_cells`). В
+    # `okpd2_codes` хита их нет; вопрос с кодом под ними с позицией не совпадает (`code_match`).
+    excluded_codes: list[str] = field(default_factory=list)
 
 
 # --------------------------------------------------------------------------- #
@@ -86,9 +92,12 @@ def code_tiers(rec_code_lists: list[list[str]], query_code: str,
     цену — «Препараты для лечения ЖКТ» 21.20.10.110 уходили в медизделие VII/73, а уточнение «мелкие
     предки ниже, остальные по рангу» дало «Мониторы и проекторы» → «Гидрофоны». Корень не в ярусах:
     кандидаты приходят из РАЗНЫХ запросов к Qdrant (пул, доборы), и их RRF-score НЕСРАВНИМЫ — позиция
-    из маленькой отфильтрованной выдачи получает высокий score при любом тексте. Пока score не
-    сравнимы (#179), любое правило «внутри яруса по score» частично случайно, и трогать порядок
-    широких кодов нечем.
+    из маленькой отфильтрованной выдачи получает высокий score при любом тексте. Пока score были
+    несравнимы (#179), любое правило «внутри яруса по score» было частично случайно, и трогать порядок
+    широких кодов было нечем. ⚠ С R31 score окна сравнимы (`_rescore`) — и правило ПЕРЕМЕРЕНО (#228,
+    `docs/eval_runs/2026-10-27_r31_1_d14_restrictions.md`): потомки выше предков дают 10 «сломано» в climb,
+    и все действительно хуже («Марля» → «Бинты марлевые медицинские», «Валы передаточные» → «Гребной
+    вал»). Потомок — более узкое ДРУГОЕ изделие; правило держится на смысле, не только на score.
 
     ⚠ Ревью PR #177, раунд 3: у одного кода предка бывают и группировка, и названные товары —
     у 28.25.11.110 «Теплообменники» (XV/5) и «Аппараты теплообменные пластинчатые для пищевой
@@ -151,6 +160,14 @@ def has_exact_position(code: str) -> bool:
         return True
 
 
+def code_match(h: "Hit", query_code: str) -> bool:
+    """Совпадение ХИТА с кодом вопроса: `okpd2_match` по его кодам, и код вопроса не лежит под кодом,
+    который позиция исключает (D20 #225: «Компьютеры портативные» 26.20.11 «за исключением
+    26.20.11.120» не совпадают с 26.20.11.120 и его подкодами, хотя 26.20.11 — их предок)."""
+    return okpd2_match(h.okpd2_codes, query_code) and not any(
+        code_cells.under(query_code, e) for e in h.excluded_codes)
+
+
 def okpd2_match(rec_codes: list[str], query_code: str) -> bool:
     """True, если код записи и код запроса лежат на одной ветке ОКПД2: один — предок другого
     ПОРАЗРЯДНО (`okpd2_ref.okpd2_key`). Так «29.20.23.110» матчит группу «29.20.23», «29.20» —
@@ -191,17 +208,30 @@ def _clean_section_title(title: str | None) -> str:
 
 
 def _to_hit(p) -> Hit:
+    """Точка Qdrant → `Hit`.
+
+    ⚠ D20 #225: коды «за исключением» — НЕ коды позиции. У четырёх позиций они лежат в payload
+    `okpd2_codes` наравне со своими («26.20.11 (за исключением 26.20.11.120, 26.20.11.130)» → все
+    три), и по исключённому коду позиция становилась целевой ТОЧНЫМ совпадением — вместе со своей
+    («Портативные персональные компьютеры» 26.20.11.120). Здесь они уходят в `excluded_codes`;
+    payload не трогаем — по нему `code_cells` находит ячейку (ключ — полный список кодов)."""
     pl = p.payload or {}
+    codes = pl.get("okpd2_codes") or []
+    marks = code_cells.marks(pl.get("section_roman"), pl.get("product_name"), codes)
+    own = [c for c, mk in zip(codes, marks)
+           if mk != code_cells.EXCEPT] if marks else list(codes)
     return Hit(
         score=p.score,
         section_roman=pl.get("section_roman", "?"),
         section_title=_clean_section_title(pl.get("section_title")),
         product_name=pl.get("product_name", ""),
-        okpd2_codes=pl.get("okpd2_codes") or [],
+        okpd2_codes=own,
+        excluded_codes=[c for c in codes if c not in own],
         min_threshold=pl.get("min_threshold"),
         requirement_blocks=pl.get("requirement_blocks") or [],
         source_anchor=pl.get("source_anchor"),
         payload=pl,
+        point_id=getattr(p, "id", None),
     )
 
 
@@ -228,7 +258,7 @@ def _search_params():
 
 
 def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
-            qvec: list[float] | None = None):
+            qvec: list[float] | None = None, with_payload: bool = True):
     """Гибрид dense+sparse с RRF. `qvec` — заранее посчитанный dense-вектор запроса: на один
     вопрос к Qdrant уходит несколько обращений (позиции + подстраховка по коду + кейсы + guard),
     и e5-large незачем прогонять на каждое. Не передан — считаем сами (обратная совместимость:
@@ -256,7 +286,7 @@ def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
         ],
         query=models.FusionQuery(fusion=models.Fusion.RRF),
         limit=limit,
-        with_payload=True,
+        with_payload=with_payload,
     )
     return res.points
 
@@ -301,12 +331,86 @@ def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
         h.code_tier = 3 if t is None else t
 
 
+# Qdrant складывает в RRF 1/(k + ранг), ранг с нуля, k = 2: сверено 28.10.2026 (Qdrant 1.18) —
+# пересчёт по двум спискам совпал с `FusionQuery(RRF)` до 7e-8, точности float32.
+_RRF_K = 2
+
+
+def _rrf_tied(lists: list[list[tuple]]) -> dict:
+    """RRF по спискам `(id, score)`: у РАВНЫХ score — равный ранг (лучший из занятых ими мест).
+
+    R31-2 #245: `FusionQuery` раздаёт ничьим списка разные ранги в произвольном порядке, и сумма
+    RRF у них плавала между прогонами — «Краски полиграфические 20.30.24»: sparse-score XXI/27 и
+    XXI/30 равны до бита (16.110046), а первой за 12 прогонов была то одна (7), то другая (5).
+    Здесь ничья в одном списке ранги не различает — порядок решают другой список, а при равной
+    сумме — якорь (`_order_key`). Без ничьих сумма та же, что у Qdrant.
+    ⚠ Сумма — дробью (ревью PR #248, LOW-2): в float равные суммы разных пар рангов расходятся на
+    1 ulp (ранги 0 и 10 против 1 и 2 — обе 7/12), и порядок решало бы округление, а не якорь."""
+    out: dict = {}
+    for pts in lists:
+        rank, prev = 0, None
+        for pos, (pid, score) in enumerate(sorted(pts, key=lambda p: -p[1])):
+            if score != prev:
+                rank, prev = pos, score
+            out[pid] = out.get(pid, 0) + Fraction(1, _RRF_K + rank)
+    return {pid: float(s) for pid, s in out.items()}
+
+
+def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
+    """R31 #179: score всех кандидатов окна ОДНИМ обращением — dense и sparse с фильтром по их id.
+
+    ⚠ ЗАЧЕМ. Окно с кодом собирается из нескольких запросов: пул (top-40 без фильтра), добор по
+    ветке кода (лимит 12), с `D14` — доборы точных форм и новых предков. RRF-score ранговый и
+    считается ВНУТРИ своей выдачи, поэтому первая позиция маленькой отфильтрованной выдачи получает
+    максимальный score при любом тексте, а `_order_key` сравнивал эти числа как одно. Замер 08.10:
+    «Мониторы и проекторы» 26.40.34 → «Гидрофоны» (добор предков), «Шлюпки» → «Катера»; три
+    раунда ревью PR #177 находили соседний случай, потому что правило «внутри яруса — по score» на
+    несравнимых числах устойчивым быть не может.
+    Здесь все кандидаты ранжируются в ОДНИХ двух списках (dense и sparse по тем же точкам) — score
+    сравнимы. Набор кандидатов ДО усечения тот же, меняется порядок — а с ним и окно `hits[:limit]`
+    (замер: у own 455 из 1569, climb 360 из 1281, control 118 из 600). Сбой запроса — прежние score:
+    пересчёт уточняет порядок, без него остаётся окно до R31. Payload не запрашивается — нужны только
+    id и score.
+    ⚠ R31-2 #245: слияние RRF — на нашей стороне (`_rrf_tied`), а не `FusionQuery`: у Qdrant ничьи
+    внутри списка получали ранги в произвольном порядке, и окно одного вопроса плавало между
+    прогонами. Два списка уходят одним пакетом (`query_batch_points`) — обращение по-прежнему одно."""
+    from qdrant_client import models
+
+    ids = [h.point_id for h in hits]
+    if not ids or any(i is None for i in ids):
+        return
+    try:  # подготовка тоже под `try` — как было внутри `_hybrid` (ревью PR #248, LOW-1)
+        flt = models.Filter(must=[models.HasIdCondition(has_id=ids)])
+        idx, val = query_vector(query)
+        sp = _search_params()
+        reqs = [models.QueryRequest(query=qvec if qvec is not None else embed_query(query), using=DENSE,
+                                    filter=flt, limit=len(ids), params=sp, with_payload=False),
+                models.QueryRequest(query=models.SparseVector(indices=idx, values=val), using=SPARSE,
+                                    filter=flt, limit=len(ids), params=sp, with_payload=False)]
+        res = _client().query_batch_points(collection_name=settings.QDRANT_COLLECTION, requests=reqs)
+    except Exception as exc:  # noqa: BLE001 — пересчёт уточняет порядок, сбой не роняет ответ
+        logger.warning("пересчёт score окна ({} кандидатов): {}", len(ids), exc)
+        return
+    dense = [(p.id, p.score) for p in res[0].points]
+    if {i for i, _ in dense} != set(ids):
+        # Кандидат не вернулся (не должно быть: dense-список отдаёт все точки фильтра) — смешивать
+        # новые score со старыми нельзя, это та же несравнимость. Остаёмся на прежних.
+        # ⚠ Полнота — по dense, а не по объединению списков: недостающий в dense кандидат «вернулся»
+        # бы через sparse, и пересчёт молча шёл на урезанном списке (ревью PR #248, мутация `limit`).
+        logger.warning("пересчёт score окна: вернулось {} из {}", len(dense), len(ids))
+        return
+    got = _rrf_tied([dense, [(p.id, p.score) for p in res[1].points]])
+    for h in hits:
+        h.score = got[h.point_id]
+
+
 def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
            qvec: list[float] | None = None) -> list[Hit]:
     """Гибридный поиск. При наличии okpd2 — буст совпадающих по коду позиций и
     жёсткая подстраховка: фильтрованный запрос по префиксам кода и, без точной позиции среди
     найденного, до двух доборов D14 — точные формы кода и новые предки (последние — только когда
-    потомков среди совпавших нет). Итого до четырёх запросов к Qdrant на вопрос с кодом.
+    потомков среди совпавших нет). Если доборы принесли кандидатов — ещё один запрос: пересчёт score
+    всего окна (`_rescore`, R31 #179). Итого до пяти запросов к Qdrant на вопрос с кодом.
 
     `qvec` — заранее посчитанный вектор запроса (см. `_hybrid`). Если не передан, считаем ОДИН
     раз здесь и переиспользуем в подстраховке по коду — раньше второй запрос эмбеддил тот же
@@ -316,10 +420,11 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
     if qvec is None:
         qvec = embed_query(query)
     hits = [_to_hit(p) for p in _hybrid(query, pool, qvec=qvec)]
+    n_pool = len(hits)
 
     if okpd2:
         for h in hits:
-            h.okpd2_match = okpd2_match(h.okpd2_codes, okpd2)
+            h.okpd2_match = code_match(h, okpd2)
 
         # Ветку кода (родители + дети) подтягиваем ВСЕГДА, а не только при отсутствии совпадений:
         # пул мог включить родителя (26.51), но пропустить дочерние позиции (26.51.52.120). Две ветви
@@ -335,7 +440,9 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
             seen = {h.source_anchor for h in hits}
             for p in _hybrid(query, max(limit, 12), qfilter=qfilter, qvec=qvec):
                 h = _to_hit(p)
-                if h.source_anchor not in seen:
+                # D20: фильтр Qdrant видит payload, а в нём и исключённые коды — позицию, пришедшую
+                # только по ним, в окно не берём (совпадения по коду у неё нет).
+                if h.source_anchor not in seen and code_match(h, okpd2):
                     h.okpd2_match = True
                     seen.add(h.source_anchor)
                     hits.append(h)
@@ -351,14 +458,16 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
             # ⚠⚠ Ревью PR #177, раунд 4 (HIGH): предков добираем, ТОЛЬКО когда среди совпавших нет
             # ПОТОМКОВ — то же условие, при котором `code_tiers` поднимает ближайшего предка; при
             # потомках предок попадает в ярус 3 и нужен только как помеха. Без условия добор шёл и у
-            # ШИРОКОГО кода: предок из маленькой отфильтрованной выдачи получает высокий score (#179) и
+            # ШИРОКОГО кода: предок из маленькой отфильтрованной выдачи получал высокий score (#179) и
             # «по рангу» обходил потомков — замер 09.10: «Мониторы» 26.40.34 → «Гидрофоны» 26.40.3,
             # «Насосы центробежные» 28.13.14 → «Криогенный насос» 28.13.1, «Шлюпки спасательные» →
             # «Катера», хотя у раунда 3 и на бою целевые там были верные. ⚠ Прежняя редакция этого
             # комментария приписывала «Гидрофонов» добору ПОТОМКОВ — неверно: 26.40.3 — ПРЕДОК 26.40.34.
             # ⚠ Потомков новых уровней НЕ добираем: порядок широких кодов без сравнимых score (#179)
-            # чинить нечем (уточнение «мелкие предки ниже» дало «Насосы центробежные» → «Криогенный
-            # насос», отчёт §5.2).
+            # чинить было нечем (уточнение «мелкие предки ниже» дало «Насосы центробежные» → «Криогенный
+            # насос», отчёт §5.2). С R31 score окна сравнимы — ограничения перемерены (#228): добор
+            # предков и при потомках пользы не дал (0 починено, лишний запрос), потомки — другое,
+            # более узкое изделие (`docs/eval_runs/2026-10-27_r31_1_d14_restrictions.md`).
             # ⚠ Запрос стоит ~43 мс (замер 08.10, ревью PR #177), поэтому только когда ТОЧНОЙ позиции
             # среди найденного нет — самый частый случай (эксперт называет код из приложения) его не
             # платит; и предков не спрашиваем, если точная пришла первым запросом.
@@ -386,10 +495,14 @@ def search(query: str, okpd2: str | None = None, limit: int = 5, pool: int = 40,
                     continue
                 for p in found:
                     h = _to_hit(p)
-                    if h.source_anchor not in seen and okpd2_match(h.okpd2_codes, okpd2):
+                    if h.source_anchor not in seen and code_match(h, okpd2):
                         h.okpd2_match = True
                         seen.add(h.source_anchor)
                         hits.append(h)
+        # R31 #179: доборы принесли кандидатов со score СВОИХ выдач — до сортировки окна пересчитываем
+        # всех одним запросом. Без доборов все score из одной выдачи (пула) — сравнимы, запрос не нужен.
+        if len(hits) > n_pool:
+            _rescore(query, hits, qvec)
         _set_code_tiers(hits, okpd2)
 
     # Полный порядок ДО усечения окна: совпавшие по коду выше, далее score, далее якорь.
@@ -691,6 +804,7 @@ _RULES_TOPIC: tuple[tuple[str, tuple[re.Pattern, ...]], ...] = (
 )
 
 RULES_QUOTA_MIN = 1  # мест, гарантированных КАЖДОМУ документу, у которого есть кандидаты
+RULES_QUOTA_FOOTNOTES = 3  # D15: мест в окне, гарантированных сноскам, названным в вопросе
 RULES_QUOTA_PRIMARY = 3  # мест, гарантированных документу по теме вопроса
 # Документы «по запросу»: место в окне НЕ резервируется, пока документ не стал темой вопроса.
 # Сноски — не процедурная норма: они уточняют требование и нужны ровно тогда, когда спросили про
@@ -843,6 +957,35 @@ def _doc_filter(only_docs: tuple[str, ...]) -> list:
 
     return [models.FieldCondition(key="doc_type",
                                   match=models.MatchAny(any=list(only_docs)))]
+
+_MARK_RE = re.compile(FOOTNOTE_MARK)
+_MARK_PAREN = re.compile(r"^<(\d{1,2})\((\d{1,2})\)>$")
+_MARK_DOT = re.compile(r"^<(\d{1,2})\.(\d{1,2})>$")
+_MARK_WORD_RE = re.compile(FOOTNOTE_WORD_MARK, re.IGNORECASE)
+
+
+def footnote_forms(query: str) -> list[tuple[str, ...]]:
+    """Маркеры сносок вопроса — каждый с формой-двойником: «<38(3)>» → («<38(3)>», «<38.3>»).
+
+    ⚠ D15 #155: определения сносок 38 записаны как «<38.1>»…«<38.14>», а ссылки в требованиях
+    приложения — «<38(1)>»…«<38(14)>» (~22 на каждую), и пользователь пишет так, как видит в
+    требовании. Своя форма идёт первой: у «<12(1)>», «<40(1)>» запись и ссылка совпадают."""
+    out: list[tuple[str, ...]] = []
+    found = [(m.start(), re.sub(r"\s+", "", m.group(0))) for m in _MARK_RE.finditer(query or "")]
+    # ⚠ Ревью D15: «что означает сноска 38(3) к требованию» — маркер без угловых скобок; маршрут
+    # его уже понимает (`сноск\w*\s*\d`), а добор — нет, и своя сноска шла второй после <42>.
+    found += [(m.start(), f"<{m.group(1)}>") for m in _MARK_WORD_RE.finditer(query or "")]
+    for _pos, mark in sorted(found):
+        if (p := _MARK_PAREN.match(mark)):
+            forms = (mark, f"<{p.group(1)}.{p.group(2)}>")
+        elif (d := _MARK_DOT.match(mark)):
+            forms = (mark, f"<{d.group(1)}({d.group(2)})>")
+        else:
+            forms = (mark,)
+        if forms not in out:
+            out.append(forms)
+    return out
+
 
 def alive_only(*must):
     """Фильтр Qdrant «документ действует» (`K8`, issue #39) плюс переданные условия.
@@ -1023,7 +1166,39 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
         except Exception as e:  # noqa: BLE001 — добор необязателен, ответ не валим
             logger.warning("добор состава документов не удался: {}: {}", type(e).__name__, e)
 
-    chosen: set[int] = set(doc_list_idxs[:RULES_QUOTA_DOC_LIST])
+    # D15 #155: маркер сноски в вопросе — запись ЭТОЙ сноски добираем по ключу (`point`), а не
+    # ждём её от ранга. Замер 27.10.2026: на «что значит <38(3)>» первой шла чужая <38.13>, своя
+    # <38.3> в тройку не попадала — ключ записи «<38.3>», а ссылка в требованиях «<38(3)>». Место в
+    # окне ей гарантировано; первой она идёт, когда вопрос — о сносках (тема `appendix_footnotes`).
+    # ⚠ Ревью D15: под одним ключом бывают РАЗНЫЕ сноски (две «<25>»: микроконтроллеры IX и поковки
+    # турбин V) — берём все записи ключа, в полном порядке `_rules_order`, а не одну из словаря;
+    # дубли с пулом — по id точки, не по ключу. Порядок сносок — как в вопросе; предел — после
+    # проверки, что сноска есть (иначе «<7>, <2> и <44>» теряли бы существующую <44>).
+    footnote_idxs: list[int] = []
+    marks = footnote_forms(query)[:6]
+    if marks and (not only_docs or "appendix_footnotes" in only_docs):
+        try:
+            from qdrant_client import models
+            got = _rules_order(_hybrid(
+                query, 3 * len(marks) + 2, collection=name, qvec=qvec, qfilter=alive_only(
+                    models.FieldCondition(key="doc_type", match=models.MatchValue(value="appendix_footnotes")),
+                    models.FieldCondition(key="point", match=models.MatchAny(any=[f for fs in marks for f in fs])))))
+            known = {p.id: i for i, p in enumerate(points)}
+            for forms in marks:
+                if len(footnote_idxs) >= RULES_QUOTA_FOOTNOTES:
+                    break
+                own = next(([p for p in got if (p.payload or {}).get("point") == f]
+                            for f in forms if any((p.payload or {}).get("point") == f for p in got)), [])
+                for p in own[:RULES_QUOTA_FOOTNOTES - len(footnote_idxs)]:
+                    if p.id not in known:
+                        known[p.id] = len(points)
+                        points.append(p)
+                    if known[p.id] not in footnote_idxs:
+                        footnote_idxs.append(known[p.id])
+        except Exception as e:  # noqa: BLE001 — добор необязателен, ответ не валим
+            logger.warning("добор сноски по маркеру не удался: {}: {}", type(e).__name__, e)
+
+    chosen: set[int] = set(doc_list_idxs[:RULES_QUOTA_DOC_LIST]) | set(footnote_idxs)
 
     def _quota_of(doc_type: str) -> int:
         if doc_type == primary:
@@ -1082,7 +1257,11 @@ def search_rules(query: str, limit: int = 6, qvec: list[float] | None = None,
     # K9 показал, что ответ строится вокруг первого источника: 4.1 в хвосте окна модель
     # использовала как ссылку («предусмотрено разделом 4»), а не как перечень.
     doc_list_set = set(doc_list_idxs)
+    # Сноски по вопросу — первыми и В ПОРЯДКЕ ВОПРОСА («<38(3)> и <44>» → сначала <38.3>).
+    footnote_rank = ({i: k for k, i in enumerate(footnote_idxs)}
+                     if primary == "appendix_footnotes" else {})
     order = sorted(chosen, key=lambda i: (
+        footnote_rank.get(i, len(footnote_rank)),
         0 if i in doc_list_set else 1,
         0 if (points[i].payload or {}).get("doc_type") == primary else 1, i))
 

@@ -396,6 +396,13 @@ a.head-avatar:hover { opacity: .9; }
   overflow-y: hidden; padding: 8px 0; background: transparent; }
 .composer textarea:focus { outline: none; }
 .composer-bar { display: flex; align-items: center; gap: 8px; flex: none; }
+/* L1 #146: выбор корпуса — компактно, слева от кнопок; на узком экране подпись «Источник:» прячется. */
+.corpus-pick { display: flex; align-items: center; gap: 6px; height: 40px; padding: 0 8px; border-radius: 8px;
+               background: var(--gray); color: var(--ink-60); font: 400 13px/1 var(--font); cursor: pointer; }
+.corpus-pick select { border: 0; background: transparent; color: var(--ink); font: 500 13px/1 var(--font);
+                      max-width: 190px; cursor: pointer; outline: none; }
+.corpus-pick:focus-within { box-shadow: var(--ring); }
+@media (max-width: 560px) { .corpus-pick-label { display: none; } .corpus-pick select { max-width: 120px; } }
 .send-btn { flex: none; width: 40px; height: 40px; border-radius: 8px; border: none; background: var(--grad-btn);
   color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background .2s, transform .08s; }
 .composer.ready .send-btn, .send-btn:hover { background: var(--grad-btn-on); }
@@ -522,6 +529,8 @@ a.head-avatar:hover { opacity: .9; }
 .answer-flag { display: flex; align-items: flex-start; gap: 8px; padding: 12px 14px; background: #fef3c7; color: #92400e;
                border-radius: 8px; font: 400 14px/1.45 var(--font); }
 .answer-flag svg { flex-shrink: 0; margin-top: 2px; }
+/* L2 #147: по чему собран ответ — справка под ответом, тише текста, но читаемая. */
+.answer-corpus { font: 400 12px/1.4 var(--font); color: var(--ink-60); padding: 2px 2px 0; }
 
 /* выпадающее меню у «⋮» и список вопросов чата */
 .dropdown { position: fixed; z-index: 50; background: #fff; border-radius: 12px; box-shadow: var(--ring), var(--shadow);

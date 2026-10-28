@@ -24,9 +24,9 @@ from app.core.prompts import (
     build_navigator_user_prompt,
     build_procedural_user_prompt,
 )
-from app.rag import documents_ref, fragments, inheritance, okpd2_ref, retriever, sparse, st1_ref
+from app.rag import code_cells, corpora, documents_ref, fragments, inheritance, okpd2_ref, retriever, sparse, st1_ref
 from app.rag.embeddings import embed_query
-from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, okpd2_match, search,
+from app.rag.retriever import (Hit, code_relation, code_tiers, covers, dense_top1, search,
                                search_cases, search_rules)
 from app.rag.thresholds import BY_KIND, lookup_procurement_threshold, lookup_threshold
 
@@ -115,6 +115,10 @@ class Answer:
     # Считается по ветке ответа (`app/rag/followup.py`), а не выдёргивается регуляркой из текста:
     # предложение внутри ответа пишет модель, и подсказка ходила бы за её формулировкой.
     input_hint: str = ""
+    # `L2` #147: по какому корпусу ФАКТИЧЕСКИ собран ответ (`corpora.USED_*`), «» — корпуса нет
+    # (приветствие, отказ ветки). Решает ветка, которая отвечала, а не эндпоинт: второе место,
+    # угадывающее маршрут по ответу, разошлось бы с первым молча.
+    corpus: str = ""
 
 
 # Условие блока (`note`) — норма, а не комментарий, поэтому режем его щедро и только по границе
@@ -286,6 +290,12 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
                       f"«{parent.get('product_name', '')}»")
     if mt:
         lines.insert(0, f"Порог: {mt}")
+    # D16 #173: пометка ячейки кода — эксперту тоже. Сразу ПОСЛЕ порога: ветка порога по видам ниже
+    # считает первой строкой панели именно порог.
+    cc, cm = code_cells.of_hit(h)
+    if code_cells.note(cm):
+        lines.insert(1 if mt else 0, f"Код в приложении: {code_cells.render(cc, cm)} — "
+                                     f"{'; '.join(code_cells.note(cm))}.")
     proc = lookup_procurement_threshold(h.okpd2_codes, h.product_name, h.section_roman)
     if proc:
         lines.append(f"Порог для целей закупок (не для подтверждения происхождения): {proc}")
@@ -339,14 +349,17 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]
     до правки сравнивал и рантайм. Факт иерархии — данные, а не вывод, поэтому он идёт в контекст.
     Код продукции из ПРОШЛЫХ ходов (`dialog_codes`) учитывается: в том диалоге второй ход называл
     только код группы. Связь печатается лишь там, где она есть, — чужой код строки не даёт.
-    ⚠ Оговорка про «из» обязательна: у позиции с пометкой «из» (прим. 3 к приложению) требования
-    относятся только к названным в наименовании товарам, и подъём по коду этого не отменяет.
+    ⚠ Оговорка про «из» обязательна: у позиции с пометкой «из» (примечания к приложению) требования
+    относятся только к названным в наименовании товарам, и подъём по коду этого не отменяет. С D16
+    #173 пометка известна (`code_cells`) — строка говорит, КАКАЯ она у охватывающего кода; не
+    известна (позиции нет в файле) — прежняя условная оговорка.
     ⚠ ТОЛЬКО ФАКТ, БЕЗ ЗАПРЕТА. Первая редакция кончалась фразой «не утверждай, что требования
     «применять нельзя» из-за несовпадения кодов», и живой прогон 08.10 показал эхо: в одном ответе
     из двух модель написала пользователю «„нельзя из-за несовпадения кодов“ — это не про ваш
     случай», хотя он такого не говорил. Запрет в контексте читается как реплика, которую надо
     опровергнуть; факта иерархии достаточно — оба ответа и без запрета начинались с «да»."""
     notes = []
+    cell, marks = code_cells.of_hit(h)       # пометки — по полному списку кодов ячейки (D20)
     for c in codes + [d for d in dialog_codes if d not in codes]:
         # ⚠ Ревью PR #177. (1) Только ОХВАТЫВАЮЩИЙ предок (`retriever.covers`: позиция — сама
         # группировка, её наименование = наименованию кода): «из 20 Катализаторы» не группировка
@@ -363,11 +376,29 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]
         if rc is None or (c not in codes and retriever.has_exact_position(c)):
             continue
         said = "из вопроса" if c in codes else "продукции, названный ранее в диалоге,"
+        # D16 #173: пометка охватывающего кода известна — говорим, какая она, а не «если есть».
+        # ⚠ Без цифр — «прим. 3» заземляло бы выдуманное «3 балла» (см. `code_cells.note`).
+        # Код вопроса под кодом «за исключением» — позиция на него НЕ распространяется, и строка
+        # «распространяется» была бы ложью (ревью D16, LOW-3); сам исключённый код охватывающим
+        # не бывает (`is_grouping_name` ложен у всех четырёх), но защита — здесь, а не в данных.
+        mk = code_cells.mark_of(rc, cell, marks)
+        if mk == code_cells.EXCEPT or code_cells.excepted_covers(c, cell, marks):
+            continue
+        if mk == code_cells.IZ:
+            scope = (", ТОЛЬКО если продукция относится к товарам, названным в наименовании позиции "
+                     "(код позиции указан с пометкой «из»)")
+        elif mk == code_cells.PLAIN and code_cells.EXCEPT in (marks or []):
+            scope = (" (код позиции указан без пометки «из»: позиция охватывает группировку, кроме "
+                     "кодов, указанных «за исключением»)")
+        elif mk == code_cells.PLAIN:
+            scope = " (код позиции указан без пометки «из»: позиция охватывает всю группировку)"
+        else:
+            scope = (", если продукция относится к товарам, названным в наименовании позиции (при "
+                     "пометке «из» — только к ним)")
         notes.append(
             f"    ⚠ Код {said} {c} ВХОДИТ В ГРУППИРОВКУ ОКПД2 {rc} этой позиции (иерархия кодов "
             f"ОКПД2): позиция распространяется на этот код, и её требования применяются к продукции "
-            f"с ним, если продукция относится к товарам, названным в наименовании позиции (при пометке "
-            f"«из» — только к ним, прим. 3 к приложению).")
+            f"с ним{scope}.")
     return notes
 
 
@@ -396,8 +427,13 @@ def format_context(hits: list[Hit], query: str | None = None,
             head += ("  СОВПАДЕНИЕ ПО КОДУ ОКПД2 (наиболее вероятная позиция)" if is_target
                      else "  совпадение по ГРУППЕ кода ОКПД2 (не эта позиция — целевая)")
         lines = [head]
-        if h.okpd2_codes:
-            lines.append(f"    ОКПД2: {', '.join(h.okpd2_codes)}")
+        # D16 #173: коды — как в графе кода первоисточника, с «из» и «за исключением». Пояснение
+        # к пометке — только у целевой: у нецелевой требований в контексте нет, пояснять нечего.
+        cc, cm = code_cells.of_hit(h)
+        if cc:
+            lines.append(f"    ОКПД2: {code_cells.render(cc, cm)}")
+        if is_target or same_cell:
+            lines += [f"    ⚠ {n[0].upper()}{n[1:]}." for n in code_cells.note(cm)]
         if is_target:
             lines += _group_notes(h, _codes(code), _codes(dialog_codes))
         if same_cell:
@@ -476,7 +512,7 @@ def format_context(hits: list[Hit], query: str | None = None,
             # ПП №719, Раздел II, позиция 4»), а полное название раздела длиннее самого
             # наименования продукции. Замер: −630 символов контекста на запрос.
             src = f" · {h.source_anchor}" if h.source_anchor else f" · раздел {sect}"
-            codes = ", ".join(h.okpd2_codes) if h.okpd2_codes else "—"
+            codes = code_cells.render(cc, cm) if cc else "—"
             # ⚠ Пометку о совпадении по ГРУППЕ кода несём и в свёрнутой строке: пользователь
             # назвал код, который подходит этому кандидату, — модель обязана это видеть, иначе
             # кандидат читается как посторонний. Первая редакция свёртки её потеряла, поймано
@@ -743,7 +779,8 @@ def target_hits(hits: list[Hit], code: str | list[str] | None = None) -> list[Hi
         # БЛИЖАЙШАЯ позиция-предок, если код вопроса глубже всего найденного (н-бутан 20.14.11.112 →
         # 20.14.11.110, а не «Катализаторы» с кодом класса «20»); есть потомки — ярусов предка нет,
         # первый по рангу среди всех связанных, как до D14 (узкий D14, решение владельца 08.10:
-        # «потомки выше предков» раунда 2 замер отверг — score разных запросов несравнимы, #179).
+        # «потомки выше предков» раунда 2 замер отверг; на сравнимых score (R31) перемерено — #228:
+        # потомок — более узкое другое изделие, 10 «сломано» в climb).
         # ⚠ Без точного — ОДНА запись (первая по рангу в лучшем ярусе), как и до D14. Находку раунда 1
         # «предок отдаёт все записи, как точный код» раунд 2 опроверг на корпусе: под одним кодом
         # лежат РАЗНЫЕ изделия (26.51.12 — 14 записей, 28.99.39.190 — 77), и у «теодолита
@@ -1177,7 +1214,8 @@ class ProceduralPlan(NamedTuple):
     grounding: str
 
 
-def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
+def plan_procedural(query: str, search_query: str,
+                    only_docs: tuple[str, ...] = ()) -> ProceduralPlan | None:
     """Контекст и промпт процедурного ответа ДО вызова модели — см. `ProceduralPlan`.
 
     None — корпус недоступен или пуст (выше по стеку это честный дефер, а не выдумка процедуры).
@@ -1186,11 +1224,15 @@ def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
     пути. Причина та же и появилась она из `EV21` #119: до выделения размер процедурного контекста
     нельзя было измерить, не заплатив за генерацию, и `eval_context_size` МОЛЧА пропускал всю
     процедурную ветку («до контекста не дошли»). Пропускал он при этом ровно те вопросы, ради
-    которых делались `K12` и `K15`, — состав документов, кластер жалоб №1."""
+    которых делались `K12` и `K15`, — состав документов, кластер жалоб №1.
+
+    `only_docs` — корпус, выбранный пользователем (`L1` #146, `corpora.ONLY_DOCS`): жёсткий фильтр
+    поиска. Пусто — весь процедурный корпус, как у автомата."""
     from app.rag import topics
 
     topic = topics.classify(search_query)
-    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic))
+    rules = search_rules(search_query, limit=RULES_TOP_K, primary_docs=topics.doc_types(topic),
+                         only_docs=only_docs)
     if not rules:
         return None
     ctx = format_rules_context(rules, show_legal_force=True)   # K13: окно смешивает документы разной силы
@@ -1211,11 +1253,18 @@ def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
     # пользователя за то, чего он не писал. Без темы блок уезжал бы в чужие вопросы: четыре цифры
     # рядом со словом «позиция» встречаются и вне этой оси.
     st1_block = None
-    if topic == topics.ST1_ORIGIN:
+    # L1: при ручном сужении корпуса (`only_docs`, «Методрекомендации») в контекст не идёт ничего из
+    # других документов (ревью): ни Перечень условий СТ-1, ни фрагмент темы — фрагменты называют
+    # «раздел 4 Приказа №52», «пункты тела постановления», а фильтр эти документы убрал, и модель
+    # приписала бы им пункты Методрекомендаций. Закрытый справочник документов (`K15`) остаётся —
+    # это предохранитель от выдуманного документа, а не корпус.
+    narrowed = bool(only_docs)
+    if topic == topics.ST1_ORIGIN and not narrowed:
         tnved = okpd2_ref.extract_tnved_position(search_query)
         if tnved:
             st1_block = st1_ref.format_for_context(tnved) or None
-    user = build_procedural_user_prompt(query, ctx, topic_fragment=topics.fragment(topic),
+    user = build_procedural_user_prompt(query, ctx,
+                                        topic_fragment="" if narrowed else topics.fragment(topic),
                                         documents=docs_ref, st1_conditions=st1_block)
     # ⚠⚠ ЗАЗЕМЛЕНИЕ ШИРЕ ОКНА, И ЭТО НАЙДЕНО ПЛАТНЫМ ПРОГОНОМ, А НЕ РАССУЖДЕНИЕМ.
     # Пока фактами были только пункты, `grounding = ctx` совпадало с истиной. Детерминированный
@@ -1229,7 +1278,9 @@ def plan_procedural(query: str, search_query: str) -> ProceduralPlan | None:
 
 
 def _answer_procedural(query: str, search_query: str,
-                       history: list[dict] | None = None, brief: bool = False) -> Answer:
+                       history: list[dict] | None = None, brief: bool = False,
+                       only_docs: tuple[str, ...] = (),
+                       used: str = corpora.USED_RULES) -> Answer:
     """Процедурный вопрос → ответ по корпусу «Правила ведения реестра» (коллекция pp719_rules).
 
     Фолбэк: порядок действий и сроки НЕ выдумываем ни при каких условиях. Две причины —
@@ -1245,7 +1296,7 @@ def _answer_procedural(query: str, search_query: str,
         return Answer(text=procedural.DEFLECTION_DISABLED, hits=[], metered=False)  # #160: отказ ветки — не ответ
     # K12: намерение вопроса задаёт и приоритет документов в окне, и оговорки промпта. Тема
     # определяется детерминированно (регулярки), поэтому маршрутизация бесплатна и воспроизводима.
-    planned = plan_procedural(query, search_query)
+    planned = plan_procedural(query, search_query, only_docs=only_docs)
     if planned is None:  # Qdrant недоступен / коллекции нет / пусто → честный дефер, а не выдумка
         return Answer(text=procedural.DEFLECTION, hits=[], metered=False)  # #160: сбой корпуса не списывается
     topic, rules, ctx, user, grounding = planned
@@ -1297,6 +1348,7 @@ def _answer_procedural(query: str, search_query: str,
         # ДОКУМЕНТЕ: на 12 из 20 вопросов про документы она даёт другой документ или None, и поле
         # предлагало ровно тот вопрос, на который только что ответили.
         input_hint=followup.after_procedural(topic),
+        corpus=used,  # L2
     )
 
 
@@ -1326,6 +1378,7 @@ class _Plan:
     points_table: str = ""
     codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
+    corpus: str = corpora.USED_APPENDIX  # L2: см. Answer.corpus
 
 
 def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
@@ -1398,7 +1451,7 @@ def _add_positions_by_code(codes: list[str], hits: list[Hit], limit: int, *,
         # Иначе разрешаем код НЕЙТРАЛЬНО — запросом по самому коду, а не по тексту вопроса о другой
         # продукции. Иначе выбор зависит от того, в каком ПОРЯДКЕ пользователь назвал коды.
         for h in search(c, okpd2=c, limit=2, qvec=None):
-            if not h.okpd2_match or not okpd2_match(h.okpd2_codes or [], c):
+            if not h.okpd2_match or not retriever.code_match(h, c):     # D20: без исключённых кодов
                 continue
             if accept is not None and not accept(h):
                 continue
@@ -1465,7 +1518,8 @@ def product_low_relevance(search_query: str, qvec: list[float] | None,
 
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
-                 history: list[dict] | None = None, brief: bool = False) -> "Answer | _Plan":
+                 history: list[dict] | None = None, brief: bool = False,
+                 corpus: str = corpora.AUTO) -> "Answer | _Plan":
     """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
     поиск/реранк/кейсы → out-of-scope guard → сборка messages. Возвращает либо ранний Answer
     (meta / процедурный / нет-позиции — модель уже не нужна или отработала), либо _Plan для
@@ -1477,7 +1531,14 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     limit=5 выпадали из окна на мелкой смене формулировки (ед./мн. число) — модель их не
     видела и ложно отказывала. Окно 8 стабильно вводит их в контекст; лишние кандидаты идут
     БЕЗ требований (только наименование и код, `EV7`) и служат материалом для уточнения по
-    коду (правило 1г)."""
+    коду (правило 1г).
+
+    `corpus` — режим, выбранный пользователем (`L1` #146, `app/rag/corpora.py`). `auto` — прежний
+    автомат побайтно; `appendix` — только приложение (гейт и пункты Приказа №52 не зовутся);
+    `rules`/`metodrek` — процедурная ветка с жёстким фильтром документов. Заготовки (приветствие)
+    идут до выбора корпуса в любом режиме — корпуса у них нет. Перевод кодов ТН ВЭД↔ОКПД2 — только
+    в «Авто» (ревью: при ручном выборе сервис подменял выбор пользователя справочником, а подпись
+    говорила «выбран вручную»); в «Приложении» код ТН ВЭД переводится и ищется по приложению."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import followup, meta, topics
     if meta.is_meta(query):
@@ -1487,8 +1548,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # T9: прямой запрос на ПЕРЕВОД кода ТН ВЭД↔ОКПД2 — отвечаем детерминированно из справочника
     # переходных ключей (без LLM: навигатор строго по 719 и на такой вопрос раньше отказывал).
     from app.rag import translate
-    if translate.is_translate(query):
-        return Answer(text=translate.answer(query), hits=[], input_hint=followup.ask_for_product())
+    if corpus == corpora.AUTO and translate.is_translate(query):
+        return Answer(text=translate.answer(query), hits=[], input_hint=followup.ask_for_product(),
+                      corpus=corpora.USED_CLASSIFIER)
 
     # Мультитёрн: уточняющий вопрос переписываем в самостоятельный — ТОЛЬКО для поиска/гейтов
     # (генерация ниже видит историю диалога через messages).
@@ -1496,11 +1558,20 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     if history and _needs_context(query):
         search_query = _contextualize(query, history)
 
+    # L1 #146: корпус норм, выбранный ВРУЧНУЮ, — процедурная ветка без гейта. Гейт здесь не
+    # спрашивается намеренно: его ошибка (#131, #139) и есть причина, по которой выбор отдан
+    # пользователю, и `PROCEDURAL_DEFLECT_ENABLED` выключает автомат, а не явный выбор.
+    if corpus in corpora.ONLY_DOCS:
+        return _answer_procedural(query, search_query, history, brief=brief,
+                                  only_docs=corpora.ONLY_DOCS[corpus],
+                                  used=corpora.used_for_mode(corpus))
+
     # Процедурный дефер-предохранитель: чистый процедурный вопрос (внесение в реестр, ГИСП,
     # подача заявления, сроки, обжалование) корпусом НЕ покрыт. Деферим детерминированно ДО
     # поиска — без вызова LLM (ноль галлюцинаций/стоимости). Товарные/смешанные вопросы (есть
     # код или товарно-балльный сигнал) сюда не попадают — их обрабатывает обычный пайплайн.
-    if settings.PROCEDURAL_DEFLECT_ENABLED:
+    # L1: при ручном выборе приложения (`appendix`) гейт не спрашивается вовсе.
+    if corpus == corpora.AUTO and settings.PROCEDURAL_DEFLECT_ENABLED:
         from app.rag import procedural
         if procedural.is_procedural(search_query, has_code=bool(okpd2)):
             # Раньше здесь был немедленный дефер. Теперь маршрутизируем на корпус Правил реестра;
@@ -1585,6 +1656,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
             "наименование продукции или укажите код ОКПД2.",
             hits=[],
             input_hint=followup.ask_for_product(),  # ответ просит назвать продукцию — туда же ведёт подсказка
+            corpus=corpora.USED_APPENDIX,  # L2: искали по приложению — так и подписываем
         )
 
     # Out-of-scope guard: совпадение по коду ОКПД2 или подтверждённый кейс = высокая
@@ -1656,7 +1728,10 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     doc_points: list = []      # ⚠ инициализация обязательна: ниже её читает шапка промпта
     if docs_topic or documents_ref.asks_about_conclusion(search_query):
         docs_ctx = documents_ref.documents_context_block(search_query)
-    if docs_topic:
+    # L1: при ручном выборе приложения пункты Приказа №52 не добираются — это другой корпус, и
+    # подпись «собран по приложению» (`L2`) иначе была бы неправдой. Закрытый справочник документов
+    # (`docs_ctx`, `K15`) остаётся: это предохранитель от выдуманного документа, а не корпус.
+    if docs_topic and corpus != corpora.APPENDIX:
         # ⚠⚠ ЗДЕСЬ ПРОСИМ РОВНО ПРИКАЗ №52, А НЕ «ДОКУМЕНТЫ ТЕМЫ». Два строки ниже блок
         # ФИЛЬТРУЕТСЯ до `tpp_order_52` — значит, просить у окна что-то ещё означает
         # потратить места, которые тут же выбросят. Пока у темы был один документ, разницы
@@ -1729,7 +1804,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     grounding = ctx + ("\n" + cases_ctx if cases_ctx else "")
     return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
-                 input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)))
+                 input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)),
+                 corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX)
 
 
 # Пробный режим без входа (решение владельца 09.10.2026): ответ гостю дешевле — та же постановка
@@ -1752,12 +1828,14 @@ def _generation_kwargs(messages: list[dict], brief: bool) -> dict:
 
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
-           history: list[dict] | None = None, brief: bool = False) -> Answer:
+           history: list[dict] | None = None, brief: bool = False,
+           corpus: str = corpora.AUTO) -> Answer:
     """Синхронный ответ навигатора (non-stream). Пред-работа — в _plan_answer; здесь только
     финальная генерация DeepSeek + faithfulness-постпроверка. Поведение НЕ изменилось при
     выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения).
-    brief — пробный режим гостя (см. `_generation_kwargs`)."""
-    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief)
+    brief — пробный режим гостя (см. `_generation_kwargs`); corpus — режим `L1` #146."""
+    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief,
+                           corpus=corpus)
     if isinstance(planned, Answer):  # ранний путь (meta / процедурный / нет-позиции)
         return planned
     resp = _client().chat.completions.create(
@@ -1797,11 +1875,13 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         grounding=planned.grounding,
         codes=planned.codes,
         input_hint=planned.input_hint,
+        corpus=planned.corpus,
     )
 
 
 def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
-                  history: list[dict] | None = None, brief: bool = False):
+                  history: list[dict] | None = None, brief: bool = False,
+                  corpus: str = corpora.AUTO):
     """Стриминг ответа (T18): генератор — yield ('delta', str) по мере генерации, затем
     ('done', Answer) с финальными метаданными (hits→sources / флаги / токены).
 
@@ -1809,7 +1889,8 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     текст одним 'delta' + 'done' (стрим для _answer_procedural — фолоу-ап). LLM-путь: stream=True,
     копим текст; эмодзи чистим по кускам (дисплей = финал), в КОНЦЕ — faithfulness-постпроверка.
     Исключения наружу НЕ глушим — эндпоинт ловит их и сигналит фронту фолбэк на /api/chat."""
-    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief)
+    planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief,
+                           corpus=corpus)
     if isinstance(planned, Answer):  # ранний путь — генерация не нужна / уже сделана
         yield "delta", planned.text
         yield "done", planned
@@ -1868,6 +1949,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         grounding=planned.grounding,
         codes=planned.codes,
         input_hint=planned.input_hint,
+        corpus=planned.corpus,
     )
 
 

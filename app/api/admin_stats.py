@@ -24,7 +24,7 @@ from datetime import date, datetime, timedelta
 from app.core.costs import cost_rub
 from app.core.plans import MSK_OFFSET
 from app.db import queries as q
-from app.rag import procedural
+from app.rag import corpora, procedural
 
 # Оценки 0..2★ считаем «плохими» (гейт приёмки: ≥4★ — пройдено, 3★ — пограничные).
 BAD_RATING_MAX = 2
@@ -58,6 +58,30 @@ def _in_window(ts, date_from: date | None, date_to: date | None) -> bool:
 def _accept_pct(ratings: list[int]) -> int | None:
     """Доля оценок ≥4★ в процентах (метрика приёмочного гейта). None — если оценок нет."""
     return round(100 * sum(1 for r in ratings if r >= 4) / len(ratings)) if ratings else None
+
+
+def _superseded_ratings(fb_by_user: dict[int, list]) -> set[int]:
+    """id оценок ответа, ПЕРЕБИТЫХ более поздней оценкой того же пользователя на тот же ответ (#166).
+
+    Повторный клик по звёздам (3 → 4) — переоценка, а не второй голос: `/api/feedback` пишет
+    каждую оценку новой строкой, и приёмочная доля считала один ответ дважды. Учитывается
+    ПОСЛЕДНЯЯ (по времени, при равенстве — по id), прежние уходят отдельным счётчиком в «Сигналы
+    качества». ⚠ Метрика меняется задним числом — замер до/после записан в задачнике."""
+    out: set[int] = set()
+    for lst in fb_by_user.values():
+        last: dict[int, object] = {}
+        for f in lst:
+            if (f.kind or "service") != "answer" or f.rating is None or f.message_id is None:
+                continue
+            prev = last.get(f.message_id)
+            if prev is None:
+                last[f.message_id] = f
+            elif (f.ts or datetime.min, f.id) > (prev.ts or datetime.min, prev.id):
+                out.add(prev.id)
+                last[f.message_id] = f
+            else:
+                out.add(f.id)
+    return out
 
 
 def _fmt_trend(cur: float, prev: float, good_up: bool | None = True) -> dict:
@@ -163,6 +187,7 @@ def build_admin_view(
     for f in all_fb:
         if f.user_id in sel_ids and _in_window(f.ts, date_from, date_to):
             fb_by_user[f.user_id].append(f)
+    superseded = _superseded_ratings(fb_by_user)
 
     # --- аккумуляторы ------------------------------------------------------
     data = []                       # детальные логи (юзер → беседы → реплики)
@@ -175,6 +200,8 @@ def build_admin_view(
     ratings: list[int] = []                                  # service-оценки 1..5
     ans_ratings: list[int] = []                              # звёзды ответов 0..5 (kind='answer')
     orphan_ratings = 0                                       # оценки без найденного ответа — вне метрики (R2)
+    repeat_ratings = 0                                       # #166: перебитые повторной оценкой того же ответа
+    withdrawn_ratings = 0                                    # последняя оценка — 0, то есть снята (27.10.2026)
     ans_ratings_by_role: dict[str, list[int]] = defaultdict(list)
     region_acc: dict[str, dict] = defaultdict(
         lambda: {"users": 0, "ratings": [], "requests": 0, "tokens": 0, "cost": 0.0}
@@ -261,6 +288,13 @@ def build_admin_view(
                 snippet = (ans_txt[:220] + "…") if len(ans_txt) > 220 else ans_txt
                 if f.rating is not None and orphan:
                     orphan_ratings += 1
+                elif f.rating is not None and f.id in superseded:
+                    repeat_ratings += 1   # #166: перебита более поздней оценкой того же ответа
+                elif f.rating == 0:
+                    # Оценка СНЯТА (решение владельца 27.10.2026): 0 ставит только повторный клик по
+                    # активной звезде — в базе все нули получены так, поверх ненулевой оценки. Ответ без
+                    # оценки в приёмку не идёт; прежде он шёл в неё нулём.
+                    withdrawn_ratings += 1
                 elif f.rating is not None:
                     ans_ratings.append(f.rating)
                     ans_ratings_by_role[u.role].append(f.rating)
@@ -272,6 +306,7 @@ def build_admin_view(
                         "answer": ans_txt,
                         "unverified": orig.unverified_json,
                         "low_relevance": bool(orig.low_relevance),
+                        "corpus": corpora.label_from_stored(orig.corpus),  # L2 #147
                         "comment": f.comment or "", "correction": f.correction or "",
                         "session_id": f.session_id, "owner_id": orig.user_id,
                     })
@@ -395,6 +430,8 @@ def build_admin_view(
         # Оценки, чей ответ не найден: в приёмку НЕ включены (R2). Ненулевое значение — сигнал,
         # что часть сигнала качества потеряна вместе с удалёнными беседами.
         "orphan_ratings": orphan_ratings,
+        "repeat_ratings": repeat_ratings,  # #166
+        "withdrawn_ratings": withdrawn_ratings,
         "per_user": per_user_stat,
         "per_day": per_day_list,
         "max_requests": per_user_stat[0]["requests"] if per_user_stat else 0,

@@ -196,6 +196,14 @@
                  у фронта нет: разъехавшаяся вторая копия уже стоила ссылки на недействующую редакцию. #}
               <textarea id="input" rows="1" placeholder="{{ input_hint }}" autofocus></textarea>
               <div class="composer-bar">
+                {# L1 #146: по какому корпусу отвечать. «Авто» — прежний выбор сервиса; значения и
+                   подписи — из app/rag/corpora.py (через web.CORPUS_MODES), своих у шаблона нет. #}
+                <label class="corpus-pick" title="Где искать ответ: сервис выбирает сам или по вашему выбору">
+                  <span class="corpus-pick-label">Источник:</span>
+                  <select id="corpus-select" aria-label="Источник ответа">
+                    {% for value, title in corpus_modes %}<option value="{{ value }}">{{ title }}</option>{% endfor %}
+                  </select>
+                </label>
                 <button class="jump-btn hidden" id="jump-btn" type="button" title="Вопросы в этом чате" aria-label="Вопросы в этом чате">
                   <svg viewBox="0 0 24 24" fill="none"><path d="M9 6h11M9 12h11M9 18h11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><circle cx="4.5" cy="6" r="1.4" fill="currentColor"/><circle cx="4.5" cy="12" r="1.4" fill="currentColor"/><circle cx="4.5" cy="18" r="1.4" fill="currentColor"/></svg>
                 </button>
@@ -223,7 +231,7 @@
           {% endif %}
           <div class="composer-disclaimer">
             {{ app_title }} — это ИИ и может ошибаться; окончательное решение принимает уполномоченный
-            эксперт ТПП.
+            эксперт ТПП. Проверяйте и выбор источника: под каждым ответом указано, по чему он собран.
             {% if user %}Диалоги сохраняются и могут просматриваться организаторами для улучшения сервиса ·
             <a href="/terms">Условия использования</a> · <a href="/privacy">Политика конфиденциальности</a> ·
             {% else %}В пробном режиме вопросы сохраняются без привязки к вам и могут просматриваться

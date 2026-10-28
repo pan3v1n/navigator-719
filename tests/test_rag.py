@@ -1178,28 +1178,41 @@ class TestOptionalLookupsDegrade(unittest.TestCase):
 
     `search_rules`/`search_cases` обещают в docstring пустой список при недоступном Qdrant, но
     оборачивали только `collection_exists` — исключение из самого запроса улетало наверх, и
-    честный процедурный дефер был недостижим."""
+    честный процедурный дефер был недостижим.
+
+    ⚠ `O3-1` #180: вектор запроса подменяется заглушкой. Прежде тест его не подменял, и
+    `embed_query` либо качал e5-large с HuggingFace (CI — сотни попыток соединения, загрузка
+    падала, исключение ловил тот же `try`), либо грузил модель с диска. Тест зеленел ИЗ-ЗА
+    сбоя эмбеддинга и до `query_points` не доходил — счётчик ниже это и закрепляет."""
 
     def setUp(self):
         from app.rag import retriever as r
         self.r = r
         self._orig = r._client
+        self._orig_embed = r.embed_query
+        calls = self.query_calls = []
 
         class _Dying:
             def collection_exists(self, name):  # noqa: ARG002
                 return True
 
             def query_points(self, **kw):
+                calls.append(kw.get("collection_name"))
                 raise ConnectionError("Qdrant недоступен")
 
         r._client = lambda: _Dying()
+        r.embed_query = lambda q: [0.0] * 1024  # noqa: ARG005 — офлайн, без модели
 
     def tearDown(self):
         self.r._client = self._orig
+        self.r.embed_query = self._orig_embed
 
     def test_rules_and_cases_return_empty_instead_of_raising(self):
         self.assertEqual(self.r.search_rules("порядок внесения в реестр"), [])
+        self.assertTrue(self.query_calls, "search_rules не дошёл до query_points — сбой не тот")
+        self.query_calls.clear()
         self.assertEqual(self.r.search_cases("насосы"), [])
+        self.assertTrue(self.query_calls, "search_cases не дошёл до query_points — сбой не тот")
 
 
 class TestFormatRulesContext(unittest.TestCase):
@@ -1553,7 +1566,13 @@ class TestThresholds(unittest.TestCase):
         (26.20.16.120) и «Сканеров штрихкодов» (26.20.16.150). Число дословно из первоисточника,
         поэтому faithfulness-гард молчал."""
         from app.rag.thresholds import _code_applies
-        self.assertIsNone(lookup_threshold(["26.20.16"], "Устройства ввода или вывода", "IX"))
+        # D20 #225: у позиции теперь СВОЙ порог — строка «26.20.16 (за исключением 26.20.16.120)»
+        # (55/65/90) раньше не разбиралась, и проверка держалась на «порога нет». Утечка — это
+        # порог принтеров (70) или сканеров (50), его быть не должно.
+        got = lookup_threshold(["26.20.16"], "Устройства ввода или вывода", "IX") or ""
+        self.assertIn("не менее 55 баллов", got)
+        self.assertNotIn("не менее 70 баллов", got)
+        self.assertNotIn("не менее 50 баллов", got)
         # направление: предок→потомок можно, потомок→предок нельзя
         self.assertTrue(_code_applies("22.22", "22.22.11"))
         self.assertTrue(_code_applies("22.22", "22.22"))

@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 
 from app.core import plans
 from app.db.models import AnswerUsage, Feedback, GuestMessage, Lead, Message, User, _utcnow
+from app.rag import corpora
 
 
 # --- users ---------------------------------------------------------------
@@ -370,24 +371,32 @@ def record_answer_usage(db: Session, user_id: int) -> None:
     db.commit()
 
 
-def is_answered_repeat(db: Session, user_id: int, session_id: str, content: str, since) -> bool:
+def is_answered_repeat(db: Session, user_id: int, session_id: str, content: str, since,
+                       mode: str = corpora.AUTO) -> bool:
     """Тот же вопрос в той же беседе после `since` уже получил ответ (#160, ревью PR #161).
 
     Так выглядит переход фронта со стрима на фолбэк, когда стрим дошёл до конца на сервере, а
     клиент финала не получил: ответ уже списан, повтор списываться и блокироваться не должен.
     Признак берётся из беседы на сервере, а не из ключа от клиента: ключ можно подсунуть, а
-    бесплатным здесь выходит только ответ, который уже получен."""
-    first = db.execute(
-        select(func.min(Message.id)).where(
+    бесплатным здесь выходит только ответ, который уже получен.
+
+    ⚠ ТОТ ЖЕ ВОПРОС = ТОТ ЖЕ ТЕКСТ И ТОТ ЖЕ РЕЖИМ ИСТОЧНИКА (`L1` #146, ревью PR feat/l1-l2). До `L1`
+    повтор давал тот же ответ при temperature 0 и ничего не стоил; с выбором корпуса тот же текст в
+    другом режиме — НОВЫЙ платный ответ, и без режима в признаке лимит обходился переключателем.
+    Режим берём у ответа, который последовал за вопросом (`messages.corpus`, `corpora.mode_of`)."""
+    qids = [r[0] for r in db.execute(
+        select(Message.id).where(
             Message.user_id == user_id, Message.session_id == session_id, Message.role == "user",
-            Message.content == content, Message.ts >= since)
-    ).scalar()
-    if first is None:
-        return False
-    return db.execute(
-        select(Message.id).where(Message.user_id == user_id, Message.session_id == session_id,
-                                 Message.role == "assistant", Message.id > first).limit(1)
-    ).first() is not None
+            Message.content == content, Message.ts >= since).order_by(Message.id))]
+    for qid in qids:
+        reply = db.execute(
+            select(Message.corpus).where(Message.user_id == user_id, Message.session_id == session_id,
+                                         Message.role == "assistant", Message.id > qid)
+            .order_by(Message.id).limit(1)
+        ).first()
+        if reply is not None and corpora.mode_of(reply[0]) == mode:
+            return True
+    return False
 
 
 def count_answer_usage(db: Session, user_id: int, start, end) -> int:
@@ -411,6 +420,7 @@ def log_message(
     unverified: list | None = None,
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
+    corpus: str | None = None,
 ) -> Message:
     m = Message(
         user_id=user_id,
@@ -422,6 +432,7 @@ def log_message(
         unverified_json=json.dumps(unverified, ensure_ascii=False) if unverified else None,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
+        corpus=corpus,
     )
     db.add(m)
     db.commit()
@@ -573,28 +584,39 @@ def create_lead(
     return lead
 
 
-def list_leads(db: Session, limit: int | None = None, status: str | None = None) -> list[Lead]:
+def list_leads(db: Session, limit: int | None = None, status: str | None = None,
+               lead_id: int | None = None) -> list[Lead]:
     """Заявки, свежие сверху; `limit` — сколько показать (админка не тянет все ПДн разом).
     Фильтр статуса — в запросе, ДО лимита: иначе на странице «Новые» были бы лишь новые среди
-    последних `limit`, а старые новые недостижимы (ревью PR #182)."""
+    последних `limit`, а старые новые недостижимы (ревью PR #182). `lead_id` — одна заявка (#200)."""
     stmt = select(Lead).order_by(Lead.created_at.desc(), Lead.id.desc())
     if status:
         stmt = stmt.where(Lead.status == status)
+    if lead_id is not None:
+        stmt = stmt.where(Lead.id == lead_id)
     if limit:
         stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def _tester_leads_pending():
+    """Условие очереди «Тестировщиков» — одно на список и на счётчик (#200, п. 6)."""
+    return (or_(Lead.kind == "tester", Lead.tariff == plans.TESTER_PLAN),
+            Lead.status.in_(("new", "in_work")))
 
 
 def list_tester_leads(db: Session, limit: int | None = None) -> list[Lead]:
     """Очередь раздела «Тестировщики» (14.10.2026): заявки на тариф «Тестировщик», ждущие решения
     (новые и в работе), старые сверху. Вид — данными (`kind`), тариф — для заявок без вида."""
-    stmt = (select(Lead)
-            .where(or_(Lead.kind == "tester", Lead.tariff == plans.TESTER_PLAN),
-                   Lead.status.in_(("new", "in_work")))
-            .order_by(Lead.created_at, Lead.id))
+    stmt = select(Lead).where(*_tester_leads_pending()).order_by(Lead.created_at, Lead.id)
     if limit:
         stmt = stmt.limit(limit)
     return list(db.execute(stmt).scalars())
+
+
+def count_tester_leads(db: Session) -> int:
+    """Сколько заявок в очереди «Тестировщиков» всего — список на странице усечён (#200, п. 6)."""
+    return db.execute(select(func.count(Lead.id)).where(*_tester_leads_pending())).scalar_one()
 
 
 def list_testers(db: Session) -> list[User]:
@@ -678,13 +700,13 @@ def delete_lead(db: Session, lead_id: int) -> bool:
 def log_guest_message(
     db: Session, *, guest_id: str, session_id: str, role: str, content: str,
     sources: list | None = None, low_relevance: bool = False, prompt_tokens: int | None = None,
-    completion_tokens: int | None = None, charged: bool = False,
+    completion_tokens: int | None = None, charged: bool = False, corpus: str | None = None,
 ) -> GuestMessage:
     m = GuestMessage(
         guest_id=guest_id, session_id=session_id, role=role, content=content,
         sources_json=json.dumps(sources, ensure_ascii=False) if sources is not None else None,
         low_relevance=low_relevance, prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens, charged=charged,
+        completion_tokens=completion_tokens, charged=charged, corpus=corpus,
     )
     db.add(m)
     db.commit()

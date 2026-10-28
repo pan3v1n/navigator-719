@@ -74,6 +74,8 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from app.rag import code_cells  # noqa: E402
+from app.rag.thresholds import _excludes_list_item, _row_in_section, _scope_conflict  # noqa: E402
 from app.rag.thresholds import (  # noqa: E402
     _code_applies,
     _list_items,
@@ -141,7 +143,19 @@ def note_rows() -> list[dict]:
             # вето здесь целиком, и верный отказ рантайма снова считался НАШИМ дефектом.
             out.append({"codes": r["codes"], "names": r["names"], "note": r["note"],
                         "quote": (r.get("threshold") or "").strip(), "kind": "список",
-                        "strict_name": bool(r.get("strict_name"))})
+                        "strict_name": bool(r.get("strict_name")),
+                        # D20 #225: «X (за исключением Y)» — исключённые коды переносятся из источника,
+                        # как `strict_name`: без них классификатор строже рантайма.
+                        "excluded": list(r.get("excluded") or ()),
+                        # D21 #230: предмет строки (имена вне её оговорок) — для правила противоположных
+                        # оговорок, то же, что в рантайме.
+                        "subject_names": r.get("subject_names"),
+                        "exclusions": r.get("exclusions"),
+                        # D22 #235: раздел вводной и исключённые строкой разделы — тот же фильтр, что в
+                        # рантайме; без них позиция раздела X под строкой 22.21 «за исключением … разделом
+                        # X» считалась НАШИМ дефектом привязки.
+                        "section": r.get("section"),
+                        "excluded_sections": list(r.get("excluded_sections") or ())})
     for t in _tables():
         if note_scope(t["note"]) != "general":
             continue
@@ -259,12 +273,17 @@ def classify(rec: dict, rows: list[dict]) -> dict:
     sec = rec.get("section_roman")
 
     def _foreign(row: dict) -> bool:
-        return bool(sec and row.get("section") and row["section"] != sec)
+        # D22 #235: раздел строки и исключённые ею разделы — предикат рантайма, импортом.
+        return not _row_in_section(row, sec)
 
     coverings: list[dict] = []
     narrower, by_name = None, None
     for row in rows:
         for c in codes:
+            # D20 #225: строка «X (за исключением Y)» позицию с кодом под Y НЕ покрывает — то же правило,
+            # что в рантайме (`thresholds._lookup`); иначе гейт краснел бы на верном отказе.
+            if any(code_cells.under(c, e) for e in row.get("excluded") or ()):
+                continue
             for rc in row["codes"]:
                 if _code_applies(rc, c):
                     if row not in coverings:
@@ -302,6 +321,12 @@ def classify(rec: dict, rows: list[dict]) -> dict:
                 or any(_norm(_strip_fn(n)) == _norm(_strip_fn(name)) for n in nm))
 
     def _ours(row: dict) -> bool:
+        # D21 #230: строка с противоположной оговоркой области — порог ДРУГОЙ продукции, как чужой раздел:
+        # уликой остаётся («порог написан для другой продукции»), нашим дефектом — нет. То же правило, что
+        # в рантайме (`thresholds._scope_conflict`, `_excludes_list_item`), импортом, а не копией.
+        if (_scope_conflict(row.get("names") or [], name, row.get("subject_names"), row.get("exclusions"))
+                or _excludes_list_item(row.get("names") or [], name, row.get("exclusions"))):
+            return False
         return not _foreign(row) and _speaks_about_us(row)
 
     # Из покрывающих строк выбираем ту, что говорит про ЭТУ позицию; если такой нет — первую,
@@ -461,4 +486,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    from app.core.console import enable_utf8  # #107: значки вне cp1251 роняли бы печать
+    enable_utf8()
     raise SystemExit(main())

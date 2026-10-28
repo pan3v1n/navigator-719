@@ -8,7 +8,8 @@ Coverage sweep (`eval_coverage.py`) гонял ВЕРБАТИМ-имя пози�
   1. Стратифицированная выборка позиций (по N на раздел, seed фиксирован).
   2. DeepSeek генерит K разговорных перефразов на позицию (как предприятие описало бы продукт
      своими словами) — кэш в scripts/eval_paraphrases.json (повторный прогон бесплатен,
-     перефразы можно глазами проверить на качество).
+     перефразы можно глазами проверить на качество). В кэше рядом с якорем лежит наименование
+     позиции; разошлось с корпусом — скрипт останавливается (`EV24` #244, см. `load_cache`).
   3. Каждый перефраз → retriever.search (+ продакшен-реранкер на code-less) → ранг ВЕРНОЙ
      позиции (exact, по source_anchor) и ВЕРНОГО раздела (section_roman).
   4. Сравнение с вербатим-базлайном на ТЕХ ЖЕ позициях → ПРОСАДКА recall@1/@3 (exact и раздел).
@@ -62,6 +63,57 @@ def _rank(hits, pred) -> int | None:
 
 
 # --------------------------------------------------------------------------- #
+# Кэш перефразов: якорь + наименование позиции (EV24 #244)
+# --------------------------------------------------------------------------- #
+# Ключ кэша — `source_anchor` («Раздел N, позиция M»), а номер позиции у редакции не вечен.
+# Раздел XVIII изложен заново (N 1254: 182 → 339 позиций), и перефразы «Суда-рыбозаводы»
+# остались под якорем, где теперь «Кронблоки для буровых судов»: exact-recall молча считал
+# промахом ВЕРНЫЙ ответ. Таких якорей нашлось 10 из 156, и ни одна метрика их не видела.
+# Поэтому рядом с якорем хранится наименование, ради которого перефраз писался, и загрузчик
+# сверяет его с корпусом: разошлось — замер не идёт, а печатает перечень.
+# ⚠ Сверяется ВЕСЬ кэш, а не только текущая выборка: запись вне выборки при другом
+# `--per-section` или `--seed` попадёт в замер так же молча.
+def _norm_name(name) -> str:
+    return " ".join(str(name or "").split())
+
+
+def cache_mismatches(cache: dict, records: list[dict]) -> list[str]:
+    """Расхождения кэша перефразов с текущим корпусом; пустой список — кэш годен."""
+    names = {r.get("source_anchor"): _norm_name(r.get("product_name")) for r in records}
+    out: list[str] = []
+    for anchor, entry in cache.items():
+        if not (isinstance(entry, dict) and isinstance(entry.get("product_name"), str)
+                and isinstance(entry.get("paraphrases"), list)):
+            out.append(f"{anchor}: запись без наименования позиции (формат кэша до EV24)")
+            continue
+        cached = _norm_name(entry["product_name"])
+        if anchor not in names:
+            out.append(f"{anchor}: якоря нет в корпусе (в кэше «{cached}»)")
+        elif cached != names[anchor]:
+            out.append(f"{anchor}: в кэше «{cached}», в корпусе «{names[anchor]}»")
+    return out
+
+
+def load_cache(records: list[dict], path: Path | None = None) -> dict[str, dict]:
+    """Кэш перефразов, сверенный с корпусом. Рассинхрон — `sys.exit` с перечнем, а не замер."""
+    path = path or CACHE
+    if not path.exists():
+        return {}
+    cache = json.loads(path.read_text(encoding="utf-8"))
+    bad = cache_mismatches(cache, records)
+    if bad:
+        sys.exit(
+            f"EV24: кэш перефразов {path.name} разошёлся с корпусом — записей: {len(bad)}. "
+            "Перефраз под чужим якорем считает промахом верный ответ; мерить так нельзя.\n"
+            + "\n".join(f"  ✗ {b}" for b in bad)
+            + "\nЧто делать: перепривязать запись к позиции, о которой перефраз (по наименованию, "
+              "а не по номеру), или удалить её — недостающее сгенерируется заново. Если позиция "
+              "та же и уточнено только наименование — переписать product_name в записи."
+        )
+    return cache
+
+
+# --------------------------------------------------------------------------- #
 # Выборка
 # --------------------------------------------------------------------------- #
 def stratified(records: list[dict], per_section: int, seed: int) -> list[dict]:
@@ -74,21 +126,27 @@ def stratified(records: list[dict], per_section: int, seed: int) -> list[dict]:
     for sec in sorted(bysec):
         pool = bysec[sec][:]
         rnd.shuffle(pool)
-        out.extend(pool[:per_section])
+        # Псевдозапись «Методологические пороги раздела N» (`section_methodology`) — не позиция:
+        # перефразировать нечего, и её не считает ни один другой замер (`target_hits`,
+        # `eval_threshold_coverage`). На ред. N 1297 выборка `--per-section 3` брала две такие.
+        # Отсеивается ПОСЛЕ перемешивания: ход генератора прежний, и выборка остальных разделов
+        # не сдвигается — меняются ровно слоты, которые занимала псевдозапись (EV24 #244).
+        out.extend([r for r in pool if r.get("record_type") != "section_methodology"][:per_section])
     return out
 
 
 # --------------------------------------------------------------------------- #
 # Генерация перефразов (DeepSeek, с кэшем)
 # --------------------------------------------------------------------------- #
-def gen_paraphrases(recs: list[dict], k: int, progress: bool) -> dict[str, list[str]]:
+def gen_paraphrases(recs: list[dict], k: int, progress: bool,
+                    cache: dict[str, dict]) -> dict[str, list[str]]:
+    """Дополняет `cache` (уже сверенный `load_cache`) и возвращает {якорь: перефразы}."""
     from app.rag.pipeline import _client
 
-    cache: dict[str, list[str]] = {}
-    if CACHE.exists():
-        cache = json.loads(CACHE.read_text(encoding="utf-8"))
+    def have(anchor: str) -> int:
+        return len((cache.get(anchor) or {}).get("paraphrases") or [])
 
-    need = [r for r in recs if r["source_anchor"] not in cache or len(cache[r["source_anchor"]]) < k]
+    need = [r for r in recs if have(r["source_anchor"]) < k]
     print(f"Перефразы: в кэше {len(recs) - len(need)}/{len(recs)}, генерим {len(need)}")
     if need:
         client = _client()
@@ -113,12 +171,15 @@ def gen_paraphrases(recs: list[dict], k: int, progress: bool) -> dict[str, list[
                     timeout=30,
                 )
                 arr = json.loads(resp.choices[0].message.content or "{}").get("paraphrases", [])
-                cache[r["source_anchor"]] = [str(a).strip() for a in arr if str(a).strip()][:k]
+                cache[r["source_anchor"]] = {
+                    "product_name": name,
+                    "paraphrases": [str(a).strip() for a in arr if str(a).strip()][:k],
+                }
             except Exception:  # noqa: BLE001 — сеть/JSON: пустой список, не валим прогон
-                cache[r["source_anchor"]] = cache.get(r["source_anchor"], [])
+                cache.setdefault(r["source_anchor"], {"product_name": name, "paraphrases": []})
         CACHE.write_text(json.dumps(cache, ensure_ascii=False, indent=1), encoding="utf-8")
         print(f"Кэш перефразов обновлён: {CACHE}")
-    return cache
+    return {a: e["paraphrases"] for a, e in cache.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -243,10 +304,12 @@ def main() -> None:
         sys.exit(f"Qdrant недоступен ({e}). Подними Docker + Qdrant (:6533).")
 
     records = load_records()
+    cache = load_cache(records)  # EV24: рассинхрон якорей с корпусом — стоп до замера
     sample = stratified(records, args.per_section, args.seed)
     print(f"Выборка: {len(sample)} позиций (≤{args.per_section}/раздел), перефразов на позицию: {args.paraphrases}")
 
-    paraphrases = gen_paraphrases(sample, args.paraphrases, progress=not args.no_progress)
+    paraphrases = gen_paraphrases(sample, args.paraphrases, progress=not args.no_progress,
+                                  cache=cache)
     verbatim, para = evaluate(sample, paraphrases, args.limit,
                               rerank_on=not args.no_rerank, progress=not args.no_progress)
     out = report(verbatim, para, args.limit, rerank_on=not args.no_rerank, sample_cache=paraphrases)
