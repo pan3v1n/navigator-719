@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ea():
+    # `eval_answers` импортирует соседа `eval_documents`: без `scripts/` в пути модуль в одиночку не
+    # грузился (в полной батарее путь добавлял другой модуль — сторож работал только «в компании»).
+    import sys
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location("ea", ROOT / "scripts" / "eval_answers.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -107,3 +112,36 @@ class TestBothReachTheReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTitleWithFootnoteOrAmendmentEV20(unittest.TestCase):
+    """`EV20` #117: у трёх разделов к имени в данных приклеены маркер сноски или редакционная пометка.
+
+    Ответ, назвавший раздел по имени («Продукция радиоэлектроники»), — атрибуция; хвост «<5>» или
+    «(в ред. … N 2146)» повторять не обязан. До правки кейс 23 (IX) проваливался 3 из 3 именно так."""
+
+    CASES = [
+        ("IX", "Продукция радиоэлектроники <5>", "**Позиция:** «Продукция радиоэлектроники», интегральная схема"),
+        ("XVIII", "Продукция судостроения <9>, <9(1)>", "Позиция раздела «Продукция судостроения», шлюпки"),
+        ("XXIX", "Оборудование для разведки нефти и газа\xa0(в ред.\xa0Постановления Правительства РФ "
+                 "от 25.12.2025 N 2146)", "«Оборудование для разведки нефти и газа», виброисточник"),
+    ]
+
+    def test_clean_name_counts(self):
+        m = _ea()
+        for roman, title, text in self.CASES:
+            self.assertTrue(m.attributed(text, roman, [_Hit(roman, title)]), roman)
+
+    def test_copied_tail_still_counts(self):
+        """Ответ, повторивший хвост (как модель делала до правки контекста), — тоже атрибуция."""
+        m = _ea()
+        for roman, title, _text in self.CASES:
+            self.assertTrue(m.attributed(f"Раздел «{title.replace(chr(160), ' ')}».", roman,
+                                         [_Hit(roman, title)]), roman)
+
+    def test_part_of_the_name_still_does_not_count(self):
+        """Отрицательный контроль: нормализация не ослабила строгость — часть имени не атрибуция."""
+        m = _ea()
+        for roman, title, _text in self.CASES:
+            self.assertFalse(m.attributed("Продукция и оборудование для нефти [1].", roman,
+                                          [_Hit(roman, title)]), roman)
