@@ -112,7 +112,8 @@ class TestProceduralBranchHasNoRelevanceThreshold(unittest.TestCase):
         Там полосы расходятся (продукция вне 719 стабильно ниже профильной), порог измерен и
         работает с самого начала. Откатывалась ПРОЦЕДУРНАЯ ветка, а не идея порога вообще."""
         self.assertTrue(hasattr(pipeline, "RELEVANCE_SOFT"))
-        self.assertAlmostEqual(pipeline.RELEVANCE_SOFT, 0.83)
+        # 0.83 → 0.82 — `R40` #239 (решение владельца 28.10.2026, парный замер отказа на полосе).
+        self.assertAlmostEqual(pipeline.RELEVANCE_SOFT, 0.82)
 
 
 class TestCollectionParameterSurvived(unittest.TestCase):

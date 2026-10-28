@@ -217,7 +217,9 @@ def run_threshold(neg: list[dict], pos: list[dict]) -> list[str]:
           f"  Минимальная суммарная ошибка: {lo} из {len(neg) + len(pos)}{same}.",
           f"  Текущий порог {RELEVANCE_SOFT}: "
           + ("внутри минимума — двигать некуда." if RELEVANCE_SOFT in plateau
-             else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f}."),
+             else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f} — "
+                  "намеренно, если порог выбран по трафику и парному замеру отказа (`R40` #239, "
+                  "см. `pipeline.RELEVANCE_SOFT`): наборы отобраны по низкому косинусу и трафик не представляют."),
           "  ⚠ Сумма ошибок — грубая мера: false-accept и ложный флаг НЕ равноценны. Флаг только",
           "     подсказывает правилу 1б, а решение «вне сферы» принимает модель — на пограничных",
           "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов — то есть чужое",
@@ -274,10 +276,85 @@ def run_confusable(limit: int, rerank_on: bool, progress: bool) -> list[str]:
     return L
 
 
+# --------------------------------------------------------------------------- #
+# Режим band — отказ модели ПАРНО на полосе между двумя порогами (R40 #239)
+# --------------------------------------------------------------------------- #
+def run_band(lo: float, hi: float, runs: int, dump: str, progress: bool) -> list[str]:
+    """Реальный отказ на вопросах, у которых флаг ЗАВИСИТ от выбора порога: `lo <= dt1 < hi`.
+
+    Вне полосы флаг при обоих порогах одинаков — промпт тот же, и разница ответов там только шум
+    модели: платить за неё незачем. Зато внутри полосы — парно: каждый вопрос при обоих порогах,
+    `runs` раз (правило трёх прогонов), пороги чередуются внутри вопроса, чтобы дрейф API не лёг на
+    один из них. Порог подменяется у модуля, который его читает (`pipeline.RELEVANCE_SOFT`), — флаг
+    решает код продукта, а не повтор его модели в скрипте (урок 30.08).
+
+    ⚠ `_refused` — грубый детектор по словам (`EV11` #92): тексты ответов кладутся в `--dump`, и
+    вывод читается глазами, а не только по счётчику."""
+    from app.rag import pipeline
+
+    sets = [("вне 719", _load(NEG), True), ("профильный", _load(BORDER), False)]
+    rows = []
+    for label, cases, neg in sets:
+        for c in cases:
+            dt1 = dense_top1(c["query"])
+            if lo <= dt1 < hi:
+                rows.append({"set": label, "negative": neg, "id": c.get("id"), "query": c["query"],
+                             "dt1": dt1, "runs": {str(hi): [], str(lo): []}})
+    it = rows
+    if progress:
+        try:
+            from tqdm import tqdm
+            it = tqdm(rows, unit="вопрос", desc=f"band {lo}–{hi}")
+        except ImportError:
+            pass
+    saved = pipeline.RELEVANCE_SOFT
+    try:
+        for r in it:
+            for _ in range(runs):
+                for t in (hi, lo):
+                    pipeline.RELEVANCE_SOFT = t
+                    ans = pipeline.answer(r["query"])
+                    r["runs"][str(t)].append({"low_rel": ans.low_relevance, "refused": _refused(ans.text),
+                                              "unverified": ans.unverified_numbers, "text": ans.text})
+    finally:
+        pipeline.RELEVANCE_SOFT = saved
+
+    def tot(neg: bool, t: float, key: str) -> tuple[int, int]:
+        xs = [x for r in rows if r["negative"] == neg for x in r["runs"][str(t)]]
+        return sum(1 for x in xs if x[key]), len(xs)
+
+    L = ["=" * 78,
+         f"ОТКАЗ НА ПОЛОСЕ {lo}–{hi} (R40) — {len(rows)} вопросов, ×{runs} при каждом пороге, парно",
+         "=" * 78]
+    for neg, what, want in ((True, "вне 719", "отказ должен остаться"),
+                            (False, "профильные", "отказов не больше")):
+        for t in (hi, lo):
+            f, n = tot(neg, t, "low_rel")
+            rf, _ = tot(neg, t, "refused")
+            L.append(f"  {what:<10} порог {t}: флаг {f}/{n}, отказ {rf}/{n}  ({want})")
+    L += ["", "  вопрос (набор, dt1): флаг / отказ при пороге hi | при пороге lo"]
+    for r in sorted(rows, key=lambda r: (not r["negative"], r["dt1"])):
+        h, lw = r["runs"][str(hi)], r["runs"][str(lo)]
+        L.append(f"  [{r['set']:<10} {r['dt1']:.3f}] {r['query'][:44]:44}  "
+                 f"{sum(x['low_rel'] for x in h)}/{sum(x['refused'] for x in h)} | "
+                 f"{sum(x['low_rel'] for x in lw)}/{sum(x['refused'] for x in lw)}")
+    L.append("")
+    if dump:
+        Path(dump).write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
+        L.append(f"  тексты ответов: {dump}")
+    return L
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="P1 out-of-scope guard + confusable различение")
-    ap.add_argument("--mode", choices=["negative", "borderline", "threshold", "confusable", "both", "guard"],
-                    default="both", help="guard = negative+borderline+threshold (обе стороны весов)")
+    ap.add_argument("--mode", choices=["negative", "borderline", "threshold", "confusable", "both", "guard",
+                                       "band"],
+                    default="both", help="guard = negative+borderline+threshold (обе стороны весов); "
+                                         "band — ПЛАТНО: отказ парно на полосе --band (R40)")
+    ap.add_argument("--band", type=float, nargs=2, default=(0.82, 0.83), metavar=("LO", "HI"),
+                    help="band: полоса косинуса top-1, где флаг зависит от порога")
+    ap.add_argument("--runs", type=int, default=3, help="band: повторов на каждом пороге")
+    ap.add_argument("--dump", type=str, default="", help="band: JSON с текстами ответов (вне репозитория)")
     ap.add_argument("--limit", type=int, default=10)
     ap.add_argument("--rerank", action="store_true", help="confusable: применить продакшен-реранкер")
     ap.add_argument("--check-refusal", action="store_true",
@@ -310,6 +387,9 @@ def main() -> None:
         out += run_threshold(neg_rows, pos_rows)
     if args.mode in ("confusable", "both"):
         out += run_confusable(args.limit, args.rerank, not args.no_progress)
+    if args.mode == "band":   # ⚠ только явно: платный режим не входит ни в `both`, ни в `guard`
+        lo, hi = sorted(args.band)
+        out += run_band(lo, hi, args.runs, args.dump, not args.no_progress)
 
     text = "\n".join(out)
     print("\n" + text)

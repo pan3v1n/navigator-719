@@ -346,6 +346,20 @@ class TestBorderlineSet(unittest.TestCase):
         self.assertIn("borderline", eval_guard.__doc__)
         self.assertNotIn("Два режима", eval_guard.__doc__)
 
+    def test_paid_band_mode_runs_only_explicitly(self):
+        """`R40`: `--mode band` зовёт DeepSeek (полный pipeline.answer ×runs ×2 порога) — он не имеет
+        права запуститься в составе `both` или `guard`, которые гоняют как бесплатный замер."""
+        import inspect
+
+        import eval_guard
+        src = inspect.getsource(eval_guard.main)
+        self.assertIn('if args.mode == "band":', src)
+        self.assertEqual(src.count("run_band("), 1)
+        # порог подменяется у модуля продукта и возвращается назад
+        band = inspect.getsource(eval_guard.run_band)
+        self.assertIn("pipeline.RELEVANCE_SOFT = t", band)
+        self.assertIn("pipeline.RELEVANCE_SOFT = saved", band)
+
     def test_threshold_curve_reports_plateau_not_argmin(self):
         """Равные суммы на сетке 0.005 — норма, и «первый минимум» всегда самый permissive конец:
         прочитав его как рекомендацию, порог понизят и добавят false-accept за нулевой выигрыш."""
