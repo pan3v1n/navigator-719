@@ -109,6 +109,10 @@ LLM; перефраз и возмущения — продакшен-реран�
   в [`eval_runs/2026-10-28_ev24_paraphrase_anchors.md`](../eval_runs/2026-10-28_ev24_paraphrase_anchors.md).
   ⚠ `EXACT_SEARCH=1` в команде для этого скрипта не действует (на `pp719_ed1031` проверено: на числа
   не влияет).
+  ⚠ Та же выборка `stratified` — у `eval_perturbation` и `eval_faithfulness_stress`: без псевдозаписей
+  `section_methodology` их популяция тоже другая (2 слота при `--per-section 3`, 3 при 5): блок
+  `level3.perturbation` с базой 25.08 сравнивать нельзя по той же причине, прогоны
+  `eval_faithfulness_stress` до 28.10 (в базе его блока нет) — тоже.
 
 _История баз: 20.08 (`zahod2`) → 21.08 (`zahod3` = `v0.5.0-test13`) → 24.08 (`zahod4` =
 `v0.5.0-test14`) → 25.08 (`zahod5` = `v0.5.0-test15`) → 25.08 (`test17_full` =
