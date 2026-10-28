@@ -1138,6 +1138,34 @@ def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text)
 
 
+# «Только по-русски» (28.10.2026, `IDEAS.md` «Протечка иероглифов»): DeepSeek изредка вставляет в русский
+# ответ китайские токены (наблюдали «咨询服务» на «юридические услуги»). Правило 7 обоих системных
+# промптов это запрещает, а здесь — страховка, как у эмодзи: иероглифы и японская кана вычищаются ПО
+# СИМВОЛУ (в потоке кусок может оборваться посреди слова — посимвольная чистка от этого не зависит),
+# полноширинная пунктуация («，», «：», «（») заменяется обычной. Кириллицу, латиницу и типографику не трогаем.
+_CJK_RE = re.compile("[぀-ヿ㐀-䶿一-鿿豈-﫿　-〿＀-￯]")
+# Полноширинный знак в китайской типографике идёт БЕЗ пробела после себя («，уточните») — пробел добавляем.
+# ⚠ Чистка строго посимвольная: фронт показывает склейку дельт потока, а в базу ложится итоговый текст —
+# «умная» чистка только итога (например, пустых скобок от вычищенного слова) развела бы экран и запись.
+_FULLWIDTH = {"，": ", ", "：": ": ", "；": "; ", "（": "(", "）": ")", "。": ". ",
+              "、": ", ", "！": "! ", "？": "? ", "　": " "}
+
+
+def _clean_model_text(text: str) -> tuple[str, int]:
+    """Текст модели без эмодзи и иероглифов → (чистый текст, сколько знаков CJK вычищено)."""
+    text = _strip_emoji(text)
+    removed = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal removed
+        ch = m.group(0)
+        if ch in _FULLWIDTH:
+            return _FULLWIDTH[ch]
+        removed += 1
+        return ""
+    return _CJK_RE.sub(repl, text), removed
+
+
 # --- Мультитёрн: контекстуализация follow-up для ПОИСКА (P1a) -----------------------
 # Уточняющий вопрос («а какой порог?», «а для гидравлического?») без своего предмета даёт
 # контекст-фри поиск. Переписываем его в самостоятельный запрос по истории — ТОЛЬКО для
@@ -1352,7 +1380,9 @@ def _answer_procedural(query: str, search_query: str,
         **_generation_kwargs(messages, brief),
     )
     usage = resp.usage
-    raw = _strip_emoji(resp.choices[0].message.content or "")
+    raw, cjk = _clean_model_text(resp.choices[0].message.content or "")
+    if cjk:  # «только по-русски»: протечка иероглифов видна в журнале, а не только вычищена
+        logger.warning("ответ модели: вычищено знаков CJK — {}", cjk)
     if brief and resp.choices[0].finish_reason == "length":
         raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
     # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
@@ -1896,7 +1926,9 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с контекстом. Незаземлённые
     # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
     # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
-    raw = _strip_emoji(resp.choices[0].message.content or "")
+    raw, cjk = _clean_model_text(resp.choices[0].message.content or "")
+    if cjk:  # «только по-русски»: протечка иероглифов видна в журнале, а не только вычищена
+        logger.warning("ответ модели: вычищено знаков CJK — {}", cjk)
     if brief and resp.choices[0].finish_reason == "length":  # оборван потолком — говорим об этом
         raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
     if _keep_points_table(raw, planned.points_table, planned.hits):  # P4: перечень баллов печатает код (EV11-1: к разбору)
@@ -1953,6 +1985,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     parts: list[str] = []
     prompt_tokens = completion_tokens = 0
     finish = None
+    cjk_total = 0
     for chunk in resp:
         usage = getattr(chunk, "usage", None)
         if usage:
@@ -1961,11 +1994,14 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         if not chunk.choices:
             continue
         finish = getattr(chunk.choices[0], "finish_reason", None) or finish
-        piece = _strip_emoji(chunk.choices[0].delta.content or "")
+        piece, cjk = _clean_model_text(chunk.choices[0].delta.content or "")
+        cjk_total += cjk
         if piece:
             parts.append(piece)
             yield "delta", piece
     raw = "".join(parts)
+    if cjk_total:  # «только по-русски»: как в answer()
+        logger.warning("ответ модели (поток): вычищено знаков CJK — {}", cjk_total)
     if brief and finish == "length":  # как в answer(): оборванный потолком ответ помечаем
         cut = "…" + BRIEF_CUT_NOTE
         raw = raw.rstrip() + cut
