@@ -472,6 +472,21 @@ class TestTextFaithfulnessCore(unittest.TestCase):
         import eval_text_faithfulness as m
         cls.m = m
 
+    def test_order_point_citations_are_checked_against_the_points(self):
+        """`UI-1` #165 (ревью PR #261, MED): ссылка [9] на пункт Приказа №52 в товарном ответе — не
+        выдумка по контексту позиций; сверяется с текстом самого пункта."""
+        m = self.m
+        self.assertEqual(m.cited_scope("Нужна копия устава [9].", n_hits=8), "rules")
+        self.assertEqual(m.cited_scope("Порог 300 баллов [1].", n_hits=8), "hits")
+        self.assertEqual(m.cited_scope("Сравните [1] и [9].", n_hits=8), "both")
+        rules = [{"source_anchor": "Приказ ТПП РФ №52, п. 4.2.1",
+                  "text": "копия устава организации и выписка из ЕГРЮЛ"}]
+        claim = "Копия устава организации и выписка из ЕГРЮЛ"
+        rule_grams = m._ngrams(m.rules_text(rules))
+        self.assertGreater(m.grounded_share(claim, rule_grams), 0.9, "пункт заземляет своё утверждение")
+        self.assertLess(m.grounded_share(claim, m._ngrams("Насосы гидравлические, порог 300 баллов")), 0.2,
+                        "контроль: контекст позиций его не заземляет — без правки это и была ложная тревога")
+
     def test_table_rows_are_not_claims(self):
         """Перечень баллов печатает КОД дословно — ссылка [N] ему не нужна, искажать нечего."""
         text = "Вот требования [1].\n| Операция | Баллы |\n|---|---|\n| сварка кузова | 6 |"

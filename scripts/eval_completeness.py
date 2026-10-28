@@ -291,7 +291,9 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all") -> list[dict]:
             # честный процедурный ответ с шестью источниками объявлялся ссылающимся на
             # несуществующую позицию. Не срабатывало три месяца ровно потому, что процедурных
             # кейсов в наборе не было ни одного (`EV21` #119): найдено первым же их прогоном.
-            "cites_ok": (not cites) or max(cites) <= max(len(ans.hits), len(ans.rule_sources), 1),
+            # `UI-1` #165: в товарном ответе на смешанный вопрос пункты Приказа №52 нумеруются ПОСЛЕ
+            # позиций — источников всего hits + rule_sources (у процедурного hits пуст: формула та же).
+            "cites_ok": (not cites) or max(cites) <= max(len(ans.hits) + len(ans.rule_sources), 1),
             "node_leak": node_leak,
             "schedule_mix": schedule_mix,
             "unverified": ans.unverified_numbers,
