@@ -42,6 +42,7 @@ from app.core.console import enable_utf8  # noqa: E402  (только после
 
 enable_utf8()  # #107: скрипт печатает значки вне cp1251 — падал бы в момент печати
 from app.rag import fragments, inheritance  # noqa: E402
+from app.rag.thresholds import BRANCH_MARK, OTHER_MARK  # noqa: E402  (ярлыки второй строки порога, K2-2)
 from app.rag.pipeline import (  # noqa: E402
     _target_hit as target_hit,
     answer,
@@ -160,8 +161,15 @@ def context_facts(hit, ctx: str) -> dict:
     # прим. 17 ОДИНАКОВЫЙ набор чисел {2300, 2900, 3400, 3500} и различаются они только
     # привязкой к датам — значит ни одна метрика, считающая ЧИСЛА, поймать подмену не может
     # в принципе. Правило 2г оставалось без единого гейта, способного упасть.
-    exc_m = re.search(r"^\s*⚠ ИНОЙ порог\s*—\s*(.+)$", block, re.M)
-    exception = (exc_m.group(1).strip() if exc_m else "")
+    # `K2-2` #128: у позиции, чья вводная называет ОДНО имя, вторая строка — «⚠ ДРУГОЙ ГРАФИК ЭТОЙ ЖЕ
+    # ПОЗИЦИИ (…)». Это НЕ оговорка: правило 2г велит вывести в «Порог» ОБА графика, поэтому числа
+    # второго графика входят в ожидаемый порог (пропуск — неполнота), а сверка «график оговорки выдан
+    # за общий» к нему не применяется — иначе верный ответ считался подменой (ревью PR #260, MED).
+    # Тексты ярлыков — из `thresholds`, копия разошлась бы молча (ревью PR #260).
+    exc_m = re.search(rf"^\s*({re.escape(OTHER_MARK)}|{re.escape(BRANCH_MARK)})\s*—\s*(.+)$", block, re.M)
+    second = (exc_m.group(2).strip() if exc_m else "")
+    branch = bool(exc_m) and exc_m.group(1) == BRANCH_MARK
+    exception = "" if branch else second
     # Баллы операций именно ЦЕЛЕВОГО блока: числа перед «балл.»
     points = [n for n in re.findall(r"—\s*(\d+(?:[.,]\d+)?)\s*балл", block)]
     return {
@@ -169,7 +177,8 @@ def context_facts(hit, ctx: str) -> dict:
         "exception": exception,
         "general_steps": _steps(threshold),
         "exception_steps": _steps(exception),
-        "threshold_numbers": claim_numbers(threshold),
+        "threshold_numbers": claim_numbers(threshold) + (claim_numbers(second) if branch else []),
+        "branch": second if branch else "",
         "points": sorted(set(points), key=lambda x: -float(x.replace(",", "."))),
         "has_incomplete_marker": ("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ" in block
                                   or "ПОРОГИ ПОКАЗАНЫ НЕ ПОЛНОСТЬЮ" in block),
