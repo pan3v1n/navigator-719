@@ -330,8 +330,31 @@ def _set_code_tiers(hits: list[Hit], okpd2: str) -> None:
         h.code_tier = 3 if t is None else t
 
 
+# Qdrant складывает в RRF 1/(k + ранг), ранг с нуля, k = 2: сверено 28.10.2026 (Qdrant 1.18) —
+# пересчёт по двум спискам совпал с `FusionQuery(RRF)` до 7e-8, точности float32.
+_RRF_K = 2
+
+
+def _rrf_tied(lists: list[list[tuple]]) -> dict:
+    """RRF по спискам `(id, score)`: у РАВНЫХ score — равный ранг (лучший из занятых ими мест).
+
+    R31-2 #245: `FusionQuery` раздаёт ничьим списка разные ранги в произвольном порядке, и сумма
+    RRF у них плавала между прогонами — «Краски полиграфические 20.30.24»: sparse-score XXI/27 и
+    XXI/30 равны до бита (16.110046), а первой за 12 прогонов была то одна (7), то другая (5).
+    Здесь ничья в одном списке ранги не различает — порядок решают другой список, а при равной
+    сумме — якорь (`_order_key`). Без ничьих сумма та же, что у Qdrant."""
+    out: dict = {}
+    for pts in lists:
+        rank, prev = 0, None
+        for pos, (pid, score) in enumerate(sorted(pts, key=lambda p: -p[1])):
+            if score != prev:
+                rank, prev = pos, score
+            out[pid] = out.get(pid, 0.0) + 1.0 / (_RRF_K + rank)
+    return out
+
+
 def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
-    """R31 #179: score всех кандидатов окна ОДНИМ запросом — гибрид с фильтром по их id.
+    """R31 #179: score всех кандидатов окна ОДНИМ обращением — dense и sparse с фильтром по их id.
 
     ⚠ ЗАЧЕМ. Окно с кодом собирается из нескольких запросов: пул (top-40 без фильтра), добор по
     ветке кода (лимит 12), с `D14` — доборы точных форм и новых предков. RRF-score ранговый и
@@ -344,21 +367,30 @@ def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
     сравнимы. Набор кандидатов ДО усечения тот же, меняется порядок — а с ним и окно `hits[:limit]`
     (замер: у own 455 из 1569, climb 360 из 1281, control 118 из 600). Сбой запроса — прежние score:
     пересчёт уточняет порядок, без него остаётся окно до R31. Payload не запрашивается — нужны только
-    id и score."""
+    id и score.
+    ⚠ R31-2 #245: слияние RRF — на нашей стороне (`_rrf_tied`), а не `FusionQuery`: у Qdrant ничьи
+    внутри списка получали ранги в произвольном порядке, и окно одного вопроса плавало между
+    прогонами. Два списка уходят одним пакетом (`query_batch_points`) — обращение по-прежнему одно."""
     from qdrant_client import models
 
     ids = [h.point_id for h in hits]
     if not ids or any(i is None for i in ids):
         return
+    flt = models.Filter(must=[models.HasIdCondition(has_id=ids)])
+    idx, val = query_vector(query)
+    sp = _search_params()
+    reqs = [models.QueryRequest(query=qvec if qvec is not None else embed_query(query), using=DENSE,
+                                filter=flt, limit=len(ids), params=sp, with_payload=False),
+            models.QueryRequest(query=models.SparseVector(indices=idx, values=val), using=SPARSE,
+                                filter=flt, limit=len(ids), params=sp, with_payload=False)]
     try:
-        pts = _hybrid(query, len(ids), qvec=qvec, with_payload=False,
-                      qfilter=models.Filter(must=[models.HasIdCondition(has_id=ids)]))
+        res = _client().query_batch_points(collection_name=settings.QDRANT_COLLECTION, requests=reqs)
     except Exception as exc:  # noqa: BLE001 — пересчёт уточняет порядок, сбой не роняет ответ
         logger.warning("пересчёт score окна ({} кандидатов): {}", len(ids), exc)
         return
-    got = {p.id: p.score for p in pts}
+    got = _rrf_tied([[(p.id, p.score) for p in r.points] for r in res])
     if any(i not in got for i in ids):
-        # Кандидат не вернулся (не должно быть: dense-префетч отдаёт все точки фильтра) — смешивать
+        # Кандидат не вернулся (не должно быть: dense-список отдаёт все точки фильтра) — смешивать
         # новые score со старыми нельзя, это та же несравнимость. Остаёмся на прежних.
         logger.warning("пересчёт score окна: вернулось {} из {}", len(got), len(ids))
         return
