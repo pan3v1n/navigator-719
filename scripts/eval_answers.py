@@ -58,11 +58,10 @@ from eval_st1_cases import check_st1_reference, st1_row  # noqa: E402  (орак
 
 GOLDEN = ROOT / "scripts" / "eval_golden.json"
 
-# Отказ «вне сферы / не найдено» (правила 1, 1б промпта):
-DECLINE_RE = re.compile(
-    r"вне сфер|не наш|не найден|не относ|уточнит|не подпад|не попад|не предусмотр|не явля",
-    re.IGNORECASE,
-)
+# Отказ «вне сферы / не найдено» (правила 1б, 1г промпта) — по ФОРМЕ ответа (`EV11` #92, `eval_refusal`):
+# не опирается ни на одну позицию. Прежний список слов («уточнит», «не явля», «не предусмотр» …)
+# срабатывал почти на любом разборе позиции и пропускал отказы без этих слов (кейс #28, 18.08).
+from eval_refusal import declines  # noqa: E402
 # Иероглифы (утечка DeepSeek): CJK + хирагана/катакана.
 CJK_RE = re.compile(r"[぀-ヿ一-鿿]")
 # Инлайн-цитата на позицию-источник: [1], [2]… (P1-промпт).
@@ -186,7 +185,7 @@ def evaluate(limit: int, cases_limit: int, kind: str = "all"):
                            if c["in_scope"] and c["expected_section"] else None),
             "coherent": (topically_coherent(text, c["expected_section"], ans.hits)
                          if c["in_scope"] and c["expected_section"] else None),
-            "declined": bool(DECLINE_RE.search(text)),
+            "declined": declines(text),
             "cited": bool(CITE_RE.search(text)),  # есть ли инлайн-ссылка [N] на позицию
             "cjk": bool(CJK_RE.search(text)),
             "low_relevance": ans.low_relevance,
