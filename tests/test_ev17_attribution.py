@@ -22,6 +22,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def _ea():
+    # `eval_answers` импортирует соседа `eval_documents`: без `scripts/` в пути модуль в одиночку не
+    # грузился (в полной батарее путь добавлял другой модуль — сторож работал только «в компании»).
+    import sys
+    if str(ROOT / "scripts") not in sys.path:
+        sys.path.insert(0, str(ROOT / "scripts"))
     spec = importlib.util.spec_from_file_location("ea", ROOT / "scripts" / "eval_answers.py")
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
@@ -103,6 +108,56 @@ class TestBothReachTheReport(unittest.TestCase):
     def test_coherence_is_computed_per_case(self):
         src = (ROOT / "scripts" / "eval_answers.py").read_text(encoding="utf-8")
         self.assertIn('"coherent": (topically_coherent(', src)
+
+
+class TestTitleWithFootnoteOrAmendmentEV20(unittest.TestCase):
+    """`EV20` #117: у трёх разделов к имени в данных приклеены маркер сноски или редакционная пометка.
+
+    Ответ, назвавший раздел по имени («Продукция радиоэлектроники»), — атрибуция; хвост «<5>» или
+    «(в ред. … N 2146)» повторять не обязан. До правки кейс 23 (IX) проваливался 3 из 3 именно так."""
+
+    CASES = [
+        ("IX", "Продукция радиоэлектроники <5>", "**Позиция:** «Продукция радиоэлектроники», интегральная схема"),
+        ("XVIII", "Продукция судостроения <9>, <9(1)>", "Позиция раздела «Продукция судостроения», шлюпки"),
+        ("XXIX", "Оборудование для разведки нефти и газа\xa0(в ред.\xa0Постановления Правительства РФ "
+                 "от 25.12.2025 N 2146)", "«Оборудование для разведки нефти и газа», виброисточник"),
+    ]
+
+    def test_clean_name_counts(self):
+        m = _ea()
+        for roman, title, text in self.CASES:
+            self.assertTrue(m.attributed(text, roman, [_Hit(roman, title)]), roman)
+
+    def test_copied_tail_still_counts(self):
+        """Ответ, повторивший хвост (как модель делала до правки контекста), — тоже атрибуция."""
+        m = _ea()
+        for roman, title, _text in self.CASES:
+            self.assertTrue(m.attributed(f"Раздел «{title.replace(chr(160), ' ')}».", roman,
+                                         [_Hit(roman, title)]), roman)
+
+    def test_part_of_the_name_still_does_not_count(self):
+        """Отрицательный контроль: нормализация не ослабила строгость — часть имени не атрибуция."""
+        m = _ea()
+        for roman, title, _text in self.CASES:
+            self.assertFalse(m.attributed("Продукция и оборудование для нефти [1].", roman,
+                                          [_Hit(roman, title)]), roman)
+
+    def test_every_section_name_shown_to_the_model_is_accepted(self):
+        """Контракт: то имя, которое контекст показывает модели (`retriever.section_name`), оракул
+        принимает для КАЖДОГО из разделов корпуса. Иначе ответ «как велели» считался бы провалом."""
+        import json
+
+        from app.rag.retriever import _clean_section_title, section_name
+        m = _ea()
+        titles = {}
+        for f in sorted((ROOT / "knowledge_base" / "pp719" / "structured").glob("*.json")):
+            for r in json.loads(f.read_text(encoding="utf-8")):
+                if r.get("section_title"):
+                    titles[r["section_roman"]] = _clean_section_title(r["section_title"])
+        self.assertGreaterEqual(len(titles), 29)
+        for roman, title in titles.items():
+            text = f"**Позиция:** «{section_name(title)}», изделие (ОКПД2 01.01) [1]."
+            self.assertTrue(m.attributed(text, roman, [_Hit(roman, title)]), f"{roman}: {title!r}")
 
 
 if __name__ == "__main__":

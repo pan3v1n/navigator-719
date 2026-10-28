@@ -96,10 +96,28 @@ def attributed(text: str, expected_roman: str, hits) -> bool:
     """
     if re.search(rf"\bраздел[а-я]*\s+{expected_roman}\b", text, re.IGNORECASE):
         return True
-    title = expected_section_title(hits, expected_roman)
+    title = _bare_title(expected_section_title(hits, expected_roman) or "")
     # Полное название раздела — тоже атрибуция: «Музыкальные инструменты и звуковое
     # оборудование» названо целиком, спутать его не с чем.
-    return bool(title) and title.strip().lower() in text.lower()
+    return bool(title) and title in _spaces(text).lower()
+
+
+def _spaces(s: str) -> str:
+    return re.sub(r"\s+", " ", s.replace("\xa0", " "))
+
+
+def _bare_title(title: str) -> str:
+    """Название раздела, как его НАЗЫВАЮТ, а не как оно лежит в данных (`EV20` #117).
+
+    ⚠ В данных у трёх разделов из 29 к имени приклеены маркер сноски («Продукция радиоэлектроники
+    <5>», «Продукция судостроения <9>, <9(1)>») или редакционная пометка («… (в ред. Постановления …
+    N 2146)», ещё и через неразрывные пробелы). Сверка «полное название дословно» засчитывала атрибуцию
+    только ответу, повторившему этот хвост: кейс 23 (IX) проваливался 3 из 3 при «Продукция
+    радиоэлектроники» в ответе — дефект ОРАКУЛА, а не ответа. Нормализация своя, рантайм не зовётся
+    (урок `O3` #104: оракул, повторяющий код, слеп к его ошибке)."""
+    t = re.sub(r"\((?:в\s+ред\.|введ[её]н|утратил)[^()]*\)", " ", _spaces(title), flags=re.IGNORECASE)
+    t = re.sub(r"<[\d.()]{1,8}>", " ", t)
+    return _spaces(t).strip(" ,;").lower()
 
 
 def topically_coherent(text: str, expected_roman: str, hits) -> bool:
@@ -112,10 +130,12 @@ def topically_coherent(text: str, expected_roman: str, hits) -> bool:
     ⚠ Порог не назначается намеренно: пока не замерено, КАК ЧАСТО ответ вообще называет раздел,
     неизвестно, чего от него требовать. Это и есть открытый вопрос `EV17`.
     """
-    title = expected_section_title(hits, expected_roman)
+    # ⚠ По имени БЕЗ хвоста (ревью `EV20`): у XXIX в сыром названии «(в ред. Постановления Правительства
+    # …)» — и лексика засчитывалась любому ответу со словами «Постановления Правительства РФ №719».
+    title = _bare_title(expected_section_title(hits, expected_roman) or "")
     if not title:
         return False
-    return any(w.lower() in text.lower() for w in re.findall(r"[А-Яа-яЁёA-Za-z]{6,}", title))
+    return any(w in text.lower() for w in re.findall(r"[а-яёa-z]{6,}", title))
 
 
 def evaluate(limit: int, cases_limit: int, kind: str = "all"):

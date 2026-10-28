@@ -2535,5 +2535,62 @@ class TestRulesQuota(unittest.TestCase):
         self.assertTrue(any("корпус Правил" in s for s in seen))
 
 
+class TestSectionNameEV20(unittest.TestCase):
+    """`EV20` #117: имя раздела для показа — без маркеров сносок и редакционной пометки; маркеры
+    отдаются отдельно, чтобы указатель на сноску не пропал."""
+
+    def test_names_and_footnotes(self):
+        from app.rag.retriever import section_footnotes, section_name
+        cases = {
+            "Продукция радиоэлектроники <5>": ("Продукция радиоэлектроники", ["<5>"]),
+            "Продукция судостроения <9>, <9(1)>": ("Продукция судостроения", ["<9>", "<9(1)>"]),
+            "Оборудование для разведки нефти и газа\xa0(в ред.\xa0Постановления Правительства РФ от "
+            "25.12.2025 N 2146)": ("Оборудование для разведки нефти и газа", []),
+            "Медицинские изделия": ("Медицинские изделия", []),
+            "": ("", []),
+        }
+        for raw, (name, marks) in cases.items():
+            self.assertEqual(section_name(raw), name, raw)
+            self.assertEqual(section_footnotes(raw), marks, raw)
+        self.assertEqual(section_name(None), "")
+
+    def test_context_shows_clean_name_and_keeps_the_footnote_pointer(self):
+        from app.rag.pipeline import format_context
+        from app.rag.retriever import Hit
+        h = Hit(score=1.0, section_roman="IX", section_title="Продукция радиоэлектроники <5>",
+                product_name="Интегральная схема первого уровня", okpd2_codes=["26.11.30"],
+                min_threshold=None, requirement_blocks=[], source_anchor="Приложение к ПП №719, Раздел IX, позиция 1",
+                okpd2_match=True)
+        ctx = format_context([h], code="26.11.30")
+        self.assertIn("(раздел «Продукция радиоэлектроники»; сноски раздела: <5>)", ctx)
+        self.assertNotIn("радиоэлектроники <5>»", ctx)
+
+    def test_no_section_name_keeps_a_tail(self):
+        """Инвариант по ВСЕМ разделам корпуса (ревью `EV20`): показанное имя не несёт ни маркера сноски,
+        ни пометки «в ред.», ни NBSP — независимо от того, какой именно шаблон их снимает."""
+        import json
+        from pathlib import Path
+
+        from app.rag.retriever import _clean_section_title, section_name
+        root = Path(__file__).resolve().parents[1] / "knowledge_base" / "pp719" / "structured"
+        titles = {r["section_title"] for f in root.glob("*.json")
+                  for r in json.loads(f.read_text(encoding="utf-8")) if r.get("section_title")}
+        self.assertGreaterEqual(len(titles), 29)
+        for t in titles:
+            name = section_name(_clean_section_title(t))
+            self.assertTrue(name, t)
+            for bad in ("<", ">", "ред.", " ", "Постановлени"):
+                self.assertNotIn(bad, name, f"{t!r} -> {name!r}")
+
+    def test_source_panel_shows_clean_name(self):
+        from app.api.chat import _sources_from_hits
+        from app.rag.retriever import Hit
+        h = Hit(score=1.0, section_roman="XXIX",
+                section_title="Оборудование для разведки нефти и газа\xa0(в ред.\xa0Постановления N 2146)",
+                product_name="Виброисточник", okpd2_codes=[], min_threshold=None, requirement_blocks=[],
+                source_anchor=None)
+        self.assertEqual(_sources_from_hits([h])[0].section, "Оборудование для разведки нефти и газа")
+
+
 if __name__ == "__main__":
     unittest.main()

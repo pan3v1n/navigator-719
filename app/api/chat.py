@@ -46,6 +46,7 @@ from app.db.engine import get_session
 from app.db.models import User
 from app.rag import corpora
 from app.rag.pipeline import SOURCE_TEXT_CAP, answer, answer_stream, source_text
+from app.rag.retriever import section_name
 from app.tools.navigator import extract_okpd2
 
 router = APIRouter()
@@ -166,7 +167,7 @@ class ChatResponse(BaseModel):
 def _sources_from_hits(hits) -> list[SourceItem]:
     return [
         SourceItem(
-            section=h.section_title or h.section_roman,
+            section=section_name(h.section_title) or h.section_roman,  # EV20: без «<5>» и «(в ред. …)»
             product_name=h.product_name,
             okpd2=h.okpd2_codes or [],
             source_anchor=h.source_anchor,
