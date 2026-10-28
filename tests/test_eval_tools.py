@@ -346,6 +346,68 @@ class TestBorderlineSet(unittest.TestCase):
         self.assertIn("borderline", eval_guard.__doc__)
         self.assertNotIn("Два режима", eval_guard.__doc__)
 
+    def test_paid_band_mode_runs_only_explicitly(self):
+        """`R40`: `--mode band` зовёт DeepSeek (полный pipeline.answer ×runs ×2 порога) — он не имеет
+        права запуститься в составе `both` или `guard`, которые гоняют как бесплатный замер.
+        ⚠ Поведением, а не текстом функции (урок раунда 10: комментарий с именем ронял сторожа)."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import eval_guard
+        calls = []
+        stubs = dict(
+            run_negative=lambda *a, **k: ([], [{"dt1": 0.8}]),
+            run_borderline=lambda *a, **k: ([], [{"dt1": 0.9}]),
+            run_threshold=lambda *a, **k: [],
+            run_confusable=lambda *a, **k: [],
+            run_band=lambda *a, **k: calls.append(a) or [],
+        )
+        client = SimpleNamespace(get_collections=lambda: None)
+        for mode, want in (("both", 0), ("guard", 0), ("band", 1)):
+            calls.clear()
+            with mock.patch.multiple(eval_guard, **stubs), \
+                    mock.patch("app.rag.retriever._client", return_value=client), \
+                    mock.patch("sys.argv", ["eval_guard.py", "--mode", mode, "--no-progress"]), \
+                    mock.patch("builtins.print"):
+                eval_guard.main()
+            self.assertEqual(len(calls), want, f"--mode {mode}: run_band вызван {len(calls)} раз")
+
+    def test_band_pairs_thresholds_and_restores_them(self):
+        """Порог подменяется у модуля продукта, порядок меняется от прогона к прогону, код ОКПД2 — как у
+        чата, и порог возвращается даже при сбое API посреди замера."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import eval_guard
+
+        from app.rag import pipeline
+        saved = pipeline.RELEVANCE_SOFT
+        seen = []
+
+        def fake_answer(q, okpd2=None, **_):
+            seen.append((pipeline.RELEVANCE_SOFT, okpd2))
+            return SimpleNamespace(low_relevance=pipeline.RELEVANCE_SOFT > 0.825, text="", unverified_numbers=[])
+
+        cases = [{"id": 1, "query": "прицепы 29.20.23"}]
+        with mock.patch.object(eval_guard, "_load", side_effect=[cases, []]), \
+                mock.patch.object(eval_guard, "dense_top1", return_value=0.825), \
+                mock.patch.object(pipeline, "answer", fake_answer):
+            out = "\n".join(eval_guard.run_band(0.82, 0.83, 2, "", False))
+        self.assertEqual([t for t, _ in seen], [0.83, 0.82, 0.82, 0.83])
+        self.assertTrue(all(c == "29.20.23" for _, c in seen))
+        self.assertIn("порог 0.83: флаг 2/2", out)
+        self.assertIn("порог 0.82: флаг 0/2", out)
+        self.assertEqual(pipeline.RELEVANCE_SOFT, saved)
+
+        def boom(*a, **k):
+            raise RuntimeError("API упал")
+        with mock.patch.object(eval_guard, "_load", side_effect=[cases, []]), \
+                mock.patch.object(eval_guard, "dense_top1", return_value=0.825), \
+                mock.patch.object(pipeline, "answer", boom):
+            with self.assertRaises(RuntimeError):
+                eval_guard.run_band(0.82, 0.83, 1, "", False)
+        self.assertEqual(pipeline.RELEVANCE_SOFT, saved, "порог не вернулся после сбоя")
+
     def test_threshold_curve_reports_plateau_not_argmin(self):
         """Равные суммы на сетке 0.005 — норма, и «первый минимум» всегда самый permissive конец:
         прочитав его как рекомендацию, порог понизят и добавят false-accept за нулевой выигрыш."""
