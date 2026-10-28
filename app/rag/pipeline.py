@@ -935,7 +935,7 @@ RULES_TEXT_CAP = 1400  # символов на пункт Правил в кон
 RULES_TEXT_CAP_DOC_LIST = 4000
 
 
-def format_rules_context(rules: list[dict], *, show_legal_force: bool = False) -> str:
+def format_rules_context(rules: list[dict], *, show_legal_force: bool = False, start: int = 1) -> str:
     """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …).
 
     `show_legal_force` (`K13` #46) — печатать ли в шапке блока юридическую силу документа.
@@ -956,7 +956,9 @@ def format_rules_context(rules: list[dict], *, show_legal_force: bool = False) -
     from app.core.manifest import legal_force_label
 
     blocks: list[str] = []
-    for i, r in enumerate(rules, 1):
+    # `start` (`UI-1` #165): в товарном ответе пункты Приказа №52 идут ПОСЛЕ позиций приложения и
+    # нумеруются продолжением — [N] однозначно ведёт к своему источнику (см. `_plan_answer`).
+    for i, r in enumerate(rules, start):
         # Атрибуция — из source_anchor записи (Правила / тело ПП №719 / Приказ ТПП №52); фолбэк на
         # «Правила ведения реестра» для записей без анкера (обратная совместимость/тесты).
         anchor = (r.get("source_anchor") or "").strip()
@@ -1393,6 +1395,9 @@ class _Plan:
     codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
     corpus: str = corpora.USED_APPENDIX  # L2: см. Answer.corpus
+    # UI-1 #165: пункты Приказа №52 из блока документов — в источники ответа ПОСЛЕ позиций, в том же
+    # порядке и с той же нумерацией [len(hits)+1 …], что в контексте.
+    doc_points: list[dict] = field(default_factory=list)
 
 
 def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
@@ -1775,7 +1780,11 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         # именно его отсутствие оставляло модель наедине с памятью — так и родилось «заключение
         # ТПП». Дефект возникал ровно тогда, когда добор пунктов не удавался.
         if doc_points:
-            docs_ctx += "\n\n" + format_rules_context(doc_points)
+            # ⚠ `UI-1` #165: нумерация ПРОДОЛЖАЕТ позиции. Прежде блок начинался с [1], и ссылка модели
+            # на пункт Приказа как [1] открывала в панели «Источник» позицию приложения №1. Теперь у
+            # пункта свой номер, а в источниках ответа он стоит на том же месте (`Answer.rule_sources`
+            # идут после `hits`, `chat._answer_sources`) — кнопка [N] открывает именно его.
+            docs_ctx += "\n\n" + format_rules_context(doc_points, start=len(hits) + 1)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
     # обязан знать — иначе перечень задвоится: один раз от модели, второй от нас.
     # ⚠ Таблицу печатаем ТОЛЬКО когда целевая позиция одна. При точном совпадении кода целевых
@@ -1819,7 +1828,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)),
-                 corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX)
+                 corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX,
+                 doc_points=doc_points)
 
 
 # Пробный режим без входа (решение владельца 09.10.2026): ответ гостю дешевле — та же постановка
@@ -1890,6 +1900,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         codes=planned.codes,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
+        rule_sources=planned.doc_points,  # UI-1: идут ПОСЛЕ hits — та же нумерация, что в контексте
     )
 
 
@@ -1964,6 +1975,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         codes=planned.codes,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
+        rule_sources=planned.doc_points,  # UI-1: идут ПОСЛЕ hits — та же нумерация, что в контексте
     )
 
 

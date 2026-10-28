@@ -262,6 +262,16 @@ def _rule_url(doc_type: str, text: str) -> str:
     return base + (anchor + frag if anchor else "#" + frag)
 
 
+def _answer_sources(ans) -> list[SourceItem]:
+    """Источники ответа в порядке ссылок [N]: позиции приложения, затем пункты норм.
+
+    ⚠ `UI-1` #165. Товарный ответ на смешанный вопрос получает в контекст пункты Приказа №52, и они
+    нумеруются ПРОДОЛЖЕНИЕМ позиций ([len(hits)+1 …], `pipeline._plan_answer`). Прежде источники были
+    «позиции ИЛИ пункты» — пунктов в товарном ответе не было вовсе, а блок начинался с [1]: ссылка на
+    пункт Приказа открывала в панели позицию №1. У процедурного ответа `hits` пуст — порядок прежний."""
+    return _sources_from_hits(ans.hits) + _sources_from_rules(ans.rule_sources)
+
+
 def _sources_from_rules(rules) -> list[SourceItem]:
     """Источники процедурного ответа в порядке [n]: метка пункта (source_anchor) + прямая ссылка на
     первоисточник. ОКПД2 у норм нет — клик ведёт по `url`, а не по коду (см. фронт addSources)."""
@@ -346,7 +356,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
         logger.exception(f"chat: движок упал на запросе от user_id={user.id}")
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
 
-    sources = _sources_from_hits(ans.hits) or _sources_from_rules(ans.rule_sources)
+    sources = _answer_sources(ans)
     message_id: int | None = None
     try:
         with get_session() as db:
@@ -411,7 +421,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                     continue
                 # kind == "done": payload — Answer. Логируем диалог и отдаём метаданные.
                 ans = payload
-                sources = _sources_from_hits(ans.hits) or _sources_from_rules(ans.rule_sources)
+                sources = _answer_sources(ans)
                 message_id: int | None = None
                 try:
                     with get_session() as db:
