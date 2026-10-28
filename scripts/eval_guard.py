@@ -15,7 +15,8 @@ false-accept — кандидаты на ужесточение» выгляди
 секции, а не две, как в прежней версии этого докстринга.
 
 Режимы: both (всё, по умолчанию) · guard (negative + borderline + threshold) · и каждая секция
-поимённо. Опц. --check-refusal: гоняет полный pipeline.answer и проверяет РЕАЛЬНЫЙ отказ
+поимённо. ⚠ band (`R40`) — ПЛАТНО и только явно: отказ модели парно при двух порогах на полосе
+`--band LO HI`, где флаг от выбора порога зависит (~6 ответов DeepSeek на вопрос полосы при ×3). Опц. --check-refusal: гоняет полный pipeline.answer и проверяет РЕАЛЬНЫЙ отказ
 (+DeepSeek) — на негативах он должен быть, на пограничных in-scope его быть НЕ должно.
 
 Детерминированное ядро без DeepSeek (нужен Qdrant + e5). Прогон после F1 (контеншн по e5).
@@ -44,6 +45,9 @@ from app.rag.retriever import dense_top1, search  # noqa: E402
 NEG = ROOT / "scripts" / "eval_golden_negative.json"
 CONF = ROOT / "scripts" / "eval_confusable.json"
 BORDER = ROOT / "scripts" / "eval_golden_borderline.json"  # EV2: пограничные IN-SCOPE
+# Плато минимума суммы ошибок наборов, при котором владелец выбрал порог ВНЕ него (`R40` #239, 28.10.2026,
+# корпус pp719_ed1031). Другое плато — корпус или эмбеддер сменились, и «вне минимума» снова тревога.
+R40_SET_PLATEAU = (0.830, 0.840)
 
 
 def _load(p: Path) -> list[dict]:
@@ -217,9 +221,12 @@ def run_threshold(neg: list[dict], pos: list[dict]) -> list[str]:
           f"  Минимальная суммарная ошибка: {lo} из {len(neg) + len(pos)}{same}.",
           f"  Текущий порог {RELEVANCE_SOFT}: "
           + ("внутри минимума — двигать некуда." if RELEVANCE_SOFT in plateau
-             else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f} — "
-                  "намеренно, если порог выбран по трафику и парному замеру отказа (`R40` #239, "
-                  "см. `pipeline.RELEVANCE_SOFT`): наборы отобраны по низкому косинусу и трафик не представляют."),
+             else f"ВНЕ минимума, лучшие значения {plateau[0]:.3f}…{plateau[-1]:.3f}"
+                  + (" — намеренно (`R40` #239, см. `pipeline.RELEVANCE_SOFT`): порог выбран по трафику и "
+                     "парному замеру отказа, наборы отобраны по низкому косинусу и трафик не представляют."
+                     if (round(plateau[0], 3), round(plateau[-1], 3)) == R40_SET_PLATEAU else
+                     f" — ⚠ И ПЛАТО СДВИНУЛОСЬ против замера `R40` ({R40_SET_PLATEAU[0]:.3f}…"
+                     f"{R40_SET_PLATEAU[1]:.3f}): корпус или эмбеддер изменились, порог перекалибровать.")),
           "  ⚠ Сумма ошибок — грубая мера: false-accept и ложный флаг НЕ равноценны. Флаг только",
           "     подсказывает правилу 1б, а решение «вне сферы» принимает модель — на пограничных",
           "     in-scope замер дал 10/20 флагов против 1/20 реальных отказов — то есть чужое",
@@ -284,13 +291,18 @@ def run_band(lo: float, hi: float, runs: int, dump: str, progress: bool) -> list
 
     Вне полосы флаг при обоих порогах одинаков — промпт тот же, и разница ответов там только шум
     модели: платить за неё незачем. Зато внутри полосы — парно: каждый вопрос при обоих порогах,
-    `runs` раз (правило трёх прогонов), пороги чередуются внутри вопроса, чтобы дрейф API не лёг на
-    один из них. Порог подменяется у модуля, который его читает (`pipeline.RELEVANCE_SOFT`), — флаг
-    решает код продукта, а не повтор его модели в скрипте (урок 30.08).
+    `runs` раз (правило трёх прогонов), порядок порогов меняется от прогона к прогону, чтобы дрейф API
+    не лёг на один из них. Порог подменяется у модуля, который его читает (`pipeline.RELEVANCE_SOFT`), —
+    флаг решает код продукта, а не повтор его модели в скрипте (урок 30.08). Код ОКПД2 из вопроса — как
+    у чата (`extract_okpd2`): с кодом флаг считается иначе (второй сигнал не спрашивается).
+
+    Тексты оплаченных ответов пишутся в `--dump` после КАЖДОГО вопроса: сбой API на 60-м ответе из 66
+    не должен терять 59 оплаченных (ревью `R40`).
 
     ⚠ `_refused` — грубый детектор по словам (`EV11` #92): тексты ответов кладутся в `--dump`, и
     вывод читается глазами, а не только по счётчику."""
     from app.rag import pipeline
+    from app.tools.navigator import extract_okpd2
 
     sets = [("вне 719", _load(NEG), True), ("профильный", _load(BORDER), False)]
     rows = []
@@ -310,12 +322,14 @@ def run_band(lo: float, hi: float, runs: int, dump: str, progress: bool) -> list
     saved = pipeline.RELEVANCE_SOFT
     try:
         for r in it:
-            for _ in range(runs):
-                for t in (hi, lo):
+            for k in range(runs):
+                for t in ((hi, lo) if k % 2 == 0 else (lo, hi)):
                     pipeline.RELEVANCE_SOFT = t
-                    ans = pipeline.answer(r["query"])
+                    ans = pipeline.answer(r["query"], okpd2=extract_okpd2(r["query"]))
                     r["runs"][str(t)].append({"low_rel": ans.low_relevance, "refused": _refused(ans.text),
                                               "unverified": ans.unverified_numbers, "text": ans.text})
+            if dump:
+                Path(dump).write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
     finally:
         pipeline.RELEVANCE_SOFT = saved
 
@@ -340,7 +354,6 @@ def run_band(lo: float, hi: float, runs: int, dump: str, progress: bool) -> list
                  f"{sum(x['low_rel'] for x in lw)}/{sum(x['refused'] for x in lw)}")
     L.append("")
     if dump:
-        Path(dump).write_text(json.dumps(rows, ensure_ascii=False, indent=1), encoding="utf-8")
         L.append(f"  тексты ответов: {dump}")
     return L
 
