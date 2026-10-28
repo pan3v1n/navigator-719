@@ -14,11 +14,9 @@
 `/etc/systemd/system/navigator-deploy-test44.{service,timer}` (`OnCalendar=2026-10-31 23:00:00 UTC`, `Persistent=false`),
 `run-deploy.sh` сверяет sha256 RTF Контура 508574, лог `~/deploy-v0.5.0-test44.log`, последняя строка `DEPLOY_EXIT=…`.
 Окно одно — товарная ветка ~28 мин (`REINDEX_FULL="pp719"`), процедурная работает всё время.
-⚠⚠ **28.10 таймер из сессии НЕ взведён:** установку юнитов на бою (`sudo`) заблокировал классификатор auto mode.
-Пакет на сервере, всё готово; взводит владелец одной командой (суммы → сухой прогон → юниты → enable, выкатку НЕ
-запускает): `ssh dan_tpp_srv@77.241.30.132 'bash ~/pkg-test44-20261028/setup-test44.sh'` — ждём `SUM_EXIT=0`, `DRY_EXIT=0`
-и строку таймера `Sat 2026-10-31 23:00:00 UTC … navigator-deploy-test44.timer`. **Перед 31.10 23:00 UTC проверить, что
-таймер стоит** (`systemctl list-timers | grep navigator`): без него N 1257 на бой не приедет.
+✅ **Таймер ВЗВЕДЁН 28.10 ~13:09 UTC** (`setup-test44.sh`): суммы пакета сошлись, сухой прогон — код 0 (маркеры 5 + 0),
+RTF Контура 508574 побайтно тот же, `list-timers` → `Sat 2026-10-31 23:00:00 UTC … navigator-deploy-test44.timer`, сервис
+inactive. Перед 31.10 23:00 UTC можно сверить `systemctl list-timers | grep navigator`.
 **Отменить до старта:** `sudo systemctl disable --now navigator-deploy-test44.timer`.
 **Откат после:** тег `v0.5.0-test43` копией его профиля с `REINDEX_FULL="pp719"` и `EXPECT` pp719 = 1583.
 
