@@ -271,7 +271,7 @@ class TestQualifiedListNotes(unittest.TestCase):
         from app.rag import thresholds as T
         got = set()
         for f in glob.glob(str(ROOT / "knowledge_base" / "pp719" / "structured" / "*.json")):
-            for r in json.loads(open(f, encoding="utf-8").read()):
+            for r in json.loads(Path(f).read_text(encoding="utf-8")):
                 thr = lookup_threshold(r["okpd2_codes"], r["product_name"], r["section_roman"]) or ""
                 if T.BRANCH_MARK in thr:
                     got.add(r["product_name"])

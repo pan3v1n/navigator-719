@@ -231,6 +231,38 @@ class TestAnswerHasNoInternalVocabulary(unittest.TestCase):
         self.assertFalse(KITCHEN_RE.search("руководство по эксплуатации и инструкция по монтажу"))
 
 
+class TestCompletenessSecondThresholdLine(unittest.TestCase):
+    """`K2-2` #128 (ревью PR #260, MED): вторая строка порога бывает двух родов, и оракул полноты обязан
+    их различать. «ИНОЙ порог» — оговорка: её график НЕ должен стоять в «Пороге». «ДРУГОЙ ГРАФИК ЭТОЙ
+    ЖЕ ПОЗИЦИИ» — правило 2г велит вывести в «Порог» ОБА графика: его числа обязательны."""
+
+    def _facts(self, name, codes, section):
+        from types import SimpleNamespace
+
+        from eval_completeness import context_facts
+
+        from app.rag.thresholds import lookup_threshold
+        thr = lookup_threshold(codes, name, section)
+        ctx = f"[1] {name} (раздел «…»)\n    Порог: {thr}\n    Операции:\n    - Сборка — 10 балл."
+        return context_facts(SimpleNamespace(product_name=name), ctx)
+
+    def test_branch_numbers_are_required_and_not_an_exception(self):
+        f = self._facts("Выключатель автоматический (воздушный) низковольтный в литом корпусе (до 1000 В) "
+                        "на токи до 6300 А", ["27.12"], "V")
+        for n in ("147", "187", "105", "167"):
+            self.assertIn(n, f["threshold_numbers"], f"число {n} обоих графиков обязано быть в пороге")
+        self.assertEqual(f["exception"], "")
+        self.assertEqual(f["exception_steps"], {}, "второй график той же позиции — не оговорка")
+        self.assertIn("6300 А", f["branch"])
+
+    def test_other_threshold_stays_an_exception(self):
+        """Контроль: у прим. 17 (траулеры) вторая строка — оговорка, как было."""
+        f = self._facts("Траулеры", ["30.11.31.110"], "XVIII")
+        self.assertTrue(f["exception"], "оговорка прим. 17 потеряна")
+        self.assertTrue(f["exception_steps"])
+        self.assertEqual(f["branch"], "")
+
+
 class TestPromptRuleLabels(unittest.TestCase):
     """Метки правил промпта обязаны быть уникальны.
 

@@ -27,14 +27,15 @@ import glob
 import json
 
 from app.core.console import enable_utf8
-from app.rag.thresholds import lookup_threshold
+from app.rag.thresholds import BRANCH_MARK, OTHER_MARK, lookup_threshold
 
 enable_utf8()  # #107: проверка печатает значки вне cp1251
 
-MARK = "⚠ ИНОЙ порог"
+MARK = OTHER_MARK
 # `K2-2` #128 (28.10.2026): второй ярлык — график ТОЙ ЖЕ позиции по характеристике изделия. Склейку
-# двух разных позиций он тоже может нести, поэтому корпусная половина ищет оба.
-MARKS = (MARK, "⚠ ДРУГОЙ ГРАФИК ЭТОЙ ЖЕ ПОЗИЦИИ")
+# двух разных позиций он тоже может нести, поэтому корпусная половина ищет оба. Тексты — из модуля:
+# копия разошлась бы молча, `multi` упал бы на единицу при поле 8 (ревью PR #260).
+MARKS = (OTHER_MARK, BRANCH_MARK)
 
 
 def lead(codes, name, section=None):
