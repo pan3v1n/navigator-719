@@ -126,7 +126,12 @@ def stratified(records: list[dict], per_section: int, seed: int) -> list[dict]:
     for sec in sorted(bysec):
         pool = bysec[sec][:]
         rnd.shuffle(pool)
-        out.extend(pool[:per_section])
+        # Псевдозапись «Методологические пороги раздела N» (`section_methodology`) — не позиция:
+        # перефразировать нечего, и её не считает ни один другой замер (`target_hits`,
+        # `eval_threshold_coverage`). На ред. N 1297 выборка `--per-section 3` брала две такие.
+        # Отсеивается ПОСЛЕ перемешивания: ход генератора прежний, и выборка остальных разделов
+        # не сдвигается — меняются ровно слоты, которые занимала псевдозапись (EV24 #244).
+        out.extend([r for r in pool if r.get("record_type") != "section_methodology"][:per_section])
     return out
 
 

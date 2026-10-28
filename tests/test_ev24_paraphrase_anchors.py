@@ -125,6 +125,56 @@ class TestLoaderStopsOnDrift(_TmpCache):
         self.assertIn("Кронблоки для буровых судов", str(cm.exception.code))
 
 
+def _stratified_before_ev24(records, per_section, seed):
+    """Выборка до EV24 — эталон «ход генератора не сдвинулся» (псевдозаписи в ней есть)."""
+    import random
+    from collections import defaultdict
+
+    rnd = random.Random(seed)
+    bysec = defaultdict(list)
+    for r in records:
+        if (r.get("product_name") or "").strip():
+            bysec[r.get("section_roman", "?")].append(r)
+    out = []
+    for sec in sorted(bysec):
+        pool = bysec[sec][:]
+        rnd.shuffle(pool)
+        out.extend(pool[:per_section])
+    return out
+
+
+class TestSampleHasNoSectionPseudoRecords(unittest.TestCase):
+    """Псевдозапись «Методологические пороги раздела N» — не позиция; выборка остальных та же."""
+
+    @classmethod
+    def setUpClass(cls):
+        from scripts.load_kb import load_records
+
+        with contextlib.redirect_stdout(io.StringIO()):
+            cls.records = load_records()
+
+    @staticmethod
+    def _pseudo(r) -> bool:
+        return r.get("record_type") == "section_methodology"
+
+    def test_no_pseudo_records_and_other_slots_unchanged(self):
+        for per in (3, 5):  # 3 — команда базы eval_paraphrase, 5 — eval_perturbation
+            with self.subTest(per_section=per):
+                old = _stratified_before_ev24(self.records, per, 42)
+                new = ep.stratified(self.records, per, 42)
+                self.assertFalse([r["source_anchor"] for r in new if self._pseudo(r)])
+                self.assertEqual(len(new), len(old))
+                kept = [r["source_anchor"] for r in old if not self._pseudo(r)]
+                self.assertTrue(set(kept) <= {r["source_anchor"] for r in new},
+                                "сдвинулась выборка разделов без псевдозаписи — ход генератора иной")
+
+    def test_corpus_still_puts_pseudo_records_in_old_sample(self):
+        # положительный контроль: без него тест выше мог бы пройти на корпусе, где псевдозапись
+        # просто не выпала, — и ничего не проверить
+        old = _stratified_before_ev24(self.records, 3, 42)
+        self.assertTrue(any(self._pseudo(r) for r in old))
+
+
 class TestGeneratedEntriesCarryName(_TmpCache):
     """Что пишет генерация, то принимает загрузчик: запись без имени уронила бы следующий прогон."""
 
