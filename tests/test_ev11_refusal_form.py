@@ -85,13 +85,14 @@ class TestPointsTableOnlyUnderAnAnalysisEV11_1(unittest.TestCase):
     TABLE = ("\n**Операции и баллы — дословно из приложения:**\n\n| Операция или условие | Баллы |\n"
              "|---|---|\n| рама | 10 балл. |")
 
-    def _run(self, model_text):
+    def _run(self, model_text, hits=None):
+        """(текст синхронного ответа, текст `done` потока, склейка дельт потока)."""
         from types import SimpleNamespace
         from unittest import mock
 
         from app.rag import pipeline
-        plan = pipeline._Plan(messages=[{"role": "user", "content": "в"}], grounding="", hits=[], cases=[],
-                              low_relevance=True, points_table=self.TABLE)
+        plan = pipeline._Plan(messages=[{"role": "user", "content": "в"}], grounding="", hits=hits or [],
+                              cases=[], low_relevance=True, points_table=self.TABLE)
         usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
 
         def create(**kw):
@@ -102,14 +103,15 @@ class TestPointsTableOnlyUnderAnAnalysisEV11_1(unittest.TestCase):
             msg = SimpleNamespace(content=model_text)
             return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=usage)
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
-        with mock.patch.object(pipeline, "_plan_answer", return_value=plan), \
-                mock.patch.object(pipeline, "_client", return_value=client):
+        with mock.patch.object(pipeline, "_plan_answer", return_value=plan),                 mock.patch.object(pipeline, "_client", return_value=client):
             sync = pipeline.answer("в").text
-            done = [p for k, p in pipeline.answer_stream("в") if k == "done"][0].text
-        return sync, done
+            events = list(pipeline.answer_stream("в"))
+        done = [p for k, p in events if k == "done"][0].text
+        deltas = "".join(p for k, p in events if k == "delta")
+        return sync, done, deltas
 
     def test_refusal_gets_no_table(self):
-        for text in self._run(REFUSAL_NO_OLD_WORDS):
+        for text in self._run(REFUSAL_NO_OLD_WORDS):  # синхронный, `done` и то, что ушло потоком
             self.assertNotIn("дословно из приложения", text)
             self.assertTrue(R.declines(text), "отказ остался чистым — проверка формы это видит")
 
@@ -120,6 +122,38 @@ class TestPointsTableOnlyUnderAnAnalysisEV11_1(unittest.TestCase):
     def test_analysis_keeps_the_table(self):
         for text in self._run(ANALYSIS):
             self.assertIn("дословно из приложения", text, "разбор позиции обязан получить таблицу")
+
+    def test_variant_header_or_points_or_code_keep_the_table(self):
+        """Ревью PR #263, MED: заголовок без двоеточия («**Позиция**», смешанный вопрос #49), разбор с
+        баллами без шаблона и позиция, подтверждённая кодом (продолжение диалога), — таблицу не теряют."""
+        from app.rag.retriever import Hit
+        coded = Hit(score=1.0, section_roman="III", section_title="т", product_name="Бульдозеры",
+                    okpd2_codes=["28.92.21.110"], min_threshold=None, requirement_blocks=[],
+                    source_anchor=None, okpd2_match=True)
+        cases = [("**Позиция**\n«Продукция машиностроения», этикетировщики (ОКПД2 28.29.22) [1].", None),
+                 ("Порог по этой позиции — не менее 90 баллов [1]; операции ниже.", None),
+                 ("Операции по этой позиции — в таблице ниже.", [coded])]
+        for model_text, hits in cases:
+            for text in self._run(model_text, hits):
+                self.assertIn("дословно из приложения", text, model_text[:40])
+
+    def test_stream_deltas_equal_the_final_text(self):
+        """Ревью PR #263, LOW: таблица в потоке — последней дельтой и только когда она есть в ответе."""
+        for model_text in (ANALYSIS, REFUSAL_NO_OLD_WORDS):
+            _sync, done, deltas = self._run(model_text)
+            self.assertEqual(deltas.rstrip(), done.rstrip(), model_text[:30])
+
+    def test_runtime_and_oracle_read_the_header_alike(self):
+        """Ревью PR #263, LOW: заголовок определён в двух местах НАМЕРЕННО (оракул не зовёт рантайм) —
+        согласие держит этот список форм."""
+        from app.rag.pipeline import _COMMITS_RE
+        yes = ["**Позиция:** «X»", "**Позиция**: «X»", "**Позиция.** «X»", "**Позиция**\n«X»",
+               "Вводная.\nПозиция: «X»"]
+        no = ["Позиции в приложении нет.", "**Позиция** не найдена.", "соседние позиции: X [1]"]
+        for t in yes:
+            self.assertTrue(_COMMITS_RE.search(t) and R.COMMIT_RE.search(t), t)
+        for t in no:
+            self.assertFalse(_COMMITS_RE.search(t) or R.COMMIT_RE.search(t), t)
 
     def test_rule_4_template_matches_the_runtime_sign(self):
         """Признак берётся из шаблона правила 4: сменят шаблон — таблица пропадёт у всех разборов."""

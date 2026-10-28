@@ -710,12 +710,21 @@ _POINTS_TABLE_TITLE = "Операции и баллы — дословно из 
 # промышленности. Замер 28.10 на приёмочных наборах (без реранкера): таблица планировалась у 21 из 24
 # вопросов вне сферы и у 5 процедурных, ушедших товарной веткой. На 42 живых ответах с таблицей блок
 # «**Позиция:**» стоял у КАЖДОГО разбора и ни у одного отказа — признак разделяет без потерь.
-_COMMITS_RE = re.compile(r"\*\*\s*Позиция\s*[:.]")
+# ⚠ Признак НЕ ОДИН (ревью PR #263, MED): модель пишет заголовок и как «**Позиция**» без двоеточия
+# (смешанный вопрос #49), а в продолжении диалога может ответить без шаблона вовсе — тогда «смотрите
+# таблицу ниже» повисло бы в пустоту. Таблица остаётся, если ответ назвал позицию в ЛЮБОЙ форме
+# заголовка, ИЛИ сам приводит баллы/проценты, ИЛИ код совпал (позиция подтверждена кодом). Все 13
+# живых ответов «таблица без заголовка» — отказы и уточнения без единого числа баллов: им её не дописать.
+_COMMITS_RE = re.compile(r"\*\*\s*Позиция\s*\**\s*[:.\n]|^\s*Позиция\s*:", re.I | re.M)
+_CLAIMS_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:балл|процент|%)", re.I)
 
 
-def _keep_points_table(raw: str, table: str) -> bool:
+def _keep_points_table(raw: str, table: str, hits: list | None = None) -> bool:
     """Дописывать ли таблицу баллов к ответу: есть таблица И ответ опирается на позицию."""
-    return bool(table) and bool(_COMMITS_RE.search(raw or ""))
+    if not table:
+        return False
+    t = raw or ""
+    return bool(_COMMITS_RE.search(t) or _CLAIMS_RE.search(t) or any(h.okpd2_match for h in hits or []))
 
 
 def _n_operations(h: Hit) -> int:
@@ -1890,7 +1899,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     raw = _strip_emoji(resp.choices[0].message.content or "")
     if brief and resp.choices[0].finish_reason == "length":  # оборван потолком — говорим об этом
         raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
-    if _keep_points_table(raw, planned.points_table):  # P4: перечень баллов печатает код (EV11-1: к разбору)
+    if _keep_points_table(raw, planned.points_table, planned.hits):  # P4: перечень баллов печатает код (EV11-1: к разбору)
         raw = raw.rstrip() + "\n" + planned.points_table
     asked = _user_text(query, history)
     ungrounded = unverified_numbers(raw, planned.grounding, asked)
@@ -1961,7 +1970,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         cut = "…" + BRIEF_CUT_NOTE
         raw = raw.rstrip() + cut
         yield "delta", cut
-    if _keep_points_table(raw, planned.points_table):  # EV11-1: к отказу/уточнению — не дописываем
+    if _keep_points_table(raw, planned.points_table, planned.hits):  # EV11-1: к отказу/уточнению — не дописываем
         # Таблицу отдаём последним куском потока: фронт дорисует её тем же рендером markdown,
         # что и остальной ответ, а копирование/экспорт заберут её вместе с текстом.
         tail = "\n" + planned.points_table
