@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -100,6 +101,9 @@ class Answer:
     # `echoed_numbers`) — пишется в журнал: правило промпта может не сработать, и тогда дефект
     # обязан быть ВИДЕН, а не уехать пользователю молча.
     phantom_documents: list[str] = field(default_factory=list)
+    # «Только по-русски» (#264): сколько знаков CJK вычистил рантайм. Метрика «без иероглифов» смотрит и
+    # сюда — иначе по уже вычищенному тексту она давала бы 1.00 при любом поведении модели (ревью PR #265).
+    cjk_removed: int = 0
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
     # Списывается ли ответ с лимита тарифа (#160). Бесплатны заготовки meta (приветствие,
@@ -1142,27 +1146,47 @@ def _strip_emoji(text: str) -> str:
 # ответ китайские токены (наблюдали «咨询服务» на «юридические услуги»). Правило 7 обоих системных
 # промптов это запрещает, а здесь — страховка, как у эмодзи: иероглифы и японская кана вычищаются ПО
 # СИМВОЛУ (в потоке кусок может оборваться посреди слова — посимвольная чистка от этого не зависит),
-# полноширинная пунктуация («，», «：», «（») заменяется обычной. Кириллицу, латиницу и типографику не трогаем.
-_CJK_RE = re.compile("[぀-ヿ㐀-䶿一-鿿豈-﫿　-〿＀-￯]")
-# Полноширинный знак в китайской типографике идёт БЕЗ пробела после себя («，уточните») — пробел добавляем.
+# полноширинные знаки («，», «：», «１００», «％») переводятся в обычные ASCII (как NFKC). Кириллицу, латиницу
+# и типографику не трогаем.
+# ⚠ Полноширинное НЕ удаляется, а переводится (ревью PR #265, MED): «не менее １００ баллов» без перевода
+# потеряло бы число целиком, и проверка заземления этого не видит — пропуск числа она не ловит.
 # ⚠ Чистка строго посимвольная: фронт показывает склейку дельт потока, а в базу ложится итоговый текст —
 # «умная» чистка только итога (например, пустых скобок от вычищенного слова) развела бы экран и запись.
-_FULLWIDTH = {"，": ", ", "：": ": ", "；": "; ", "（": "(", "）": ")", "。": ". ",
-              "、": ", ", "！": "! ", "？": "? ", "　": " "}
+# Диапазоны — кодами, а не литералами: в исходнике не должно быть невидимых знаков (идеографический пробел).
+def _char_ranges(*pairs: tuple[int, int]) -> str:
+    return "".join(f"{chr(a)}-{chr(b)}" for a, b in pairs)
+
+
+_CJK_RE = re.compile("[" + _char_ranges((0x3000, 0x303F), (0x3040, 0x30FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF),
+                                        (0xF900, 0xFAFF), (0xFF00, 0xFFEF)) + "]")
+_CJK_PUNCT = {0x3000: " ", 0x3001: ",", 0x3002: "."}   # идеографический пробел, «、», «。»
+
+
+def _cjk_replacement(ch: str) -> str | None:
+    """Чем заменить знак из `_CJK_RE`: ASCII-аналогом или None (вычистить)."""
+    cp = ord(ch)
+    if 0xFF01 <= cp <= 0xFF5E:               # полноширинные ASCII: «１００» → «100», «％» → «%»
+        return chr(cp - 0xFEE0)
+    if cp in _CJK_PUNCT:
+        return _CJK_PUNCT[cp]
+    if 0xFFE0 <= cp <= 0xFFEE:               # полноширинные знаки валют и т. п.
+        return unicodedata.normalize("NFKC", ch)
+    return None                              # иероглифы, кана, полуширинная катакана, скобки 「」【】…
 
 
 def _clean_model_text(text: str) -> tuple[str, int]:
-    """Текст модели без эмодзи и иероглифов → (чистый текст, сколько знаков CJK вычищено)."""
+    """Текст модели без эмодзи и иероглифов → (чистый текст, сколько знаков CJK вычищено).
+    Переведённые в ASCII полноширинные знаки в счётчик не входят — это не протечка языка."""
     text = _strip_emoji(text)
     removed = 0
 
     def repl(m: re.Match) -> str:
         nonlocal removed
-        ch = m.group(0)
-        if ch in _FULLWIDTH:
-            return _FULLWIDTH[ch]
-        removed += 1
-        return ""
+        rep = _cjk_replacement(m.group(0))
+        if rep is None:
+            removed += 1
+            return ""
+        return rep
     return _CJK_RE.sub(repl, text), removed
 
 
@@ -1408,6 +1432,7 @@ def _answer_procedural(query: str, search_query: str,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
+        cjk_removed=cjk,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=grounding,
@@ -1949,6 +1974,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
+        cjk_removed=cjk,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
@@ -2028,6 +2054,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
+        cjk_removed=cjk_total,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
