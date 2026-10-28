@@ -145,3 +145,20 @@ class TestTitleWithFootnoteOrAmendmentEV20(unittest.TestCase):
         for roman, title, _text in self.CASES:
             self.assertFalse(m.attributed("Продукция и оборудование для нефти [1].", roman,
                                           [_Hit(roman, title)]), roman)
+
+    def test_every_section_name_shown_to_the_model_is_accepted(self):
+        """Контракт: то имя, которое контекст показывает модели (`retriever.section_name`), оракул
+        принимает для КАЖДОГО из разделов корпуса. Иначе ответ «как велели» считался бы провалом."""
+        import json
+
+        from app.rag.retriever import _clean_section_title, section_name
+        m = _ea()
+        titles = {}
+        for f in sorted((ROOT / "knowledge_base" / "pp719" / "structured").glob("*.json")):
+            for r in json.loads(f.read_text(encoding="utf-8")):
+                if r.get("section_title"):
+                    titles[r["section_roman"]] = _clean_section_title(r["section_title"])
+        self.assertGreaterEqual(len(titles), 29)
+        for roman, title in titles.items():
+            text = f"**Позиция:** «{section_name(title)}», изделие (ОКПД2 01.01) [1]."
+            self.assertTrue(m.attributed(text, roman, [_Hit(roman, title)]), f"{roman}: {title!r}")

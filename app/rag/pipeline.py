@@ -427,7 +427,11 @@ def format_context(hits: list[Hit], query: str | None = None,
     for i, h in enumerate(hits, 1):
         is_target = any(h is t for t in targets)
         same_cell = not is_target and fragments.group_of(h.product_name) in groups
-        sect = f"«{h.section_title}»" if h.section_title else f"Раздел {h.section_roman}"
+        # EV20 #117: имя раздела — чистое (без «<5>» и «(в ред. …)», которые модель копировала в ответ),
+        # маркер сноски — отдельной пометкой, чтобы указатель на неё не пропал (`retriever.section_name`).
+        name, marks = retriever.section_name(h.section_title), retriever.section_footnotes(h.section_title)
+        sect = (f"«{name}»" if name else f"Раздел {h.section_roman}") + (
+            f"; сноски раздела: {', '.join(marks)}" if marks else "")
         head = f"[{i}] {h.product_name} (раздел {sect})"
         if h.okpd2_match:
             # ⚠ Совпал код — но целевой записью стала не эта: значит совпадение по ГРУППЕ кода
