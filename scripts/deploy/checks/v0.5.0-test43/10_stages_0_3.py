@@ -13,7 +13,8 @@
   5. `D15` #155: маркер сноски «<38.12>» — не код ОКПД2, вопрос идёт процедурной веткой;
   6. ЖИВОЙ индекс: на 26.20.11.120 исключающая позиция не целевая (`D20`); на «что значит <38(3)>» первой
      идёт своя сноска <38.3> (`D15`); поиск с кодом и пересчётом score окна (`R31`) не падает и не
-     плавает между прогонами (`R31-2` #245: ничья sparse-score — окно одно в восьми прогонах).
+     плавает между прогонами (`R31-2` #245: ничья sparse-score — окно одно в восьми прогонах, пересчёт
+     отработал в каждом без сбоя — сервер принял пакет dense + sparse).
 
 ⚠ Блоки 1–5 офлайновые, 6 требует живого Qdrant. Имена коллекций — из настроек: локально та же проверка
 гоняется на любых коллекциях (`QDRANT_COLLECTION=… QDRANT_RULES_COLLECTION=…`). Положительный контроль —
@@ -161,14 +162,32 @@ def main() -> int:
               "контроль: поиск с кодом не нашёл совпадений")
         # R31-2 #245: ничья sparse-score XXI/27 и XXI/30 — до правки первой была то одна, то другая
         # (7 из 12 / 5 из 12); восемь прогонов подряд без правки совпадают с вероятностью ~1 %.
+        # ⚠ Ревью PR #248 (MED-1): одной устойчивости мало — окно ДО `R31` тоже устойчиво, и пункт
+        # проходил, когда пересчёт падал (сервер отверг пакет, вернул не всех) и молча откатывался.
+        # Поэтому ещё: слияние вызвано в каждом прогоне и ни одного предупреждения пересчёта.
+        from loguru import logger as _log
         q = "Краски полиграфические 20.30.24"
         qv = retriever.embed_query(q)
-        firsts = {tuple(h.source_anchor for h in retriever.search(q, okpd2="20.30.24", limit=8, qvec=qv)[:3])
-                  for _ in range(8)}
-        check(hasattr(retriever, "_rrf_tied") and len(firsts) == 1,
-              "«Краски полиграфические 20.30.24»: окно одно и то же в 8 прогонах (R31-2)",
-              f"окно плавает: {len(firsts)} разных порядков top-3 за 8 прогонов, _rrf_tied — "
-              f"{'есть' if hasattr(retriever, '_rrf_tied') else 'нет'}")
+        warns, calls = [], [0]
+        orig = getattr(retriever, "_rrf_tied", None)
+        sink = _log.add(lambda m: warns.append(m.record["message"]), level="WARNING",
+                        filter=lambda r: "пересчёт score окна" in r["message"])
+        if orig is not None:
+            def _spy(lists):
+                calls[0] += 1
+                return orig(lists)
+            retriever._rrf_tied = _spy
+        try:
+            firsts = {tuple(h.source_anchor for h in retriever.search(q, okpd2="20.30.24", limit=8, qvec=qv)[:3])
+                      for _ in range(8)}
+        finally:
+            _log.remove(sink)
+            if orig is not None:
+                retriever._rrf_tied = orig
+        check(orig is not None and len(firsts) == 1 and calls[0] == 8 and not warns,
+              "«Краски полиграфические 20.30.24»: пересчёт окна отработал 8 раз из 8, окно одно (R31-2)",
+              f"пересчёт окна: _rrf_tied {'есть' if orig else 'нет'}, вызван {calls[0]} из 8, сбоев "
+              f"{len(warns)}, порядков top-3 {len(firsts)}" + (f" — {warns[0][:160]}" if warns else ""))
     except Exception as e:  # noqa: BLE001
         check(False, "", f"живой индекс: {type(e).__name__}: {e}")
 

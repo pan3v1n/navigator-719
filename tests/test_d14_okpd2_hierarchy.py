@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import random
 import unittest
+from fractions import Fraction
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -223,17 +224,31 @@ class TestSearchFetchesNewRelations(unittest.TestCase):
         self.rescores = []
         self.rescore_payload = []
 
+        self.rescore_requests = []
+
         def fake_batch(collection_name, requests):
-            # R31: пересчёт score окна — dense и sparse по id одним пакетом. dense-список — score
-            # «настоящие» (третий элемент строки корпуса), сравнимые у всех; `rescore` подменяет его
-            # (сбой, неполный ответ). sparse по умолчанию пуст, `sparse` — функция строк → точки.
-            ids = list(requests[0].filter.must[0].has_id)
-            self.rescores.append(ids)
+            # R31: пересчёт score окна — dense и sparse по id одним пакетом. Подмена отвечает КАЖДОМУ
+            # запросу по его `using`, фильтру и `limit`, как Qdrant (ревью PR #248, MED-3: прежняя читала
+            # фильтр первого и отдавала всё — «только dense», «sparse без фильтра», чужой `limit` и
+            # перепутанный `using` проходили). dense — score «настоящие» (третий элемент строки
+            # корпуса), `rescore` подменяет его (сбой, неполный ответ); sparse по умолчанию пуст,
+            # `sparse` — функция строк → точки. Без фильтра запрос видит весь корпус.
+            self.rescore_requests.append(requests)
             self.rescore_payload.append([r.with_payload for r in requests])
-            rows = [r for r in corpus if r[0] in ids]
-            dense = rescore(rows) if rescore is not None else \
-                [_point(*r) for r in sorted(rows, key=lambda r: -r[2])]
-            return [SimpleNamespace(points=dense), SimpleNamespace(points=sparse(rows) if sparse else [])]
+            out = []
+            for req in requests:
+                ids = [i for c in (getattr(req.filter, "must", None) or []) for i in (getattr(c, "has_id", None) or [])]
+                rows = [r for r in corpus if r[0] in ids] if req.filter is not None else list(corpus)
+                if req.using == retriever.DENSE:
+                    self.rescores.append(ids)
+                    pts = rescore(rows) if rescore is not None else \
+                        [_point(*r) for r in sorted(rows, key=lambda r: -r[2])]
+                elif req.using == retriever.SPARSE:
+                    pts = sparse(rows) if sparse else []
+                else:
+                    raise ValueError(f"нет вектора {req.using!r}")    # Qdrant ответил бы 400
+                out.append(SimpleNamespace(points=pts[:req.limit]))
+            return out
 
         def fake_hybrid(query, limit, qfilter=None, collection=None, qvec=None, with_payload=True):
             conds = (getattr(qfilter, "should", None) or []) + (getattr(qfilter, "must", None) or [])
@@ -384,8 +399,22 @@ class TestRescoreR31(unittest.TestCase):
         """Вернулись не все кандидаты — новые score со старыми не смешиваем (та же несравнимость).
         ⚠ Ревью R31 (LOW-1): вернувшимся «Мониторам» подмена даёт ДРУГОЙ score (0.1), иначе «оставили
         старые» и «смешали» неразличимы — мутация `got.get(id, h.score)` выживала."""
-        hits, _calls = self._go(rescore=lambda rows: [_point(r[0], r[1], 0.1) for r in rows
+        # ⚠ Ревью PR #248 (MED-2): score вернувшимся — РАЗНЫЕ. При равных (0.1 и 0.1) ничья давала
+        # «Мониторам» ранг 0, то есть 1/2 = их старому 0.5, и смешение снова было неотличимо.
+        given = {"Мониторы": 0.1, "Прочее": 0.3}                       # «Мониторы» — ранг 1, 1/3
+        hits, _calls = self._go(rescore=lambda rows: [_point(r[0], r[1], given[r[0]]) for r in rows
                                                       if r[0] != "Приёмники"])
+        self.assertEqual(hits[0].source_anchor, "Приёмники")
+        self.assertGreater(hits[0].score, 0.9)                         # score маленькой выдачи
+        self.assertEqual(next(h.score for h in hits if h.source_anchor == "Мониторы"), 0.5)
+
+    def test_partial_dense_is_not_completed_by_sparse(self):
+        """dense вернул не всех — прежние score, даже если недостающий пришёл через sparse: иначе пересчёт
+        молча шёл бы на урезанном dense (ревью PR #248, мутация `limit` у dense-запроса)."""
+        given = {"Мониторы": 0.1, "Прочее": 0.3}
+        hits, _calls = self._go(
+            rescore=lambda rows: [_point(r[0], r[1], given[r[0]]) for r in rows if r[0] != "Приёмники"],
+            sparse=lambda rows: [_point(r[0], r[1], 5.0) for r in rows if r[0] == "Приёмники"])
         self.assertEqual(hits[0].source_anchor, "Приёмники")
         self.assertGreater(hits[0].score, 0.9)                         # score маленькой выдачи
         self.assertEqual(next(h.score for h in hits if h.source_anchor == "Мониторы"), 0.5)
@@ -395,10 +424,41 @@ class TestRescoreR31(unittest.TestCase):
         self._go()
         self.assertEqual(self.rescore_payload, [[False, False]])     # одно обращение, два списка
 
+    def test_rescore_requests_shape(self):
+        """Ревью PR #248 (MED-3): оба списка — по id ВСЕХ кандидатов окна, каждый со своим вектором и
+        лимитом не меньше числа кандидатов (иначе часть не вернётся и пересчёт молча выключится)."""
+        hits, _calls = self._go()
+        ids = {h.point_id for h in hits}
+        [batch] = self.rescore_requests
+        self.assertEqual([r.using for r in batch], [retriever.DENSE, retriever.SPARSE])
+        for r in batch:
+            self.assertEqual({i for c in r.filter.must for i in c.has_id}, ids)
+            self.assertEqual(r.limit, len(ids))
+        self.assertEqual(batch[0].query, [0.0] * 8)                       # вектор вопроса, не пересчитан
+
+    def test_sparse_list_takes_part(self):
+        """sparse-список участвует в порядке и спрашивается ТОЛЬКО по кандидатам. dense: Мониторы >
+        Приёмники > Проекторы; sparse: Приёмники > Проекторы > Мониторы → по RRF первыми Приёмники
+        (5/6 против 3/4). Только dense — первыми Мониторы; sparse без фильтра — «Шум» (не кандидат,
+        sparse 20) сдвигает ранги, и снова Мониторы."""
+        corpus = [("Мониторы", ["26.40.34.110"], 0.5), ("Приёмники", ["26.40.20"], 0.2),
+                  ("Проекторы", ["26.40.34.120"], 0.15), ("Шум", ["99.99"], 0.01)]
+        sp = {"Приёмники": 9.0, "Проекторы": 8.0, "Мониторы": 1.0, "Шум": 20.0}
+        hits, _calls = self._run("26.40", corpus=corpus, hidden=("Приёмники", "Шум"), query="Мониторы",
+                                 inflate=True, sparse=lambda rows: sorted(
+                                     (_point(r[0], r[1], sp[r[0]]) for r in rows), key=lambda p: -p.score))
+        self.assertNotIn("Шум", [h.source_anchor for h in hits])
+        self.assertEqual([h.source_anchor for h in hits[:3]], ["Приёмники", "Мониторы", "Проекторы"])
+
     def test_no_new_candidates_no_extra_query(self):
         """Доборы ничего не добавили — все score из пула, сравнимы: лишнего запроса нет."""
         self._run("20")
         self.assertEqual(self.rescores, [])
+
+
+def _rrf(*ranks: int) -> float:
+    """Сумма RRF по рангам (с нуля, k = 2) — дробью, как в `_rrf_tied`."""
+    return float(sum(Fraction(1, 2 + r) for r in ranks))
 
 
 class TestRescoreTiesR312(unittest.TestCase):
@@ -411,9 +471,9 @@ class TestRescoreTiesR312(unittest.TestCase):
         tie = [("b", 16.11), ("a", 16.11), ("c", 9.4)]
         for sp in (tie, [tie[1], tie[0], tie[2]]):
             got = retriever._rrf_tied([dense, sp])
-            self.assertEqual(got["a"], 1 / 2 + 1 / 2)                 # ничья — лучший из рангов
-            self.assertEqual(got["b"], 1 / 3 + 1 / 2)
-            self.assertEqual(got["c"], 1 / 4 + 1 / 4)                 # после ничьей двух — ранг 2
+            self.assertEqual(got["a"], _rrf(0, 0))                     # ничья — лучший из рангов
+            self.assertEqual(got["b"], _rrf(1, 0))
+            self.assertEqual(got["c"], _rrf(2, 2))                     # после ничьей двух — ранг 2
 
     def test_any_permutation_gives_same_scores(self):
         dense = [("a", 0.5), ("b", 0.5), ("c", 0.4), ("d", 0.4), ("e", 0.1)]
@@ -429,7 +489,17 @@ class TestRescoreTiesR312(unittest.TestCase):
     def test_without_ties_matches_qdrant_fusion(self):
         """Без ничьих — формула Qdrant (1/(2 + ранг), ранг с нуля): окно, где ничьих нет, не меняется."""
         got = retriever._rrf_tied([[("a", 0.9), ("b", 0.8)], [("b", 5.0), ("a", 1.0), ("c", 0.5)]])
-        self.assertEqual(got, {"a": 1 / 2 + 1 / 3, "b": 1 / 3 + 1 / 2, "c": 1 / 4})
+        self.assertEqual(got, {"a": _rrf(0, 1), "b": _rrf(1, 0), "c": _rrf(2)})
+
+    def test_equal_sums_of_different_ranks_are_equal(self):
+        """Ревью PR #248 (LOW-2): ранги (0, 10) и (1, 2) — обе суммы 7/12, а в float они расходились
+        на 1 ulp, и порядок решало округление. Равные суммы обязаны быть равны — дальше решает якорь."""
+        dense = [(f"x{i}", 1.0 - i / 100) for i in range(11)]          # a — ранг 0, b — ранг 1
+        dense[0], dense[1] = ("a", 1.0), ("b", 0.99)
+        sparse = [("p", 3.0), ("q", 2.5), ("b", 2.0)] + [(f"y{i}", 1.0 - i / 100) for i in range(7)] + \
+            [("a", 0.1)]                                                  # b — ранг 2, a — ранг 10
+        got = retriever._rrf_tied([dense, sparse])
+        self.assertEqual(got["a"], got["b"])
 
     def test_window_order_stable_when_sparse_tie_arrives_reversed(self):
         """Через `search`: та же ничья sparse в двух порядках прихода — то же окно. По dense выше

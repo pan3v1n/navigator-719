@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass, field
+from fractions import Fraction
 from functools import lru_cache
 
 from loguru import logger
@@ -342,15 +343,17 @@ def _rrf_tied(lists: list[list[tuple]]) -> dict:
     RRF у них плавала между прогонами — «Краски полиграфические 20.30.24»: sparse-score XXI/27 и
     XXI/30 равны до бита (16.110046), а первой за 12 прогонов была то одна (7), то другая (5).
     Здесь ничья в одном списке ранги не различает — порядок решают другой список, а при равной
-    сумме — якорь (`_order_key`). Без ничьих сумма та же, что у Qdrant."""
+    сумме — якорь (`_order_key`). Без ничьих сумма та же, что у Qdrant.
+    ⚠ Сумма — дробью (ревью PR #248, LOW-2): в float равные суммы разных пар рангов расходятся на
+    1 ulp (ранги 0 и 10 против 1 и 2 — обе 7/12), и порядок решало бы округление, а не якорь."""
     out: dict = {}
     for pts in lists:
         rank, prev = 0, None
         for pos, (pid, score) in enumerate(sorted(pts, key=lambda p: -p[1])):
             if score != prev:
                 rank, prev = pos, score
-            out[pid] = out.get(pid, 0.0) + 1.0 / (_RRF_K + rank)
-    return out
+            out[pid] = out.get(pid, 0) + Fraction(1, _RRF_K + rank)
+    return {pid: float(s) for pid, s in out.items()}
 
 
 def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
@@ -376,24 +379,27 @@ def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
     ids = [h.point_id for h in hits]
     if not ids or any(i is None for i in ids):
         return
-    flt = models.Filter(must=[models.HasIdCondition(has_id=ids)])
-    idx, val = query_vector(query)
-    sp = _search_params()
-    reqs = [models.QueryRequest(query=qvec if qvec is not None else embed_query(query), using=DENSE,
-                                filter=flt, limit=len(ids), params=sp, with_payload=False),
-            models.QueryRequest(query=models.SparseVector(indices=idx, values=val), using=SPARSE,
-                                filter=flt, limit=len(ids), params=sp, with_payload=False)]
-    try:
+    try:  # подготовка тоже под `try` — как было внутри `_hybrid` (ревью PR #248, LOW-1)
+        flt = models.Filter(must=[models.HasIdCondition(has_id=ids)])
+        idx, val = query_vector(query)
+        sp = _search_params()
+        reqs = [models.QueryRequest(query=qvec if qvec is not None else embed_query(query), using=DENSE,
+                                    filter=flt, limit=len(ids), params=sp, with_payload=False),
+                models.QueryRequest(query=models.SparseVector(indices=idx, values=val), using=SPARSE,
+                                    filter=flt, limit=len(ids), params=sp, with_payload=False)]
         res = _client().query_batch_points(collection_name=settings.QDRANT_COLLECTION, requests=reqs)
     except Exception as exc:  # noqa: BLE001 — пересчёт уточняет порядок, сбой не роняет ответ
         logger.warning("пересчёт score окна ({} кандидатов): {}", len(ids), exc)
         return
-    got = _rrf_tied([[(p.id, p.score) for p in r.points] for r in res])
-    if any(i not in got for i in ids):
+    dense = [(p.id, p.score) for p in res[0].points]
+    if {i for i, _ in dense} != set(ids):
         # Кандидат не вернулся (не должно быть: dense-список отдаёт все точки фильтра) — смешивать
         # новые score со старыми нельзя, это та же несравнимость. Остаёмся на прежних.
-        logger.warning("пересчёт score окна: вернулось {} из {}", len(got), len(ids))
+        # ⚠ Полнота — по dense, а не по объединению списков: недостающий в dense кандидат «вернулся»
+        # бы через sparse, и пересчёт молча шёл на урезанном списке (ревью PR #248, мутация `limit`).
+        logger.warning("пересчёт score окна: вернулось {} из {}", len(dense), len(ids))
         return
+    got = _rrf_tied([dense, [(p.id, p.score) for p in res[1].points]])
     for h in hits:
         h.score = got[h.point_id]
 
