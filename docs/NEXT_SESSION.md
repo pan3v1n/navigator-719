@@ -5,6 +5,37 @@
 > планы по волнам — [REVIEW_TZ.md](REVIEW_TZ.md) (R1–R30), [KB_EXPANSION_TZ.md](KB_EXPANSION_TZ.md) (K1–K17),
 > [DUAL_CORPUS_TZ.md](DUAL_CORPUS_TZ.md) (L1–L8), [AGENTS_PLAN.md](AGENTS_PLAN.md) (A1–A6, B1).
 
+## ⏰ 28.10.2026, вечер · `test43` НА БОЮ; `test44` (N 1257) — ТАЙМЕРОМ 01.11 02:00 МСК
+
+**Бой:** `/ping` → `v0.5.0-test43`, `prod` = `main` = `02b8aaf` (код `dev` на корпусе test41, коллекции 1583 / 767 / 12).
+Подробно — `CLAUDE.md`, блок 28.10. Решения владельца 28.10 (все 18) — `BACKLOG.md`, «Очередь на 28.10.2026, вечер».
+
+**`test44` = N 1257 поверх test43** — тег `22c7fb2` (PR #254), пакет `~/pkg-test44-20261028`, юниты
+`/etc/systemd/system/navigator-deploy-test44.{service,timer}` (`OnCalendar=2026-10-31 23:00:00 UTC`, `Persistent=false`),
+`run-deploy.sh` сверяет sha256 RTF Контура 508574, лог `~/deploy-v0.5.0-test44.log`, последняя строка `DEPLOY_EXIT=…`.
+Окно одно — товарная ветка ~28 мин (`REINDEX_FULL="pp719"`), процедурная работает всё время.
+⚠⚠ **28.10 таймер из сессии НЕ взведён:** установку юнитов на бою (`sudo`) заблокировал классификатор auto mode.
+Пакет на сервере, всё готово; взводит владелец одной командой (суммы → сухой прогон → юниты → enable, выкатку НЕ
+запускает): `ssh dan_tpp_srv@77.241.30.132 'bash ~/pkg-test44-20261028/setup-test44.sh'` — ждём `SUM_EXIT=0`, `DRY_EXIT=0`
+и строку таймера `Sat 2026-10-31 23:00:00 UTC … navigator-deploy-test44.timer`. **Перед 31.10 23:00 UTC проверить, что
+таймер стоит** (`systemctl list-timers | grep navigator`): без него N 1257 на бой не приедет.
+**Отменить до старта:** `sudo systemctl disable --now navigator-deploy-test44.timer`.
+**Откат после:** тег `v0.5.0-test43` копией его профиля с `REINDEX_FULL="pp719"` и `EXPECT` pp719 = 1583.
+
+**Утром 01.11 (одно ssh — разрешение владельца на 01.11 дано 28.10 вместе с выпуском):**
+```bash
+ssh dan_tpp_srv@77.241.30.132 'head -3 ~/deploy-v0.5.0-test44.log; tail -50 ~/deploy-v0.5.0-test44.log; systemctl list-timers --all --no-pager | grep navigator'
+curl -s https://xn--b1afk4ade.xn--719--83dani8b8bqyy.xn--p1ai/ping   # ждём "release":"v0.5.0-test44"
+```
+Ждём `DEPLOY_EXIT=0`, «Контур 508574: побайтно тот же», коллекции 1584 / 767 / 12, релизную `10_edition_2026_10_31` —
+0 провалов. Затем: живой DeepSeek по §5 профиля test44 (иглы → 115 и 15 операций; магниты → 70 / 270 / 900; ссылка →
+508574; бульдозеры и СТ-1 — контроль; движок в контейнере, `okpd2=extract_okpd2(q)`) → **`prod` перемотать на тег** →
+юниты убрать (`sudo systemctl disable --now navigator-deploy-test44.timer`, удалить оба файла, `daemon-reload`) →
+закрыть #154 → **`main` → `dev`** (до этого не сливать: в `dev` уехал бы откат корпуса) → docs PR «test44 выкачена».
+
+**Дальше по очереди:** `O10` #188 шаг 2 (Планировщик) → `test45` пакет промпта (`R40` — ветка `fix/r40-relevance-082`,
+парный `--check-refusal` на полосе 0.82–0.83 ещё не снят) → `D23` #251 → `test46` данные → платный прогон → гейт `1.0`.
+
 ## ✅ 28.10.2026 · `R31-2` РЕШЕНА (`R31` ЕДЕТ В `test43`), `EV8-1` СНОВА ОТКЛОНЕНА, `EV24` СДЕЛАНА
 
 Бой не тронут (`/ping` → `test41`, `test42` на таймере 01.11 02:00 МСК).
