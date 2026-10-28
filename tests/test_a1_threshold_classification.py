@@ -255,9 +255,39 @@ class TestQualifiedListNotes(unittest.TestCase):
         self.assertIsNotNone(thr)
         self.assertIn("147 баллов", thr)
         self.assertIn("187 баллов", thr)
-        self.assertIn("⚠ ИНОЙ порог", thr, "второй график потерял свою оговорку")
+        # `K2-2` #128: вводная прим. 27 называет ОДНУ позицию — второй график её же, не «иной».
+        self.assertIn("⚠ ДРУГОЙ ГРАФИК ЭТОЙ ЖЕ ПОЗИЦИИ", thr, "второй график потерял свою оговорку")
+        self.assertNotIn("ИНОЙ порог", thr)
         self.assertIn("105 баллов", thr)
         self.assertIn("до 4000 А включительно", thr)
+
+    def test_branch_label_only_where_the_note_names_one_position(self):
+        """`K2-2` #128: «ДРУГОЙ ГРАФИК ЭТОЙ ЖЕ ПОЗИЦИИ» — только у строки, чья вводная называет ОДНО имя
+        (выключатели); у контакторов имён два, подблоки про РАЗНУЮ продукцию — «ИНОЙ порог» остаётся.
+        Состав закреплён по всему корпусу: новая позиция с этим ярлыком — разбор поимённо."""
+        import glob
+        import json
+
+        from app.rag import thresholds as T
+        got = set()
+        for f in glob.glob(str(ROOT / "knowledge_base" / "pp719" / "structured" / "*.json")):
+            for r in json.loads(open(f, encoding="utf-8").read()):
+                thr = lookup_threshold(r["okpd2_codes"], r["product_name"], r["section_roman"]) or ""
+                if T.BRANCH_MARK in thr:
+                    got.add(r["product_name"])
+        self.assertEqual(got, {"Выключатель автоматический (воздушный) низковольтный в литом корпусе "
+                               "(до 1000 В) на токи до 6300 А"})
+        contactors = lookup_threshold(["27.33"], "Контакторы и пускатели электромагнитные низковольтные", "V")
+        self.assertIn(T.OTHER_MARK, contactors, "контроль: у контакторов подблоки про разную продукцию")
+        self.assertNotIn(T.BRANCH_MARK, contactors)
+
+    def test_both_labels_are_described_in_rule_2g(self):
+        """Ярлык — контракт с промптом: строка, которой правило 2г не объясняет, читается моделью наугад."""
+        from app.core.prompts import NAVIGATOR_SYSTEM_PROMPT
+        from app.rag import thresholds as T
+        flat = " ".join(NAVIGATOR_SYSTEM_PROMPT.split())
+        self.assertIn(T.OTHER_MARK, flat)
+        self.assertIn(T.BRANCH_MARK, flat)
 
     def test_specific_note_row_does_not_leak_to_other_products(self):
         """⚠ «ИЗ 27.12 "Выключатель автоматический…"» = «часть кода, а именно это изделие».

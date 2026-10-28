@@ -32,6 +32,9 @@ from app.rag.thresholds import lookup_threshold
 enable_utf8()  # #107: проверка печатает значки вне cp1251
 
 MARK = "⚠ ИНОЙ порог"
+# `K2-2` #128 (28.10.2026): второй ярлык — график ТОЙ ЖЕ позиции по характеристике изделия. Склейку
+# двух разных позиций он тоже может нести, поэтому корпусная половина ищет оба.
+MARKS = (MARK, "⚠ ДРУГОЙ ГРАФИК ЭТОЙ ЖЕ ПОЗИЦИИ")
 
 
 def lead(codes, name, section=None):
@@ -111,7 +114,7 @@ for f in glob.glob("knowledge_base/pp719/structured/*.json"):
         scanned += 1
         name = (rec.get("product_name") or "").strip()
         got = lookup_threshold(rec.get("okpd2_codes") or [], name, rec.get("section_roman"))
-        if name and got and MARK in got:
+        if name and got and any(m in got for m in MARKS):
             multi += 1
             shared.setdefault(got, set()).add(name)
 
