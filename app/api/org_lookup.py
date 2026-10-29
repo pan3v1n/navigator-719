@@ -21,7 +21,7 @@ from app.db.models import User
 router = APIRouter()
 
 # Человек вводит ИНН раз-другой, admin открывает карточки подряд — с запасом на обоих; ниже лимита DaData
-# на порядки, а повтор того же ИНН берётся из кэша.
+# на порядки. Считаются только запросы мимо кэша: повтор того же ИНН лимит не тратит (ревью PR #270).
 LOOKUPS_PER_HOUR = 60
 _limit = SlidingWindow(LOOKUPS_PER_HOUR, window=3600.0)
 
@@ -34,19 +34,23 @@ class LookupIn(BaseModel):
 @router.post("/api/org-lookup")
 def org_lookup(body: LookupIn, user: User = Depends(require_user)):
     inn = body.inn.strip()
-    if len(inn) == 12 and inn.isascii() and inn.isdigit():
+    # Сначала контрольные цифры: опечатка в 12 цифрах — «проверьте ИНН», а не «впишите название сами»
+    # (ревью PR #270); текст — как у сохранения анкеты.
+    if not inn_valid(inn):
+        raise HTTPException(status_code=422, detail="Проверьте ИНН: 10 цифр у организации или 12 у ИП, "
+                                                    "контрольные цифры не сходятся.")
+    if len(inn) == 12:
         # Решение владельца: ИНН ИП и физлица (ПДн) наружу не отправляем — и не делаем вид, что искали
         raise HTTPException(status_code=422, detail="По ИНН ИП название не подбирается — впишите его сами.")
-    if not inn_valid(inn):
-        raise HTTPException(status_code=422, detail="Проверьте ИНН: 10 цифр у организации, контрольные "
-                                                    "цифры не сходятся.")
     if not reg.enabled():
         return {"outcome": reg.UNAVAILABLE}
-    if not _limit.check(f"user:{user.id}"):
-        return JSONResponse({"outcome": reg.UNAVAILABLE, "detail": "Слишком много проверок подряд — "
-                             "попробуйте через час."}, status_code=429,
-                            headers={"Retry-After": str(_limit.retry_after(f"user:{user.id}"))})
-    res = reg.lookup(inn)
+    res = reg.cached(inn)
+    if res is None:
+        if not _limit.check(f"user:{user.id}"):
+            return JSONResponse({"outcome": reg.UNAVAILABLE, "detail": "Слишком много проверок подряд — "
+                                 "попробуйте через час."}, status_code=429,
+                                headers={"Retry-After": str(_limit.retry_after(f"user:{user.id}"))})
+        res = reg.lookup(inn)
     if res is None or res.org is None:
         return {"outcome": res.outcome if res else reg.UNAVAILABLE}
     o = res.org

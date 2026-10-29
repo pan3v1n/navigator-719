@@ -25,7 +25,9 @@ from app.db import queries as q  # noqa: E402
 from tests.test_profile import _CabinetDB, _request  # noqa: E402
 
 INN = "7707083893"            # организация, контрольные цифры верны
+INN2, INN3 = "7721581040", "7736207543"   # ещё организации — для лимита частоты
 INN_IP = "500100732259"       # ИП — 12 цифр, контрольные цифры верны
+INN_IP_BAD = "500100732258"   # 12 цифр с опечаткой
 INN_BAD = "7707083894"        # опечатка: контрольная цифра не сходится
 DIRECTOR = "Грефов Герман Оскарович"
 
@@ -104,16 +106,60 @@ class TestLookup(_DaData):
 
     def test_unavailable_is_not_not_found_and_not_cached(self):
         """«Не проверено» об организации не говорит ничего: не «не найдена» и не на сутки в кэш."""
+        after_pause = 1000.0 + max(reg.PAUSE_LONG_S, reg.PAUSE_SHORT_S) + 1
         for reply in (401, 403, 429, 500, httpx.ConnectTimeout("t"), httpx.ConnectError("x"),
                       "<html>не json</html>", {"oops": 1}, {"suggestions": "x"}, {"suggestions": [None]}):
             with self.subTest(reply=repr(reply)[:30]):
                 reg.clear_cache()
                 self.calls.clear()
                 self.reply = reply
-                self.assertEqual(reg.lookup(INN).outcome, reg.UNAVAILABLE)
+                self.assertEqual(reg.lookup(INN, now=1000.0).outcome, reg.UNAVAILABLE)
                 self.reply = PARTY
-                self.assertEqual(reg.lookup(INN).outcome, reg.FOUND, "сбой закэшировался")
+                self.assertEqual(reg.lookup(INN, now=after_pause).outcome, reg.FOUND, "сбой закэшировался")
                 self.assertEqual(len(self.calls), 2)
+
+    def test_dadata_failure_pauses_lookups(self):
+        """Ревью PR #270: отказ DaData или канала — пауза, а не запрос на каждое нажатие клавиши весь день."""
+        for reply, pause in ((401, reg.PAUSE_LONG_S), (403, reg.PAUSE_LONG_S), (429, reg.PAUSE_SHORT_S),
+                             (502, reg.PAUSE_SHORT_S), (httpx.ReadTimeout("t"), reg.PAUSE_SHORT_S)):
+            with self.subTest(reply=repr(reply)[:30]):
+                reg.clear_cache()
+                self.calls.clear()
+                self.reply = reply
+                reg.lookup(INN, now=1000.0)
+                self.reply = PARTY
+                self.assertEqual(reg.lookup(INN, now=1000.0 + pause - 1).outcome, reg.UNAVAILABLE)
+                self.assertEqual(reg.lookup(INN2, now=1000.0 + pause - 1).outcome, reg.UNAVAILABLE)
+                self.assertEqual(len(self.calls), 1, "во время паузы запрос ушёл в DaData")
+                self.assertEqual(reg.lookup(INN, now=1000.0 + pause + 1).outcome, reg.FOUND)
+                self.assertEqual(len(self.calls), 2, "после паузы поиск не вернулся")
+
+    def test_unparsed_record_does_not_pause(self):
+        """Неразобранный ответ — про эту запись, а не про DaData: другие ИНН ищутся сразу."""
+        self.reply = {"suggestions": [None]}
+        reg.lookup(INN, now=1000.0)
+        self.reply = PARTY
+        reg.lookup(INN, now=1001.0)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_cache_served_during_pause(self):
+        reg.lookup(INN, now=1000.0)
+        self.reply = 403
+        reg.lookup(INN2, now=1001.0)
+        self.assertEqual(reg.lookup(INN, now=1002.0).outcome, reg.FOUND, "найденное раньше — из кэша и в паузу")
+        self.assertEqual(len(self.calls), 2)
+
+    def test_absurd_liquidation_date_is_not_500(self):
+        """Ревью PR #270: дата вне диапазона — без даты, а не исключение мимо разбора."""
+        for ms in (-10 ** 20, 10 ** 20, float("inf"), float("nan")):
+            with self.subTest(ms=ms):
+                reg.clear_cache()
+                dead = json.loads(json.dumps(PARTY))
+                dead["suggestions"][0]["data"]["state"] = {"status": "LIQUIDATED", "liquidation_date": ms}
+                self.reply = json.dumps(dead)
+                res = reg.lookup(INN)
+                self.assertEqual(res.outcome, reg.FOUND)
+                self.assertEqual(res.org.status_text, "ликвидирована")
 
     def test_foreign_record_is_not_found_org(self):
         other = json.loads(json.dumps(PARTY))
@@ -203,9 +249,13 @@ class TestEndpoint(_DaData):
     def test_ip_inn_and_typo_rejected_before_dadata(self):
         r = self.post(inn=INN_IP, name="ИП Петров")
         self.assertEqual(r.status_code, 422)
-        self.assertIn("ИП", r.json()["detail"])
-        self.assertEqual(self.post(inn=INN_BAD).status_code, 422)
-        self.assertEqual(self.post(inn="").status_code, 422)
+        self.assertIn("название не подбирается", r.json()["detail"])
+        for bad in (INN_BAD, INN_IP_BAD, ""):
+            with self.subTest(inn=bad):
+                r = self.post(inn=bad)
+                self.assertEqual(r.status_code, 422)
+                # Ревью PR #270: опечатка в 12 цифрах — «проверьте ИНН», а не «впишите название сами»
+                self.assertIn("Проверьте ИНН", r.json()["detail"])
         self.assertEqual(self.calls, [], "номер ушёл в DaData")
 
     def test_disabled_and_unavailable(self):
@@ -219,13 +269,26 @@ class TestEndpoint(_DaData):
         self.assertEqual(self.post(inn=INN).json(), {"outcome": "not_found"})
 
     def test_rate_limited(self):
+        self.reply = {"suggestions": []}
         with mock.patch.object(api, "_limit", SlidingWindow(2, window=3600.0)):
             self.assertEqual(self.post(inn=INN).status_code, 200)
-            self.assertEqual(self.post(inn=INN).status_code, 200)
-            r = self.post(inn=INN)
+            self.assertEqual(self.post(inn=INN2).status_code, 200)
+            r = self.post(inn=INN3)
         self.assertEqual(r.status_code, 429)
         self.assertEqual(r.json()["outcome"], "unavailable")
         self.assertIn("Retry-After", r.headers)
+        self.assertEqual(len(self.calls), 2)
+
+    def test_cached_repeat_does_not_spend_limit(self):
+        """Ревью PR #270: admin листает карточки, человек открывает правку анкеты — повтор того же ИНН из кэша
+        лимит частоты не тратит."""
+        self.reply = {"suggestions": []}
+        with mock.patch.object(api, "_limit", SlidingWindow(2, window=3600.0)):
+            for _ in range(5):
+                self.assertEqual(self.post(inn=INN).status_code, 200)
+            self.assertEqual(self.post(inn=INN2).status_code, 200, "повторы из кэша израсходовали лимит")
+            self.assertEqual(self.post(inn=INN3).status_code, 429)
+        self.assertEqual(len(self.calls), 2)
 
 
 class TestPages(_CabinetDB):
@@ -253,6 +316,19 @@ class TestPages(_CabinetDB):
             html = self._page(u, edit="1")
         self.assertNotIn('id="inn-lookup"', html)
         self.assertNotIn("/api/org-lookup", html)
+
+    def test_verified_inn_marked_for_script(self):
+        """Ревью PR #270: у подтверждённой организации скрипт не предлагает «Подставить название» — правка
+        названия сняла бы подтверждение. Скрипту нужен подтверждённый ИНН; у неподтверждённой — пусто."""
+        u = self._user()
+        with self.Session() as db:
+            q.set_user_org(db, u.id, "ПАО «Сбербанк»", INN)
+        self.assertIn('data-verified-inn=""', self._page(self._fresh(u.id), edit="1"))
+        with self.Session() as db:
+            q.verify_org(db, u.id, 99)
+        html = self._page(self._fresh(u.id), edit="1")
+        self.assertIn(f'data-verified-inn="{INN}"', html)
+        self.assertIn("verified && value === verified", html)
 
     def test_first_fill_has_lookup(self):
         """Анкета до чата (гейт профиля) открыта на правку — поиск там тоже."""
