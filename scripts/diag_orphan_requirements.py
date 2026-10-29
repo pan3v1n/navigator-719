@@ -175,13 +175,33 @@ def assign_groups(rows: list[Row]) -> None:
 RECONCILED = "D23 #251: перечень общей ячейки сверен с первоисточником — у каждой позиции группы полный"
 
 
-def _mark_reconciled(groups: list[dict], recs: list[dict]) -> int:
-    """`reconciled` у группы R29, если ВСЕ её позиции однозначно находятся в базе и несут ОДИН И ТОТ ЖЕ
-    непустой перечень — его записал `scripts/d23_groups.py --write` по сетке ячеек HTML Контура.
+SHARED_MANIFEST = ROOT / "knowledge_base" / "pp719" / "shared_cells.json"
 
-    Признак берётся из ДАННЫХ, а не из списка «что сверяли»: генератор видит раскол в тексте чанков (там он
-    навсегда), а неполон ли перечень в базе — знает только база. Одноимённая позиция (две записи на имя)
-    признаком не считается — группа остаётся с пометкой, это безопаснее."""
+
+def _manifest_lists(path: Path = SHARED_MANIFEST) -> list[dict]:
+    """Перечни манифеста сверки `D23`, у которых текст записей покрывает ячейку первоисточника не хуже порога."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    floor = data.get("min_recall", 0.9)
+    return [m for m in data.get("lists") or [] if (m.get("recall") or 0) >= floor]
+
+
+def _mark_reconciled(groups: list[dict], recs: list[dict], manifest: list[dict] | None = None) -> int:
+    """`reconciled` у группы R29, если ВСЕ её позиции однозначно находятся в базе, несут ОДИН И ТОТ ЖЕ
+    непустой перечень И входят в один перечень манифеста `D23` (`shared_cells.json`) с полнотой против ячейки
+    первоисточника не ниже порога.
+
+    Одинаковый перечень у позиций правка обеспечивает сама — он полноты не доказывает (ревью PR D23, H3:
+    «Аддитивные установки» I-25/26 получали одно требование о доле в уставном капитале, а ячейка шла дальше).
+    Доказательство — полнота в манифесте. Манифеста нет — пометка не снимается ни у кого. Одноимённая позиция
+    (две записи на имя) признаком не считается — группа остаётся с пометкой, это безопаснее."""
+    manifest = _manifest_lists() if manifest is None else manifest
+    member_sets = [(m["section"], {" ".join(p["product_name"].split()).lower() for p in m["members"]})
+                   for m in manifest]
     by_name: dict[tuple[str, str], list[dict]] = {}
     for r in recs:
         for k in {" ".join(r["product_name"].split()).lower(),
@@ -189,7 +209,7 @@ def _mark_reconciled(groups: list[dict], recs: list[dict]) -> int:
             by_name.setdefault((r["section_roman"], k), []).append(r)
     n = 0
     for g in groups:
-        blocks = []
+        blocks, names = [], set()
         for p_ in g.get("positions") or []:
             name = p_.get("product_name") or ""
             cand = (by_name.get((g["section"], " ".join(name.split()).lower()))
@@ -197,7 +217,10 @@ def _mark_reconciled(groups: list[dict], recs: list[dict]) -> int:
             cand = list({id(c): c for c in cand}.values())
             blocks.append(json.dumps(cand[0].get("requirement_blocks") or [], ensure_ascii=False, sort_keys=True)
                           if len(cand) == 1 else None)
-        if blocks and None not in blocks and len(set(blocks)) == 1 and blocks[0] != "[]":
+            if len(cand) == 1:
+                names.add(" ".join(cand[0]["product_name"].split()).lower())
+        verified = any(sec == g["section"] and names <= members for sec, members in member_sets)
+        if blocks and None not in blocks and len(set(blocks)) == 1 and blocks[0] != "[]" and verified:
             g["reconciled"] = RECONCILED
             n += 1
         else:

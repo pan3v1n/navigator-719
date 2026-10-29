@@ -117,6 +117,22 @@ class TestFullList(unittest.TestCase):
         self.assertTrue(how.startswith("разбор"), how)
         self.assertEqual(len([o for b in blocks for o in b["operations"]]), 2)
 
+    def test_dated_variant_in_block_label_is_not_covered(self):
+        """M1 ревью: у VII-35 вариант «до 1 января 2019 г.: … не более 50 процентов» стоял в подписи блока, а его
+        операции «покрывал» блок «с 1 января 2019 г.» донора — вариант терялся."""
+        ops = [(f"операция {w}", None) for w in ("сборка", "наладка", "испытания", "упаковка")]
+        donor = _rec("Донор", ops, 37, comp="с 1 января 2019 г.: соблюдение доли не более 70 процентов")
+        donor["requirement_blocks"].append({"component": "прочие условия", "operations": [
+            {"text": f"дополнительная операция {i}", "points": None} for i in range(6)]})
+        other = _rec("Член", ops, 35, comp="до 1 января 2019 г.: соблюдение доли не более 50 процентов")
+        text = ("до 1 января 2019 г.: соблюдение доли не более 50 процентов\nс 1 января 2019 г.: соблюдение доли не "
+                "более 70 процентов\n" + "\n".join(t for t, _ in ops) + "\n"
+                + "\n".join(f"дополнительная операция {i}" for i in range(6)))
+        blocks, how = d.full_list([other, donor], text)
+        self.assertEqual(how, "объединение блоков членов")
+        self.assertIn("до 1 января 2019 г.: соблюдение доли не более 50 процентов",
+                      [b.get("component") for b in blocks])
+
     def test_numbers_tell_operations_apart(self):
         """Ячейка гамма-камер и МР-томографов VII: «не более 50 процентов» ИЛИ «не более 70 процентов»."""
         op50 = d.norm("соблюдение процентной доли иностранных товаров - не более 50 процентов цены товара")
@@ -134,31 +150,77 @@ class TestFullList(unittest.TestCase):
 
 
 class TestContinuationJoin(unittest.TestCase):
-    """Ячейку рвут строки поправок во всю ширину; продолжение узнаётся по оборванной фразе."""
+    """Контур режет ячейку на куски по строкам кода; законченная ячейка кончается без знака, оборванная — на
+    «;», «:» или «,». Голова новой ячейки (права на документацию / частая голова раздела) склейку останавливает."""
 
     @staticmethod
     def _grp(code, req):
         return {"code": code, "codes": [code], "rows": [{"req": req, "name": code}], "excluded": False}
 
+    def _join(self, a, b, heads=None):
+        return d._join_continuations([self._grp("1", a), self._grp("2", b)], {} if heads is None else heads)
+
     def test_comma_tail_joins(self):
-        out = d._join_continuations([self._grp("1", f"{OPENER};\nправа использования товарного знака,"),
-                                     self._grp("2", "правообладателем которого является субъект")])
-        self.assertEqual(len(out), 1)
+        self.assertEqual(len(self._join(f"{OPENER};\nправа использования товарного знака,",
+                                        "правообладателем которого является субъект")), 1)
 
     def test_lowercase_after_unfinished_phrase_joins(self):
-        out = d._join_continuations([self._grp("1", f"{OPENER};\nнаправлена на комплексное предотвращение"),
-                                     self._grp("2", "и (или) минимизацию негативного воздействия")])
-        self.assertEqual(len(out), 1)
+        self.assertEqual(len(self._join(f"{OPENER};\nнаправлена на комплексное предотвращение",
+                                        "и (или) минимизацию негативного воздействия")), 1)
 
-    def test_points_list_after_semicolon_does_not_join(self):
-        """Газовозы XVIII законно начинают свой перечень операцией с баллами."""
-        out = d._join_continuations([self._grp("1", f"{OPENER};\nмонтаж (10 баллов);"),
-                                     self._grp("2", "монтаж судовой системы (15 баллов);")])
-        self.assertEqual(len(out), 2)
+    def test_points_operation_after_semicolon_joins(self):
+        """Суда XVIII — одна ячейка в 7 кусках: «… монтаж электрооборудования (95 баллов);» → «монтаж судовой
+        системы хранения сжиженного газа (250 баллов);» (ревью PR D23, H2: прежнее правило резало её на части)."""
+        self.assertEqual(len(self._join(f"{OPENER};\nмонтаж электрооборудования (95 баллов);",
+                                        "монтаж судовой системы хранения сжиженного газа (250 баллов);")), 1)
+
+    def test_same_opener_with_other_subject_joins(self):
+        """Аддитивные установки I: «… на срок не менее 5 лет;» → «наличие у субъекта … в уставном капитале доли
+        резидентов РФ:» — зачин тот же, но речь не о правах на документацию."""
+        self.assertEqual(len(self._join(
+            f"{OPENER} на срок не менее 5 лет;",
+            "наличие у субъекта деятельности в сфере промышленности - налогового резидента в уставном капитале "
+            "доли резидентов Российской Федерации:")), 1)
+
+    def test_rights_head_after_semicolon_starts_new_cell(self):
+        """«Смолы эпоксидные» XXI кончаются на «;» (неряшливость источника), а следом своя ячейка с правами."""
+        self.assertEqual(len(self._join("наличие разрешительных документов на объект;", f"{OPENER} на срок 5 лет;")), 2)
+        self.assertEqual(len(self._join("сборка;", "наличие у изготовителя учтенных копий конструкторской "
+                                                   "документации по ЕСКД;")), 2)
+
+    def test_learned_section_head_after_colon_starts_new_cell(self):
+        """IX: «… расчет баллов осуществляется по формуле:» → «1. соответствие заявителя …» — частая голова раздела."""
+        heads = {d.head_key("1. соответствие заявителя следующим обязательным условиям:"): 19}
+        self.assertEqual(len(self._join("при этом расчет баллов осуществляется по формуле:",
+                                        "1. соответствие заявителя следующим обязательным условиям:", heads)), 2)
+
+    def test_quote_closed_amendment_tail_is_finished(self):
+        """«… (3 балла)";» — закрывающая кавычка вставки поправки: ячейка закончена."""
+        self.assertEqual(len(self._join('сборка (обязательная операция) (3 балла)";', "сборка изделия;")), 2)
 
     def test_finished_sentence_does_not_join(self):
-        out = d._join_continuations([self._grp("1", f"{OPENER}."), self._grp("2", "сборка изделия")])
+        self.assertEqual(len(self._join(f"{OPENER}.", "сборка изделия")), 2)
+        self.assertEqual(len(self._join("контрольно-измерительные операции (10 баллов)", "сборка изделия")), 2)
+
+    def test_without_heads_only_comma_and_broken_phrase(self):
+        out = d._join_continuations([self._grp("1", "сборка;"), self._grp("2", "покраска;")], None)
         self.assertEqual(len(out), 2)
+
+    def test_joined_chunk_does_not_open_new_list(self):
+        """Стык склейки не режется обратно на перечни по зачину (см. `groups_of`): кусок I-121 начинается с
+        «наличие у субъекта …»."""
+        rows = d.grid(_tables(_table(
+            f'<tr><td>28.41.34.100</td><td>Изделие А</td><td>{OPENER} на срок не менее 5 лет;</td></tr>'
+            '<tr><td colspan="3">(в ред. Постановления Правительства РФ от 01.01.2025 N 1)</td></tr>'
+            '<tr><td>28.96.10.121</td><td>Изделие Б</td><td>наличие у субъекта деятельности в сфере промышленности - '
+            'налогового резидента в уставном капитале доли резидентов Российской Федерации:</td></tr>'
+            '<tr><td>28.96.10.122</td><td>Изделие В</td><td>для акционерных обществ - не менее 75 процентов</td></tr>'))[0])
+        groups = d.groups_of(rows, heads={})
+        mine = [g for g in groups if "28.41.34.100" in g["codes"]]
+        self.assertEqual(len(mine), 1)
+        self.assertEqual(mine[0]["codes"], ["28.41.34.100", "28.96.10.121", "28.96.10.122"])
+        self.assertEqual(len(mine[0]["segments"]), 1)
+        self.assertEqual(mine[0]["segments"][0]["products"], ["Изделие А", "Изделие Б", "Изделие В"])
 
 
 class TestSectionNoteMoved(unittest.TestCase):
@@ -205,6 +267,13 @@ class TestShareCellThresholds(unittest.TestCase):
         self.assertEqual(len(log), 1)
         self.assertEqual(qual["min_threshold"], self.THR)
 
+    def test_group_of_several_lists_shares_nothing(self):
+        """L4 ревью: коды сравниваются с кодами ВСЕЙ группы — при нескольких перечнях в группе это не
+        доказательство для одного из них."""
+        rep, qual = self._report("из 26.11.22.200 | из 26.11.22.210 | 26.11.22.216")
+        rep["IV"]["shared"][0]["group_segments"] = 2
+        self.assertEqual(d.share_cell_thresholds(rep, self.NOTES), [])
+
     def test_different_code_lists_share_nothing(self):
         """В общем случае члены ячейки законно имеют разные пороги (V «из 27.12»)."""
         rep, qual = self._report("из 26.11.22.200 | 26.11.22.216")
@@ -242,18 +311,65 @@ class TestCorpusAfterD23(unittest.TestCase):
     def _ops(r):
         return [o for b in r.get("requirement_blocks") or [] for o in b.get("operations") or []]
 
+    def _texts(self, r):
+        return [(o.get("text") or "", o.get("points")) for o in self._ops(r)]
+
+    def _all_text(self, r):
+        return " ".join((b.get("component") or "") + " " + (b.get("note") or "") + " "
+                        + " ".join(o.get("text") or "" for o in b.get("operations") or [])
+                        for b in r.get("requirement_blocks") or [])
+
+    # Факты ниже — ЦИТАТЫ ячеек HTML Контура 508574, а не вывод инструмента: равенство блоков членов
+    # `reconcile` обеспечивает сам по построению и как проверка ничего не доказывает (ревью PR D23).
+
     def test_combines_carry_whole_list(self):
         """«Комбайны зерноуборочные» несли 1 операцию из перечня, остальное — «Машинокомплекты»."""
         a = self._one("III", "Комбайны зерноуборочные")
-        b = self._one("III", "Машинокомплекты комбайнов зерноуборочных")
         self.assertGreaterEqual(len(self._ops(a)), 170)
-        self.assertEqual(self._blocks(a), self._blocks(b))
+
+    def test_ships_carry_one_list_from_head_to_tail(self):
+        """Суда XVIII — одна ячейка в 7 кусках (H2 ревью): у газовоза, сухогруза и ледокола — от «закладка судна
+        (обязательное условие)» до «сдача судна (обязательное условие)», с газовой системой на 250 баллов."""
+        for name in ("Суда наливные морские", "Суда сухогрузные речные самоходные", "Ледоколы", "Суда круизные морские"):
+            r = self._one("XVIII", name)
+            joined = self._all_text(r)
+            self.assertIn("закладка судна (обязательное условие)", joined, name)
+            self.assertIn("сдача судна (обязательное условие)", joined, name)
+            self.assertIn(("монтаж судовой системы хранения сжиженного газа", 250),
+                          [(t[:48], p) for t, p in self._texts(r)], name)
+
+    def test_pesticides_carry_operations_of_the_cell(self):
+        """XXI 20.20.1…20.20.15 — одна ячейка (H2): у «Гербицидов» есть лаборатория (кусок 20.20.13) и
+        операции куска 20.20.15."""
+        joined = self._all_text(self._one("XXI", "Гербициды"))
+        self.assertIn("аналитической лаборатории", joined)
+        self.assertIn("измельчение", joined)
+
+    def test_additive_installations_carry_operations_of_the_cell(self):
+        """I-24…I-27 — одна ячейка (H3): у «фотополимеризации» — доля в уставном капитале И «сборка (3 балла)»."""
+        # «для акционерных обществ - не менее 75 процентов …» разборщик положил у I-26 в `min_threshold` — это
+        # класс `D24` #267 (текст ячейки не в своём поле), блоками его правка не переносит
+        r = self._one("I", "Аддитивные установки фотополимеризации")
+        self.assertIn("доли резидентов Российской Федерации", self._all_text(r))
+        self.assertIn(("сборка", 3), [(t.strip(), p) for t, p in self._texts(r)])
+
+    def test_record_thresholds_not_copied_between_members(self):
+        """H1 ревью: порог записи одного члена перекрывал верный порог примечания у соседей."""
+        from app.rag import thresholds as T
+
+        def eff(sec, prefix):
+            r = self._one(sec, prefix)
+            return r.get("min_threshold") or T.lookup_threshold(r["okpd2_codes"], r["product_name"], sec) or ""
+
+        self.assertIn("[прим. 26]", eff("IX", "Машины вычислительные электронные цифровые, поставляемые"))
+        self.assertIn("[прим. 26]", eff("IX", "Машины вычислительные электронные цифровые прочие"))
+        self.assertIn("[прим. 32", eff("XXVII", "Игры прочие"))
+        self.assertIn("[прим. 56", eff("I", "Аддитивные установки фотополимеризации"))
 
     def test_transmitters_44_45_get_list_of_43(self):
         iv = {r["source_anchor"].rsplit(" ", 1)[-1]: r for r in self.recs["IV"]}
         self.assertTrue(self._ops(iv["43"]))
-        self.assertEqual(self._blocks(iv["44"]), self._blocks(iv["43"]))
-        self.assertEqual(self._blocks(iv["45"]), self._blocks(iv["43"]))
+        self.assertIn("сборка приемо-передающих устройств", self._all_text(iv["44"]))
         self.assertNotIn("доразбор", iv["44"].get("notes") or "")
 
     def test_machine_tools_keep_head_of_list(self):
@@ -268,10 +384,8 @@ class TestCorpusAfterD23(unittest.TestCase):
         self.assertIn("не более 50 процентов", texts)
         self.assertIn("не более 70 процентов", texts)
 
-    def test_freons_share_one_list_without_neighbour_labels(self):
+    def test_freons_without_neighbour_labels(self):
         a = self._one("XXI", "Хладон-218")
-        b = self._one("XXI", "Хладон-125 ХП")
-        self.assertEqual(self._blocks(a), self._blocks(b))
         comps = {(bl.get("component") or "") for bl in a["requirement_blocks"]}
         self.assertFalse({c for c in comps if c.startswith(("Хладон", "Мономер"))}, comps)
 
@@ -300,37 +414,62 @@ class TestCorpusAfterD23(unittest.TestCase):
 
 
 class TestR29AfterD23(unittest.TestCase):
-    """Группы R29 сверены: пометка «перечень неполный» снята, а состав группы и роли строк остались."""
+    """Пометка «перечень неполный» снимается только у групп, полнота которых доказана манифестом сверки
+    (`shared_cells.json`), — а состав группы и роли строк остаются."""
 
-    def test_reconciled_groups_lose_incomplete_notice_but_keep_roles(self):
+    def test_reconciled_only_with_manifest_proof(self):
+        import diag_orphan_requirements as G
         from app.rag import fragments
         groups = json.loads((ROOT / "knowledge_base/pp719/fragmented_requirements.json").read_text(encoding="utf-8"))
-        self.assertTrue(groups)
-        self.assertTrue(all(g.get("reconciled") for g in groups), [g["section"] for g in groups if not g.get("reconciled")])
-        self.assertFalse(fragments.is_fragmented("Хладон-218 (октафторпропан)"))
-        self.assertFalse(fragments.is_fragmented("Аддитивные установки экструзии материала"))
+        verified = G._manifest_lists()
+        self.assertTrue(verified, "манифест сверки пуст или отсутствует")
+
+        def norm(n):
+            return " ".join(n.split("\n")[0].split()).lower()
+
+        for g in groups:
+            if not g.get("reconciled"):
+                continue
+            names = {norm(p["product_name"]) for p in g["positions"]}
+            proof = [m for m in verified if m["section"] == g["section"]
+                     and all(any(norm(x["product_name"]).startswith(n) for x in m["members"]) for n in names)]
+            self.assertTrue(proof, (g["section"], sorted(names)))
         # EV6/EV7: обрывок и продукт одной ячейки — по-прежнему одна группа, квалификатор — квалификатор
-        self.assertIsNotNone(fragments.group_of("Светодиоды белого диапазона"))
         self.assertEqual(fragments.group_of("Светодиоды (в части светодиодов белого диапазона)"),
                          fragments.group_of("Светодиоды белого диапазона"))
         self.assertTrue(fragments.is_scope_qualifier("Светодиоды (в части светодиодов белого диапазона)"))
 
 
 class TestReconciledMarkInGenerator(unittest.TestCase):
-    """`diag_orphan_requirements._mark_reconciled`: признак — из данных, одноимённая позиция его не даёт."""
+    """`diag_orphan_requirements._mark_reconciled`: одинаковый перечень — НЕ доказательство (его даёт сама правка);
+    нужен перечень манифеста с полнотой против ячейки, одноимённая позиция признака не даёт."""
 
     def test_mark(self):
         import diag_orphan_requirements as G
         same = [{"component": None, "operations": [{"text": "сборка", "points": 1}]}]
         recs = [{**_rec("А", sec="T"), "requirement_blocks": same}, {**_rec("Б", sec="T"), "requirement_blocks": same},
                 {**_rec("В", sec="T"), "requirement_blocks": [{"operations": [{"text": "иное"}]}]},
-                {**_rec("Д", sec="T"), "requirement_blocks": same}, {**_rec("Д", sec="T"), "requirement_blocks": same}]
+                {**_rec("Д", sec="T"), "requirement_blocks": same}, {**_rec("Д", sec="T"), "requirement_blocks": same},
+                {**_rec("Е", sec="T"), "requirement_blocks": same}, {**_rec("Ж", sec="T"), "requirement_blocks": same}]
+        manifest = [{"section": "T", "recall": 1.0, "members": [{"product_name": n} for n in "АБВД"]}]
         groups = [{"section": "T", "positions": [{"product_name": "А"}, {"product_name": "Б"}]},
                   {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "В"}]},
                   {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "Д"}]},
-                  {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "нет такой"}]}]
-        self.assertEqual(G._mark_reconciled(groups, recs), 1)
-        self.assertEqual([bool(g.get("reconciled")) for g in groups], [True, False, False, False])
+                  {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "нет такой"}]},
+                  {"section": "T", "positions": [{"product_name": "Е"}, {"product_name": "Ж"}]}]
+        self.assertEqual(G._mark_reconciled(groups, recs, manifest), 1)
+        self.assertEqual([bool(g.get("reconciled")) for g in groups], [True, False, False, False, False])
+        self.assertEqual(G._mark_reconciled(groups, recs, []), 0)          # без манифеста — ни одной пометки
+
+    def test_manifest_floor(self):
+        import tempfile
+        import diag_orphan_requirements as G
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "m.json"
+            p.write_text(json.dumps({"min_recall": 0.9, "lists": [{"section": "T", "recall": 0.89, "members": []},
+                                                                   {"section": "T", "recall": 0.95, "members": []}]}),
+                         encoding="utf-8")
+            self.assertEqual([m["recall"] for m in G._manifest_lists(p)], [0.95])
 
 
 class TestIncompleteThresholdListCountsOnlyLost(unittest.TestCase):

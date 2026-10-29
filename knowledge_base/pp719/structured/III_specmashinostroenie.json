@@ -10028,7 +10028,7 @@
     ],
     "tnved_codes": [],
     "requirement_type": "points",
-    "min_threshold": "с 1 января 2024 г. - на уровне не менее 70 процентов (25 баллов); с 1 января 2026 г. на уровне не менее 80 процентов (25 баллов)",
+    "min_threshold": null,
     "requirement_blocks": [
       {
         "component": "Права на документацию",
@@ -20923,7 +20923,7 @@
     ],
     "tnved_codes": [],
     "requirement_type": "mixed",
-    "min_threshold": "не менее 8, с 1 января 2018 г. - не менее 10, с 1 января 2020 г. - не менее 12",
+    "min_threshold": null,
     "requirement_blocks": [
       {
         "component": "общие требования",

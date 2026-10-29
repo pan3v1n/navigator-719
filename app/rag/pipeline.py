@@ -431,7 +431,12 @@ def format_context(hits: list[Hit], query: str | None = None,
     tail: list[str] = []          # K6: строки НЕцелевых кандидатов, сворачиваются в один блок
     for i, h in enumerate(hits, 1):
         is_target = any(h is t for t in targets)
-        same_cell = not is_target and fragments.group_of(h.product_name) in groups
+        # D23 #251: у СВЕРЕННОЙ группы (пометка «перечень неполный» снята, `is_fragmented` → False) полный
+        # перечень есть у самой целевой — требования соседа его лишь повторяли бы (ревью: окно светодиодов IV
+        # 6.3 → 21.7 тыс. символов, сумма показанных баллов 500 при одном перечне на 100). Сосед — как прочие
+        # нецелевые (EV7): имя, код, якорь.
+        same_cell = (not is_target and fragments.group_of(h.product_name) in groups
+                     and fragments.is_fragmented(h.product_name))
         # EV20 #117: имя раздела — чистое (без «<5>» и «(в ред. …)», которые модель копировала в ответ),
         # маркер сноски — отдельной пометкой, чтобы указатель на неё не пропал (`retriever.section_name`).
         name, marks = retriever.section_name(h.section_title), retriever.section_footnotes(h.section_title)

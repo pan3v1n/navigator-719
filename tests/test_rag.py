@@ -636,9 +636,26 @@ class TestContextAndDisclaimer(unittest.TestCase):
         EV7 убирал требования всех нецелевых, включая соседние строки той же ячейки, — и ответ о
         белых светодиодах терял 7 операций из 22, при том что его же пометка неполноты отсылает
         «к соседним позициям той же группы»."""
+        ctx = self._split_cell_context(fragmented=True)
+        self.assertIn("технические условия", ctx)          # сиблинг той же ячейки — при требованиях
+        self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
+        self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
+
+    def test_reconciled_cell_sibling_does_not_repeat_the_list(self):
+        """`D23` #251: у СВЕРЕННОЙ ячейки полный перечень есть у самой целевой — требования соседа лишь
+        повторили бы его (ревью: окно светодиодов IV 6.3 → 21.7 тыс. символов, баллов 500 при перечне на 100).
+        Сосед — как прочие нецелевые: без требований и без пометки «другая строка той же ячейки»."""
+        ctx = self._split_cell_context(fragmented=False)
+        self.assertNotIn("технические условия", ctx)
+        self.assertNotIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)
+        self.assertIn("сборка кристалла", ctx)             # у целевой — её перечень
+
+    def _split_cell_context(self, fragmented: bool) -> str:
         from app.rag import fragments
-        with mock.patch.object(fragments, "group_of", side_effect=lambda n: 1 if "Светодиод" in (n or "") else None):
-            ctx = format_context([
+        in_group = lambda n: "Светодиод" in (n or "")  # noqa: E731
+        with mock.patch.object(fragments, "group_of", side_effect=lambda n: 1 if in_group(n) else None), \
+                mock.patch.object(fragments, "is_fragmented", side_effect=lambda n: fragmented and in_group(n)):
+            return format_context([
                 make_hit(product_name="Светодиоды белого диапазона", score=0.9,
                          requirement_blocks=[{"operations": [{"text": "сборка кристалла", "points": 30}]}]),
                 make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.8,
@@ -646,9 +663,6 @@ class TestContextAndDisclaimer(unittest.TestCase):
                 make_hit(product_name="Насосы", score=0.7,
                          requirement_blocks=[{"operations": [{"text": "литьё", "points": 55}]}]),
             ])
-        self.assertIn("технические условия", ctx)          # сиблинг той же ячейки — при требованиях
-        self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
-        self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
 
     def test_section_methodology_record_is_never_the_target(self):
         """Псевдозапись раздела — это ПОРОГИ раздела, а не продукция.

@@ -205,33 +205,94 @@ def section_tables(tables, recs) -> dict[str, list[list[dict]]]:
     return out
 
 
-def _join_continuations(groups: list[dict]) -> list[dict]:
-    """Группа, чей перечень — ПРОДОЛЖЕНИЕ перечня предыдущей, присоединяется к ней.
+_AMEND_TAIL_RE = re.compile(r"\s*\((?:в\s+ред|введ)[^)]*\)\s*$", re.I)
+_QUOTE_END_RE = re.compile(r"[\"»]\s*[;.]?$")
+# Голова ячейки, начатой с «наличие у …»: права или копии ДОКУМЕНТАЦИИ («наличие у юридического лица … прав на
+# конструкторскую …», XXII «наличие у изготовителя учтенных копий конструкторской документации»). Тот же зачин
+# с другим предметом — середина перечня («… в уставном капитале доли резидентов РФ:» у аддитивных установок I).
+_HAVE_RE = re.compile(r"^(?:(?:до|с)\s+\d{1,2}\s+\w+\s+\d{4}\s*г\.?:?\s*)?наличие\s+у\b", re.I)
+_DOCS_RIGHTS_RE = re.compile(r"\b(?:прав\w*|копи\w*)\b[^;\n]{0,120}?документац", re.I)
 
-    Вёрстка рвёт общую ячейку и через строку с кодом, если между ними стоит поправка во всю ширину
-    («Аддитивные установки экструзии материала» начинаются с «для акционерных обществ - не менее 75
-    процентов» — середины перечня «Аддитивных установок фотополимеризации»). Признак тот же, что у
-    генератора списка `R29` (`diag_orphan_requirements.find_fragmented`): предыдущий перечень оборван
-    двоеточием, а этот начинается не с зачина требования (`_OPENER` генератора).
 
-    После «;» — только продолжение перечня БЕЗ баллов (документы у «Светодиодов белого диапазона»:
-    «…схемы принципиальные электрические <51>;» → «сборочные чертежи на изделие <51>;»). Балльный перечень
-    законно начинается с операции («монтаж судовой системы хранения сжиженного газа (… баллов)» у
-    газовозов XVIII — свой полный перечень), и склейка по «;» раздала бы его соседям: замер на 508574 —
-    перечни судов, которые корпус несёт целиком, превращались в «обрывки» общего."""
+def _first_line(grp: dict) -> str:
+    return next((x["req"] for x in grp["rows"] if x["req"]), "").strip().split("\n")[0]
+
+
+def _tail_state(grp: dict) -> str:
+    """Чем кончается текст ячейки группы: «end» — законченная ячейка, «;» / «:» / «,», «letter» — оборвана
+    на слове. Хвост «(в ред. …)» знаком конца не считается; закрывающая кавычка вставки поправки («…(3 балла)";»)
+    — конец ячейки (так кончается текст, вставленный актом)."""
+    text = [x["req"] for x in grp["rows"] if x["req"]]
+    t = _AMEND_TAIL_RE.sub("", text[-1].rstrip()) if text else ""
+    if not t or _QUOTE_END_RE.search(t):
+        return "end"
+    if t[-1] in ";:,":
+        return t[-1]
+    return "letter" if t[-1].isalpha() else "end"
+
+
+def head_key(line: str) -> str:
+    return " ".join(norm(line).split()[:6])
+
+
+def section_heads(grids: list[list[dict]]) -> dict[str, int]:
+    """Как в разделе начинаются ячейки: первые шесть слов куска, который открывает таблицу или идёт после
+    ЗАКОНЧЕННОЙ ячейки, и сколько раз. В IX 19 ячеек открывает «1. соответствие заявителя следующим
+    обязательным условиям», в XXII 15 — «наличие у изготовителя учтенных копий конструкторской документации»."""
+    heads: dict[str, int] = defaultdict(int)
+    for g in grids:
+        prev = None
+        for grp in groups_of(g, heads=None):
+            if not _first_line(grp):
+                continue
+            if prev is None or _tail_state(prev) == "end":
+                heads[head_key(_first_line(grp))] += 1
+            prev = grp
+    return dict(heads)
+
+
+def _is_head(line: str, heads: dict[str, int]) -> bool:
+    if _HAVE_RE.match(line):
+        return bool(_DOCS_RIGHTS_RE.search(line[:300]))
+    return heads.get(head_key(line), 0) >= 2
+
+
+def _join_continuations(groups: list[dict], heads: dict[str, int] | None = None) -> list[dict]:
+    """Группа, чей текст — ПРОДОЛЖЕНИЕ ячейки предыдущей, присоединяется к ней.
+
+    Контур режет длинную ячейку на куски по строкам кода (свой ROWSPAN у каждого куска, в RTF — `\\clvmgf`
+    заново), а ячейку рвут ещё и поправки во всю ширину. Признак — ТЕКСТ: законченная ячейка на 508574 кончается
+    без знака (1027 стыков) или точкой (9), а оборванная — на «;», «:» или «,» (55). Поэтому:
+      * хвост «,» — продолжение («…права использования товарного знака,» → «правообладателем которого…», IV);
+      * хвост «;» или «:» — продолжение, если следующий кусок не голова ячейки (`_is_head`): перечень судов
+        XVIII — ОДНА ячейка в 7 кусках, от «наличие у юридического лица …» до «сдача судна (обязательное
+        условие)» — единственной строки без «;»; куски начинаются операцией с баллами («монтаж судовой системы
+        хранения сжиженного газа (250 баллов)» продолжает «… монтаж электрооборудования (95 баллов);»);
+      * хвост на слове + строчная буква в начале, не зачин — оборванная фраза («…комплексное предотвращение» →
+        «и (или) минимизацию …», XXI);
+      * хвост `";` (закрывающая кавычка вставки поправки) — ячейка закончена, следом идёт новая.
+    ⚠ Неряшливость источника: «Смолы эпоксидные» и «Герметики» XXI кончаются на «;», а следом открывается своя
+    ячейка с правами на документацию — её и ловит `_is_head`. Без `heads` (сбор голов раздела) — только «,» и
+    оборванная фраза."""
     out: list[dict] = []
     for grp in groups:
         first = next((x["req"] for x in grp["rows"] if x["req"]), "").strip()
-        prev_text = [x["req"] for x in out[-1]["rows"] if x["req"]] if out else []
-        tail = prev_text[-1].rstrip() if prev_text else ""
-        # Оборванная фраза — тоже продолжение: запятой предложение не кончается («…или права использования
-        # товарного знака,» → «правообладателем которого является…» у светодиодов IV-7 → IV-8: ячейку рвут
-        # строки поправок «(в ред. … N 2033)» во всю ширину).
-        broken = tail.endswith(",") or (tail[-1:].isalpha() and first[:1].islower())
-        cont = (tail.endswith(":") or broken
-                or (tail.endswith(";") and not POINTS_RE.search(first.split("\n")[0])))
-        if (out and first and cont and not grp["excluded"] and not out[-1]["excluded"]
-                and not LIST_OPENER_RE.match(first)):
+        if not (out and first) or grp["excluded"] or out[-1]["excluded"]:
+            out.append(grp)
+            continue
+        state, line = _tail_state(out[-1]), first.split("\n")[0]
+        if state == ",":
+            cont = True
+        elif state in ";:":
+            cont = heads is not None and not _is_head(line, heads)
+        elif state == "letter":
+            cont = first[:1].islower() and not LIST_OPENER_RE.match(first)
+        else:
+            cont = False
+        if cont:
+            # на стыке новый перечень не открывается (см. `groups_of`); копия строки — сетка таблицы общая
+            k = next(i for i, x in enumerate(grp["rows"]) if x["req"])
+            grp["rows"][k] = {**grp["rows"][k], "cont": True}
             out[-1]["rows"] += grp["rows"]
             out[-1]["codes"] += grp["codes"]
             out[-1]["continued"] = True
@@ -240,8 +301,9 @@ def _join_continuations(groups: list[dict]) -> list[dict]:
     return out
 
 
-def groups_of(g: list[dict]) -> list[dict]:
-    """Строки таблицы раздела → группы «код → [перечни: текст + продукты]».
+def groups_of(g: list[dict], heads: dict[str, int] | None = None) -> list[dict]:
+    """Строки таблицы раздела → группы «код → [перечни: текст + продукты]». `heads` — головы ячеек раздела
+    (`section_heads`): без них склейка продолжений по «;» и «:» не делается.
 
     Новый код открывает новую группу, КРОМЕ строки, куда ячейка требований заходит сверху (ROWSPAN): такие
     коды делят одну ячейку, то есть один перечень («Краны … стрелкового типа» / «прочие» / «Автокраны»).
@@ -265,12 +327,13 @@ def groups_of(g: list[dict]) -> list[dict]:
             if x["req_cell"] is not None and not x["req_spans_in"]:
                 cur["req_cell"] = x["req_cell"]
             cur["rows"].append(x)
-    out = _join_continuations(out)
+    out = _join_continuations(out, heads)
     for grp in out:
         segs: list[dict] = []
         seg = None
         for x in grp["rows"]:
-            if seg is None or (x["name"] and x["req"] and OPENER_RE.match(x["req"]) and seg["text"]):
+            if seg is None or (x["name"] and x["req"] and not x.get("cont") and OPENER_RE.match(x["req"])
+                               and seg["text"]):
                 seg = {"text": [], "products": []}
                 segs.append(seg)
             if x["req"]:
@@ -346,7 +409,8 @@ def analyse(by_sec: dict, recs: dict, min_cover: float, gap: float) -> dict:
     for sec in [s for s in recs if s in by_sec]:
         find = match_records(recs[sec])
         segs, seen, where = [], set(), {}
-        groups = [grp for g in by_sec[sec] for grp in groups_of(g)]
+        heads = section_heads(by_sec[sec])
+        groups = [grp for g in by_sec[sec] for grp in groups_of(g, heads)]
         for gi, grp in enumerate(groups):
             for si, seg in enumerate(grp["segments"]):
                 full = "\n".join(seg["text"])
@@ -371,6 +435,7 @@ def analyse(by_sec: dict, recs: dict, min_cover: float, gap: float) -> dict:
                                     "source": src, "parent": parent.get("product_name") if parent else None})
                 union = set(toks(" ".join(own_text(r) for r in objs)))
                 segs.append({"group": gi, "seg": si, "code": " | ".join(grp["codes"])[:120],
+                             "group_segments": len(grp["segments"]),
                              "union_cover": round(sum(1 for w in ft if w in union) / len(ft), 3) if ft else 1.0,
                              "excluded": grp["excluded"], "into_excluded": grp["into_excluded"],
                              "chars": len(full), "text": full, "members": members, "_recs": objs})
@@ -464,8 +529,11 @@ def full_list(recs: list[dict], text: str) -> tuple[list[dict], str]:
     # у станков I (28.41.1–28.41.4) ячейку начинают «наличие управляющего программно-аппаратного комплекса
     # (25 баллов)» и «изготовление станины» — 8 операций у I-13, остальные 204 у I-19, и разбор I-19 покрывал
     # ячейку не хуже объединения (слова перечня повторяются), а первые 8 операций терялись.
-    pool = _op_texts(best)
-    extra = [op for r in recs if r is not best for op in _op_texts(r) if not _op_covered(op, pool)]
+    # M1 ревью: сравниваются и подписи блоков — в них стоят даты вариантов («до 1 января 2019 г.: … не более
+    # 50 процентов» у VII-35 «Холодильники комбинированные лабораторные» терялся: его операции «покрывал» блок
+    # «с 1 января 2019 г.» донора VII-37).
+    pool = _req_texts(best, names)
+    extra = [op for r in recs if r is not best for op in _req_texts(r, names) if not _op_covered(op, pool)]
     if not extra and _cover(own_text(best), ft) >= _cover(" ".join(own_text(r) for r in recs), ft) - 0.02:
         return copy.deepcopy(_unlabel(best.get("requirement_blocks") or [], names)), f"разбор «{best['product_name'][:60]}»"
     return copy.deepcopy(union), "объединение блоков членов"
@@ -488,6 +556,18 @@ def _unlabel(blocks: list[dict], names: set[str]) -> list[dict]:
 
 def _op_texts(r: dict) -> list[str]:
     return [norm(o.get("text")) for b in r.get("requirement_blocks") or [] for o in b.get("operations") or []]
+
+
+def _req_texts(r: dict, names: set[str]) -> list[str]:
+    """Операции записи и подписи её блоков (`component`, `note`), кроме подписи-имени члена перечня."""
+    out = []
+    for b in r.get("requirement_blocks") or []:
+        for k in ("component", "note"):
+            t = norm(b.get(k))
+            if t and t not in names:
+                out.append(t)
+        out += [norm(o.get("text")) for o in b.get("operations") or []]
+    return [t for t in out if t]
 
 
 def _op_covered(op: str, pool: list[str]) -> bool:
@@ -519,7 +599,11 @@ def reconcile(report: dict) -> list[dict]:
             recs = x["_recs"]
             blocks, how = full_list(recs, x["text"])
             rtype = _rtype(blocks, recs)
-            thresholds = {r.get("min_threshold") for r in recs if r.get("min_threshold")}
+            # ⚠ Порог записи (`min_threshold`) НЕ переносится между членами: рантайм берёт его ПЕРВЫМ
+            # (`min_threshold or lookup_threshold`), и чужое значение перекрыло бы верный порог примечания. Ревью
+            # PR D23: «20 баллов» (балл строки ячейки) у IX-12/13 вместо порогов прим. 26, «не менее 50 баллов» у
+            # XXVII-12…14 вместо прим. 32, требование о доле в уставном капитале у I-25 вместо прим. 56. Порог по
+            # ячейке — только `share_cell_thresholds`, с доказательством.
             for r in recs:
                 before = sum(len(b.get("operations") or []) for b in r.get("requirement_blocks") or [])
                 changed = []
@@ -529,10 +613,6 @@ def reconcile(report: dict) -> list[dict]:
                 if rtype and r.get("requirement_type") != rtype:
                     r["requirement_type"] = rtype
                     changed.append("тип")
-                # Порог в общей ячейке общий; разные пороги у членов — порог примечания по коду, не трогаем.
-                if not r.get("min_threshold") and len(thresholds) == 1:
-                    r["min_threshold"] = next(iter(thresholds))
-                    changed.append("порог")
                 for rx, what in ((_EMPTY_NOTE_RE, "снята пометка «требования не указаны»"),
                                  (_GROUP_NOTE_RE, "снята пометка «доразбор»")):
                     if r.get("notes") and rx.search(r["notes"]):
@@ -616,7 +696,8 @@ def share_cell_thresholds(report: dict, notes_text: str | None = None) -> list[d
                                                                      r["product_name"], sec)) for r in recs]
             have = {t for _, t in got if t}
             miss = [r for r, t in got if not t]
-            if len(have) != 1 or not miss:
+            # L4 ревью: коды сравниваются с кодами ВСЕЙ группы — доказательство только для группы из одного перечня
+            if len(have) != 1 or not miss or x.get("group_segments", 1) != 1:
                 continue
             thr = next(iter(have))
             refs = re.findall(r"\[прим\. ([^\]]+)\]", thr)
@@ -630,6 +711,34 @@ def share_cell_thresholds(report: dict, notes_text: str | None = None) -> list[d
                             "anchor": r.get("source_anchor"), "ops": [0, 0], "what": [f"порог прим. {refs[0]}"],
                             "source": "коды примечания = коды ячейки"})
     return log
+
+
+MANIFEST = ROOT / "knowledge_base" / "pp719" / "shared_cells.json"
+MANIFEST_MIN_RECALL = 0.9
+
+
+def shared_manifest(report: dict, sha: str, source: str) -> dict:
+    """Манифест сверки: каждый общий перечень (≥ 2 записи), его члены и насколько текст записей покрывает
+    ячейку первоисточника — ПОСЛЕ правки. Из него генератор R29 решает, снимать ли пометку «перечень неполный»
+    (ревью PR D23, H3: признак «у всех позиций один перечень» правка обеспечивает сама и полноты не доказывает)."""
+    lists = []
+    for sec, rep in report.items():
+        for x in rep["shared"]:
+            recs = x["_recs"]
+            ft = toks(x["text"])
+            covers = [_cover(own_text({"requirement_blocks": r.get("requirement_blocks")}), ft) for r in recs]
+            same = len({json.dumps(r.get("requirement_blocks"), ensure_ascii=False, sort_keys=True) for r in recs}) == 1
+            lists.append({
+                "section": sec, "code": x["code"],
+                "members": [{"product_name": r["product_name"], "anchor": r.get("source_anchor")} for r in recs],
+                "same_list": same,
+                # полнота — у ХУДШЕГО члена: блоки записи (без notes — до модели они не доходят) против ячейки
+                "recall": round(min(covers), 3) if covers else 0.0,
+                "ops": [sum(len(b.get("operations") or []) for b in r.get("requirement_blocks") or []) for r in recs],
+            })
+    return {"_comment": ("D23 #251: общие ячейки требований по сетке HTML Контура и полнота текста записей против "
+                         "ячейки. Генерируется `scripts/d23_groups.py <HTML> --write`; правится ТОЛЬКО перегенерацией."),
+            "source": source, "sha256_16": sha, "min_recall": MANIFEST_MIN_RECALL, "lists": lists}
 
 
 def write_files(files: dict[Path, list[dict]]) -> None:
@@ -681,6 +790,8 @@ def main() -> int:
     print(f"ВСЕГО: общих перечней {tot['shared']}, расколото {tot['split']}, обрывков {tot['fragments']}, "
           f"наследование: тот же перечень {tot['ok']}, пустая ячейка {tot['empty']}"
           f" / не в том перечне {tot['bad']}, записей вне таблицы {tot['unmatched']}")
+    outside = sorted(set(recs) - set(report))
+    print(f"разделы ВНЕ сверки (таблица без зачина «наличие у …» или не узнана): {', '.join(outside) or 'нет'}")
     if args.json:
         clean = {s: {**r, "shared": [{k: v for k, v in x.items() if k != "_recs"} for x in r["shared"]],
                      "into_excluded": [{k: v for k, v in x.items() if k != "_recs"} for x in r["into_excluded"]]}
@@ -703,8 +814,13 @@ def main() -> int:
              "what": ["примечание раздела → методика"], "source": "D19 п. 2"} for e in moved]
     if args.log:
         args.log.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
+    manifest = shared_manifest(report, hashlib.sha256(raw).hexdigest()[:16], args.html.name)
+    weak = [m for m in manifest["lists"] if m["recall"] < MANIFEST_MIN_RECALL]
+    print(f"манифест общих перечней: {len(manifest['lists'])}, полнота против ячейки < {MANIFEST_MIN_RECALL}: "
+          f"{len(weak)} (у них пометка R29 «перечень неполный» остаётся)")
     if args.write:
         write_files(files)
+        MANIFEST.write_text(json.dumps(manifest, ensure_ascii=False, indent=1) + "\n", encoding="utf-8")
     return 0
 
 
