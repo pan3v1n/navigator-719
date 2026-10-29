@@ -99,6 +99,16 @@
     {% if u.org or u.inn %}
     <p>{% if u.org_verified_at %}<span class="badge ok">подтверждена</span> {{ org_verified }}
       {% else %}<span class="badge warn">не подтверждена</span> — вписал пользователь, проверьте по ЕГРЮЛ/ЕГРИП{% endif %}</p>
+    {# Запись ЕГРЮЛ по вписанному ИНН (DaData, решение владельца 29.10.2026) — заполняет скрипт внизу.
+       ИНН ИП (12 цифр) — ПДн, наружу не отправляется. #}
+    {% if u.inn and org_lookup_on() %}
+    {% if u.inn|length == 10 %}
+    <div class="egrul" id="egrul" data-inn="{{ u.inn }}" data-name="{{ u.org or '' }}" role="status" aria-live="polite">
+      <p class="muted">Ищу организацию в ЕГРЮЛ…</p></div>
+    {% else %}
+    <p class="muted">ИНН из 12 цифр (ИП) в реестре автоматически не ищется — это персональные данные; сверьте по ЕГРИП.</p>
+    {% endif %}
+    {% endif %}
     <form method="post" action="/api/admin/users/{{ u.id }}/org-verify" class="adm-row">
       <input type="hidden" name="verified" value="{{ '0' if u.org_verified_at else '1' }}">
       <button class="ds-btn secondary" type="submit"{% if not u.org_verified_at and not (u.org and u.inn) %} disabled{% endif %}>
@@ -106,7 +116,7 @@
     </form>
     {% endif %}
     <form method="post" action="/api/admin/users/{{ u.id }}/org" class="adm-form">
-      <label>Организация <input name="org" value="{{ u.org or '' }}" maxlength="300"></label>
+      <label>Организация <input name="org" value="{{ u.org or '' }}" maxlength="300" id="adm-org"></label>
       <label>ИНН <input name="inn" value="{{ u.inn or '' }}" inputmode="numeric" pattern="\d{10}(\d{2})?" maxlength="12"></label>
       <button class="ds-btn secondary" type="submit">Сохранить</button>
     </form>
@@ -171,5 +181,58 @@
     navigator.clipboard.writeText(document.getElementById("new-password").textContent)
       .then(function () { copyBtn.textContent = "Скопировано"; });
   });
+
+  // Запись ЕГРЮЛ по ИНН учётки (DaData, 29.10.2026): название, статус, реквизиты и сверка с вписанным.
+  // «Подставить в форму» только заполняет поле — сохраняет admin кнопкой формы.
+  (function () {
+    var box = document.getElementById("egrul");
+    if (!box) return;
+    function line(parent, label, value) {
+      if (!value) return;
+      var p = document.createElement("p");
+      var b = document.createElement("span"); b.className = "muted"; b.textContent = label + ": ";
+      p.appendChild(b); p.appendChild(document.createTextNode(value));
+      parent.appendChild(p);
+    }
+    function say(text) {
+      box.textContent = "";
+      var p = document.createElement("p"); p.className = "muted"; p.textContent = text;
+      box.appendChild(p);
+    }
+    fetch("/api/org-lookup", { method: "POST", headers: { "Content-Type": "application/json" },
+                               body: JSON.stringify({ inn: box.dataset.inn, name: box.dataset.name }) })
+      .then(function (r) { return r.json(); })
+      .then(function (d) {
+        if (d.outcome === "not_found") { say("В ЕГРЮЛ организация с ИНН " + box.dataset.inn + " не найдена."); return; }
+        if (d.outcome !== "found" || !d.org) { say(d.detail || "ЕГРЮЛ сейчас не проверить — сверьте вручную."); return; }
+        var o = d.org;
+        box.textContent = "";
+        var head = document.createElement("p");
+        var st = document.createElement("span");
+        st.className = "badge " + (o.active ? "ok" : "warn"); st.textContent = o.status_text || "статус не указан";
+        head.appendChild(document.createTextNode("ЕГРЮЛ: "));
+        head.appendChild(st);
+        if (d.matches !== null && d.matches !== undefined) {
+          var m = document.createElement("span");
+          m.className = "badge " + (d.matches ? "ok" : "warn");
+          m.textContent = d.matches ? "название совпадает с вписанным" : "название отличается от вписанного — сверьте";
+          head.appendChild(document.createTextNode(" ")); head.appendChild(m);
+        }
+        box.appendChild(head);
+        line(box, "Краткое название", o.name);
+        line(box, "Полное название", o.full_name);
+        line(box, "ОГРН", o.ogrn);
+        line(box, "КПП", o.kpp);
+        line(box, "Адрес", o.address);
+        var field = document.getElementById("adm-org");
+        if (field && !d.matches) {
+          var b = document.createElement("button");
+          b.type = "button"; b.className = "ds-btn secondary"; b.textContent = "Подставить название в форму";
+          b.addEventListener("click", function () { field.value = o.name; field.focus(); });
+          box.appendChild(b);
+        }
+      })
+      .catch(function () { say("ЕГРЮЛ сейчас не проверить — сверьте вручную."); });
+  })();
 </script>
 {% endblock %}
