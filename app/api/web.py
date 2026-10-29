@@ -38,7 +38,7 @@ from app.api.leads import TARIFFS as LEAD_TARIFFS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import plans, pricing
+from app.core import org_registry, plans, pricing
 from app.core.plans import PLAN_LIMITS
 from app.core.inn import inn_valid
 from app.core.config import settings
@@ -71,6 +71,8 @@ def plural(n: int, one: str, few: str, many: str) -> str:
 templates.env.filters["plural"] = plural
 # Витрина тарифов (09.10.2026) — описание одно на все отрисовки кабинета, не поле контекста страницы.
 templates.env.globals["pricing"] = pricing
+# Организация по ИНН (DaData, 29.10.2026): кабинет и карточка в /admin показывают поиск, только если задан ключ.
+templates.env.globals["org_lookup_on"] = org_registry.enabled
 
 
 @lru_cache(maxsize=1)
@@ -198,7 +200,7 @@ def login_page(request: Request, trial_over: str = ""):
 # а согласие даётся именно на её условиях. Дата редакции задаётся здесь и показывается на
 # странице: молча меняющийся правовой документ хуже отсутствующего.
 # --------------------------------------------------------------------------- #
-DOCS_UPDATED = "09.10.2026"  # кабинет: должность, email, телефон, организация и ИНН в политике
+DOCS_UPDATED = "29.10.2026"  # политика: ИНН организации уходит в DaData (поиск в ЕГРЮЛ)
 
 
 def _doc(request: Request, template: str, page_title: str, active: str) -> HTMLResponse:

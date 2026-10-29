@@ -306,13 +306,16 @@
         {% set org_ok = user.org_verified_at and user.org and user.inn
                         and form.org.split()|join(' ') == user.org.split()|join(' ') and form.inn == user.inn %}
         <label class="field"><span>Организация</span>
-          <input name="org" value="{{ form.org }}" placeholder="ООО «Предприятие»" autocomplete="organization" maxlength="300">
+          <input name="org" value="{{ form.org }}" placeholder="ООО «Предприятие»" autocomplete="organization" maxlength="300" id="org-input">
         </label>
         <label class="field"><span>ИНН организации</span>
-          <input name="inn" value="{{ form.inn }}" placeholder="10 или 12 цифр" inputmode="numeric" maxlength="12">
+          <input name="inn" value="{{ form.inn }}" placeholder="10 или 12 цифр" inputmode="numeric" maxlength="12" id="inn-input">
         </label>
+        {# Организация по ИНН из ЕГРЮЛ (DaData, решение владельца 29.10.2026): строку заполняет скрипт ниже.
+           Подсказка, а не проверка: сохранение от неё не зависит. #}
+        {% if editing and org_lookup_on() %}<div class="org-status lookup hidden" id="inn-lookup" role="status" aria-live="polite"></div>{% endif %}
         {% if form.org or form.inn %}
-        <div class="org-status {{ 'ok' if org_ok else 'wait' }}" role="status">
+        <div class="org-status {{ 'ok' if org_ok else 'wait' }}" role="status"{% if not org_ok and not (form.org and form.inn) %} id="org-incomplete"{% endif %}>
           {% if org_ok %}Организация и ИНН подтверждены администратором
           {% elif not (form.org and form.inn) %}Укажите и организацию, и ИНН — без них администратор не сможет подтвердить организацию
           {% else %}Организация и ИНН не подтверждены — их проверит администратор сервиса{% endif %}</div>
@@ -477,6 +480,74 @@
     });
   })();
 </script>
+{% if editing and org_lookup_on() %}
+<script>
+  // Организация по ИНН (DaData, 29.10.2026). Ищется только ИНН организации — 10 цифр; ИНН ИП (12) — ПДн,
+  // его сервер не отправляет и отвечает подсказкой. Пустое поле «Организация» заполняется названием из
+  // реестра, вписанное не перезаписывается — для него кнопка «Подставить». Сбой поиска — подсказка
+  // вписать вручную: сохранение анкеты от поиска не зависит.
+  (function () {
+    var inn = document.getElementById("inn-input"), org = document.getElementById("org-input");
+    var box = document.getElementById("inn-lookup");
+    if (!inn || !org || !box) return;
+    var seq = 0, timer = null, asked = "";
+
+    function show(text, cls, found) {
+      box.textContent = "";
+      box.className = "org-status lookup " + (cls || "wait");
+      box.appendChild(document.createTextNode(text));
+      if (found) {
+        var b = document.createElement("button");
+        b.type = "button"; b.className = "ds-link lookup-fill"; b.textContent = "Подставить название";
+        b.addEventListener("click", function () { org.value = found; b.remove(); });
+        box.appendChild(document.createTextNode(" "));
+        box.appendChild(b);
+      }
+    }
+    function hide() { box.className = "org-status lookup hidden"; box.textContent = ""; }
+
+    function ask(value) {
+      var my = ++seq;
+      asked = value;
+      show("Ищу организацию в ЕГРЮЛ…");
+      fetch("/api/org-lookup", { method: "POST", headers: { "Content-Type": "application/json" },
+                                 body: JSON.stringify({ inn: value, name: org.value }) })
+        .then(function (r) { return r.json().then(function (d) { return { status: r.status, d: d }; }); })
+        .then(function (res) {
+          if (my !== seq) return;                          // пока ждали, ИНН уже другой
+          var d = res.d || {};
+          if (res.status === 422) { show(d.detail || "Проверьте ИНН.", "warn"); return; }
+          if (d.outcome === "found" && d.org) {
+            var o = d.org, line = "ЕГРЮЛ: " + o.name + (o.status_text ? " — " + o.status_text : "");
+            if (!org.value.trim()) {
+              org.value = o.name;
+              show(line + ". Название подставлено.", o.active ? "ok" : "warn");
+              var stale = document.getElementById("org-incomplete");    // «Укажите и организацию, и ИНН» — уже указаны
+              if (stale) stale.classList.add("hidden");
+            } else {
+              show(line + ".", o.active ? "ok" : "warn", d.matches ? null : o.name);
+            }
+          } else if (d.outcome === "not_found") {
+            show("Организация с таким ИНН в ЕГРЮЛ не найдена — проверьте номер.", "warn");
+          } else {
+            show("Не удалось проверить ИНН в реестре — впишите название сами.");
+          }
+        })
+        .catch(function () { if (my === seq) show("Не удалось проверить ИНН в реестре — впишите название сами."); });
+    }
+
+    function check(now) {
+      var value = inn.value.replace(/\s+/g, "");
+      clearTimeout(timer);
+      if (value === asked && !box.classList.contains("hidden")) return;
+      if (!/^\d{10}$/.test(value) && !/^\d{12}$/.test(value)) { seq++; asked = ""; hide(); return; }
+      timer = setTimeout(function () { ask(value); }, now ? 0 : 400);
+    }
+    inn.addEventListener("input", function () { check(false); });
+    if (inn.value.trim()) check(true);                   // ИНН уже вписан — сразу показать, что в реестре
+  })();
+</script>
+{% endif %}
 {% endif %}
 {% if tab == 'plan' %}
 <script>
