@@ -96,14 +96,18 @@ class TestFullList(unittest.TestCase):
     def test_single_parse_not_taken_when_other_member_has_unique_ops(self):
         """Станки I: 8 операций у I-13, 204 у I-19 — разбор одного I-19 «покрывал» ячейку словами, а первые
         операции терялись. Перечень — объединение."""
+        # слова головной операции у донора ВСЕ есть (перечень повторяет их), но ни одна операция донора её не
+        # покрывает — покрытие по словам случаи не различает, различают только операции
         head = _rec("Станки лазерные", [("наличие управляющего программно-аппаратного комплекса", 25)], 13)
-        tail = _rec("Части станков", [(f"обработка детали номер {i} станины", 1) for i in range(20)], 19)
+        tail_ops = [("наличие станины", 1), ("обработка управляющего узла", 1),
+                    ("сборка программно-аппаратного модуля", 1), ("испытания комплекса", 1)]
+        tail = _rec("Части станков", tail_ops, 19)
         text = ("наличие управляющего программно-аппаратного комплекса (25 баллов);\n"
-                + "\n".join(f"обработка детали номер {i} станины (1 балл);" for i in range(20)))
+                + "\n".join(f"{t} (1 балл);" for t, _ in tail_ops))
         blocks, how = d.full_list([head, tail], text)
         ops = [o["text"] for b in blocks for o in b["operations"]]
         self.assertIn("наличие управляющего программно-аппаратного комплекса", ops)
-        self.assertEqual(len(ops), 21)
+        self.assertEqual(len(ops), 5)
         self.assertEqual(how, "объединение блоков членов")
 
     def test_single_parse_taken_when_it_carries_everything(self):
@@ -214,6 +218,9 @@ class TestShareCellThresholds(unittest.TestCase):
     def test_date_of_amendment_is_not_a_code(self):
         self.assertEqual(d._note_codes("71", self.NOTES),
                          ["26.11.22.216", "из 26.11.22.200", "из 26.11.22.210"])
+        # дата поправки в самой голове примечания — тоже не код
+        dated = "74. Продукция (в ред. от 15.12.2025) кодами из 26.11.22.200, 26.11.22.216 и включенная в раздел IV\n"
+        self.assertEqual(d._note_codes("74", dated), ["26.11.22.216", "из 26.11.22.200"])
 
 
 class TestCorpusAfterD23(unittest.TestCase):
@@ -307,6 +314,33 @@ class TestR29AfterD23(unittest.TestCase):
         self.assertEqual(fragments.group_of("Светодиоды (в части светодиодов белого диапазона)"),
                          fragments.group_of("Светодиоды белого диапазона"))
         self.assertTrue(fragments.is_scope_qualifier("Светодиоды (в части светодиодов белого диапазона)"))
+
+
+class TestReconciledMarkInGenerator(unittest.TestCase):
+    """`diag_orphan_requirements._mark_reconciled`: признак — из данных, одноимённая позиция его не даёт."""
+
+    def test_mark(self):
+        import diag_orphan_requirements as G
+        same = [{"component": None, "operations": [{"text": "сборка", "points": 1}]}]
+        recs = [{**_rec("А", sec="T"), "requirement_blocks": same}, {**_rec("Б", sec="T"), "requirement_blocks": same},
+                {**_rec("В", sec="T"), "requirement_blocks": [{"operations": [{"text": "иное"}]}]},
+                {**_rec("Д", sec="T"), "requirement_blocks": same}, {**_rec("Д", sec="T"), "requirement_blocks": same}]
+        groups = [{"section": "T", "positions": [{"product_name": "А"}, {"product_name": "Б"}]},
+                  {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "В"}]},
+                  {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "Д"}]},
+                  {"section": "T", "positions": [{"product_name": "А"}, {"product_name": "нет такой"}]}]
+        self.assertEqual(G._mark_reconciled(groups, recs), 1)
+        self.assertEqual([bool(g.get("reconciled")) for g in groups], [True, False, False, False])
+
+
+class TestIncompleteThresholdListCountsOnlyLost(unittest.TestCase):
+    """Пометка «пороги показаны не полностью» — о ПОТЕРЯННЫХ баллах. После `D23` у 64 членов общих перечней
+    есть баллы соседних строк чанка («лишние» по строке, законные по ячейке) — в список они не идут."""
+
+    def test_corpus_list_is_empty(self):
+        from scripts import verify_structured as vs
+        romans = sorted({f.name.split("_")[0] for f in vs.STRUCT.glob("*.json")})
+        self.assertEqual([(x["section"], x["product_name"][:40]) for x in vs.collect_incomplete(romans)], [])
 
 
 class TestD18KonturServiceLine(unittest.TestCase):
