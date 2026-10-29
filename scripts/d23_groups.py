@@ -21,11 +21,16 @@
 Карта наследования (#69, #52) проверяется тем же разбором: ребёнок обязан стоять в ТОМ ЖЕ перечне, что и
 его родитель.
 
-Только чтение: данные не правит, печатает сводку и пишет разбор в JSON для поимённого чтения.
+Без `--write` данные не правит: печатает сводку, пишет разбор (`--json`) и журнал плана правки (`--log`)
+для поимённого чтения. С `--write` — каждому члену расколотого перечня записывается полный перечень его ячейки.
 
-ЗАПУСК (HTML — не в репозитории, 9 МБ; sha256 печатается в выходе):
-    curl -L "https://normativ.kontur.ru/document?moduleId=1&documentId=508767" -o <файл>.html
-    .venv/Scripts/python.exe scripts/d23_groups.py <файл>.html --json <выход>.json
+⚠ Вёрстка — та, из которой собран корпус: сейчас 508574 (N 1297 + N 1257). На 508767 раздел VII свёрстан
+иначе (`ACTUALIZATION.md` п. 11), и сверка даёт 39 ложных «споров» наследования против 2.
+
+ЗАПУСК (HTML — не в репозитории, 9 МБ; sha256 печатается в выходе, у Контура он меняется от скачивания к
+скачиванию — в странице есть служебные куски, — а таблицы нет):
+    curl -L "https://normativ.kontur.ru/document?moduleId=1&documentId=508574" -o <файл>.html
+    .venv/Scripts/python.exe scripts/d23_groups.py <файл>.html --json <выход>.json --log <план>.json
 """
 from __future__ import annotations
 
@@ -176,7 +181,7 @@ def effective_text(r: dict, find=None) -> tuple[str, str]:
         return own, "свои"
     parent = inheritance.lookup(r["section_roman"], r["product_name"])
     if parent:
-        prec = find(r["section_roman"], parent["product_name"]) if find else None
+        prec = find.parent(r["section_roman"], parent) if find else None
         body = own_text(prec) if prec else " ".join(str(o.get("text") or "") for o in parent.get("operations") or [])
         return own + " " + body, "наследование"
     return own, "пусто"
@@ -271,23 +276,63 @@ def groups_of(g: list[dict]) -> list[dict]:
     return out
 
 
+def _position(r: dict) -> int:
+    m = re.search(r"позиция\s+(\d+)", r.get("source_anchor") or "")
+    return int(m.group(1)) if m else 10 ** 6
+
+
 def match_records(recs: list[dict]):
-    """Наименование из таблицы → запись: сначала полное имя, затем ключ наследования (первая строка)."""
-    full = {norm(r["product_name"]): r for r in recs}
+    """Наименование из таблицы → запись: сначала полное имя, затем ключ наследования (первая строка).
+
+    Одноимённые записи раздела — РАЗНЫЕ позиции, различимые только порядком в таблице (на 508574 пять пар:
+    «Шасси с установленными двигателями…» III-116/117, «Устройства наведения промышленные» IV-11/34,
+    «Трансмиттеры и транспондеры для оптических сетей» IV-43/45, «Сополимеры стирола…» XXI-169/177, «Альты»
+    XXV-14/30). Прежде имя брало последнюю из пары: у «Трансмиттеров» в перечень вместо позиции 43 с
+    требованиями дважды попадала пустая 45, и перечень выглядел «низким покрытием», а не расколом. Поэтому
+    `find` такое имя НЕ разрешает (None — родитель по имени неоднозначен), а `find.claim` раздаёт одноимённые
+    записи членам перечней по порядку позиций: таблица обходится сверху вниз, как нумерованы позиции."""
+    by_name: dict[str, list[dict]] = defaultdict(list)
+    for r in sorted(recs, key=_position):
+        by_name[norm(r["product_name"])].append(r)
     first: dict[str, list[dict]] = defaultdict(list)
     for r in recs:
         first[inheritance._key(r["section_roman"], r["product_name"])].append(r)
 
     def find(sec: str, name: str) -> dict | None:
-        r = full.get(norm(name))
-        if r is not None:
-            return r
+        cand = by_name.get(norm(name)) or []
+        if cand:
+            return cand[0] if len(cand) == 1 else None
         cand = first.get(inheritance._key(sec, name)) or []
         if len(cand) == 1:
             return cand[0]
         n = norm(name)                                # имя в таблице длиннее или короче имени записи
-        cand = [r for k, r in full.items() if len(n) >= 12 and (k.startswith(n) or n.startswith(k))]
+        cand = [rs[0] for k, rs in by_name.items()
+                if len(rs) == 1 and len(n) >= 12 and (k.startswith(n) or n.startswith(k))]
         return cand[0] if len(cand) == 1 else None
+
+    def parent(sec: str, p: dict) -> dict | None:
+        """Запись родителя из карты наследования. Одноимённого родителя различают операции: карта хранит
+        их вместе с именем («Устройства наведения промышленные» IV-11 и IV-34 — у наследника IV-35 родитель
+        34, по ROWSPAN это одна ячейка)."""
+        cand = by_name.get(norm(p.get("product_name"))) or []
+        if len(cand) <= 1:
+            return find(sec, p.get("product_name") or "")
+        want = [norm(o.get("text")) for o in p.get("operations") or []]
+        hit = [c for c in cand
+               if [norm(o.get("text")) for b in c.get("requirement_blocks") or [] for o in b.get("operations") or []] == want]
+        return hit[0] if len(hit) == 1 else None
+
+    claimed: set[int] = set()
+
+    def claim(sec: str, name: str) -> dict | None:
+        cand = by_name.get(norm(name)) or []
+        r = next((c for c in cand if id(c) not in claimed), cand[-1]) if len(cand) > 1 else find(sec, name)
+        if r is not None:
+            claimed.add(id(r))
+        return r
+
+    find.claim = claim
+    find.parent = parent
     return find
 
 
@@ -303,7 +348,7 @@ def analyse(by_sec: dict, recs: dict, min_cover: float, gap: float) -> dict:
                 ft = toks(full)
                 members, objs = [], []
                 for name in seg["products"]:
-                    r = find(sec, name)
+                    r = find.claim(sec, name)
                     if r is None:
                         members.append({"product": name[:100], "anchor": None, "cover": None, "source": "нет в корпусе"})
                         continue
@@ -314,12 +359,12 @@ def analyse(by_sec: dict, recs: dict, min_cover: float, gap: float) -> dict:
                     eff, src = effective_text(r, find)
                     et = set(toks(eff))
                     parent = inheritance.lookup(sec, r["product_name"]) if src == "наследование" else None
-                    prec = find(sec, parent["product_name"]) if parent else None
+                    prec = find.parent(sec, parent) if parent else None
                     members.append({"product": r["product_name"][:100], "anchor": r.get("source_anchor"),
                                     "parent_id": id(prec) if prec is not None else None,
                                     "cover": round(sum(1 for w in ft if w in et) / len(ft), 3) if ft else 1.0,
                                     "source": src, "parent": parent.get("product_name") if parent else None})
-                union = set(toks(" ".join(own_text(r) for r in (find(sec, n) for n in seg["products"]) if r)))
+                union = set(toks(" ".join(own_text(r) for r in objs)))
                 segs.append({"group": gi, "seg": si, "code": " | ".join(grp["codes"])[:120],
                              "union_cover": round(sum(1 for w in ft if w in union) / len(ft), 3) if ft else 1.0,
                              "excluded": grp["excluded"], "into_excluded": grp["into_excluded"],
@@ -375,6 +420,11 @@ def analyse(by_sec: dict, recs: dict, min_cover: float, gap: float) -> dict:
 
 
 _EMPTY_NOTE_RE = re.compile(r"\s*Во фрагменте приложения требования[^.]*не указаны\.?", re.I)
+# Пометка разборщика у пустого члена группы (35 записей, форма одна). После правки она ложна: требования у
+# записи есть, а «группа», которую она называет, бывает чужой (у «Трансмиттеров» IV-44/45 — «Агрегирующие
+# транспондеры», хотя ячейка по ROWSPAN — позиции 43).
+_GROUP_NOTE_RE = re.compile(r"\s*Вариант продукции в группе «(?:[^«»]|«[^»]*»)*» под общим кодом «[^»]*»\.\s*"
+                            r"Отдельные требования к локализации во фрагменте не выделены[^.]*\(доразбор\)\.?")
 
 
 def _block_key(b: dict) -> tuple:
@@ -404,9 +454,25 @@ def full_list(recs: list[dict], text: str) -> tuple[list[dict], str]:
                 seen.add(k)
                 union.append(b)
     best = max(recs, key=lambda r: _cover(own_text(r), ft))
-    if _cover(own_text(best), ft) >= _cover(" ".join(own_text(r) for r in recs), ft) - 0.02:
+    # Разбор одного члена — только если у остальных нет операций, которых в нём нет. Покрытия по словам мало:
+    # у станков I (28.41.1–28.41.4) ячейку начинают «наличие управляющего программно-аппаратного комплекса
+    # (25 баллов)» и «изготовление станины» — 8 операций у I-13, остальные 204 у I-19, и разбор I-19 покрывал
+    # ячейку не хуже объединения (слова перечня повторяются), а первые 8 операций терялись.
+    pool = _op_texts(best)
+    extra = [op for r in recs if r is not best for op in _op_texts(r) if not _op_covered(op, pool)]
+    if not extra and _cover(own_text(best), ft) >= _cover(" ".join(own_text(r) for r in recs), ft) - 0.02:
         return copy.deepcopy(best.get("requirement_blocks") or []), f"разбор «{best['product_name'][:60]}»"
     return copy.deepcopy(union), "объединение блоков членов"
+
+
+def _op_texts(r: dict) -> list[str]:
+    return [norm(o.get("text")) for b in r.get("requirement_blocks") or [] for o in b.get("operations") or []]
+
+
+def _op_covered(op: str, pool: list[str]) -> bool:
+    """Операция есть в разборе: тем же текстом или пересказом (≥ 80 % её слов в одной операции разбора)."""
+    words = set(op.split())
+    return any(op == p or (words and len(words & set(p.split())) / len(words) >= 0.8) for p in pool)
 
 
 def _rtype(blocks: list[dict], recs: list[dict]) -> str | None:
@@ -441,9 +507,11 @@ def reconcile(report: dict) -> list[dict]:
                 if not r.get("min_threshold") and len(thresholds) == 1:
                     r["min_threshold"] = next(iter(thresholds))
                     changed.append("порог")
-                if r.get("notes") and _EMPTY_NOTE_RE.search(r["notes"]):
-                    r["notes"] = _EMPTY_NOTE_RE.sub("", r["notes"]).strip()
-                    changed.append("снята пометка «требования не указаны»")
+                for rx, what in ((_EMPTY_NOTE_RE, "снята пометка «требования не указаны»"),
+                                 (_GROUP_NOTE_RE, "снята пометка «доразбор»")):
+                    if r.get("notes") and rx.search(r["notes"]):
+                        r["notes"] = rx.sub("", r["notes"]).strip() or None
+                        changed.append(what)
                 if changed:
                     after = sum(len(b.get("operations") or []) for b in r["requirement_blocks"])
                     log.append({"section": sec, "code": x["code"], "product": r["product_name"][:100],
