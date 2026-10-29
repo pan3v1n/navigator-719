@@ -1,9 +1,40 @@
 # План на следующую сессию — Навигатор ПП №719
 
-> Обновлён **28.10.2026**. **Порядок работ — [BACKLOG.md § Очередь на 28.10.2026](BACKLOG.md), идём
+> Обновлён **29.10.2026**. **Порядок работ — [BACKLOG.md § Очередь на 28.10.2026](BACKLOG.md), идём
 > по ней сверху вниз**; там же вся фактура по задачам. Протокол замера — [WAVE3_PROTOCOL.md](WAVE3_PROTOCOL.md);
 > планы по волнам — [REVIEW_TZ.md](REVIEW_TZ.md) (R1–R30), [KB_EXPANSION_TZ.md](KB_EXPANSION_TZ.md) (K1–K17),
 > [DUAL_CORPUS_TZ.md](DUAL_CORPUS_TZ.md) (L1–L8), [AGENTS_PLAN.md](AGENTS_PLAN.md) (A1–A6, B1).
+
+## ▶ 29.10.2026 · ЗАХОД ДО `test44`: `D23` ШАГИ 2–3; ПАКЕТ `test45` ЖДЁТ 01.11
+
+**Бой** (сверено `/ping` 29.10): `v0.5.0-test43`; `test44` на таймере 31.10 23:00 UTC. `dev` = `effdd90`, CI зелёный.
+
+**Ночь 28.10 (была только в памяти сессии):** пакет промпта `test45` в `dev` целиком — последним `LANG-1` #264
+(PR #265: правило 7 «только по-русски» во всех промптах + `pipeline._clean_model_text` вычищает CJK и кану,
+полноширинные → ASCII, `Answer.cjk_removed`, метрика `eval_answers.leaked_cjk`; ревью — HIGH нет, MED 2, LOW 3).
+`D23` #251 — шаг 1 из 3: `scripts/d23_groups.py` в ветке `feat/d23-source-reconcile` (итог — комментарий в #251).
+
+**Решение владельца 29.10:** `D18` #208 — **полной переиндексацией**: профиль `test46` с
+`REINDEX_FULL="pp719 pp719_rules"`, два окна ночью подряд, как у `test41` (товарная ~28 мин, процедурная ~69 мин).
+
+**Порядок захода:** `D23` шаг 2 (поимённый разбор, `--write`, карта наследования и список R29, `D19`, `D18`, #65/#95)
+→ шаг 3 (радиус, замер одним кодом, ревью, PR в `dev` — **не сливать до тега `test45`**, профиль `test46`). Если
+останется время — заготовка профиля `test45` и лист разметки `EV8-1`/`K18`.
+
+**`O10`: копия 29.10 не снялась по расписанию.** ПК спал в 09:00 (вышел из сна 09:32), «запускать пропущенное»
+задачу не догнало — следующий запуск сразу встал на 30.10. Копия `navigator_app-2026-10-29_0300.db` снята ручным
+запуском задачи (целостность ok, 38 / 1354 / 311). В обёртке `pull-backup-daily.cmd` теперь одна попытка в сутки
+(`last-attempt.txt`; второй запуск в тот же день к бою не подключается — проверено). **За владельцем** (классификатор
+auto mode не дал сессии менять задачу Планировщика) — добавить триггеры «вход» и «разблокировка» с задержкой 2 мин,
+в PowerShell от своего имени:
+```powershell
+$t = Get-ScheduledTask -TaskName navigator-pull-backup
+$logon = New-ScheduledTaskTrigger -AtLogOn -User 'pan3v'; $logon.Delay = 'PT2M'
+$cls = Get-CimClass -Namespace Root/Microsoft/Windows/TaskScheduler -ClassName MSFT_TaskSessionStateChangeTrigger
+$unlock = New-CimInstance -CimClass $cls -ClientOnly; $unlock.StateChange = 8; $unlock.UserId = 'pan3v'; $unlock.Delay = 'PT2M'; $unlock.Enabled = $true
+Set-ScheduledTask -TaskName navigator-pull-backup -Trigger @($t.Triggers[0], $logon, $unlock)
+```
+Проверка: `(Get-ScheduledTask navigator-pull-backup).Triggers` — три триггера; в журнале — одна запись в сутки.
 
 ## ⏰ 28.10.2026, вечер · `test43` НА БОЮ; `test44` (N 1257) — ТАЙМЕРОМ 01.11 02:00 МСК
 
