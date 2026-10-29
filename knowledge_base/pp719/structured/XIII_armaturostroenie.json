@@ -97,7 +97,7 @@
    "28.14.11.110"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": null,
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -185,7 +185,7 @@
    "28.14.11.120"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": null,
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -273,7 +273,7 @@
    "28.14.12"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": null,
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -361,7 +361,7 @@
    "28.14.13"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": null,
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -449,7 +449,7 @@
    "28.14.2"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": "percentage",
   "min_threshold": null,
   "requirement_blocks": [
    {

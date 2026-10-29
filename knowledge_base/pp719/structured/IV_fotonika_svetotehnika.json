@@ -1751,7 +1751,7 @@
       "27.31.11.000"
     ],
     "tnved_codes": [],
-    "requirement_type": "operations",
+    "requirement_type": "percentage",
     "min_threshold": null,
     "requirement_blocks": [
       {
@@ -3147,7 +3147,7 @@
       "26.30.30.000"
     ],
     "tnved_codes": [],
-    "requirement_type": "operations",
+    "requirement_type": null,
     "min_threshold": null,
     "requirement_blocks": [
       {
@@ -3186,7 +3186,7 @@
       "26.30.30.000"
     ],
     "tnved_codes": [],
-    "requirement_type": "operations",
+    "requirement_type": null,
     "min_threshold": null,
     "requirement_blocks": [
       {

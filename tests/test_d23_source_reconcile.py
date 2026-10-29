@@ -133,6 +133,18 @@ class TestFullList(unittest.TestCase):
         self.assertIn("до 1 января 2019 г.: соблюдение доли не более 50 процентов",
                       [b.get("component") for b in blocks])
 
+    def test_pointless_list_keeps_member_type(self):
+        donor = {**_rec("Донор", [("сборка", None), ("наладка", None)], 1), "requirement_type": "mixed"}
+        self.assertIsNone(d._rtype(donor["requirement_blocks"], [donor, _rec("Член", [], 2)]))
+        pts = {**_rec("Донор", [("сборка", 5)], 1), "requirement_type": "operations"}
+        self.assertEqual(d._rtype(pts["requirement_blocks"], [pts]), "mixed")
+
+    def test_before_and_since_dates_are_different_variants(self):
+        """Раунд 2 ревью, M1: у VII-35 и VII-37 подписи «до 1 января 2019 г.» и «Требования с 1 января 2019 г.» —
+        числа те же, слова совпадают на 4 из 5; различает только «до» / «с»."""
+        self.assertFalse(d._op_covered(d.norm("до 1 января 2019 г."), [d.norm("Требования с 1 января 2019 г.")]))
+        self.assertTrue(d._op_covered(d.norm("с 1 января 2019 г."), [d.norm("Требования с 1 января 2019 г.")]))
+
     def test_numbers_tell_operations_apart(self):
         """Ячейка гамма-камер и МР-томографов VII: «не более 50 процентов» ИЛИ «не более 70 процентов»."""
         op50 = d.norm("соблюдение процентной доли иностранных товаров - не более 50 процентов цены товара")
@@ -201,6 +213,26 @@ class TestContinuationJoin(unittest.TestCase):
     def test_finished_sentence_does_not_join(self):
         self.assertEqual(len(self._join(f"{OPENER}.", "сборка изделия")), 2)
         self.assertEqual(len(self._join("контрольно-измерительные операции (10 баллов)", "сборка изделия")), 2)
+
+    def test_preamble_only_chunk_continues(self):
+        """Раунд 2 ревью, M2: мебель XI — кусок из одних прав («… на срок не менее 5 лет») продолжается куском
+        «осуществление на территории РФ следующих операций»; бельё XVII, склады III («… 5 лет <6>»)."""
+        self.assertEqual(len(self._join(f"{OPENER} на срок не менее 5 лет",
+                                        "осуществление на территории Российской Федерации следующих операций:")), 1)
+        self.assertEqual(len(self._join(f"{OPENER} на срок не менее 5 лет <6>",
+                                        "наличие на территории одной из стран - членов ЕАЭС сервисного центра")), 1)
+
+    def test_chunk_with_operations_ending_in_word_is_finished(self):
+        """Законченная ячейка тоже кончается словом («… упаковка») — кусок с операциями не продолжается."""
+        self.assertEqual(len(self._join(f"{OPENER};\nсборка;\nупаковка",
+                                        "осуществление на территории Российской Федерации следующих операций:")), 2)
+
+    def test_or_start_continues(self):
+        """VII: сфигмоманометры «… <4>» → капнографы «или\nналичие у юридического лица …» — альтернатива."""
+        self.assertEqual(len(self._join("до 1 января 2019 г.:\nсоблюдение доли - не более 50 процентов <4>",
+                                        f"или\n{OPENER}")), 1)
+        # и тогда, когда предыдущий кусок — с операциями (правило вводного куска здесь не сработало бы)
+        self.assertEqual(len(self._join("сборка;\nупаковка <4>", f"или\n{OPENER}")), 1)
 
     def test_without_heads_only_comma_and_broken_phrase(self):
         out = d._join_continuations([self._grp("1", "сборка;"), self._grp("2", "покраска;")], None)
@@ -366,6 +398,23 @@ class TestCorpusAfterD23(unittest.TestCase):
         self.assertIn("[прим. 32", eff("XXVII", "Игры прочие"))
         self.assertIn("[прим. 56", eff("I", "Аддитивные установки фотополимеризации"))
 
+    def test_group_threshold_kept_after_own_list(self):
+        """Раунд 2 ревью, H1: насосы XIX-2/3/9 показывали «порог группы» (условие о числе операций у XIX-1) через
+        наследование; со своим перечнем наследование не срабатывает — условие обязано остаться."""
+        for name in ("Насосы смазочные", "Насосы для охлаждающей жидкости", "Насосы питательные и конденсатные"):
+            self.assertIn("не менее 4 технологических операций", self._one("XIX", name).get("min_threshold") or "", name)
+
+    def test_type_not_overwritten_by_pointless_list(self):
+        """Раунд 2 ревью, L3: у ОФЭКТ VII-6 тип донора «mixed» снимал строку R7 «Порог: не предусмотрен»."""
+        self.assertEqual(self._one("VII", "Системы однофотонной эмиссионной").get("requirement_type"), "operations")
+
+    def test_point_transfer_guard_is_quiet_on_corpus(self):
+        """Раунд 2 ревью, M3: сторож D8 (`check_records`) после правки давал 115 ложных «лишних» у членов общих
+        ячеек; у них «лишние» законны — на корпусе обязан быть 0."""
+        from scripts import verify_structured as vs
+        romans = sorted({f.name.split("_")[0] for f in vs.STRUCT.glob("*.json")})
+        self.assertEqual(sum(vs.check_records(sec)[1] for sec in romans), 0)
+
     def test_transmitters_44_45_get_list_of_43(self):
         iv = {r["source_anchor"].rsplit(" ", 1)[-1]: r for r in self.recs["IV"]}
         self.assertTrue(self._ops(iv["43"]))
@@ -434,6 +483,9 @@ class TestR29AfterD23(unittest.TestCase):
             proof = [m for m in verified if m["section"] == g["section"]
                      and all(any(norm(x["product_name"]).startswith(n) for x in m["members"]) for n in names)]
             self.assertTrue(proof, (g["section"], sorted(names)))
+        # аддитивные установки I: в перечне нет «не менее 75 процентов … трех четвертей» (они в `min_threshold` I-26,
+        # класс D24) — полнота не доказана, пометка «перечень неполный» остаётся (раунд 2 ревью, H2)
+        self.assertTrue(fragments.is_fragmented("Аддитивные установки фотополимеризации в ванне"))
         # EV6/EV7: обрывок и продукт одной ячейки — по-прежнему одна группа, квалификатор — квалификатор
         self.assertEqual(fragments.group_of("Светодиоды (в части светодиодов белого диапазона)"),
                          fragments.group_of("Светодиоды белого диапазона"))
@@ -466,10 +518,17 @@ class TestReconciledMarkInGenerator(unittest.TestCase):
         import diag_orphan_requirements as G
         with tempfile.TemporaryDirectory() as tmp:
             p = Path(tmp) / "m.json"
-            p.write_text(json.dumps({"min_recall": 0.9, "lists": [{"section": "T", "recall": 0.89, "members": []},
-                                                                   {"section": "T", "recall": 0.95, "members": []}]}),
-                         encoding="utf-8")
+            p.write_text(json.dumps({"min_recall": 0.9, "lists": [
+                {"section": "T", "recall": 0.89, "members": []},
+                {"section": "T", "recall": 0.95, "members": []},
+                {"section": "T", "recall": 0.97, "members": [], "numbers_missing": ["75"]}]}), encoding="utf-8")
             self.assertEqual([m["recall"] for m in G._manifest_lists(p)], [0.95])
+
+    def test_numbers_of_cell_counted_with_points(self):
+        """Числа ячейки ищутся и в тексте блоков, и в баллах операций; даты поправок «(в ред. …)» не считаются."""
+        r = _rec("А", [("сборка", 25), ("доля не менее 75 процентов", None)], 1)
+        cell = "сборка (25 баллов); доля не менее 75 процентов; трех четвертей 3 (в ред. Постановления от 15.12.2025 N 2033)"
+        self.assertEqual(d._cell_numbers(cell) - d._record_numbers(r), {"3"})
 
 
 class TestIncompleteThresholdListCountsOnlyLost(unittest.TestCase):

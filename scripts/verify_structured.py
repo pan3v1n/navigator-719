@@ -165,6 +165,18 @@ def collect_incomplete(romans: list[str]) -> list[dict]:
     return out
 
 
+SHARED_MANIFEST = ROOT / "knowledge_base" / "pp719" / "shared_cells.json"
+
+
+def _shared_cell_anchors(path: Path = SHARED_MANIFEST) -> set[str]:
+    """Якоря записей — членов общих ячеек по манифесту `D23`; манифеста нет — пусто (сверка как прежде)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    return {m.get("anchor") for lst in data.get("lists") or [] for m in lst.get("members") or [] if m.get("anchor")}
+
+
 def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
     """Слой B: сверка баллов ПО ЗАПИСИ. Возвращает (записей проверено, записей с расхождением).
 
@@ -187,12 +199,16 @@ def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
         return 0, 0
 
     bad = 0
+    shared = _shared_cell_anchors()
     for p, rec in zip(products, data):
         src, got = source_points(p), record_points(rec)
         # «0 баллов» — не значение, а отметка «эта градация баллов не даёт» («менее 25 процентов -
         # 0 баллов»). Разбор её законно опускает, ругаться не на что.
         lost = sorted(x for x in src - got if x != 0)
-        extra = sorted(got - src - outside)
+        # У члена ОБЩЕЙ ячейки (`D23`, манифест `shared_cells.json`) баллы соседних строк чанка законны — единица
+        # первоисточника ячейка, а не строка. Без этого сторож давал 115 ложных «лишних», и настоящий перенос балла
+        # в них тонул (ревью PR D23, раунд 2, M3). Потерянные баллы у таких записей проверяются по-прежнему.
+        extra = [] if rec.get("source_anchor") in shared else sorted(got - src - outside)
         if not lost and not extra:
             continue
         bad += 1

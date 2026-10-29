@@ -187,7 +187,8 @@ def _manifest_lists(path: Path = SHARED_MANIFEST) -> list[dict]:
     except (json.JSONDecodeError, OSError):
         return []
     floor = data.get("min_recall", 0.9)
-    return [m for m in data.get("lists") or [] if (m.get("recall") or 0) >= floor]
+    # И ни одного недостающего числа ячейки: полнота по словам их не видит (ревью PR D23, раунд 2, H2).
+    return [m for m in data.get("lists") or [] if (m.get("recall") or 0) >= floor and not m.get("numbers_missing")]
 
 
 def _mark_reconciled(groups: list[dict], recs: list[dict], manifest: list[dict] | None = None) -> int:

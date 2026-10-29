@@ -107,8 +107,8 @@
    "28.13.11.120"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
-  "min_threshold": null,
+  "requirement_type": null,
+  "min_threshold": "осуществление на территории Российской Федерации до 1 января 2018 г. не менее 4 технологических операций (включая сборку, сварку, покраску и нанесение защитных покрытий), с 1 января 2018 г. - не менее 5 из следующих технологических операций, с 1 января 2020 г. - всех следующих технологических операций, формирующих ключевые параметры (влияющих на ключевые параметры) продукции",
   "requirement_blocks": [
    {
     "component": "Права на документацию",
@@ -205,8 +205,8 @@
    "28.13.11.130"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
-  "min_threshold": null,
+  "requirement_type": null,
+  "min_threshold": "осуществление на территории Российской Федерации до 1 января 2018 г. не менее 4 технологических операций (включая сборку, сварку, покраску и нанесение защитных покрытий), с 1 января 2018 г. - не менее 5 из следующих технологических операций, с 1 января 2020 г. - всех следующих технологических операций, формирующих ключевые параметры (влияющих на ключевые параметры) продукции",
   "requirement_blocks": [
    {
     "component": "Права на документацию",
@@ -303,7 +303,7 @@
    "28.13.12"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": "percentage",
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -781,8 +781,8 @@
    "28.13.14.110"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
-  "min_threshold": null,
+  "requirement_type": null,
+  "min_threshold": "осуществление на территории Российской Федерации до 1 января 2018 г. не менее 4 технологических операций (включая сборку, сварку, покраску и нанесение защитных покрытий), с 1 января 2018 г. - не менее 5 из следующих технологических операций, с 1 января 2020 г. - всех следующих технологических операций, формирующих ключевые параметры (влияющих на ключевые параметры) продукции",
   "requirement_blocks": [
    {
     "component": "Права на документацию",
@@ -879,7 +879,7 @@
    "28.13.14.110"
   ],
   "tnved_codes": [],
-  "requirement_type": "mixed",
+  "requirement_type": "percentage",
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -1253,7 +1253,7 @@
    "28.13.31.120"
   ],
   "tnved_codes": [],
-  "requirement_type": "operations",
+  "requirement_type": null,
   "min_threshold": null,
   "requirement_blocks": [
    {
@@ -1333,7 +1333,7 @@
    "28.13.32.110"
   ],
   "tnved_codes": [],
-  "requirement_type": "operations",
+  "requirement_type": "percentage",
   "min_threshold": null,
   "requirement_blocks": [
    {
