@@ -149,7 +149,11 @@ def collect_incomplete(romans: list[str]) -> list[dict]:
             src, got = source_points(p), record_points(rec)
             lost = sorted(x for x in src - got if x != 0)
             extra = sorted(got - src - outside)
-            if not lost and not extra:
+            # Пометка рантайма — о ПОТЕРЯННЫХ порогах; «лишние» баллы её не дают. После `D23` #251 у члена
+            # общего перечня законно есть баллы соседних строк чанка (единица первоисточника — ячейка, а не
+            # строка): «лишние» без потерянных повесили бы «пороги показаны не полностью» на 64 позиции с
+            # полным перечнем. Перенос балла между записями по-прежнему ловит `check_records` (D8).
+            if not lost:
                 continue
             out.append({
                 "section": roman,
@@ -159,6 +163,21 @@ def collect_incomplete(romans: list[str]) -> list[dict]:
                 "extra_points": [_fmt(x) for x in extra],
             })
     return out
+
+
+SHARED_MANIFEST = ROOT / "knowledge_base" / "pp719" / "shared_cells.json"
+
+
+def _shared_cell_anchors(path: Path = SHARED_MANIFEST) -> set[str]:
+    """Якоря записей — членов общих ячеек по манифесту `D23`; манифеста нет — пусто (сверка как прежде)."""
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return set()
+    # Только перечни, сведённые к ОДНОМУ перечню (`same_list`): у «целых» нетронутых перечней члены несут свои
+    # разборы, и чужой балл у них обязан оставаться видимым (раунд 3 ревью, L-2).
+    return {m.get("anchor") for lst in data.get("lists") or [] if lst.get("same_list")
+            for m in lst.get("members") or [] if m.get("anchor")}
 
 
 def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
@@ -183,12 +202,24 @@ def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
         return 0, 0
 
     bad = 0
-    for p, rec in zip(products, data):
+    shared = _shared_cell_anchors()
+    for i, (p, rec) in enumerate(zip(products, data)):
         src, got = source_points(p), record_points(rec)
+        # Строка-код без наименования сразу за позицией («из 29.10.52.190|||» под «Автомобилями для гольфа» III,
+        # «из 29.32.30.365/366» под телематикой IX) — продолжение её строки в RTF: ячейка требований разнесена по обеим.
+        # `D24` #267 восстанавливает ячейку позиции целиком по HTML, и баллы такой строки у позиции законны.
+        tail: set = set()
+        for q in products[i + 1:]:
+            if (q.name_raw or "").strip():
+                break
+            tail |= source_points(q)
         # «0 баллов» — не значение, а отметка «эта градация баллов не даёт» («менее 25 процентов -
         # 0 баллов»). Разбор её законно опускает, ругаться не на что.
         lost = sorted(x for x in src - got if x != 0)
-        extra = sorted(got - src - outside)
+        # У члена ОБЩЕЙ ячейки (`D23`, манифест `shared_cells.json`) баллы соседних строк чанка законны — единица
+        # первоисточника ячейка, а не строка. Без этого сторож давал 115 ложных «лишних», и настоящий перенос балла
+        # в них тонул (ревью PR D23, раунд 2, M3). Потерянные баллы у таких записей проверяются по-прежнему.
+        extra = [] if rec.get("source_anchor") in shared else sorted(got - src - tail - outside)
         if not lost and not extra:
             continue
         bad += 1

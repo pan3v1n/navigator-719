@@ -92,9 +92,12 @@ def _fragmented() -> frozenset[str]:
         groups = json.loads(_PATH.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):  # битый/недочитанный файл не должен ронять ответ
         return frozenset()
+    # D23 #251: группа, сверенная с первоисточником (`reconciled` ставит генератор по данным), несёт у каждой
+    # позиции полный перечень ячейки — пометка «перечень неполный» у неё была бы неправдой. Состав группы и
+    # роли строк (`group_of`, `is_scope_qualifier`) от этого не меняются: ячейка по-прежнему одна.
     return frozenset(
         k
-        for g in groups for p in (g.get("positions") or [])
+        for g in groups if not g.get("reconciled") for p in (g.get("positions") or [])
         for k in _keys(p.get("product_name"))
     )
 

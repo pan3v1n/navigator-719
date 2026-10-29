@@ -63,6 +63,47 @@ def make_hit(**kw) -> Hit:
     return Hit(**base)
 
 
+# Группа R29, НЕ сверенная с первоисточником: механизм пометки «перечень неполный» проверяется на ней. После
+# `D23` #251 все группы корпуса сверены (`reconciled`), и пометка на настоящих данных не ставится нигде —
+# проверять механизм на них значило бы проверять пустоту.
+_R29_FIXTURE = [
+    {"section": "XXI", "positions": [
+        {"product_name": "Хладон-218 (октафторпропан)\nХладон-23", "role": "product"},
+        {"product_name": "Хладон-125 ХП", "role": "product"}]},
+    {"section": "IV", "reconciled": "D23", "positions": [
+        {"product_name": "Светодиоды (в части светодиодов белого диапазона)", "role": "qualifier"},
+        {"product_name": "Светодиоды белого диапазона", "role": "product"}]},
+]
+
+
+class _R29File:
+    """Подменяет файл R29 на время теста и сбрасывает кэши модуля в обе стороны."""
+
+    def __init__(self, groups):
+        self.groups = groups
+
+    def _clear(self):
+        from app.rag import fragments
+        for f in (fragments._fragmented, fragments._group_index, fragments._role_index, fragments.group_codes):
+            f.cache_clear()
+
+    def __enter__(self):
+        import tempfile
+        from app.rag import fragments
+        self._dir = tempfile.TemporaryDirectory()
+        path = Path(self._dir.name) / "fragmented_requirements.json"
+        path.write_text(json.dumps(self.groups, ensure_ascii=False), encoding="utf-8")
+        self._patch = mock.patch.object(fragments, "_PATH", path)
+        self._patch.start()
+        self._clear()
+        return self
+
+    def __exit__(self, *exc):
+        self._patch.stop()
+        self._clear()
+        self._dir.cleanup()
+
+
 class TestOkpd2Match(unittest.TestCase):
     def test_segments(self):
         self.assertEqual(_segments("29.20.23.110"), ["29", "20", "23", "110"])
@@ -420,21 +461,35 @@ class TestContextAndDisclaimer(unittest.TestCase):
         hit = make_hit(product_name="Хладон-218 (октафторпропан)", section_roman="XXI",
                        okpd2_codes=["20.14.19.120"],
                        requirement_blocks=[{"operations": [{"text": "пиролиз", "points": 100}]}])
-        ctx = format_context([hit])
-        self.assertIn("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ", ctx)
-        self.assertIn("входит в группу с ОБЩИМИ требованиями", ctx)
-        # обычная позиция пометку не получает
-        self.assertNotIn("входит в группу с ОБЩИМИ требованиями", format_context([make_hit()]))
-        self.assertTrue(fragments.is_fragmented("Хладон-218 (октафторпропан)"))
-        self.assertFalse(fragments.is_fragmented("Подшипники шариковые или роликовые"))
+        with _R29File(_R29_FIXTURE):
+            ctx = format_context([hit])
+            self.assertIn("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ", ctx)
+            self.assertIn("входит в группу с ОБЩИМИ требованиями", ctx)
+            # обычная позиция пометку не получает
+            self.assertNotIn("входит в группу с ОБЩИМИ требованиями", format_context([make_hit()]))
+            self.assertTrue(fragments.is_fragmented("Хладон-218 (октафторпропан)"))
+            self.assertFalse(fragments.is_fragmented("Подшипники шариковые или роликовые"))
+
+    def test_reconciled_group_is_not_marked_incomplete(self):
+        """`D23` #251: у сверенной группы полный перечень у каждой позиции — пометка была бы неправдой, а
+        состав группы и роль строки (`EV6`/`EV7`) остаются."""
+        from app.rag import fragments
+        with _R29File(_R29_FIXTURE):
+            self.assertFalse(fragments.is_fragmented("Светодиоды белого диапазона"))
+            self.assertNotIn("входит в группу с ОБЩИМИ требованиями",
+                             format_context([make_hit(product_name="Светодиоды белого диапазона")]))
+            self.assertEqual(fragments.group_of("Светодиоды (в части светодиодов белого диапазона)"),
+                             fragments.group_of("Светодиоды белого диапазона"))
+            self.assertTrue(fragments.is_scope_qualifier("Светодиоды (в части светодиодов белого диапазона)"))
 
     def test_fragmented_lookup_is_robust(self):
         from app.rag import fragments
-        # многострочное наименование исходника → сверяем по ПЕРВОЙ строке
-        self.assertTrue(fragments.is_fragmented("Хладон-218 (октафторпропан)\nХладон-23"))
-        self.assertTrue(fragments.is_fragmented("  хладон-218   (октафторпропан)  "))  # регистр/пробелы
-        self.assertFalse(fragments.is_fragmented(None))
-        self.assertFalse(fragments.is_fragmented(""))
+        with _R29File(_R29_FIXTURE):
+            # многострочное наименование исходника → сверяем по ПЕРВОЙ строке
+            self.assertTrue(fragments.is_fragmented("Хладон-218 (октафторпропан)\nХладон-23"))
+            self.assertTrue(fragments.is_fragmented("  хладон-218   (октафторпропан)  "))  # регистр/пробелы
+            self.assertFalse(fragments.is_fragmented(None))
+            self.assertFalse(fragments.is_fragmented(""))
 
     def test_group_of_links_siblings_of_one_split_cell(self):
         from app.rag import fragments
@@ -581,9 +636,26 @@ class TestContextAndDisclaimer(unittest.TestCase):
         EV7 убирал требования всех нецелевых, включая соседние строки той же ячейки, — и ответ о
         белых светодиодах терял 7 операций из 22, при том что его же пометка неполноты отсылает
         «к соседним позициям той же группы»."""
+        ctx = self._split_cell_context(fragmented=True)
+        self.assertIn("технические условия", ctx)          # сиблинг той же ячейки — при требованиях
+        self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
+        self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
+
+    def test_reconciled_cell_sibling_does_not_repeat_the_list(self):
+        """`D23` #251: у СВЕРЕННОЙ ячейки полный перечень есть у самой целевой — требования соседа лишь
+        повторили бы его (ревью: окно светодиодов IV 6.3 → 21.7 тыс. символов, баллов 500 при перечне на 100).
+        Сосед — как прочие нецелевые: без требований и без пометки «другая строка той же ячейки»."""
+        ctx = self._split_cell_context(fragmented=False)
+        self.assertNotIn("технические условия", ctx)
+        self.assertNotIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)
+        self.assertIn("сборка кристалла", ctx)             # у целевой — её перечень
+
+    def _split_cell_context(self, fragmented: bool) -> str:
         from app.rag import fragments
-        with mock.patch.object(fragments, "group_of", side_effect=lambda n: 1 if "Светодиод" in (n or "") else None):
-            ctx = format_context([
+        in_group = lambda n: "Светодиод" in (n or "")  # noqa: E731
+        with mock.patch.object(fragments, "group_of", side_effect=lambda n: 1 if in_group(n) else None), \
+                mock.patch.object(fragments, "is_fragmented", side_effect=lambda n: fragmented and in_group(n)):
+            return format_context([
                 make_hit(product_name="Светодиоды белого диапазона", score=0.9,
                          requirement_blocks=[{"operations": [{"text": "сборка кристалла", "points": 30}]}]),
                 make_hit(product_name="Светодиоды (в части светодиодов белого диапазона)", score=0.8,
@@ -591,9 +663,6 @@ class TestContextAndDisclaimer(unittest.TestCase):
                 make_hit(product_name="Насосы", score=0.7,
                          requirement_blocks=[{"operations": [{"text": "литьё", "points": 55}]}]),
             ])
-        self.assertIn("технические условия", ctx)          # сиблинг той же ячейки — при требованиях
-        self.assertIn("ДРУГАЯ СТРОКА ТОЙ ЖЕ ЯЧЕЙКИ", ctx)  # и это в контексте названо
-        self.assertFalse(number_in_context("55", ctx))     # а чужая продукция — без чисел
 
     def test_section_methodology_record_is_never_the_target(self):
         """Псевдозапись раздела — это ПОРОГИ раздела, а не продукция.
@@ -776,11 +845,12 @@ class TestContextAndDisclaimer(unittest.TestCase):
         self.assertIs(_target_hit([header, qualifier]), header)
 
     def test_fragmented_list_covers_known_groups(self):
-        # список сгенерирован из чанков детерминированно; страхуемся от его потери/обнуления
+        # список сгенерирован из чанков детерминированно; страхуемся от его потери/обнуления. После `D23`
+        # группы сверены (пометки «неполный» нет), но состав их обязан остаться — на нём держатся EV6/EV7
         from app.rag import fragments
         for name in ("Аддитивные установки экструзии материала", "Светодиоды зеленого диапазона",
                      "Хладон-125 ХП", "Мономер-6 технический (гексафторпропилен технический)"):
-            self.assertTrue(fragments.is_fragmented(name), name)
+            self.assertIsNotNone(fragments.group_of(name), name)
 
     def test_inherited_group_requirements_are_attributed(self):
         """R6 шаг 3: позиция без своих требований получает требования ГРУППЫ — но с атрибуцией.
@@ -904,8 +974,8 @@ class TestContextAndDisclaimer(unittest.TestCase):
         вводная, наследовать от него нельзя (потомок получил бы фразу без списка)."""
         from app.rag import fragments, inheritance
         for name in ("Аддитивные установки экструзии материала", "Хладон-125 ХП"):
-            self.assertTrue(fragments.is_fragmented(name), name)
-            self.assertIsNone(inheritance.lookup("I", name))
+            self.assertIsNotNone(fragments.group_of(name), name)      # позиция из группы R29 …
+            self.assertIsNone(inheritance.lookup("I", name))         # … и в карту наследования не попала
             self.assertIsNone(inheritance.lookup("XXI", name))
 
     def test_format_context_ranks_relevant_ops(self):

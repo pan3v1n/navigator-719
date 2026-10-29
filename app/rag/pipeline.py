@@ -254,10 +254,34 @@ def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET,
                 ops.append({**o, "_parent": parent} if parent else o)
             continue
         # Блок без операций: весь смысл в `component`, а условие уточняет, как его читать.
+        # `_required` — обязательное требование позиции (права на КД/ТД, сервисный центр, условие <18>): при
+        # усечении длинного перечня оно не уступает место операциям (`_rank_operations`, D24 #267).
+        # `_heading` — вводная списка, кончающаяся «:» («осуществление на территории РФ следующих операций (…),
+        # которые в совокупности оцениваются не менее 50 баллов:»), чьи пункты разобраны в следующие блоки: не
+        # требование, а заголовок — печатается строкой «▸» (правило 2б промпта) и места в капе не занимает. До D24
+        # таких блоков в корпусе не было: разборщик ставил на место вводной свой ярлык.
         text = _block_intro(comp, note, note_cap, thr)
         if text:
-            ops.append({"text": text, "points": None})
+            kind = "_heading" if comp.endswith(":") else "_required"
+            ops.append({"text": text, "points": None, kind: True})
     return ops
+
+
+def _shown_operations(ops: list[dict], query: str | None, cap: int = MAX_OPS_TARGET) -> tuple[list[dict], int]:
+    """Что из требований хита показывается при капе: не больше `cap` требований, вводные списка (`_heading`) в кап
+    не входят. → (показанные, всего требований). Один отбор на контекст модели и таблицу баллов (`points_table`):
+    таблица обязана быть подмножеством контекста."""
+    total = sum(1 for o in ops if not o.get("_heading"))
+    if total <= cap:
+        return ops, total
+    shown, n = [], 0
+    for o in _rank_operations(ops, query):
+        if not o.get("_heading"):
+            if n == cap:
+                continue
+            n += 1
+        shown.append(o)
+    return shown, total
 
 
 def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
@@ -268,9 +292,17 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     запроса (локальный токенизатор BM25, без сети/модели). Сортировка стабильна: при
     равной релевантности исходный порядок сохраняется. Без запроса/совпадений — без изменений."""
     qtok = set(sparse.tokenize(query)) if query else set()
+    # D24 #267: обязательные требования без баллов (блоки без операций — права на КД/ТД, сервисный центр, условие
+    # <18>) — первыми при любом запросе: иначе у больших позиций (бульдозеры, суда, станки) усечение до
+    # MAX_OPS_TARGET срезало бы именно их — тот класс, на который жаловались эксперты («обязательные требования не
+    # показаны»). За ними — вводные списков (`_heading`): после пересортировки они уже не стоят над своими пунктами,
+    # но территория и правила начисления, которые они называют, относятся ко всему перечню. Порядок внутри групп —
+    # прежний (сортировка стабильна).
+    def group(o):
+        return 0 if o.get("_required") else 1 if o.get("_heading") else 2
     if not qtok:
-        return ops
-    return sorted(ops, key=lambda o: -len(qtok & set(sparse.tokenize(o.get("text", "")))))
+        return sorted(ops, key=group)
+    return sorted(ops, key=lambda o: (group(o), -len(qtok & set(sparse.tokenize(o.get("text", ""))))))
 
 
 # Б1 (дизайн 08.10.2026): текст позиции для панели «Источник». Кап — потому что текст уезжает в
@@ -316,6 +348,10 @@ def source_text(h: Hit, cap: int = SOURCE_TEXT_CAP) -> str:
         lines.append(f"Порог для целей закупок (не для подтверждения происхождения): {proc}")
     cur_parent = None
     for o in ops:
+        if o.get("_heading"):
+            lines.append(f"▸ {(o.get('text') or '').strip()}")
+            cur_parent = None
+            continue
         op_parent = o.get("_parent")
         if op_parent and op_parent != cur_parent:
             lines.append(f"▸ {op_parent}")
@@ -431,7 +467,12 @@ def format_context(hits: list[Hit], query: str | None = None,
     tail: list[str] = []          # K6: строки НЕцелевых кандидатов, сворачиваются в один блок
     for i, h in enumerate(hits, 1):
         is_target = any(h is t for t in targets)
-        same_cell = not is_target and fragments.group_of(h.product_name) in groups
+        # D23 #251: у СВЕРЕННОЙ группы (пометка «перечень неполный» снята, `is_fragmented` → False) полный
+        # перечень есть у самой целевой — требования соседа его лишь повторяли бы (ревью: окно светодиодов IV
+        # 6.3 → 21.7 тыс. символов, сумма показанных баллов 500 при одном перечне на 100). Сосед — как прочие
+        # нецелевые (EV7): имя, код, якорь.
+        same_cell = (not is_target and fragments.group_of(h.product_name) in groups
+                     and fragments.is_fragmented(h.product_name))
         # EV20 #117: имя раздела — чистое (без «<5>» и «(в ред. …)», которые модель копировала в ответ),
         # маркер сноски — отдельной пометкой, чтобы указатель на неё не пропал (`retriever.section_name`).
         name, marks = retriever.section_name(h.section_title), retriever.section_footnotes(h.section_title)
@@ -631,14 +672,15 @@ def format_context(hits: list[Hit], query: str | None = None,
 
         if attribution_line:
             lines.append(attribution_line)
-        total = len(ops)
-        if total > cap:
-            ops = _rank_operations(ops, query)
-        shown = ops[:cap]
+        shown, total = _shown_operations(ops, query, cap)
         if shown:
             lines.append("    Ключевые операции группы:" if parent else "    Ключевые операции:")
             cur_parent = None
             for o in shown:
+                if o.get("_heading"):                       # вводная списка (D24): заголовок, не требование
+                    lines.append(f"      ▸ {o.get('text', '')}")
+                    cur_parent = None
+                    continue
                 # K4: вводная фраза блока печатается при смене группы — операции перестают
                 # висеть без указания, частью какого требования они являются. При усечении
                 # список пересортирован по релевантности, и заголовок может повториться —
@@ -654,7 +696,7 @@ def format_context(hits: list[Hit], query: str | None = None,
             if total > cap:
                 rel = " (показаны наиболее релевантные запросу)" if query else ""
                 lines.append(
-                    f"      СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {len(shown)} из {total} операций"
+                    f"      СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ: показаны {cap} из {total} операций"
                     f"{rel}; полный перечень требований и баллов — в первоисточнике ПП №719 (этот раздел)."
                 )
         # R29: у позиции требования заведомо неполны — общая ячейка группы расколота при конвертации
@@ -740,7 +782,7 @@ def _n_operations(h: Hit) -> int:
     показывая при этом требования, — и одна такая запись лежит внутри расколотой группы, где по
     этому числу выбирается опора ответа. Ровно то расхождение счётчиков, которое `EV7` уже
     исправляла для кандидатов."""
-    return len(_hit_operations(h))
+    return sum(1 for o in _hit_operations(h) if not o.get("_heading"))   # вводная списка (D24) — не требование
 
 
 def _codes(code: str | list[str] | None) -> list[str]:
@@ -918,15 +960,14 @@ def points_table(hit: Hit | None, query: str | None = None) -> str:
     # faithfulness-гард честно помечает её баллы как незаземлённые — сверка идёт с КОНТЕКСТОМ.
     # Поэтому повторяем ровно тот отбор, что делает `format_context`, и лишь потом фильтруем
     # балльные.
-    shown_all = (_rank_operations(ops, query)[:MAX_OPS_TARGET]
-                 if len(ops) > MAX_OPS_TARGET else ops)
+    shown_all, total = _shown_operations(ops, query)
     scored = [o for o in shown_all if o.get("points") is not None]
     if len(scored) < POINTS_TABLE_MIN:
         return ""
     # Числа в подписи НЕ печатаем. Контекст уже несёт свою пометку «показаны N из M операций», и
     # модель её цитирует; вторая пара чисел рядом (у нас M считалось бы по балльным — 94 против
     # 95) читается как расхождение данных. Один факт — один источник.
-    incomplete = " (перечень неполный)" if len(ops) > len(shown_all) else ""
+    incomplete = " (перечень неполный)" if total > MAX_OPS_TARGET else ""
     rows = ["", f"**{_POINTS_TABLE_TITLE}{incomplete}:**", "",
             "| Операция или условие | Баллы |", "|---|---|"]
     for o in scored:

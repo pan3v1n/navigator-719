@@ -172,6 +172,63 @@ def assign_groups(rows: list[Row]) -> None:
 # --------------------------------------------------------------------------- #
 # Структурированные записи
 # --------------------------------------------------------------------------- #
+RECONCILED = "D23 #251: перечень общей ячейки сверен с первоисточником — у каждой позиции группы полный"
+
+
+SHARED_MANIFEST = ROOT / "knowledge_base" / "pp719" / "shared_cells.json"
+
+
+def _manifest_lists(path: Path = SHARED_MANIFEST) -> list[dict]:
+    """Перечни манифеста сверки `D23`, у которых текст записей покрывает ячейку первоисточника не хуже порога."""
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return []
+    floor = data.get("min_recall", 0.9)
+    # И ни одного недостающего числа ячейки: полнота по словам их не видит (ревью PR D23, раунд 2, H2).
+    return [m for m in data.get("lists") or [] if (m.get("recall") or 0) >= floor and not m.get("numbers_missing")]
+
+
+def _mark_reconciled(groups: list[dict], recs: list[dict], manifest: list[dict] | None = None) -> int:
+    """`reconciled` у группы R29, если ВСЕ её позиции однозначно находятся в базе, несут ОДИН И ТОТ ЖЕ
+    непустой перечень И входят в один перечень манифеста `D23` (`shared_cells.json`) с полнотой против ячейки
+    первоисточника не ниже порога.
+
+    Одинаковый перечень у позиций правка обеспечивает сама — он полноты не доказывает (ревью PR D23, H3:
+    «Аддитивные установки» I-25/26 получали одно требование о доле в уставном капитале, а ячейка шла дальше).
+    Доказательство — полнота в манифесте. Манифеста нет — пометка не снимается ни у кого. Одноимённая позиция
+    (две записи на имя) признаком не считается — группа остаётся с пометкой, это безопаснее."""
+    manifest = _manifest_lists() if manifest is None else manifest
+    member_sets = [(m["section"], {" ".join(p["product_name"].split()).lower() for p in m["members"]})
+                   for m in manifest]
+    by_name: dict[tuple[str, str], list[dict]] = {}
+    for r in recs:
+        for k in {" ".join(r["product_name"].split()).lower(),
+                  " ".join(r["product_name"].split("\n")[0].split()).lower()}:
+            by_name.setdefault((r["section_roman"], k), []).append(r)
+    n = 0
+    for g in groups:
+        blocks, names = [], set()
+        for p_ in g.get("positions") or []:
+            name = p_.get("product_name") or ""
+            cand = (by_name.get((g["section"], " ".join(name.split()).lower()))
+                    or by_name.get((g["section"], " ".join(name.split("\n")[0].split()).lower())) or [])
+            cand = list({id(c): c for c in cand}.values())
+            blocks.append(json.dumps(cand[0].get("requirement_blocks") or [], ensure_ascii=False, sort_keys=True)
+                          if len(cand) == 1 else None)
+            if len(cand) == 1:
+                names.add(" ".join(cand[0]["product_name"].split()).lower())
+        verified = any(sec == g["section"] and names <= members for sec, members in member_sets)
+        if blocks and None not in blocks and len(set(blocks)) == 1 and blocks[0] != "[]" and verified:
+            g["reconciled"] = RECONCILED
+            n += 1
+        else:
+            g.pop("reconciled", None)
+    return n
+
+
 def load_structured() -> list[dict]:
     recs: list[dict] = []
     for f in sorted(STRUCT_DIR.glob("*.json")):
@@ -196,7 +253,9 @@ def n_operations(rec: dict) -> int:
     n = 0
     for b in (rec.get("requirement_blocks") or []):
         ops = b.get("operations") or []
-        n += len(ops) if ops else (1 if (b.get("component") or "").strip() else 0)
+        comp = (b.get("component") or "").strip()
+        # вводная списка без своих операций (D24, «…следующих операций:») — заголовок, а не требование
+        n += len(ops) if ops else (1 if comp and not comp.endswith(":") else 0)
     return n
 
 
@@ -428,7 +487,9 @@ def record_operations(rec: dict) -> list[dict]:
             continue
         text = _block_intro(comp, note, NOTE_CAP_TARGET, thr)
         if text:
-            out.append({"text": text, "points": None})
+            # вводная списка («…следующих операций:», D24) — заголовок, как у рантайма: наследник печатает её «▸»;
+            # остальное — обязательное требование, при усечении оно идёт первым (`pipeline._rank_operations`)
+            out.append({"text": text, "points": None, ("_heading" if comp.endswith(":") else "_required"): True})
     return out
 
 
@@ -648,6 +709,9 @@ def main() -> None:
                     p_["role_source"] = "generator"
         print(f"R29: ролей от эксперта сохранено {len(prev)} (из них переопределили генератор: {kept}); "
               "остальные пересчитаны. Чтобы правка пережила перегенерацию — role_source: \"expert\".")
+        n_rec = _mark_reconciled(groups, recs)
+        print(f"R29: групп, сверенных с первоисточником (D23: у всех позиций один полный перечень), {n_rec} "
+              f"из {len(groups)} — пометку «перечень неполный» рантайм у них не ставит, роли и состав остаются.")
         out.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
         n_pos = sum(len(g["positions"]) for g in groups)
         print(f"R29: групп с расколотой ячейкой {len(groups)}, позиций в них {n_pos} → {out}")
