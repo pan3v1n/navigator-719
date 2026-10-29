@@ -487,8 +487,9 @@ def record_operations(rec: dict) -> list[dict]:
             continue
         text = _block_intro(comp, note, NOTE_CAP_TARGET, thr)
         if text:
-            # вводная списка («…следующих операций:», D24) — заголовок, как у рантайма: наследник печатает её «▸»
-            out.append({"text": text, "points": None, **({"_heading": True} if comp.endswith(":") else {})})
+            # вводная списка («…следующих операций:», D24) — заголовок, как у рантайма: наследник печатает её «▸»;
+            # остальное — обязательное требование, при усечении оно идёт первым (`pipeline._rank_operations`)
+            out.append({"text": text, "points": None, ("_heading" if comp.endswith(":") else "_required"): True})
     return out
 
 
