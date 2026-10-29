@@ -23,6 +23,10 @@ stdout. Здесь: сверка sha256 (обрыв канала на серед
 По расписанию — Планировщик заданий Windows, раз в сутки после 03:00 UTC (06:00 МСК), например:
   schtasks /Create /SC DAILY /ST 09:00 /TN navigator-pull-backup ^
     /TR "D:\\navigator-719\\.venv\\Scripts\\python.exe D:\\navigator-719\\scripts\\pull_backup.py --dest E:\\navigator-backups"
+⚠ 29.10.2026: ПК спал в 09:00, и «запускать пропущенное» (StartWhenAvailable) после пробуждения запуск
+не догнал — копии за сутки не было. Задаче нужны ещё триггеры «вход» и «разблокировка», а обёртке
+(`D:\\navigator-backups\\pull-backup-daily.cmd`) — одна попытка в сутки по файлу `last-attempt.txt`:
+подключение к бою разрешено раз в сутки, какой бы триггер ни сработал первым.
 """
 
 from __future__ import annotations
