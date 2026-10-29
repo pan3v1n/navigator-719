@@ -149,7 +149,11 @@ def collect_incomplete(romans: list[str]) -> list[dict]:
             src, got = source_points(p), record_points(rec)
             lost = sorted(x for x in src - got if x != 0)
             extra = sorted(got - src - outside)
-            if not lost and not extra:
+            # Пометка рантайма — о ПОТЕРЯННЫХ порогах; «лишние» баллы её не дают. После `D23` #251 у члена
+            # общего перечня законно есть баллы соседних строк чанка (единица первоисточника — ячейка, а не
+            # строка): «лишние» без потерянных повесили бы «пороги показаны не полностью» на 64 позиции с
+            # полным перечнем. Перенос балла между записями по-прежнему ловит `check_records` (D8).
+            if not lost:
                 continue
             out.append({
                 "section": roman,

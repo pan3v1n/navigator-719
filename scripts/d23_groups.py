@@ -224,7 +224,12 @@ def _join_continuations(groups: list[dict]) -> list[dict]:
         first = next((x["req"] for x in grp["rows"] if x["req"]), "").strip()
         prev_text = [x["req"] for x in out[-1]["rows"] if x["req"]] if out else []
         tail = prev_text[-1].rstrip() if prev_text else ""
-        cont = tail.endswith(":") or (tail.endswith(";") and not POINTS_RE.search(first.split("\n")[0]))
+        # Оборванная фраза — тоже продолжение: запятой предложение не кончается («…или права использования
+        # товарного знака,» → «правообладателем которого является…» у светодиодов IV-7 → IV-8: ячейку рвут
+        # строки поправок «(в ред. … N 2033)» во всю ширину).
+        broken = tail.endswith(",") or (tail[-1:].isalpha() and first[:1].islower())
+        cont = (tail.endswith(":") or broken
+                or (tail.endswith(";") and not POINTS_RE.search(first.split("\n")[0])))
         if (out and first and cont and not grp["excluded"] and not out[-1]["excluded"]
                 and not LIST_OPENER_RE.match(first)):
             out[-1]["rows"] += grp["rows"]
@@ -446,9 +451,10 @@ def full_list(recs: list[dict], text: str) -> tuple[list[dict], str]:
     член уже несёт перечень целиком (покрытие не хуже объединения), берётся его разбор: два полных разбора
     одной ячейки разнятся формулировками, и объединение задвоило бы операции."""
     ft = toks(text)
+    names = {norm(r["product_name"]) for r in recs} | {norm(r["product_name"].split("\n")[0]) for r in recs}
     union, seen = [], set()
     for r in recs:
-        for b in r.get("requirement_blocks") or []:
+        for b in _unlabel(r.get("requirement_blocks") or [], names):
             k = _block_key(b)
             if k not in seen:
                 seen.add(k)
@@ -461,8 +467,23 @@ def full_list(recs: list[dict], text: str) -> tuple[list[dict], str]:
     pool = _op_texts(best)
     extra = [op for r in recs if r is not best for op in _op_texts(r) if not _op_covered(op, pool)]
     if not extra and _cover(own_text(best), ft) >= _cover(" ".join(own_text(r) for r in recs), ft) - 0.02:
-        return copy.deepcopy(best.get("requirement_blocks") or []), f"разбор «{best['product_name'][:60]}»"
+        return copy.deepcopy(_unlabel(best.get("requirement_blocks") or [], names)), f"разбор «{best['product_name'][:60]}»"
     return copy.deepcopy(union), "объединение блоков членов"
+
+
+def _unlabel(blocks: list[dict], names: set[str]) -> list[dict]:
+    """Блоки без подписи-имени члена перечня. Разборщик ставил в `component` имя СВОЕЙ позиции («Хладон-318
+    (октафторциклобутан)»), а в общем перечне такая подпись читается как «требования к Хладону-318» у
+    «Жидкости Б-1» (37 блоков в 23 перечнях на 508574; в ячейке этих подписей нет). Блок, у которого кроме
+    имени ничего нет, выпадает — требования в нём нет."""
+    out = []
+    for b in blocks:
+        if norm(b.get("component")) in names:
+            if not (b.get("operations") or b.get("note") or b.get("min_threshold")):
+                continue
+            b = {**b, "component": None}
+        out.append(b)
+    return out
 
 
 def _op_texts(r: dict) -> list[str]:
@@ -470,9 +491,14 @@ def _op_texts(r: dict) -> list[str]:
 
 
 def _op_covered(op: str, pool: list[str]) -> bool:
-    """Операция есть в разборе: тем же текстом или пересказом (≥ 80 % её слов в одной операции разбора)."""
+    """Операция есть в разборе: тем же текстом или пересказом (≥ 80 % её слов в одной операции разбора) — и
+    с ТЕМИ ЖЕ числами. Без чисел пересказом считалось «не более 50 процентов цены товара» при «не более
+    70 процентов»: ячейка гамма-камер и МР-томографов VII несёт два варианта через «или», и вариант с 50 %
+    (разбор гамма-камер) выпадал из перечня."""
     words = set(op.split())
-    return any(op == p or (words and len(words & set(p.split())) / len(words) >= 0.8) for p in pool)
+    nums = set(re.findall(r"\d+", op))
+    return any(op == p or (words and len(words & set(p.split())) / len(words) >= 0.8
+                           and nums <= set(re.findall(r"\d+", p))) for p in pool)
 
 
 def _rtype(blocks: list[dict], recs: list[dict]) -> str | None:
@@ -517,6 +543,92 @@ def reconcile(report: dict) -> list[dict]:
                     log.append({"section": sec, "code": x["code"], "product": r["product_name"][:100],
                                 "anchor": r.get("source_anchor"), "ops": [before, after], "what": changed,
                                 "source": how})
+    return log
+
+
+# Примечание о целом разделе («Заключения, выданные до 10.05.2024 в отношении продукции, включенной в раздел
+# VII …, действительны до окончания их срока действия»). Разбор оставлял его строкой-продолжением у позиции,
+# под которой оно стоит в таблице: на 508574 — у VII-22 (плазмаферез) и VII-37 (морозильники), то есть у
+# случайных позиций (`D19` #210 п. 2). Место ему — запись методики раздела.
+_SECTION_NOTE_RE = re.compile(r"Заключения, выданные до \S+ в отношении продукции, включенной в раздел\s+"
+                              r"(?P<sec>[IVXL]+)\b.*?действительны до окончания их срока действия"
+                              r"(?:\s*\([^()]*\))?\.?")
+
+
+def move_section_notes(files: dict[Path, list[dict]]) -> list[dict]:
+    """Примечание о целом разделе — из `notes` позиций в `notes` записи методики этого раздела (один раз)."""
+    meth = {r["section_roman"]: r for data in files.values() for r in data
+            if r.get("record_type") == "section_methodology"}
+    log = []
+    for data in files.values():
+        for r in data:
+            if r.get("record_type") == "section_methodology" or not r.get("notes"):
+                continue
+            for m in list(_SECTION_NOTE_RE.finditer(r["notes"])):
+                note, sec = m.group(0).strip(), m.group("sec")
+                if sec != r["section_roman"] or sec not in meth:
+                    continue                          # чужой раздел или методики нет — не трогаем
+                r["notes"] = (r["notes"].replace(m.group(0), "").strip() or None)
+                target = meth[sec]
+                if note not in (target.get("notes") or ""):
+                    target["notes"] = ((target.get("notes") or "").rstrip() + "\n" + note).strip()
+                log.append({"section": sec, "from": r.get("source_anchor"), "product": r["product_name"][:80],
+                            "note": note[:120]})
+    return log
+
+
+NOTES_CHUNK = ROOT / "knowledge_base" / "pp719" / "chunks" / "130_PRIMECHANIYA_prilozheniya.txt"
+_NOTE_CODE_RE = re.compile(r"(из\s+)?(?<![\d.])(\d{2}(?:\.\d+)+)(?![\d.])", re.I)
+_DATE_RE = re.compile(r"\d{1,2}\.\d{1,2}\.\d{4}")
+
+
+def _note_codes(note: str, text: str) -> list[str] | None:
+    """Коды КОДОВОГО примечания («Продукция, классифицируемая кодами … из 26.11.22.200, из 26.11.22.210,
+    26.11.22.216 и включенная в раздел IV …») с пометками «из», или None — если примечание называет продукцию
+    в кавычках (тогда порог адресован ИМЕНИ, и по ячейке его переносить нельзя)."""
+    m = re.search(rf"^{re.escape(note)}\.\s+(.*)$", text, re.M)
+    if not m:
+        return None
+    head = re.split(r"\s+и\s+включенн", m.group(1))[0]
+    if any(q in head for q in "\"«»"):
+        return None
+    head = _DATE_RE.sub(" ", head)
+    return sorted(("из " if a else "") + c for a, c in _NOTE_CODE_RE.findall(head))
+
+
+def share_cell_thresholds(report: dict, notes_text: str | None = None) -> list[dict]:
+    """Порог кодового примечания — членам ячейки, которым рантайм его не нашёл, ТОЛЬКО при доказательстве:
+    список кодов примечания (с «из») В ТОЧНОСТИ равен кодам общей ячейки первоисточника.
+
+    Светодиоды IV: прим. 71 «из 26.11.22.200, из 26.11.22.210, 26.11.22.216» — ровно коды ячейки белых
+    (IV-1…3), прим. 72 «из 26.11.22.200, 26.11.22.210, 26.11.22.211–.215» — ровно ячейка небелых (IV-4…10).
+    Коды .200 и .210 стоят в ОБОИХ примечаниях, и `thresholds._lookup` у строк-квалификаторов IV-1, 2, 4, 5
+    честно не угадывает; различает только ячейка. ⚠ В общем случае члены одной ячейки законно имеют РАЗНЫЕ
+    пороги (V «из 27.12»: реле, выключатели, зажимы — у каждого свой или никакого), поэтому без равенства
+    списков — ничего. Сторож устаревания (при новой редакции прим. 71/72) — тест данных."""
+    from app.rag import thresholds as T
+    text = notes_text if notes_text is not None else NOTES_CHUNK.read_text(encoding="utf-8")
+    log = []
+    for sec, rep in report.items():
+        for x in rep["shared"]:
+            recs = x["_recs"]
+            got = [(r, r.get("min_threshold") or T.lookup_threshold(r.get("okpd2_codes") or [],
+                                                                     r["product_name"], sec)) for r in recs]
+            have = {t for _, t in got if t}
+            miss = [r for r, t in got if not t]
+            if len(have) != 1 or not miss:
+                continue
+            thr = next(iter(have))
+            refs = re.findall(r"\[прим\. ([^\]]+)\]", thr)
+            cell = sorted(re.sub(r"\s+", " ", c.strip()).lower() for c in re.split(r"\s*\|\s*|\n", x["code"])
+                          if c.strip())
+            if len(refs) != 1 or [c.lower() for c in (_note_codes(refs[0], text) or [])] != cell:
+                continue
+            for r in miss:
+                r["min_threshold"] = thr
+                log.append({"section": sec, "code": x["code"], "product": r["product_name"][:100],
+                            "anchor": r.get("source_anchor"), "ops": [0, 0], "what": [f"порог прим. {refs[0]}"],
+                            "source": "коды примечания = коды ячейки"})
     return log
 
 
@@ -578,6 +690,17 @@ def main() -> int:
     log = reconcile(report)                           # правит записи в памяти; на диск — только с --write
     print(f"правка: записей {len(log)}, перечней {len({(e['section'], e['code']) for e in log})}"
           + ("" if args.write else " — ПЛАН, файлы не тронуты (--write)"))
+    shared_thr = share_cell_thresholds(report)
+    for e in shared_thr:
+        print(f"  {e['what'][0]}: «{e['product']}» ({e['anchor']}) — {e['source']}")
+    print(f"порогов кодового примечания по ячейке: {len(shared_thr)}")
+    log += shared_thr
+    moved = move_section_notes(files)
+    for e in moved:
+        print(f"  примечание раздела {e['section']}: из «{e['product']}» ({e['from']}) → методика раздела")
+    print(f"примечаний о целом разделе перенесено в методику: {len(moved)}")
+    log += [{"section": e["section"], "code": "", "product": e["product"], "anchor": e["from"], "ops": [0, 0],
+             "what": ["примечание раздела → методика"], "source": "D19 п. 2"} for e in moved]
     if args.log:
         args.log.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
     if args.write:

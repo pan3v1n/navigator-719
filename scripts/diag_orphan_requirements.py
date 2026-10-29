@@ -172,6 +172,39 @@ def assign_groups(rows: list[Row]) -> None:
 # --------------------------------------------------------------------------- #
 # Структурированные записи
 # --------------------------------------------------------------------------- #
+RECONCILED = "D23 #251: перечень общей ячейки сверен с первоисточником — у каждой позиции группы полный"
+
+
+def _mark_reconciled(groups: list[dict], recs: list[dict]) -> int:
+    """`reconciled` у группы R29, если ВСЕ её позиции однозначно находятся в базе и несут ОДИН И ТОТ ЖЕ
+    непустой перечень — его записал `scripts/d23_groups.py --write` по сетке ячеек HTML Контура.
+
+    Признак берётся из ДАННЫХ, а не из списка «что сверяли»: генератор видит раскол в тексте чанков (там он
+    навсегда), а неполон ли перечень в базе — знает только база. Одноимённая позиция (две записи на имя)
+    признаком не считается — группа остаётся с пометкой, это безопаснее."""
+    by_name: dict[tuple[str, str], list[dict]] = {}
+    for r in recs:
+        for k in {" ".join(r["product_name"].split()).lower(),
+                  " ".join(r["product_name"].split("\n")[0].split()).lower()}:
+            by_name.setdefault((r["section_roman"], k), []).append(r)
+    n = 0
+    for g in groups:
+        blocks = []
+        for p_ in g.get("positions") or []:
+            name = p_.get("product_name") or ""
+            cand = (by_name.get((g["section"], " ".join(name.split()).lower()))
+                    or by_name.get((g["section"], " ".join(name.split("\n")[0].split()).lower())) or [])
+            cand = list({id(c): c for c in cand}.values())
+            blocks.append(json.dumps(cand[0].get("requirement_blocks") or [], ensure_ascii=False, sort_keys=True)
+                          if len(cand) == 1 else None)
+        if blocks and None not in blocks and len(set(blocks)) == 1 and blocks[0] != "[]":
+            g["reconciled"] = RECONCILED
+            n += 1
+        else:
+            g.pop("reconciled", None)
+    return n
+
+
 def load_structured() -> list[dict]:
     recs: list[dict] = []
     for f in sorted(STRUCT_DIR.glob("*.json")):
@@ -648,6 +681,9 @@ def main() -> None:
                     p_["role_source"] = "generator"
         print(f"R29: ролей от эксперта сохранено {len(prev)} (из них переопределили генератор: {kept}); "
               "остальные пересчитаны. Чтобы правка пережила перегенерацию — role_source: \"expert\".")
+        n_rec = _mark_reconciled(groups, recs)
+        print(f"R29: групп, сверенных с первоисточником (D23: у всех позиций один полный перечень), {n_rec} "
+              f"из {len(groups)} — пометку «перечень неполный» рантайм у них не ставит, роли и состав остаются.")
         out.write_text(json.dumps(groups, ensure_ascii=False, indent=1), encoding="utf-8")
         n_pos = sum(len(g["positions"]) for g in groups)
         print(f"R29: групп с расколотой ячейкой {len(groups)}, позиций в них {n_pos} → {out}")
