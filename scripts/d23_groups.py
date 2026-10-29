@@ -40,7 +40,7 @@ import hashlib
 import json
 import re
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from html.parser import HTMLParser
 from pathlib import Path
 
@@ -470,7 +470,12 @@ def analyse(by_sec: dict, recs: dict, min_cover: float, gap: float) -> dict:
             # Вердикт перечня: «целый» — члены несут его одинаково; «расколот» — кто-то несёт заметно меньше
             # лучшего, то есть разбор раздал перечень по строкам; «низкое покрытие» — все одинаково плохи, а
             # объединение не лучше: это формат записи (балльная без общего зачина), не раскол.
-            if min(covers) >= top - gap and top >= min_cover:
+            # Объединение членов покрывает ячейку заметно лучше ЛУЧШЕГО из них — каждый несёт кусок (раунд 3 ревью,
+            # H-1: мебель XI 31.01.12…31.09.13 — у членов 0.56 и 0.53, у объединения 0.88; дробилки VI 0.70/0.73 →
+            # 0.98). Без этой ветки перечень уходил в «низкое покрытие» или «целый» и не правился.
+            if x["union_cover"] >= top + gap and x["union_cover"] >= min_cover:
+                x["verdict"] = "расколот"
+            elif min(covers) >= top - gap and top >= min_cover:
                 x["verdict"] = "целый"
             elif min(covers) < top - gap:
                 x["verdict"] = "расколот"
@@ -624,6 +629,34 @@ def _rtype(blocks: list[dict], recs: list[dict]) -> str | None:
     return "mixed" if t not in ("points", "mixed") else t
 
 
+# Порог в `min_threshold` члена — «не менее N …» / «всех следующих …», а не операция с баллами в скобках
+# («с 1 января 2024 г. - на уровне не менее 70 процентов (25 баллов)» у III-61 — это операция ячейки).
+_THRESHOLDISH_RE = re.compile(r"не\s+менее\s+\d+|всех\s+следующих", re.I)
+_POINTS_OP_RE = re.compile(r"\(\s*\d+[,.]?\d*\s*балл", re.I)
+
+
+def cell_threshold(recs: list[dict], cell_text: str) -> str | None:
+    """Порог САМОЙ ячейки, который разборщик положил в `min_threshold` одного из членов, или None.
+
+    Условия (раунды 1–3 ревью PR D23): это порог, а не операция; его слова и ЧИСЛА есть в тексте ячейки; кандидат
+    один. Кому его отдавать, решает `reconcile`: только члену без своего порога — ни в записи, ни в примечаниях
+    (`lookup_threshold`): чужой порог записи перекрыл бы верный порог примечания (IX-12/13, XXVII-12…14, I-25).
+    Случаи: «не менее 8 / 10 / 12 из следующих операций» шасси III-116 → III-117 (без него у III-117 стояла ложная
+    строка R7 «порог не предусмотрен»); «не менее 4 / 5 / всех технологических операций» насосов XIX-1 → XIX-2…10;
+    «не менее 70 баллов» XV-7 → XV-6."""
+    cell_t = set(toks(cell_text))
+    cell_n = Counter(_numbers(cell_text))
+    cand = set()
+    for r in recs:
+        t = r.get("min_threshold")
+        if not t or not _THRESHOLDISH_RE.search(t) or _POINTS_OP_RE.search(t):
+            continue
+        tt = toks(t)
+        if tt and sum(w in cell_t for w in tt) / len(tt) >= 0.95 and not (Counter(_numbers(t)) - cell_n):
+            cand.add(t)
+    return next(iter(cand)) if len(cand) == 1 else None
+
+
 def reconcile(report: dict) -> list[dict]:
     """Правка расколотых перечней: каждому члену — полный перечень его ячейки. Возвращает журнал правок."""
     from app.rag import thresholds as T
@@ -640,27 +673,20 @@ def reconcile(report: dict) -> list[dict]:
             # PR D23: «20 баллов» (балл строки ячейки) у IX-12/13 вместо порогов прим. 26, «не менее 50 баллов» у
             # XXVII-12…14 вместо прим. 32, требование о доле в уставном капитале у I-25 вместо прим. 56. Порог по
             # ячейке — только `share_cell_thresholds`, с доказательством.
-            names = {r["product_name"] for r in recs}
+            cell_thr = cell_threshold(recs, x["text"])
             for r in recs:
                 before = sum(len(b.get("operations") or []) for b in r.get("requirement_blocks") or [])
                 changed = []
-                # Порог ГРУППЫ, который запись показывала через наследование (своих операций не было, родитель —
-                # член той же ячейки со своим `min_threshold`), сохраняется: со своими блоками наследование не
-                # срабатывает, и условие о числе операций у насосов XIX-2/3/9 пропадало (ревью, раунд 2, H1).
-                inherited = None
-                if not before and not r.get("min_threshold"):
-                    parent = inheritance.lookup(sec, r["product_name"])
-                    if parent and parent.get("min_threshold") and parent.get("product_name") in names:
-                        inherited = parent["min_threshold"]
                 if [_block_key(b) for b in r.get("requirement_blocks") or []] != [_block_key(b) for b in blocks]:
                     r["requirement_blocks"] = copy.deepcopy(blocks)
                     changed.append("перечень")
                 if rtype and r.get("requirement_type") != rtype:
                     r["requirement_type"] = rtype
                     changed.append("тип")
-                if inherited and not T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], sec):
-                    r["min_threshold"] = inherited
-                    changed.append("порог группы сохранён")
+                if (cell_thr and not r.get("min_threshold")
+                        and not T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], sec)):
+                    r["min_threshold"] = cell_thr
+                    changed.append("порог ячейки")
                 for rx, what in ((_EMPTY_NOTE_RE, "снята пометка «требования не указаны»"),
                                  (_GROUP_NOTE_RE, "снята пометка «доразбор»")):
                     if r.get("notes") and rx.search(r["notes"]):
@@ -766,19 +792,30 @@ MANIFEST_MIN_RECALL = 0.9
 _AMEND_PAREN_RE = re.compile(r"\((?:в\s+ред|введ)[^)]*\)", re.I)
 
 
-def _cell_numbers(text: str) -> set[str]:
-    """Числа ячейки: без дат и номеров актов в «(в ред. …)», без сносок `<N>` (их снимает `norm`)."""
-    return set(re.findall(r"\d+", norm(_AMEND_PAREN_RE.sub(" ", text or ""))))
+_NUMBERING_RE = re.compile(r"(?<![\d,])\d+(?:\.\d+){1,}(?![\d,])")
 
 
-def _record_numbers(r: dict) -> set[str]:
-    """Числа записи: в тексте блоков (операции, подписи, пороги блоков) и в баллах операций."""
-    nums = set(re.findall(r"\d+", norm(own_text({"requirement_blocks": r.get("requirement_blocks")}))))
+def _numbers(text: str | None) -> list[str]:
+    """Числа текста — СПИСКОМ (мультимножество): без дат и номеров актов в «(в ред. …)», без сносок `<N>` (их
+    снимает `norm`), без многоуровневой нумерации и кодов вида «1.1.1.11» / «26.20.22» (раунд 3 ревью, L-1)."""
+    t = _NUMBERING_RE.sub(" ", _AMEND_PAREN_RE.sub(" ", text or ""))
+    return re.findall(r"\d+", norm(t))
+
+
+def _cell_numbers(text: str) -> Counter:
+    return Counter(_numbers(text))
+
+
+def _record_numbers(r: dict) -> Counter:
+    """Числа записи: в тексте блоков (операции, подписи, пороги блоков) и в баллах операций — мультимножеством:
+    одно «2018» в операции о числе операций не «покрывает» потерянную метку даты «с 1 января 2018 г.» у доли
+    (раунд 3 ревью, M-2: XIX «Комплектующие», XIII, VII-41…43)."""
+    nums = Counter(_numbers(own_text({"requirement_blocks": r.get("requirement_blocks")})))
     for b in r.get("requirement_blocks") or []:
         for o in b.get("operations") or []:
-            if o.get("points") is not None:
-                nums |= set(re.findall(r"\d+", str(o["points"]).replace(".0", "") if str(o["points"]).endswith(".0")
-                                       else str(o["points"])))
+            p = o.get("points")
+            if p is not None:
+                nums.update(re.findall(r"\d+", str(int(p)) if float(p).is_integer() else str(p)))
     return nums
 
 
@@ -795,7 +832,10 @@ def shared_manifest(report: dict, sha: str, source: str) -> dict:
             # Числа — отдельно: `toks` их выбрасывает, и перечень без «не менее 75 процентов … трех четвертей»
             # проходил как полный (ревью PR D23, раунд 2, H2: аддитивные установки I).
             cell_nums = _cell_numbers(x["text"])
-            missing = sorted(set().union(*(cell_nums - _record_numbers(r) for r in recs)), key=lambda n: (len(n), n))
+            lack = Counter()
+            for r in recs:
+                lack |= cell_nums - _record_numbers(r)           # худший член: максимум недостачи по каждому числу
+            missing = sorted(lack.elements(), key=lambda n: (len(n), n))
             same = len({json.dumps(r.get("requirement_blocks"), ensure_ascii=False, sort_keys=True) for r in recs}) == 1
             lists.append({
                 "section": sec, "code": x["code"],

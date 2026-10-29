@@ -174,7 +174,10 @@ def _shared_cell_anchors(path: Path = SHARED_MANIFEST) -> set[str]:
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         return set()
-    return {m.get("anchor") for lst in data.get("lists") or [] for m in lst.get("members") or [] if m.get("anchor")}
+    # Только перечни, сведённые к ОДНОМУ перечню (`same_list`): у «целых» нетронутых перечней члены несут свои
+    # разборы, и чужой балл у них обязан оставаться видимым (раунд 3 ревью, L-2).
+    return {m.get("anchor") for lst in data.get("lists") or [] if lst.get("same_list")
+            for m in lst.get("members") or [] if m.get("anchor")}
 
 
 def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:

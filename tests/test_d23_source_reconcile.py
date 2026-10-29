@@ -110,6 +110,22 @@ class TestFullList(unittest.TestCase):
         self.assertEqual(len(ops), 5)
         self.assertEqual(how, "объединение блоков членов")
 
+    def test_union_better_than_every_member_is_split(self):
+        """Раунд 3 ревью, H-1: мебель XI — у членов покрытие 0.56 и 0.53, у объединения 0.88; без этой ветки
+        вердикт «низкое покрытие» и перечень не правился."""
+        # члены покрывают РАВНЫЕ половины ячейки (0.5 и 0.5): старые ветки дали бы «низкое покрытие»
+        html = _table(
+            '<tr><td>31.01.12</td><td>Мебель А</td><td rowspan="2">раскрой древесных;<br>сверление заготовок;<br>'
+            'облицовывание кромок;<br>сборка изделия</td></tr>'
+            '<tr><td>31.02.10</td><td>Мебель Б</td></tr>')
+        a = _rec("Мебель А", [("раскрой древесных", None), ("сверление заготовок", None)], 1)
+        b = _rec("Мебель Б", [("облицовывание кромок", None), ("сборка изделия", None)], 2)
+        rep_ = d.analyse({"T": [d.grid(_tables(html)[0])]}, {"T": [a, b]}, 0.6, 0.1)
+        covers = [m["cover"] for m in rep_["T"]["shared"][0]["members"] if m["product"].startswith("Мебель")]
+        self.assertEqual(len(set(covers)), 1)                 # члены равны — старые ветки раскола не видели
+        self.assertLess(covers[0], 0.6)
+        self.assertEqual([x["verdict"] for x in rep_["T"]["shared"]], ["расколот"])
+
     def test_single_parse_taken_when_it_carries_everything(self):
         full = _rec("Полный", [("операция один", None), ("операция два", None)], 1)
         part = _rec("Часть", [("операция один", None)], 2)
@@ -222,6 +238,10 @@ class TestContinuationJoin(unittest.TestCase):
         self.assertEqual(len(self._join(f"{OPENER} на срок не менее 5 лет <6>",
                                         "наличие на территории одной из стран - членов ЕАЭС сервисного центра")), 1)
 
+    def test_preamble_only_chunk_then_head_starts_new_cell(self):
+        """Законченная ячейка из одних прав бывает (V, VI, XVI) — её защищает только `_is_head`."""
+        self.assertEqual(len(self._join(f"{OPENER} на срок не менее 5 лет", f"{OPENER} на срок 3 года;")), 2)
+
     def test_chunk_with_operations_ending_in_word_is_finished(self):
         """Законченная ячейка тоже кончается словом («… упаковка») — кусок с операциями не продолжается."""
         self.assertEqual(len(self._join(f"{OPENER};\nсборка;\nупаковка",
@@ -253,6 +273,34 @@ class TestContinuationJoin(unittest.TestCase):
         self.assertEqual(mine[0]["codes"], ["28.41.34.100", "28.96.10.121", "28.96.10.122"])
         self.assertEqual(len(mine[0]["segments"]), 1)
         self.assertEqual(mine[0]["segments"][0]["products"], ["Изделие А", "Изделие Б", "Изделие В"])
+
+
+class TestCellThreshold(unittest.TestCase):
+    """Порог самой ячейки из `min_threshold` члена — соседям без своего порога (раунд 3 ревью, H-2 / M-1)."""
+
+    CELL = ("наличие прав на документацию;\nс 1 января 2016 г. не менее 8, с 1 января 2018 г. - не менее 10, "
+            "с 1 января 2020 г. - не менее 12 из следующих операций:\nсборка;\nсварка")
+    THR = "не менее 8, с 1 января 2018 г. - не менее 10, с 1 января 2020 г. - не менее 12"
+
+    def _recs(self, thr):
+        donor = {**_rec("Шасси", [("сборка", None)], 116), "min_threshold": thr}
+        return [donor, _rec("Шасси", [], 117)]
+
+    def test_threshold_of_cell_found(self):
+        self.assertEqual(d.cell_threshold(self._recs(self.THR), self.CELL), self.THR)
+
+    def test_operation_with_points_is_not_a_threshold(self):
+        """III-61: «с 1 января 2024 г. - на уровне не менее 70 процентов (25 баллов)» — операция ячейки."""
+        thr = "с 1 января 2024 г. - на уровне не менее 70 процентов (25 баллов)"
+        self.assertIsNone(d.cell_threshold(self._recs(thr), self.CELL + "\n" + thr))
+
+    def test_threshold_absent_from_cell_is_not_shared(self):
+        self.assertIsNone(d.cell_threshold(self._recs("не менее 90 баллов"), self.CELL))
+
+    def test_two_candidates_share_nothing(self):
+        a = {**_rec("А", [("сборка", None)], 1), "min_threshold": "не менее 10"}
+        b = {**_rec("Б", [("сборка", None)], 2), "min_threshold": "не менее 12"}
+        self.assertIsNone(d.cell_threshold([a, b], self.CELL))
 
 
 class TestSectionNoteMoved(unittest.TestCase):
@@ -404,9 +452,34 @@ class TestCorpusAfterD23(unittest.TestCase):
         for name in ("Насосы смазочные", "Насосы для охлаждающей жидкости", "Насосы питательные и конденсатные"):
             self.assertIn("не менее 4 технологических операций", self._one("XIX", name).get("min_threshold") or "", name)
 
+    def test_cell_threshold_given_to_members_without_one(self):
+        """Раунд 3 ревью: III-117 — «не менее 8 / 10 / 12 из» (без него стояла ложная R7), XIX-4/10 — условие о
+        числе операций, VI-39 «Дробилки прочие» — 60 / 80 / 100 баллов."""
+        iii117 = next(r for r in self.recs["III"] if r["source_anchor"].endswith("позиция 117"))
+        self.assertIn("не менее 12", iii117.get("min_threshold") or "")
+        for name in ("Насосы возвратно-поступательные объемного действия", "Насосы двухстороннего входа"):
+            self.assertIn("не менее 4 технологических операций", self._one("XIX", name).get("min_threshold") or "", name)
+        self.assertIn("не менее 100 баллов", self._one("VI", "Дробилки прочие").get("min_threshold") or "")
+
+    def test_furniture_cells_carry_operations(self):
+        """Раунд 3 ревью, H-1: у XI-4 «Мебель деревянная для офисов» были только права и ложная строка R7."""
+        r = self._one("XI", "Мебель деревянная для офисов")
+        self.assertTrue([o for o in self._ops(r) if o.get("points")], "у XI-4 нет операций с баллами")
+
     def test_type_not_overwritten_by_pointless_list(self):
         """Раунд 2 ревью, L3: у ОФЭКТ VII-6 тип донора «mixed» снимал строку R7 «Порог: не предусмотрен»."""
         self.assertEqual(self._one("VII", "Системы однофотонной эмиссионной").get("requirement_type"), "operations")
+
+    def test_point_transfer_guard_skips_only_unified_lists(self):
+        """Раунд 3 ревью, L-2: «лишние» баллы не считаются только у перечней, сведённых к ОДНОМУ (`same_list`);
+        у нетронутых «целых» чужой балл обязан оставаться видимым."""
+        import tempfile
+        from scripts import verify_structured as vs
+        with tempfile.TemporaryDirectory() as tmp:
+            p = Path(tmp) / "m.json"
+            p.write_text(json.dumps({"lists": [{"same_list": True, "members": [{"anchor": "A"}, {"anchor": "B"}]},
+                                               {"same_list": False, "members": [{"anchor": "C"}]}]}), encoding="utf-8")
+            self.assertEqual(vs._shared_cell_anchors(p), {"A", "B"})
 
     def test_point_transfer_guard_is_quiet_on_corpus(self):
         """Раунд 2 ревью, M3: сторож D8 (`check_records`) после правки давал 115 ложных «лишних» у членов общих
@@ -524,11 +597,21 @@ class TestReconciledMarkInGenerator(unittest.TestCase):
                 {"section": "T", "recall": 0.97, "members": [], "numbers_missing": ["75"]}]}), encoding="utf-8")
             self.assertEqual([m["recall"] for m in G._manifest_lists(p)], [0.95])
 
+    def test_numbers_are_a_multiset(self):
+        """Раунд 3 ревью, M-2: одно «2018» в другой операции не «покрывает» потерянную метку даты у доли."""
+        r = _rec("А", [("с 1 января 2018 г. не менее 5 из операций", None), ("доля не более 40 процентов", None)], 1)
+        cell = "с 1 января 2018 г. не менее 5 из операций; с 1 января 2018 г. доля не более 40 процентов"
+        self.assertEqual(sorted((d._cell_numbers(cell) - d._record_numbers(r)).elements()), ["1", "2018"])
+
+    def test_item_numbering_is_not_a_number(self):
+        """Раунд 3 ревью, L-1: «1.1.1.11» — номер пункта, не число ячейки."""
+        self.assertEqual(d._numbers("1.1.1.11 наличие сервисного центра; 2.4 сборка (5 баллов)"), ["5"])
+
     def test_numbers_of_cell_counted_with_points(self):
         """Числа ячейки ищутся и в тексте блоков, и в баллах операций; даты поправок «(в ред. …)» не считаются."""
         r = _rec("А", [("сборка", 25), ("доля не менее 75 процентов", None)], 1)
         cell = "сборка (25 баллов); доля не менее 75 процентов; трех четвертей 3 (в ред. Постановления от 15.12.2025 N 2033)"
-        self.assertEqual(d._cell_numbers(cell) - d._record_numbers(r), {"3"})
+        self.assertEqual(sorted((d._cell_numbers(cell) - d._record_numbers(r)).elements()), ["3"])
 
 
 class TestIncompleteThresholdListCountsOnlyLost(unittest.TestCase):

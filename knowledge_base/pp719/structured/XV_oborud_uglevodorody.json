@@ -424,7 +424,7 @@
   ],
   "tnved_codes": [],
   "requirement_type": "mixed",
-  "min_threshold": null,
+  "min_threshold": "не менее 70 баллов",
   "requirement_blocks": [
    {
     "component": "общее требование",
