@@ -253,7 +253,9 @@ def n_operations(rec: dict) -> int:
     n = 0
     for b in (rec.get("requirement_blocks") or []):
         ops = b.get("operations") or []
-        n += len(ops) if ops else (1 if (b.get("component") or "").strip() else 0)
+        comp = (b.get("component") or "").strip()
+        # вводная списка без своих операций (D24, «…следующих операций:») — заголовок, а не требование
+        n += len(ops) if ops else (1 if comp and not comp.endswith(":") else 0)
     return n
 
 
@@ -485,7 +487,8 @@ def record_operations(rec: dict) -> list[dict]:
             continue
         text = _block_intro(comp, note, NOTE_CAP_TARGET, thr)
         if text:
-            out.append({"text": text, "points": None})
+            # вводная списка («…следующих операций:», D24) — заголовок, как у рантайма: наследник печатает её «▸»
+            out.append({"text": text, "points": None, **({"_heading": True} if comp.endswith(":") else {})})
     return out
 
 

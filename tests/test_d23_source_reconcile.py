@@ -556,9 +556,13 @@ class TestR29AfterD23(unittest.TestCase):
             proof = [m for m in verified if m["section"] == g["section"]
                      and all(any(norm(x["product_name"]).startswith(n) for x in m["members"]) for n in names)]
             self.assertTrue(proof, (g["section"], sorted(names)))
-        # аддитивные установки I: в перечне нет «не менее 75 процентов … трех четвертей» (они в `min_threshold` I-26,
-        # класс D24) — полнота не доказана, пометка «перечень неполный» остаётся (раунд 2 ревью, H2)
-        self.assertTrue(fragments.is_fragmented("Аддитивные установки фотополимеризации в ванне"))
+        # аддитивные установки I: до `D24` в перечне не было «не менее 75 процентов … трех четвертей» (лежали в
+        # `min_threshold` I-26) — полнота не доказана, пометка стояла (раунд 2 ревью, H2). `D24` вернул строки в блоки:
+        # полнота против ячейки 1.0, чисел не хватает 0 — группа сверена ДАННЫМИ манифеста, а не копией перечня
+        add = [m for m in verified if any(x["product_name"].startswith("Аддитивные установки фотополимеризации")
+                                          for x in m["members"])]
+        self.assertEqual([(m["recall"], m["numbers_missing"]) for m in add], [(1.0, [])])
+        self.assertFalse(fragments.is_fragmented("Аддитивные установки фотополимеризации в ванне"))
         # EV6/EV7: обрывок и продукт одной ячейки — по-прежнему одна группа, квалификатор — квалификатор
         self.assertEqual(fragments.group_of("Светодиоды (в части светодиодов белого диапазона)"),
                          fragments.group_of("Светодиоды белого диапазона"))
@@ -622,6 +626,374 @@ class TestIncompleteThresholdListCountsOnlyLost(unittest.TestCase):
         from scripts import verify_structured as vs
         romans = sorted({f.name.split("_")[0] for f in vs.STRUCT.glob("*.json")})
         self.assertEqual([(x["section"], x["product_name"][:40]) for x in vs.collect_incomplete(romans)], [])
+
+
+class TestD24LostLines(unittest.TestCase):
+    """`D24` #267: строки ячейки, которых нет в записи, встают в неё по месту; совпавшие — не задваиваются."""
+
+    @staticmethod
+    def _apply(r, text):
+        units, skipped = d.lost_units(r, text)
+        n = d.apply_units(r, units)
+        return n, skipped
+
+    @staticmethod
+    def _flat(r):
+        out = []
+        for b in r["requirement_blocks"]:
+            if b.get("component"):
+                out.append(("▸", b["component"]))
+            out += [("•", o["text"], o.get("points")) for o in b.get("operations") or []]
+        return out
+
+    def test_lost_preamble_goes_first(self):
+        """«Бульдозеры» III-2: права, сервисный центр, условие <18> — до первого совпавшего блока."""
+        r = {**_rec("Бульдозеры", [("литье заготовок несущей рамы", 4)], 2, comp="несущая рама"), "requirement_type": "points"}
+        text = (f"{OPENER};\nналичие сервисного центра, уполномоченного осуществлять ремонт;\n"
+                "несущая рама:\nлитье заготовок несущей рамы (4 балла);")
+        n, _ = self._apply(r, text)
+        self.assertEqual(n, 2)
+        self.assertEqual([b.get("component") for b in r["requirement_blocks"]][:2],
+                         [OPENER, "наличие сервисного центра, уполномоченного осуществлять ремонт"])
+        self.assertEqual(r["requirement_blocks"][2]["component"], "несущая рама")
+
+    def test_lost_header_with_points_becomes_block(self):
+        """«Автомобили для гольфа» III: «несущая рама (корпус):» + операции с баллами — новый блок."""
+        r = _rec("Гольф", [(OPENER, None)], 1)
+        # перед заголовком — потерянное требование без «;»: заголовок не приклеивается к нему переносом строки
+        text = (f"{OPENER};\nналичие сервисного центра на территории России\nнесущая рама (корпус):\n"
+                "использование металлопроката для рамы (3 балла);\nлитье заготовок рамы\n(2 балла);\n"
+                "сварка заготовок рамы - 4 балла")
+        self._apply(r, text)
+        self.assertEqual(r["requirement_blocks"][-2]["component"], "наличие сервисного центра на территории России")
+        blk = r["requirement_blocks"][-1]
+        self.assertEqual(blk["component"], "несущая рама (корпус):")
+        self.assertEqual([(o["text"], o["points"]) for o in blk["operations"]],
+                         [("использование металлопроката для рамы", 3), ("литье заготовок рамы", 2),
+                          ("сварка заготовок рамы", 4)])
+
+    def test_header_with_group_points_is_header(self):
+        """XXIII-1 «… всех следующих операций (при наличии) (13 баллов):» — баллы за весь список: подпись блока, не
+        операция на 13 баллов рядом с условием «13 баллов за выполнение всех операций»."""
+        r = _rec("Башня", [("наличие сервисного центра", None)], 1)
+        self._apply(r, "наличие сервисного центра;\nосуществление всех следующих технологических операций (13 баллов):\n"
+                       "вальцевание обечаек башни;\nсварка обечаек башни")
+        blk = r["requirement_blocks"][-1]
+        self.assertEqual(blk["component"], "осуществление всех следующих технологических операций (13 баллов):")
+        self.assertEqual([(o["text"], o["points"]) for o in blk["operations"]],
+                         [("вальцевание обечаек башни", None), ("сварка обечаек башни", None)])
+
+    def test_split_and_truncated_lines_are_not_lost(self):
+        """Строку разборщик разбил на две операции / обрезал / снабдил пометкой — это не потеря, дубля нет."""
+        r = _rec("А", [("литье ковка штамповка заготовок рамы", 4), ("раскрой гибка сварка заготовок рамы", 4),
+                       ("применение электронных модулей российского производства при этом расчет баллов", None),
+                       ("применение печатных плат произведенных в России: не менее одной печатной платы", 5)], 1)
+        text = ("литье ковка штамповка (4 балла), раскрой гибка сварка (4 балла) заготовок рамы;\n"
+                "применение электронных модулей российского производства, при этом расчет баллов осуществляется "
+                "по формуле со сложными коэффициентами;\n"
+                "2.1.1. не менее одной печатной платы (5 баллов, обязательное требование)")
+        n, _ = self._apply(r, text)
+        self.assertEqual(n, 0)
+
+    def test_line_split_into_two_short_operations_is_not_lost(self):
+        """Обе половины короче четырёх слов — их узнаёт только пара соседних элементов."""
+        r = _rec("А", [("литье ковка штамповка", 4), ("раскрой гибка сварка", 4)], 1)
+        self.assertEqual(self._apply(r, "литье, ковка, штамповка, раскрой, гибка, сварка;")[0], 0)
+
+    def test_formula_and_its_header_are_skipped(self):
+        r = _rec("Принтер", [("сборка изделия", 10)], 1)
+        text = "сборка изделия (10 баллов);\nрасчет баллов по формуле:\nгде К - количество модулей,\nделенное на общее количество"
+        n, skipped = self._apply(r, text)
+        self.assertEqual(n, 0)
+        self.assertEqual([w for w, _ in skipped], ["формула", "формула (заголовок)", "формула"])
+
+    def test_several_points_in_one_line_are_not_split(self):
+        r = _rec("Погрузчик", [("сборка", 1)], 1)
+        n, skipped = self._apply(r, "сборка (1 балл);\nпроизводство гидроцилиндров стрелы (3 балла), рукояти (3 балла)")
+        self.assertEqual(n, 0)
+        self.assertEqual([w for w, _ in skipped], ["несколько баллов"])
+
+    def test_operations_joined_by_semicolon_are_split(self):
+        """XXII-11: три операции одной строкой через «;» — по строке на каждую; уже записанная не задваивается."""
+        r = _rec("Колонка", [("изготовление блока управления колонки", 30)], 1)
+        n, skipped = self._apply(r, "изготовление блока управления колонки (30 баллов); производство заправочного "
+                                    "устройства колонки (10 баллов); производство заправочных рукавов (10 баллов)")
+        self.assertEqual((n, skipped), (2, []))
+        self.assertEqual([(o["text"], o["points"]) for o in r["requirement_blocks"][0]["operations"]],
+                         [("изготовление блока управления колонки", 30), ("производство заправочного устройства колонки", 10),
+                          ("производство заправочных рукавов", 10)])
+
+    def test_items_under_matched_header_join_its_block(self):
+        """«…доли резидентов РФ:» есть в записи, «для акционерных обществ …» — нет: становится операцией блока."""
+        r = _rec("А", [], 1)
+        r["requirement_blocks"] = [{"component": "наличие в уставном капитале доли резидентов Российской Федерации:",
+                                    "operations": []}]
+        self._apply(r, "наличие в уставном капитале доли резидентов Российской Федерации:\n"
+                       "для акционерных обществ - не менее 75 процентов;\nдля обществ с ограниченной ответственностью")
+        ops = r["requirement_blocks"][0]["operations"]
+        self.assertEqual([o["text"] for o in ops], ["для акционерных обществ - не менее 75 процентов",
+                                                    "для обществ с ограниченной ответственностью"])
+
+    def test_items_under_header_whose_colon_parser_dropped(self):
+        """I-26: разборщик снял «:» у «…доли резидентов Российской Федерации», в ячейке оно есть — пункты под ним
+        остаются пунктами этого требования, а не тремя отдельными «обязательными»."""
+        r = _rec("А", [], 1)
+        r["requirement_blocks"] = [{"component": "наличие в уставном капитале доли резидентов Российской Федерации",
+                                    "operations": []}]
+        self._apply(r, "наличие в уставном капитале доли резидентов Российской Федерации:\n"
+                       "для акционерных обществ - не менее 75 процентов;\nдля обществ с ограниченной ответственностью")
+        self.assertEqual(len(r["requirement_blocks"]), 1)
+        self.assertEqual(len(r["requirement_blocks"][0]["operations"]), 2)
+
+    def test_requirement_lines_without_semicolon_are_not_glued(self):
+        """III (32 позиции): у строки сервисного центра в HTML нет «;», следующая «при производстве осуществляется
+        комплекс …» — отдельное требование, а не перенос строки."""
+        r = _rec("Комбайны", [("сборка комбайна", 5)], 1)
+        text = ("наличие сервисного центра, уполномоченного осуществлять ремонт и обслуживание продукции\n"
+                "при производстве осуществляется комплекс операций по изготовлению компонентов\nсборка комбайна (5 баллов)")
+        self._apply(r, text)
+        comps = [b.get("component") for b in r["requirement_blocks"]]
+        self.assertEqual(comps[:2], ["наличие сервисного центра, уполномоченного осуществлять ремонт и обслуживание "
+                                     "продукции", "при производстве осуществляется комплекс операций по изготовлению "
+                                                  "компонентов"])
+
+    def test_wrapped_line_of_one_requirement_is_glued(self):
+        """Перенос строки внутри одного требования (VII-111: «… Требования для целей регулирования"» + «или
+        соответствующего международного стандарта ISO 13485») — одна строка блока."""
+        r = _rec("Иглы", [("сборка игл", 5)], 1)
+        text = ('наличие сертификата системы менеджмента качества ГОСТ "Изделия медицинские"\n'
+                "или соответствующего международного стандарта ISO 13485 (если применимо);\nсборка игл (5 баллов)")
+        self._apply(r, text)
+        self.assertEqual(len(r["requirement_blocks"]), 2)
+        self.assertIn("ISO 13485", r["requirement_blocks"][0]["component"])
+
+    def test_idempotent(self):
+        r = _rec("Бульдозеры", [("литье заготовок несущей рамы", 4)], 2, comp="несущая рама")
+        text = f"{OPENER};\nнесущая рама:\nлитье заготовок несущей рамы (4 балла);\nсварка рамы (6 баллов)"
+        self._apply(r, text)
+        before = json.dumps(r, ensure_ascii=False)
+        self.assertEqual(self._apply(r, text)[0], 0)
+        self.assertEqual(json.dumps(r, ensure_ascii=False), before)
+
+
+class TestD24FoldHeadings(unittest.TestCase):
+    """Вводная списка встаёт на место ярлыка разборщика — и только ярлыка."""
+
+    HEAD = "осуществление на территории Российской Федерации следующих технологических операций:"
+
+    def _r(self, label):
+        return {"requirement_blocks": [{"component": self.HEAD, "operations": []},
+                                       {"component": label, "operations": [{"text": "сборка", "points": 3}]}]}
+
+    def test_paraphrase_label_and_empty_label_give_way(self):
+        for label in ("Технологические операции", None, "Операции на территории РФ"):
+            r = self._r(label)
+            self.assertEqual(d.fold_headings(r, self.HEAD + "\nсборка (3 балла)"), 1, label)
+            self.assertEqual([b["component"] for b in r["requirement_blocks"]], [self.HEAD.rstrip()], label)
+            self.assertEqual(d.fold_headings(r, self.HEAD + "\nсборка (3 балла)"), 0)          # повтор — без правки
+
+    def test_node_and_cell_text_stay(self):
+        """«станина» — узел, не пересказ вводной; подпись, которая есть в ячейке, — текст первоисточника."""
+        for label, cell in (("станина", ""), ("технологические операции", "технологические операции:\n")):
+            r = self._r(label)
+            self.assertEqual(d.fold_headings(r, self.HEAD + "\n" + cell + "сборка (3 балла)"), 0, label)
+            self.assertEqual(len(r["requirement_blocks"]), 2)
+
+
+class TestD24Headings(unittest.TestCase):
+    """Рантайм: вводная без операций — строка «▸», не обязательное требование и не место в капе."""
+
+    @staticmethod
+    def _hit(n_ops):
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_rag import make_hit
+        blocks = [{"component": "наличие сервисного центра", "operations": []},
+                  {"component": "осуществление на территории Российской Федерации следующих операций:", "operations": []}]
+        blocks += [{"component": f"узел {i}", "operations": [{"text": f"сварка узла номер {i}", "points": 1}]}
+                   for i in range(n_ops - 1)]
+        return make_hit(requirement_blocks=blocks, okpd2_match=True)
+
+    def test_heading_is_not_required_and_not_counted(self):
+        from app.rag.pipeline import MAX_OPS_TARGET, _hit_operations, _n_operations, _shown_operations
+        h = self._hit(MAX_OPS_TARGET)
+        ops = _hit_operations(h)
+        self.assertEqual([("_required" in o, "_heading" in o) for o in ops[:2]], [(True, False), (False, True)])
+        self.assertEqual(_n_operations(h), MAX_OPS_TARGET)
+        shown, total = _shown_operations(ops, "сварка")
+        self.assertEqual((len(shown), total), (MAX_OPS_TARGET + 1, MAX_OPS_TARGET))   # кап не сработал
+
+    def test_heading_printed_as_intro_line(self):
+        from app.rag.pipeline import MAX_OPS_TARGET, format_context, source_text
+        h = self._hit(MAX_OPS_TARGET)
+        ctx = format_context([h], None, None)
+        self.assertIn("      ▸ осуществление на территории Российской Федерации следующих операций:", ctx)
+        self.assertNotIn("следующих операций: — баллы не приведены", ctx)
+        self.assertNotIn("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ", ctx)
+        self.assertIn("▸ осуществление на территории Российской Федерации следующих операций:", source_text(h))
+
+    def test_truncated_count_ignores_headings(self):
+        from app.rag.pipeline import MAX_OPS_TARGET, format_context
+        ctx = format_context([self._hit(MAX_OPS_TARGET + 1)], "сварка", None)
+        self.assertIn(f"показаны {MAX_OPS_TARGET} из {MAX_OPS_TARGET + 1} операций", ctx)
+        self.assertEqual(ctx.count("• "), MAX_OPS_TARGET)                      # вводная — не пункт и не место
+        head = ctx.index("▸ осуществление на территории Российской Федерации следующих операций:")
+        self.assertLess(head, ctx.index("• сварка узла"))                       # над пунктами и после пересортировки
+
+    def test_points_table_follows_same_selection(self):
+        from app.rag.pipeline import MAX_OPS_TARGET, points_table
+        self.assertNotIn("перечень неполный", points_table(self._hit(MAX_OPS_TARGET), "сварка"))
+        self.assertIn("перечень неполный", points_table(self._hit(MAX_OPS_TARGET + 1), "сварка"))
+
+    def test_inherited_heading_keeps_flag(self):
+        import diag_orphan_requirements as G
+        rec = {"requirement_blocks": [{"component": "осуществление следующих операций:", "operations": []},
+                                      {"component": "наличие прав", "operations": []}]}
+        self.assertEqual([o.get("_heading") for o in G.record_operations(rec)], [True, None])
+        self.assertEqual(G.n_operations(rec), 1)
+
+
+class TestD24RestoreRecord(unittest.TestCase):
+    """`restore_lost_lines`: что меняется в записи помимо строк — тип, порог-требование, notes."""
+
+    @staticmethod
+    def _run(r, text, lookup="70 баллов [прим. 56]"):
+        from unittest import mock
+        rep = {"T": {"all": [{"text": text, "_recs": [r], "code": "x"}]}}
+        with mock.patch("app.rag.thresholds.lookup_threshold", return_value=lookup):
+            return d.restore_lost_lines(rep)
+
+    def test_requirement_in_threshold_field_is_dropped(self):
+        r = _rec("А", [("сборка", None)], 1)
+        r["min_threshold"] = "для акционерных обществ - не менее 75 процентов"
+        self._run(r, "сборка;\nдля акционерных обществ - не менее 75 процентов")
+        self.assertIsNone(r["min_threshold"])
+
+    def test_threshold_statement_and_no_note_threshold_are_kept(self):
+        for thr, lookup in (("не менее 50 баллов", "70 баллов"), ("для акционерных обществ - не менее 75 процентов", None)):
+            r = _rec("А", [("сборка", None)], 1)
+            r["min_threshold"] = thr
+            self._run(r, f"сборка;\n{thr}", lookup)
+            self.assertEqual(r["min_threshold"], thr)
+
+    def test_points_make_type_mixed(self):
+        r = _rec("А", [("наличие прав на документацию", None)], 1)
+        self._run(r, "наличие прав на документацию;\nсварка корпуса (5 баллов)")
+        self.assertEqual(r["requirement_type"], "mixed")
+        r = _rec("А", [("наличие прав на документацию", None)], 1)
+        self._run(r, "наличие прав на документацию;\nналичие сервисного центра в России")
+        self.assertEqual(r["requirement_type"], "operations")
+
+    def test_notes_with_cell_text_move_to_blocks(self):
+        r = _rec("А", [("сборка корпуса изделия", 2)], 1, notes="наличие сервисного центра на территории России")
+        self._run(r, "сборка корпуса изделия (2 балла);\nналичие сервисного центра на территории России")
+        self.assertIsNone(r["notes"])
+        r = _rec("А", [("сборка корпуса изделия", 2)], 1, notes="позиция исключена с 2027 года")
+        self._run(r, "сборка корпуса изделия (2 балла);\nналичие сервисного центра на территории России")
+        self.assertEqual(r["notes"], "позиция исключена с 2027 года")
+
+    def test_lost_heading_takes_place_of_parser_label(self):
+        r = _rec("А", [("сборка корпуса изделия", 3)], 1, comp="Технологические операции")
+        self._run(r, "осуществление на территории Российской Федерации следующих технологических операций:\n"
+                     "сборка корпуса изделия (3 балла)")
+        self.assertEqual([b["component"] for b in r["requirement_blocks"]],
+                         ["осуществление на территории Российской Федерации следующих технологических операций:"])
+
+    def test_record_without_own_operations_is_left_to_inheritance(self):
+        r = _rec("А", [], 1)
+        r["requirement_blocks"] = [{"component": "наличие прав", "operations": []}]
+        log, _ = self._run(r, "наличие прав;\nсварка корпуса изделия (5 баллов)")
+        self.assertEqual(log, [])
+        self.assertEqual(len(r["requirement_blocks"]), 1)
+
+
+class TestD24Runtime(unittest.TestCase):
+    """Обязательные требования без баллов при усечении длинного перечня не уступают место операциям."""
+
+    def test_required_first_when_truncated(self):
+        from app.rag.pipeline import MAX_OPS_TARGET, _hit_operations, _rank_operations
+        sys.path.insert(0, str(ROOT / "tests"))
+        from test_rag import make_hit
+        blocks = [{"component": f"операции узла {i}", "operations": [{"text": f"сварка узла номер {i}", "points": 1}]}
+                  for i in range(MAX_OPS_TARGET + 5)]
+        blocks.append({"component": "наличие сервисного центра на территории России", "operations": []})
+        ops = _hit_operations(make_hit(requirement_blocks=blocks))
+        self.assertTrue(ops[-1].get("_required"))
+        for query in ("сварка узла", None):
+            ranked = _rank_operations(ops, query)
+            self.assertEqual(ranked[0]["text"], "наличие сервисного центра на территории России", query)
+            self.assertEqual([o["text"] for o in ranked[1:]], [o["text"] for o in ops[:-1]], query)
+
+
+class TestD24Corpus(unittest.TestCase):
+    """Корпус после `D24`: позиции, ради которых правка делалась."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.recs = d.load_records()
+
+    def _one(self, sec, prefix):
+        hit = [r for r in self.recs[sec] if r["product_name"].startswith(prefix)]
+        self.assertEqual(len(hit), 1, prefix)
+        return hit[0]
+
+    @staticmethod
+    def _text(r):
+        return " ".join((b.get("component") or "") + " " + " ".join(o.get("text") or "" for o in b.get("operations") or [])
+                        for b in r.get("requirement_blocks") or [])
+
+    def test_bulldozers_have_mandatory_requirements(self):
+        t = self._text(self._one("III", "Бульдозеры на гусеничных тракторах"))
+        self.assertIn("сервисного центра", t)
+        self.assertIn("одного из условий <18>", t)
+        self.assertIn("прав на конструкторскую", t)
+
+    def test_service_centre_and_components_are_separate(self):
+        r = self._one("III", "Комбайны зерноуборочные")
+        comps = [b.get("component") or "" for b in r["requirement_blocks"]]
+        svc = [c for c in comps if "сервисного центра" in c]
+        self.assertEqual(len(svc), 1)
+        self.assertNotIn("комплекс производственных", svc[0])
+        self.assertTrue(any(c.startswith("при производстве осуществляется комплекс") for c in comps))
+
+    def test_golf_carts_list_restored(self):
+        r = self._one("III", "Автомобили для перевозки игроков в гольф")
+        pts = [o for b in r["requirement_blocks"] for o in b.get("operations") or [] if o.get("points")]
+        self.assertGreaterEqual(len(pts), 30)
+
+    def test_requirement_in_threshold_field_gives_way_to_note(self):
+        """IX-5 «20 баллов» (заголовок группы требований) и I-26 «для акционерных обществ …» стояли в поле порога и
+        перекрывали порог примечания."""
+        from app.rag import thresholds as T
+        for sec, prefix, note in (("IX", "Компьютеры портативные массой", "[прим. 26]"),
+                                  ("I", "Аддитивные установки экструзии", "[прим. 56")):
+            r = self._one(sec, prefix)
+            eff = r.get("min_threshold") or T.lookup_threshold(r["okpd2_codes"], r["product_name"], sec) or ""
+            self.assertIn(note, eff, prefix)
+
+    def test_toys_heading_does_not_truncate_list(self):
+        """XXVII-11: вводная «… в совокупности оцениваются не менее 50 баллов:» стоит над «для пластмассовых …»
+        отдельной строкой «▸» и не вытесняет за кап операцию с баллами."""
+        from app.rag.pipeline import format_context
+        from app.rag.retriever import Hit
+        r = next(x for x in self.recs["XXVII"] if x["source_anchor"].endswith("позиция 11"))
+        h = Hit(score=1.0, section_roman="XXVII", section_title="", product_name=r["product_name"],
+                okpd2_codes=r["okpd2_codes"], min_threshold=r.get("min_threshold"),
+                requirement_blocks=r["requirement_blocks"], source_anchor=r["source_anchor"], okpd2_match=True, payload=r)
+        ctx = format_context([h], None, None)
+        self.assertNotIn("СПИСОК ОПЕРАЦИЙ НЕПОЛНЫЙ", ctx)
+        self.assertIn("      ▸ осуществление на территории Российской Федерации следующих операций", ctx)
+        self.assertIn("печать настольно-печатных игр, произведенных на территории Российской Федерации по договору", ctx)
+
+    def test_parser_labels_replaced_by_source_headings(self):
+        r = self._one("I", "Аддитивные установки экструзии")
+        comps = [b.get("component") or "" for b in r["requirement_blocks"]]
+        self.assertNotIn("Компоненты и технологические операции", comps)
+        self.assertTrue(any(c.startswith("производство (осуществление) на территории Российской Федерации следующих")
+                            and r["requirement_blocks"][i].get("operations") for i, c in enumerate(comps)))
+
+    def test_no_dangling_formula_headers(self):
+        r = next(x for x in self.recs["IX"] if x["source_anchor"].endswith("позиция 16"))
+        self.assertFalse([b for b in r["requirement_blocks"] if (b.get("component") or "").startswith("расчет баллов по формуле")])
 
 
 class TestD18KonturServiceLine(unittest.TestCase):

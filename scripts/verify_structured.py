@@ -203,15 +203,23 @@ def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
 
     bad = 0
     shared = _shared_cell_anchors()
-    for p, rec in zip(products, data):
+    for i, (p, rec) in enumerate(zip(products, data)):
         src, got = source_points(p), record_points(rec)
+        # Строка-код без наименования сразу за позицией («из 29.10.52.190|||» под «Автомобилями для гольфа» III,
+        # «из 29.32.30.365/366» под телематикой IX) — продолжение её строки в RTF: ячейка требований разнесена по обеим.
+        # `D24` #267 восстанавливает ячейку позиции целиком по HTML, и баллы такой строки у позиции законны.
+        tail: set = set()
+        for q in products[i + 1:]:
+            if (q.name_raw or "").strip():
+                break
+            tail |= source_points(q)
         # «0 баллов» — не значение, а отметка «эта градация баллов не даёт» («менее 25 процентов -
         # 0 баллов»). Разбор её законно опускает, ругаться не на что.
         lost = sorted(x for x in src - got if x != 0)
         # У члена ОБЩЕЙ ячейки (`D23`, манифест `shared_cells.json`) баллы соседних строк чанка законны — единица
         # первоисточника ячейка, а не строка. Без этого сторож давал 115 ложных «лишних», и настоящий перенос балла
         # в них тонул (ревью PR D23, раунд 2, M3). Потерянные баллы у таких записей проверяются по-прежнему.
-        extra = [] if rec.get("source_anchor") in shared else sorted(got - src - outside)
+        extra = [] if rec.get("source_anchor") in shared else sorted(got - src - tail - outside)
         if not lost and not extra:
             continue
         bad += 1
