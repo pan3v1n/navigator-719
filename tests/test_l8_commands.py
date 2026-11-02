@@ -32,6 +32,7 @@ from sqlalchemy.pool import StaticPool  # noqa: E402
 from test_auth import _Ans, _GuestBase  # noqa: E402
 from test_l1_l2_corpus_choice import _Stubbed  # noqa: E402
 
+import eval_commands  # noqa: E402
 import eval_routing  # noqa: E402
 from app.api import admin_stats, guest, trial  # noqa: E402
 from app.api import auth as auth_mod  # noqa: E402
@@ -210,6 +211,21 @@ class TestRouteOfEveryCommand(_Stubbed):
     def test_codes_reach_their_lookups(self):
         self.assertEqual(extract_okpd2(REQ.render(BULLDOZER)), BULLDOZER)
         self.assertTrue(extract_tnved_position(commands.find("st1").render("8471 30 000 0")))
+
+    def test_live_run_covers_every_command(self):
+        cases = eval_commands.build_cases()
+        self.assertEqual({c.key for c, _ in cases}, {c.key for c in COMMANDS})
+        self.assertEqual(len(cases), 24, "6 команд × 3 значения + 6 команд без поля")
+        self.assertEqual(set(eval_commands.FILLS), {c.field.kind for c in COMMANDS if c.field})
+        self.assertIn(eval_commands.OUT_OF_SCOPE, eval_commands.FILLS["product"])
+
+    def test_live_summary_does_not_call_procedural_answers_refusals(self):
+        row = {"key": "docs", "value": "", "run": 1, "corpus_mode": corpora.RULES, "used": corpora.USED_RULES,
+               "text": "ответ", "seconds": 1.0, "label": "источник задан командой «х»", "hallucinated": [],
+               "guard": [], "phantom_guard": [], "phantom_oracle": [], "claims": 0, "cited": True,
+               "declined": True, "low_relevance": False, "cjk": False, "prompt_tokens": 1, "completion_tokens": 1}
+        report = "\n".join(eval_commands.summarize([row]))
+        self.assertIn("| `docs` | — | rules | — |", report)
 
     def test_sweep_is_built_from_the_catalog(self):
         rows = eval_routing.command_rows()
