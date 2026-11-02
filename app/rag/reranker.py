@@ -18,7 +18,7 @@ from __future__ import annotations
 import json
 
 from app.core.config import settings
-from app.rag.retriever import Hit
+from app.rag.retriever import Hit, section_name
 
 RERANK_SYSTEM = (
     "Ты — ранжировщик позиций нормативной базы (Постановление Правительства РФ №719). "
@@ -30,7 +30,7 @@ RERANK_SYSTEM = (
 
 
 def _candidate_line(i: int, h: Hit) -> str:
-    sect = h.section_title or f"Раздел {h.section_roman}"
+    sect = section_name(h.section_title) or f"Раздел {h.section_roman}"  # EV20: без сносок и «в ред.»
     codes = ", ".join(h.okpd2_codes) if h.okpd2_codes else "—"
     return f"[{i}] раздел: {sect}; продукция: {h.product_name}; ОКПД2: {codes}"
 

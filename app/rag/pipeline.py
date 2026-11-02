@@ -9,6 +9,7 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -50,7 +51,17 @@ RULES_DOC_POINTS = 3
 # Калибровка на golden set (docs/eval_report.md): out-of-scope ≤ 0.822, in-scope ≥ 0.808 —
 # полоса перекрытия узкая, поэтому порог НЕ режет жёстко, а лишь поднимает флаг для модели
 # (финальное решение «вне сферы» принимает LLM по смыслу контекста, см. правило 1б промпта).
-RELEVANCE_SOFT = 0.83
+#
+# ⚠ 0.83 → 0.82 — `R40` #239, решение владельца 28.10.2026 (вариант Б). Порог стоит НЕ в минимуме
+# суммарной ошибки наборов (`eval_guard --mode guard`: плато 0.830–0.840) — намеренно. Наборы отобраны
+# по низкому косинусу и трафик не представляют; на трафике (226 ответов без кода, копия базы 27.10)
+# флаг стоял у 57 % ответов и убирал из них баллы, а оценки расходятся около 0.82, не 0.83.
+# Парный замер на полосе 0.82–0.83 (`eval_guard --mode band`, ×3 на каждом пороге): вне 719 флаг
+# остаётся у 6 из 6 (его поднимает второй сигнал — класс ОКПД2, `scope.py`), отказ по смыслу 18 / 18
+# при обоих порогах; у профильных флаг 15 → 3, отказов 1 → 0. Цена: слабое совпадение поиска модель
+# подаёт увереннее («WEP-3ax» → кодек ВКС, «пластичная смазка» → баллы смазки КСТ в 1 из 3, оба с
+# пометкой «предварительно, проверьте»). Отчёт — `docs/eval_runs/2026-10-28_r40_threshold_082.md`.
+RELEVANCE_SOFT = 0.82
 # ⚠⚠⚠ ПОРОГА РЕЛЕВАНТНОСТИ У ПРОЦЕДУРНОЙ ВЕТКИ НЕТ, И ЭТО ИЗМЕРЕННОЕ РЕШЕНИЕ, А НЕ ПРОБЕЛ.
 # Раунд 8 ревью PR #137 предписывал завести здесь гейт вне-сферы («щедрый маршрут + порог»),
 # он был написан, выкачен в ветку и ОТКАЧЕН 03.09.2026 по замеру. Не повторять, не измерив заново.
@@ -90,14 +101,18 @@ class Answer:
     # `echoed_numbers`) — пишется в журнал: правило промпта может не сработать, и тогда дефект
     # обязан быть ВИДЕН, а не уехать пользователю молча.
     phantom_documents: list[str] = field(default_factory=list)
+    # «Только по-русски» (#264): сколько знаков CJK вычистил рантайм. Метрика «без иероглифов» смотрит и
+    # сюда — иначе по уже вычищенному тексту она давала бы 1.00 при любом поведении модели (ревью PR #265).
+    cjk_removed: int = 0
     prompt_tokens: int = 0  # токены DeepSeek за ответ (учёт затрат в админ-логах)
     completion_tokens: int = 0
     # Списывается ли ответ с лимита тарифа (#160). Бесплатны заготовки meta (приветствие,
     # «спасибо», «что умеешь») и деферы процедурной ветки (сбой корпуса / ветка выключена) — решает
     # ПАЙПЛАЙН, а не эндпоинт: второе место, решающее «бесплатно ли», разошлось бы с первым молча.
     metered: bool = True
-    # Пункты первоисточников процедурного ответа (Правила/тело ПП №719/Приказ №52) в порядке [n] —
-    # для кликабельных источников. Товарный путь их не заполняет (там источники строятся из hits).
+    # Пункты первоисточников в порядке [n] — для кликабельных источников. Процедурный ответ: пункты
+    # окна (Правила/тело ПП №719/Приказ №52), `hits` пуст. Товарный ответ на смешанный вопрос
+    # (`UI-1` #165): пункты Приказа №52 из блока документов, их [n] ПРОДОЛЖАЮТ нумерацию `hits`.
     rule_sources: list[dict] = field(default_factory=list)
     # ⚠ ЗАЗЕМЛЕНИЕ, С КОТОРЫМ СВЕРЯЛСЯ ИМЕННО ЭТОТ ОТВЕТ. Метрики обязаны брать его отсюда, а не
     # пересобирать `format_context(ans.hits, query)` заново: пересборка — это ВТОРОЕ место, где
@@ -417,7 +432,11 @@ def format_context(hits: list[Hit], query: str | None = None,
     for i, h in enumerate(hits, 1):
         is_target = any(h is t for t in targets)
         same_cell = not is_target and fragments.group_of(h.product_name) in groups
-        sect = f"«{h.section_title}»" if h.section_title else f"Раздел {h.section_roman}"
+        # EV20 #117: имя раздела — чистое (без «<5>» и «(в ред. …)», которые модель копировала в ответ),
+        # маркер сноски — отдельной пометкой, чтобы указатель на неё не пропал (`retriever.section_name`).
+        name, marks = retriever.section_name(h.section_title), retriever.section_footnotes(h.section_title)
+        sect = (f"«{name}»" if name else f"Раздел {h.section_roman}") + (
+            f"; сноски раздела: {', '.join(marks)}" if marks else "")
         head = f"[{i}] {h.product_name} (раздел {sect})"
         if h.okpd2_match:
             # ⚠ Совпал код — но целевой записью стала не эта: значит совпадение по ГРУППЕ кода
@@ -688,6 +707,28 @@ def format_context(hits: list[Hit], query: str | None = None,
 POINTS_TABLE_MIN = 12  # балльных операций у целевой позиции, начиная с которых печатает код
 
 _POINTS_TABLE_TITLE = "Операции и баллы — дословно из приложения"
+# ⚠ `EV11-1` (28.10.2026): таблицу баллов код дописывает ТОЛЬКО к ответу, который назвал позицию —
+# блок «**Позиция:**» шаблона правила 4. Таблица строится ДО генерации по целевой записи, а модель
+# может отказать по правилу 1б («вне сферы», «прямой позиции нет») или уточнять по 1г — и тогда под
+# отказом стояли бы баллы ЧУЖОЙ позиции: «водка» → таблица оборудования для спиртовой
+# промышленности. Замер 28.10 на приёмочных наборах (без реранкера): таблица планировалась у 21 из 24
+# вопросов вне сферы и у 5 процедурных, ушедших товарной веткой. На 42 живых ответах с таблицей блок
+# «**Позиция:**» стоял у КАЖДОГО разбора и ни у одного отказа — признак разделяет без потерь.
+# ⚠ Признак НЕ ОДИН (ревью PR #263, MED): модель пишет заголовок и как «**Позиция**» без двоеточия
+# (смешанный вопрос #49), а в продолжении диалога может ответить без шаблона вовсе — тогда «смотрите
+# таблицу ниже» повисло бы в пустоту. Таблица остаётся, если ответ назвал позицию в ЛЮБОЙ форме
+# заголовка, ИЛИ сам приводит баллы/проценты, ИЛИ код совпал (позиция подтверждена кодом). Все 13
+# живых ответов «таблица без заголовка» — отказы и уточнения без единого числа баллов: им её не дописать.
+_COMMITS_RE = re.compile(r"\*\*\s*Позиция\s*\**\s*[:.\n]|^\s*Позиция\s*:", re.I | re.M)
+_CLAIMS_RE = re.compile(r"\d+(?:[.,]\d+)?\s*(?:балл|процент|%)", re.I)
+
+
+def _keep_points_table(raw: str, table: str, hits: list | None = None) -> bool:
+    """Дописывать ли таблицу баллов к ответу: есть таблица И ответ опирается на позицию."""
+    if not table:
+        return False
+    t = raw or ""
+    return bool(_COMMITS_RE.search(t) or _CLAIMS_RE.search(t) or any(h.okpd2_match for h in hits or []))
 
 
 def _n_operations(h: Hit) -> int:
@@ -921,7 +962,7 @@ RULES_TEXT_CAP = 1400  # символов на пункт Правил в кон
 RULES_TEXT_CAP_DOC_LIST = 4000
 
 
-def format_rules_context(rules: list[dict], *, show_legal_force: bool = False) -> str:
+def format_rules_context(rules: list[dict], *, show_legal_force: bool = False, start: int = 1) -> str:
     """Контекст процедурного ответчика: пронумерованные пункты Правил реестра ([1], [2], …).
 
     `show_legal_force` (`K13` #46) — печатать ли в шапке блока юридическую силу документа.
@@ -942,7 +983,9 @@ def format_rules_context(rules: list[dict], *, show_legal_force: bool = False) -
     from app.core.manifest import legal_force_label
 
     blocks: list[str] = []
-    for i, r in enumerate(rules, 1):
+    # `start` (`UI-1` #165): в товарном ответе пункты Приказа №52 идут ПОСЛЕ позиций приложения и
+    # нумеруются продолжением — [N] однозначно ведёт к своему источнику (см. `_plan_answer`).
+    for i, r in enumerate(rules, start):
         # Атрибуция — из source_anchor записи (Правила / тело ПП №719 / Приказ ТПП №52); фолбэк на
         # «Правила ведения реестра» для записей без анкера (обратная совместимость/тесты).
         anchor = (r.get("source_anchor") or "").strip()
@@ -1097,6 +1140,54 @@ _EMOJI_RE = re.compile("[\U0001F000-\U0001FAFF☀-➿⬀-⯿️]")
 
 def _strip_emoji(text: str) -> str:
     return _EMOJI_RE.sub("", text)
+
+
+# «Только по-русски» (28.10.2026, `IDEAS.md` «Протечка иероглифов»): DeepSeek изредка вставляет в русский
+# ответ китайские токены (наблюдали «咨询服务» на «юридические услуги»). Правило 7 обоих системных
+# промптов это запрещает, а здесь — страховка, как у эмодзи: иероглифы и японская кана вычищаются ПО
+# СИМВОЛУ (в потоке кусок может оборваться посреди слова — посимвольная чистка от этого не зависит),
+# полноширинные знаки («，», «：», «１００», «％») переводятся в обычные ASCII (как NFKC). Кириллицу, латиницу
+# и типографику не трогаем.
+# ⚠ Полноширинное НЕ удаляется, а переводится (ревью PR #265, MED): «не менее １００ баллов» без перевода
+# потеряло бы число целиком, и проверка заземления этого не видит — пропуск числа она не ловит.
+# ⚠ Чистка строго посимвольная: фронт показывает склейку дельт потока, а в базу ложится итоговый текст —
+# «умная» чистка только итога (например, пустых скобок от вычищенного слова) развела бы экран и запись.
+# Диапазоны — кодами, а не литералами: в исходнике не должно быть невидимых знаков (идеографический пробел).
+def _char_ranges(*pairs: tuple[int, int]) -> str:
+    return "".join(f"{chr(a)}-{chr(b)}" for a, b in pairs)
+
+
+_CJK_RE = re.compile("[" + _char_ranges((0x3000, 0x303F), (0x3040, 0x30FF), (0x3400, 0x4DBF), (0x4E00, 0x9FFF),
+                                        (0xF900, 0xFAFF), (0xFF00, 0xFFEF)) + "]")
+_CJK_PUNCT = {0x3000: " ", 0x3001: ",", 0x3002: "."}   # идеографический пробел, «、», «。»
+
+
+def _cjk_replacement(ch: str) -> str | None:
+    """Чем заменить знак из `_CJK_RE`: ASCII-аналогом или None (вычистить)."""
+    cp = ord(ch)
+    if 0xFF01 <= cp <= 0xFF5E:               # полноширинные ASCII: «１００» → «100», «％» → «%»
+        return chr(cp - 0xFEE0)
+    if cp in _CJK_PUNCT:
+        return _CJK_PUNCT[cp]
+    if 0xFFE0 <= cp <= 0xFFEE:               # полноширинные знаки валют и т. п.
+        return unicodedata.normalize("NFKC", ch)
+    return None                              # иероглифы, кана, полуширинная катакана, скобки 「」【】…
+
+
+def _clean_model_text(text: str) -> tuple[str, int]:
+    """Текст модели без эмодзи и иероглифов → (чистый текст, сколько знаков CJK вычищено).
+    Переведённые в ASCII полноширинные знаки в счётчик не входят — это не протечка языка."""
+    text = _strip_emoji(text)
+    removed = 0
+
+    def repl(m: re.Match) -> str:
+        nonlocal removed
+        rep = _cjk_replacement(m.group(0))
+        if rep is None:
+            removed += 1
+            return ""
+        return rep
+    return _CJK_RE.sub(repl, text), removed
 
 
 # --- Мультитёрн: контекстуализация follow-up для ПОИСКА (P1a) -----------------------
@@ -1313,7 +1404,9 @@ def _answer_procedural(query: str, search_query: str,
         **_generation_kwargs(messages, brief),
     )
     usage = resp.usage
-    raw = _strip_emoji(resp.choices[0].message.content or "")
+    raw, cjk = _clean_model_text(resp.choices[0].message.content or "")
+    if cjk:  # «только по-русски»: протечка иероглифов видна в журнале, а не только вычищена
+        logger.warning("ответ модели: вычищено знаков CJK — {}", cjk)
     if brief and resp.choices[0].finish_reason == "length":
         raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
     # Незаземлённые числа: баллы/% (общий guard) + СРОКИ в днях (спец. для процедуры).
@@ -1339,6 +1432,7 @@ def _answer_procedural(query: str, search_query: str,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
+        cjk_removed=cjk,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=grounding,
@@ -1379,6 +1473,9 @@ class _Plan:
     codes: list[str] = field(default_factory=list)  # коды, по которым выбраны целевые (EV8)
     input_hint: str = ""  # U5: подсказка следующего шага, см. Answer.input_hint
     corpus: str = corpora.USED_APPENDIX  # L2: см. Answer.corpus
+    # UI-1 #165: пункты Приказа №52 из блока документов — в источники ответа ПОСЛЕ позиций, в том же
+    # порядке и с той же нумерацией [len(hits)+1 …], что в контексте.
+    doc_points: list[dict] = field(default_factory=list)
 
 
 def _resolve_tnved(query: str) -> tuple[str, list[str]] | None:
@@ -1761,7 +1858,11 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
         # именно его отсутствие оставляло модель наедине с памятью — так и родилось «заключение
         # ТПП». Дефект возникал ровно тогда, когда добор пунктов не удавался.
         if doc_points:
-            docs_ctx += "\n\n" + format_rules_context(doc_points)
+            # ⚠ `UI-1` #165: нумерация ПРОДОЛЖАЕТ позиции. Прежде блок начинался с [1], и ссылка модели
+            # на пункт Приказа как [1] открывала в панели «Источник» позицию приложения №1. Теперь у
+            # пункта свой номер, а в источниках ответа он стоит на том же месте (`Answer.rule_sources`
+            # идут после `hits`, `chat._answer_sources`) — кнопка [N] открывает именно его.
+            docs_ctx += "\n\n" + format_rules_context(doc_points, start=len(hits) + 1)
     # P4: длинный перечень баллов печатает код, а не модель (см. `points_table`). Промпт об этом
     # обязан знать — иначе перечень задвоится: один раз от модели, второй от нас.
     # ⚠ Таблицу печатаем ТОЛЬКО когда целевая позиция одна. При точном совпадении кода целевых
@@ -1805,7 +1906,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     return _Plan(messages=messages, grounding=grounding, codes=all_codes, hits=hits, cases=cases,
                  low_relevance=low_rel, points_table=table,
                  input_hint=followup.after_product(low_rel, documents_answered=bool(docs_ctx)),
-                 corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX)
+                 corpus=corpora.USED_APPENDIX_ORDER52 if doc_points else corpora.USED_APPENDIX,
+                 doc_points=doc_points)
 
 
 # Пробный режим без входа (решение владельца 09.10.2026): ответ гостю дешевле — та же постановка
@@ -1849,10 +1951,12 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Faithfulness-постпроверка: числа баллов/% из ответа сверяем с контекстом. Незаземлённые
     # НЕ удаляем и НЕ пишем дисклеймер в ответ (внутренний продукт) — но фиксируем в
     # Answer.unverified_numbers: эксперт-admin видит флаг в логах диалогов.
-    raw = _strip_emoji(resp.choices[0].message.content or "")
+    raw, cjk = _clean_model_text(resp.choices[0].message.content or "")
+    if cjk:  # «только по-русски»: протечка иероглифов видна в журнале, а не только вычищена
+        logger.warning("ответ модели: вычищено знаков CJK — {}", cjk)
     if brief and resp.choices[0].finish_reason == "length":  # оборван потолком — говорим об этом
         raw = raw.rstrip() + "…" + BRIEF_CUT_NOTE
-    if planned.points_table:  # P4: длинный перечень баллов печатает код — дословно и одинаково
+    if _keep_points_table(raw, planned.points_table, planned.hits):  # P4: перечень баллов печатает код (EV11-1: к разбору)
         raw = raw.rstrip() + "\n" + planned.points_table
     asked = _user_text(query, history)
     ungrounded = unverified_numbers(raw, planned.grounding, asked)
@@ -1870,12 +1974,14 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
+        cjk_removed=cjk,
         prompt_tokens=usage.prompt_tokens if usage else 0,
         completion_tokens=usage.completion_tokens if usage else 0,
         grounding=planned.grounding,
         codes=planned.codes,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
+        rule_sources=planned.doc_points,  # UI-1: идут ПОСЛЕ hits — та же нумерация, что в контексте
     )
 
 
@@ -1905,6 +2011,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     parts: list[str] = []
     prompt_tokens = completion_tokens = 0
     finish = None
+    cjk_total = 0
     for chunk in resp:
         usage = getattr(chunk, "usage", None)
         if usage:
@@ -1913,16 +2020,19 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         if not chunk.choices:
             continue
         finish = getattr(chunk.choices[0], "finish_reason", None) or finish
-        piece = _strip_emoji(chunk.choices[0].delta.content or "")
+        piece, cjk = _clean_model_text(chunk.choices[0].delta.content or "")
+        cjk_total += cjk
         if piece:
             parts.append(piece)
             yield "delta", piece
     raw = "".join(parts)
+    if cjk_total:  # «только по-русски»: как в answer()
+        logger.warning("ответ модели (поток): вычищено знаков CJK — {}", cjk_total)
     if brief and finish == "length":  # как в answer(): оборванный потолком ответ помечаем
         cut = "…" + BRIEF_CUT_NOTE
         raw = raw.rstrip() + cut
         yield "delta", cut
-    if planned.points_table:
+    if _keep_points_table(raw, planned.points_table, planned.hits):  # EV11-1: к отказу/уточнению — не дописываем
         # Таблицу отдаём последним куском потока: фронт дорисует её тем же рендером markdown,
         # что и остальной ответ, а копирование/экспорт заберут её вместе с текстом.
         tail = "\n" + planned.points_table
@@ -1944,12 +2054,14 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
         unverified_numbers=ungrounded,
         echoed_numbers=echoed,
         phantom_documents=phantom,
+        cjk_removed=cjk_total,
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         grounding=planned.grounding,
         codes=planned.codes,
         input_hint=planned.input_hint,
         corpus=planned.corpus,
+        rule_sources=planned.doc_points,  # UI-1: идут ПОСЛЕ hits — та же нумерация, что в контексте
     )
 
 

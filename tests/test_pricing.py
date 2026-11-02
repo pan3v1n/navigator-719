@@ -113,7 +113,7 @@ class TestLandingShowcase(unittest.TestCase):
 
     def test_trial_only_on_individual_start(self):
         ind, corp = _panel(LANDING, "individual"), _panel(LANDING, "corporate")
-        self.assertEqual(ind.count("Предложение ограничено"), 1)
+        self.assertNotIn("Предложение ограничено", ind, "акция без срока: ограничения нет (решение владельца 02.11.2026)")
         self.assertIn(f'<div class="price">{pricing.TRIAL_TEXT}</div>', ind)
         self.assertIn(f'data-pick="Старт" data-trial="1">Подключить за {pricing.TRIAL_PRICE}', ind)
         self.assertNotIn("data-trial", corp)

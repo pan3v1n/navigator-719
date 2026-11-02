@@ -35,9 +35,8 @@ from loguru import logger
 from app.api.chat import (
     ChatRequest,
     ChatResponse,
+    _answer_sources,
     _reject_sensitive,
-    _sources_from_hits,
-    _sources_from_rules,
     _sse,
 )
 from app.api.events import log_answer_event
@@ -184,7 +183,7 @@ def _load_history(gid: str, session_id: str, max_msgs: int = 12) -> list[dict]:
 def _guest_sources(ans) -> list:
     """Источники без полного текста: гость видит, на какой пункт опирается ответ, и ссылку на
     первоисточник; текст пункта в панели — после входа (макет: «видеть полный текст источников»)."""
-    sources = _sources_from_hits(ans.hits) or _sources_from_rules(ans.rule_sources)
+    sources = _answer_sources(ans)
     for s in sources:
         s.text = None
     return sources

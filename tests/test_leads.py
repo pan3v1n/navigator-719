@@ -255,7 +255,9 @@ class TestLandingGuards(unittest.TestCase):
         """Шрифты и скрипты — только свои: внешние CDN из РФ грузятся ненадёжно."""
         for m in re.finditer(r'(?:src|href)="(https?:)?//([^"/]+)', self.html):
             host = m.group(2)
-            self.assertTrue(host.startswith("сервис."), f"внешний ресурс: {host}")
+            # свой корень законен: `canonical` обязан быть абсолютным, и браузер его не загружает
+            own = host.startswith("сервис.") or host == "xn--719--83dani8b8bqyy.xn--p1ai"
+            self.assertTrue(own, f"внешний ресурс: {host}")
         css = (LANDING / "styles.css").read_text(encoding="utf-8")
         self.assertNotRegex(css, r"url\(\s*[\"']?https?:", "шрифт или картинка с внешнего адреса")
         for f in re.findall(r'url\("(fonts/[^"]+)"\)', css):

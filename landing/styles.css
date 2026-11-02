@@ -142,8 +142,6 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
 .pricing-head h2 { font-size: clamp(32px, 4vw, 48px); }
 .plans[hidden], .fine[hidden] { display: none; }
 .plan.promo { position: relative; }
-.promo-badge { position: absolute; top: -13px; left: 50%; transform: translateX(-50%); white-space: nowrap;
-  padding: 5px 12px; border-radius: 999px; background: var(--grad); color: #fff; font: 600 12px/1.2 var(--font); }
 .plans .price { font-size: 26px; }
 .price-old { font: 500 18px/1.2 var(--font); color: var(--text-60); text-decoration: line-through; }
 .addon { display: flex; gap: 10px; align-items: flex-start; padding: 14px; border-radius: 10px; background: var(--gray);
@@ -277,23 +275,6 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
 .linkbtn { border: 0; background: none; padding: 8px 0 0; cursor: pointer; align-self: flex-start;
   font: 500 16px/1.2 var(--font); color: var(--blue); }
 
-/* ---- отзывы ---- */
-.rev-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
-.rev-nav { display: flex; gap: 12px; }
-.revs { display: flex; gap: 20px; overflow-x: auto; scroll-snap-type: x mandatory; scrollbar-width: none; scroll-behavior: smooth; }
-.revs::-webkit-scrollbar { display: none; }
-.rev { flex: 0 0 calc((100% - 40px) / 3); min-width: 300px; scroll-snap-align: start; background: var(--gray);
-  border-radius: 16px; padding: 32px; display: flex; flex-direction: column; gap: 24px; min-height: 380px; }
-.rev-who { display: flex; gap: 14px; align-items: center; }
-.ava { width: 52px; height: 52px; flex: none; border-radius: 50%; background: radial-gradient(circle at 50% 35%, #E3E7EC, #C7CED6);
-  display: flex; align-items: center; justify-content: center; font: 600 16px/1 var(--font); color: var(--text-60); }
-.rev-name { font: 600 16px/1.2 var(--font); }
-.rev-role { font: 400 14px/1.3 var(--font); color: var(--text-60); margin-top: 4px; }
-.rev-text { font: 400 16px/1.5 var(--font); color: var(--text-85); flex: 1; }
-.rev-meta { display: flex; flex-direction: column; gap: 4px; font: 400 14px/1.4 var(--font); color: var(--text-60); }
-.ph { align-self: flex-start; box-shadow: inset 0 0 0 1px rgba(216, 51, 50, .5); color: var(--red); border-radius: 4px;
-  padding: 6px 8px; font: 500 12px/1.2 var(--font); }
-
 /* ---- вопросы ---- */
 .sec-faq { align-items: center; }
 .faq { width: 100%; max-width: 989px; display: flex; flex-direction: column; }
@@ -353,7 +334,6 @@ input::placeholder { color: rgba(60, 63, 66, .4); }
   .form-foot .btn { width: 100%; }
   .btn { padding: 20px; font-size: 17px; }
   .btn-sm { padding: 12px; font-size: 15px; }
-  .rev { flex-basis: 86%; min-width: 0; padding: 24px; min-height: 0; }
   .qa-q { font-size: 17px; padding: 20px 0; }
   .qa-a { padding-right: 0; }
   .foot { padding: 72px 0; }

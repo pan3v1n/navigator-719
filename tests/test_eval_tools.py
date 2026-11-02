@@ -231,6 +231,38 @@ class TestAnswerHasNoInternalVocabulary(unittest.TestCase):
         self.assertFalse(KITCHEN_RE.search("руководство по эксплуатации и инструкция по монтажу"))
 
 
+class TestCompletenessSecondThresholdLine(unittest.TestCase):
+    """`K2-2` #128 (ревью PR #260, MED): вторая строка порога бывает двух родов, и оракул полноты обязан
+    их различать. «ИНОЙ порог» — оговорка: её график НЕ должен стоять в «Пороге». «ДРУГОЙ ГРАФИК ЭТОЙ
+    ЖЕ ПОЗИЦИИ» — правило 2г велит вывести в «Порог» ОБА графика: его числа обязательны."""
+
+    def _facts(self, name, codes, section):
+        from types import SimpleNamespace
+
+        from eval_completeness import context_facts
+
+        from app.rag.thresholds import lookup_threshold
+        thr = lookup_threshold(codes, name, section)
+        ctx = f"[1] {name} (раздел «…»)\n    Порог: {thr}\n    Операции:\n    - Сборка — 10 балл."
+        return context_facts(SimpleNamespace(product_name=name), ctx)
+
+    def test_branch_numbers_are_required_and_not_an_exception(self):
+        f = self._facts("Выключатель автоматический (воздушный) низковольтный в литом корпусе (до 1000 В) "
+                        "на токи до 6300 А", ["27.12"], "V")
+        for n in ("147", "187", "105", "167"):
+            self.assertIn(n, f["threshold_numbers"], f"число {n} обоих графиков обязано быть в пороге")
+        self.assertEqual(f["exception"], "")
+        self.assertEqual(f["exception_steps"], {}, "второй график той же позиции — не оговорка")
+        self.assertIn("6300 А", f["branch"])
+
+    def test_other_threshold_stays_an_exception(self):
+        """Контроль: у прим. 17 (траулеры) вторая строка — оговорка, как было."""
+        f = self._facts("Траулеры", ["30.11.31.110"], "XVIII")
+        self.assertTrue(f["exception"], "оговорка прим. 17 потеряна")
+        self.assertTrue(f["exception_steps"])
+        self.assertEqual(f["branch"], "")
+
+
 class TestPromptRuleLabels(unittest.TestCase):
     """Метки правил промпта обязаны быть уникальны.
 
@@ -346,6 +378,68 @@ class TestBorderlineSet(unittest.TestCase):
         self.assertIn("borderline", eval_guard.__doc__)
         self.assertNotIn("Два режима", eval_guard.__doc__)
 
+    def test_paid_band_mode_runs_only_explicitly(self):
+        """`R40`: `--mode band` зовёт DeepSeek (полный pipeline.answer ×runs ×2 порога) — он не имеет
+        права запуститься в составе `both` или `guard`, которые гоняют как бесплатный замер.
+        ⚠ Поведением, а не текстом функции (урок раунда 10: комментарий с именем ронял сторожа)."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import eval_guard
+        calls = []
+        stubs = dict(
+            run_negative=lambda *a, **k: ([], [{"dt1": 0.8}]),
+            run_borderline=lambda *a, **k: ([], [{"dt1": 0.9}]),
+            run_threshold=lambda *a, **k: [],
+            run_confusable=lambda *a, **k: [],
+            run_band=lambda *a, **k: calls.append(a) or [],
+        )
+        client = SimpleNamespace(get_collections=lambda: None)
+        for mode, want in (("both", 0), ("guard", 0), ("band", 1)):
+            calls.clear()
+            with mock.patch.multiple(eval_guard, **stubs), \
+                    mock.patch("app.rag.retriever._client", return_value=client), \
+                    mock.patch("sys.argv", ["eval_guard.py", "--mode", mode, "--no-progress"]), \
+                    mock.patch("builtins.print"):
+                eval_guard.main()
+            self.assertEqual(len(calls), want, f"--mode {mode}: run_band вызван {len(calls)} раз")
+
+    def test_band_pairs_thresholds_and_restores_them(self):
+        """Порог подменяется у модуля продукта, порядок меняется от прогона к прогону, код ОКПД2 — как у
+        чата, и порог возвращается даже при сбое API посреди замера."""
+        from types import SimpleNamespace
+        from unittest import mock
+
+        import eval_guard
+
+        from app.rag import pipeline
+        saved = pipeline.RELEVANCE_SOFT
+        seen = []
+
+        def fake_answer(q, okpd2=None, **_):
+            seen.append((pipeline.RELEVANCE_SOFT, okpd2))
+            return SimpleNamespace(low_relevance=pipeline.RELEVANCE_SOFT > 0.825, text="", unverified_numbers=[])
+
+        cases = [{"id": 1, "query": "прицепы 29.20.23"}]
+        with mock.patch.object(eval_guard, "_load", side_effect=[cases, []]), \
+                mock.patch.object(eval_guard, "dense_top1", return_value=0.825), \
+                mock.patch.object(pipeline, "answer", fake_answer):
+            out = "\n".join(eval_guard.run_band(0.82, 0.83, 2, "", False))
+        self.assertEqual([t for t, _ in seen], [0.83, 0.82, 0.82, 0.83])
+        self.assertTrue(all(c == "29.20.23" for _, c in seen))
+        self.assertIn("порог 0.83: флаг 2/2", out)
+        self.assertIn("порог 0.82: флаг 0/2", out)
+        self.assertEqual(pipeline.RELEVANCE_SOFT, saved)
+
+        def boom(*a, **k):
+            raise RuntimeError("API упал")
+        with mock.patch.object(eval_guard, "_load", side_effect=[cases, []]), \
+                mock.patch.object(eval_guard, "dense_top1", return_value=0.825), \
+                mock.patch.object(pipeline, "answer", boom):
+            with self.assertRaises(RuntimeError):
+                eval_guard.run_band(0.82, 0.83, 1, "", False)
+        self.assertEqual(pipeline.RELEVANCE_SOFT, saved, "порог не вернулся после сбоя")
+
     def test_threshold_curve_reports_plateau_not_argmin(self):
         """Равные суммы на сетке 0.005 — норма, и «первый минимум» всегда самый permissive конец:
         прочитав его как рекомендацию, порог понизят и добавят false-accept за нулевой выигрыш."""
@@ -377,6 +471,21 @@ class TestTextFaithfulnessCore(unittest.TestCase):
     def setUpClass(cls):
         import eval_text_faithfulness as m
         cls.m = m
+
+    def test_order_point_citations_are_checked_against_the_points(self):
+        """`UI-1` #165 (ревью PR #261, MED): ссылка [9] на пункт Приказа №52 в товарном ответе — не
+        выдумка по контексту позиций; сверяется с текстом самого пункта."""
+        m = self.m
+        self.assertEqual(m.cited_scope("Нужна копия устава [9].", n_hits=8), "rules")
+        self.assertEqual(m.cited_scope("Порог 300 баллов [1].", n_hits=8), "hits")
+        self.assertEqual(m.cited_scope("Сравните [1] и [9].", n_hits=8), "both")
+        rules = [{"source_anchor": "Приказ ТПП РФ №52, п. 4.2.1",
+                  "text": "копия устава организации и выписка из ЕГРЮЛ"}]
+        claim = "Копия устава организации и выписка из ЕГРЮЛ"
+        rule_grams = m._ngrams(m.rules_text(rules))
+        self.assertGreater(m.grounded_share(claim, rule_grams), 0.9, "пункт заземляет своё утверждение")
+        self.assertLess(m.grounded_share(claim, m._ngrams("Насосы гидравлические, порог 300 баллов")), 0.2,
+                        "контроль: контекст позиций его не заземляет — без правки это и была ложная тревога")
 
     def test_table_rows_are_not_claims(self):
         """Перечень баллов печатает КОД дословно — ссылка [N] ему не нужна, искажать нечего."""

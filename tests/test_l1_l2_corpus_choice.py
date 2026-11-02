@@ -199,6 +199,101 @@ class TestMixedQuestionInAppendixMode(_Stubbed):
         self.assertEqual(planned.corpus, corpora.USED_APPENDIX)
 
 
+class TestOrder52PointsNumberedAfterPositionsUI1(_Stubbed):
+    """`UI-1` #165: пункты Приказа №52 в товарном ответе нумеруются ПРОДОЛЖЕНИЕМ позиций и стоят в
+    источниках ответа на тех же местах — кнопка [N] открывает ровно то, на что сослалась модель.
+
+    Прежде блок документов начинался с [1], а источники были «позиции ИЛИ пункты»: ссылка на пункт
+    Приказа как [1] открывала в панели «Источник» позицию приложения №1."""
+
+    Q = TestMixedQuestionInAppendixMode.Q
+    _hit = TestMixedQuestionInAppendixMode._hit
+
+    def _two_hits(self):
+        h1 = self._hit()
+        h2 = Hit(score=0.8, section_roman="XIX", section_title="Насосы", product_name="Насосы прочие",
+                 okpd2_codes=["28.13.19"], min_threshold=None, requirement_blocks=[],
+                 source_anchor="Раздел XIX, позиция 2")
+        return [h1, h2]
+
+    def test_context_numbers_order_points_after_positions(self):
+        pl.search = lambda *a, **k: self._two_hits()
+        planned = pl._plan_answer(self.Q)
+        user = planned.messages[-1]["content"]
+        self.assertIn("[3] Приказ ТПП РФ №52, п. 4.2.1", user, "пункт Приказа — следующий номер после позиций")
+        self.assertNotIn("[1] Приказ ТПП РФ №52", user)
+        self.assertEqual([p["point"] for p in planned.doc_points], ["4.2.1"])
+
+    def test_answer_sources_put_points_on_the_same_places(self):
+        from app.api.chat import _answer_sources
+        pl.search = lambda *a, **k: self._two_hits()
+        planned = pl._plan_answer(self.Q)
+        ans = Answer(text="", hits=planned.hits, rule_sources=planned.doc_points)
+        src = _answer_sources(ans)
+        self.assertEqual([x.kind for x in src], ["product", "product", "rule"],
+                         "[3] обязан открывать пункт Приказа, а не позицию")
+        self.assertIn("4.2.1", src[2].product_name)
+
+    def test_every_endpoint_builds_sources_through_one_function(self):
+        """Ревью PR #261, LOW: откат к «позиции ИЛИ пункты» в ОДНОМ эндпоинте из трёх (чат, поток, гость)
+        прошёл бы зелёным — фейковые ответы тестов эндпоинтов несут либо позиции, либо пункты. Сторож —
+        по именам в КОД-объектах (вложенные генераторы потока тоже), не по тексту: комментарий с именем
+        функции его не обманет (урок раунда 10)."""
+        import types
+
+        from app.api import chat, guest
+
+        def names(code):
+            out = set(code.co_names)
+            for c in code.co_consts:
+                if isinstance(c, types.CodeType):
+                    out |= names(c)
+            return out
+
+        for mod in (chat, guest):
+            for attr, fn in vars(mod).items():
+                if not isinstance(fn, types.FunctionType) or fn.__module__ != mod.__name__:
+                    continue
+                if attr in ("_answer_sources", "_sources_from_hits", "_sources_from_rules"):
+                    continue
+                used = names(fn.__code__) & {"_sources_from_hits", "_sources_from_rules"}
+                self.assertFalse(used, f"{mod.__name__}.{attr} строит источники мимо _answer_sources: {used}")
+        self.assertIn("_answer_sources", names(chat.chat.__code__) | names(chat.chat_stream.__code__))
+
+    def test_procedural_answer_sources_unchanged(self):
+        """Контроль: у процедурного ответа позиций нет — источники пункты с [1], как прежде."""
+        from app.api.chat import _answer_sources
+        rules = [{"doc_type": "rules", "source_anchor": "Правила, п. 7", "text": "текст"}]
+        src = _answer_sources(Answer(text="", hits=[], rule_sources=rules))
+        self.assertEqual([s.product_name for s in src], ["Правила, п. 7"])
+
+    def test_answer_carries_doc_points_as_rule_sources(self):
+        """И синхронный, и потоковый ответ отдают пункты в `rule_sources` (иначе источники их не знают).
+        Поведением: план с пунктами, LLM подменена."""
+        from types import SimpleNamespace
+        from unittest import mock
+        pts = [{"doc_type": "tpp_order_52", "source_anchor": "Приказ ТПП РФ №52, п. 4.2.1", "text": "т"}]
+        plan = pl._Plan(messages=[{"role": "user", "content": "в"}], grounding="", hits=[self._hit()],
+                        cases=[], low_relevance=False, doc_points=pts)
+        msg = SimpleNamespace(content="Ответ [2].")
+        usage = SimpleNamespace(prompt_tokens=1, completion_tokens=1)
+
+        def create(**kw):
+            if kw.get("stream"):
+                delta = SimpleNamespace(content="Ответ [2].")
+                return iter([SimpleNamespace(choices=[SimpleNamespace(delta=delta, finish_reason="stop")],
+                                             usage=None),
+                             SimpleNamespace(choices=[], usage=usage)])
+            return SimpleNamespace(choices=[SimpleNamespace(message=msg, finish_reason="stop")], usage=usage)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        with mock.patch.object(pl, "_plan_answer", return_value=plan),                 mock.patch.object(pl, "_client", return_value=client):
+            sync = pl.answer("в")
+            done = [p for k, p in pl.answer_stream("в") if k == "done"][0]
+        for ans in (sync, done):
+            self.assertEqual(ans.rule_sources, pts)
+            self.assertEqual(len(ans.hits), 1)
+
+
 class TestOnlyDocsReachesTheSearch(unittest.TestCase):
     """Фильтр документов доходит до поиска: настоящие `_answer_procedural` и `plan_procedural`.
 

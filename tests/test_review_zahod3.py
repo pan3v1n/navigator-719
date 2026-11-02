@@ -89,9 +89,14 @@ class TestNumbersAreNotIdentity(unittest.TestCase):
         """Ничья → порядок первоисточника. Выдуманный выбор хуже сохранённого."""
         got = th.lookup_threshold(["27.12"], self.NAME, "V") or ""
         self.assertTrue(got.startswith("для выключателей автоматических"), got[:80])
-        self.assertIn("до 4000 А включительно", got.split("⚠ ИНОЙ порог")[0],
-                      "ведущим стал более УЗКИЙ диапазон, чем сама позиция")
-        self.assertIn("⚠ ИНОЙ порог", got, "второй график потерян")
+        # `K2-2` #128: вторая строка — «ДРУГОЙ ГРАФИК ЭТОЙ ЖЕ ПОЗИЦИИ» (вводная называет одну позицию).
+        # Делим по переводу строки: деление по ярлыку, которого в строке нет, вернуло бы её целиком,
+        # и сторож «ведущий блок» молча перестал бы что-либо проверять (ревью PR #260, HIGH).
+        lead, _, second = got.partition("\n")
+        self.assertIn("до 4000 А включительно", lead, "ведущим стал более УЗКИЙ диапазон, чем сама позиция")
+        self.assertNotIn("от 4000 А до 6300 А", lead)
+        self.assertIn(th.BRANCH_MARK, second, "второй график потерян")
+        self.assertNotIn("ИНОЙ порог", got)
 
 
 class TestDecisivePoolIsNotTautological(unittest.TestCase):
