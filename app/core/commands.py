@@ -187,6 +187,15 @@ def title_of(key: str | None) -> str:
     return cmd.title if cmd else base
 
 
+def corpus_of(key: str | None) -> str | None:
+    """Источник команды по ключу реплики. Ответ без корпуса («спасибо», отказ) его не теряет: колонка
+    `corpus` у такого ответа пуста, а ключ записан, и по нему источник держится дальше."""
+    if not key:
+        return None
+    cmd = find(key[len(HELD):] if key.startswith(HELD) else key)
+    return cmd.corpus if cmd else None
+
+
 def short_title(text: str) -> str:
     """Заголовок беседы в сайдбаре. Запуски одной команды начинаются одинаково, а значение стоит
     дальше 48 знаков заголовка: без этого все беседы команды неразличимы."""

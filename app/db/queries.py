@@ -775,6 +775,15 @@ def guest_last_question(db: Session, guest_id: str, session_id: str
     return question, answer
 
 
+def guest_last_answer(db: Session, guest_id: str, session_id: str) -> GuestMessage | None:
+    """Последний ответ беседы гостя. Не `guest_last_question`: там ответ на ПОСЛЕДНИЙ вопрос, и у
+    оборванного стрима он пуст, хотя предыдущие ответы в беседе есть."""
+    return db.execute(
+        select(GuestMessage).where(GuestMessage.guest_id == guest_id, GuestMessage.session_id == session_id,
+                                   GuestMessage.role == "assistant")
+        .order_by(GuestMessage.id.desc()).limit(1)).scalars().first()
+
+
 def list_guest_messages(db: Session, limit: int = 200) -> list[GuestMessage]:
     """Последние реплики гостей, свежие сверху — для вкладки «Пробный режим» в админке."""
     return list(db.execute(

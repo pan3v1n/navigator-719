@@ -33,7 +33,7 @@ from test_auth import _Ans, _GuestBase  # noqa: E402
 from test_l1_l2_corpus_choice import _Stubbed  # noqa: E402
 
 import eval_routing  # noqa: E402
-from app.api import admin_stats, guest  # noqa: E402
+from app.api import admin_stats, guest, trial  # noqa: E402
 from app.api import auth as auth_mod  # noqa: E402
 from app.api import chat as chat_mod  # noqa: E402
 from app.api.ratelimit import SlidingWindow  # noqa: E402
@@ -463,6 +463,24 @@ class TestChatApi(_ApiBase):
         self.assertIn("выбран вручную", r["corpus_label"])
         self.assertIsNone(self.rows()[-1].command)
 
+    def test_answer_without_corpus_does_not_break_the_chain(self):
+        """«Спасибо» и отказ записаны без корпуса: источник держится по ключу команды."""
+        self.post(message=BULLDOZER, command="req", session_id="s1")
+        with mock.patch.object(chat_mod, "answer", lambda m, **k: _Fake(corpus="")):
+            self.post(message="спасибо", corpus=corpora.APPENDIX, session_id="s1")
+        self.assertEqual(self.rows()[-1].command, commands.held("req"))
+        self.assertIsNone(self.rows()[-1].corpus)
+        conv = self.client.get("/api/conversations/s1").json()
+        self.assertEqual(conv["held_corpus"], corpora.APPENDIX, "переключатель не должен уйти с источника")
+        r = self.post(message="а для насосов?", corpus=corpora.APPENDIX, session_id="s1").json()
+        self.assertIn("задан командой", r["corpus_label"])
+
+    def test_first_answer_without_corpus_keeps_the_source(self):
+        with mock.patch.object(chat_mod, "answer", lambda m, **k: _Fake(corpus="")):
+            self.post(command="docs", session_id="s1")
+        conv = self.client.get("/api/conversations/s1").json()
+        self.assertEqual(conv["held_corpus"], corpora.RULES)
+
     def test_held_label_survives_several_turns(self):
         self.post(message=BULLDOZER, command="req", session_id="s1")
         self.post(message="а для насосов?", corpus=corpora.APPENDIX, session_id="s1")
@@ -597,6 +615,18 @@ class TestGuest(_GuestBase):
         self.assertIn("задан командой", r.json()["corpus_label"])
         self.assertEqual(self.rows()[-1].command, commands.held("req"))
 
+    def test_broken_stream_does_not_break_the_chain(self):
+        """Оборванный стрим оставляет вопрос без ответа: источник берётся у последнего ответа беседы."""
+        with self.Session() as db:
+            q.log_guest_message(db, guest_id=self.gid(), session_id="g", role="user", content="Q", charged=True)
+            q.log_guest_message(db, guest_id=self.gid(), session_id="g", role="assistant", content="A",
+                                corpus="appendix|appendix", command="req")
+            q.log_guest_message(db, guest_id=self.gid(), session_id="g", role="user", content="оборван", charged=True)
+            self.assertEqual(q.guest_last_answer(db, self.gid(), "g").command, "req")
+
+    def gid(self):
+        return trial.guest_id(mock.Mock(cookies=self.client.cookies))
+
     def test_guest_page_shows_commands(self):
         self.assertIn("window.COMMANDS", self.page.text)
         self.assertIn('data-command="req"', self.page.text)
@@ -688,6 +718,22 @@ class TestSearchByValue(_SearchStubs):
         self.assertEqual(args[0], question)
         self.assertIsNone(kw["resolved"], "значение команды не выдаётся за переписанный вопрос")
 
+    def test_operations_are_ranked_by_the_question(self):
+        """Значение ищет позицию, а какие операции показать, решает вопрос команды."""
+        seen = {}
+        for name in ("format_context", "points_table"):
+            real = getattr(pl, name)
+            self.addCleanup(setattr, pl, name, real)
+
+            def spy(*a, _name=name, _real=real, **k):
+                seen[_name] = a[1]
+                return _real(*a, **k)
+            setattr(pl, name, spy)
+        question = commands.find("parts").render("насосы")
+        pl._plan_answer(question, corpus=corpora.APPENDIX, search_text="насосы")
+        self.assertEqual(seen["format_context"], question)
+        self.assertEqual(seen["points_table"], question)
+
     def test_ordinary_question_is_not_touched(self):
         pl._plan_answer("требования к насосам", corpus=corpora.APPENDIX)
         self.assertEqual({t for _, t in self.searched}, {"требования к насосам"})
@@ -755,6 +801,11 @@ class TestFront(unittest.TestCase):
     def test_rejected_command_comes_back(self):
         fn = self.js[self.js.index("async function handleRejected("):self.js.index("async function ask(")]
         self.assertIn("restoreCommand(pending)", fn)
+
+    def test_rejected_stale_question_leaves_the_screen_alone(self):
+        fn = self.js[self.js.index("async function handleRejected("):self.js.index("async function ask(")]
+        self.assertLess(fn.index("if (!isCurrent(pending)) return;"), fn.index("setHint(hintBeforeAsk)"))
+        self.assertIn("!pending._sent.command) input.value = text", fn, "собранный текст команды в поле не идёт")
 
     def test_no_copy_of_templates_in_js(self):
         for c in COMMANDS:
@@ -903,6 +954,18 @@ assert.strictEqual(isCurrent(p), false);
 assert.strictEqual(restoreCommand(p), false);
 assert.strictEqual(input.value, "новый ввод");
 assert.strictEqual(activeCommand, null);
+// и при пустом поле устаревший запрос команду не возвращает
+input.value = "";
+p = sent(CMD, "насосы");
+askRun += 1;
+assert.strictEqual(restoreCommand(p), false);
+assert.strictEqual(activeCommand, null);
+input.value = "новый ввод";
+// черновик человека важнее команды, которая не ушла
+p = sent(CMD, "насосы");
+assert.strictEqual(restoreCommand(p), false);
+assert.strictEqual(input.value, "новый ввод");
+input.value = "";
 // несостоявшаяся беседа снимается, чужая на экране остаётся
 sessionId = "S"; removed = [];
 dropNew(sent(null, ""), true);

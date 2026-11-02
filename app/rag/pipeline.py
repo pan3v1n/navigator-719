@@ -1813,7 +1813,10 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     hist_code = _anchor_code(history)
     if hist_code and okpd2_ref.okpd2_key(hist_code) in {okpd2_ref.okpd2_key(c) for c in all_codes}:
         hist_code = None
-    ctx = format_context(hits, search_query, all_codes,
+    # Позицию ищем по значению команды, а операции ранжируем по её вопросу: «Проверка комплектующих»
+    # должна показать операции про компоненты, а не те, что похожи на наименование продукции.
+    rank_query = query if search_text else search_query
+    ctx = format_context(hits, rank_query, all_codes,
                          dialog_codes=[hist_code] if hist_code else None)
     cases_ctx = format_cases(cases) if cases else None
     # `resolved` — переписанный уточняющий вопрос; значение команды вопросом не является
@@ -1878,7 +1881,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Эксперт увидел бы «дословно из приложения» без пометки неполноты и без баллов сиблинга:
     # ровно тот класс молчаливой потери, против которого заведены R29 и D9.
     _tgts = target_hits(hits, all_codes)
-    table = points_table(_tgts[0], search_query) if len(_tgts) == 1 else ""
+    table = points_table(_tgts[0], rank_query) if len(_tgts) == 1 else ""
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)

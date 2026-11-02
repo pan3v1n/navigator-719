@@ -178,12 +178,13 @@ def _apply_command(req: ChatRequest) -> str | None:
 
 def _held_command(req: ChatRequest, last_answer) -> str | None:
     """Уточнение после команды (решения 6 и 7): источник остался от неё, и подпись «выбран вручную»
-    была бы неправдой. Признак — из журнала беседы, а не от клиента: режим последнего ответа тот же,
-    ответ дала команда. Сменил человек источник — совпадения нет, подпись обычная."""
+    была бы неправдой. Признак — из журнала беседы, а не от клиента: последний ответ дала команда, и
+    вопрос идёт по её источнику. Спросил человек по другому источнику — цепочка обрывается. Сменил
+    источник и вернул тот же, не задав вопроса, — сервер этого не видит, подпись останется командной."""
     if req.command or not req.session_id or req.corpus == corpora.AUTO:
         return None
     last = last_answer()
-    if last is None or not last.command or corpora.mode_of(last.corpus) != req.corpus:
+    if last is None or commands.corpus_of(last.command) != req.corpus:
         return None
     return commands.held(last.command)
 
@@ -573,9 +574,8 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
             out.append(item)
         # L8-1, решение 7: источник команды держится до конца беседы и в переоткрытой
         answers = [m for m in msgs if m.role == "assistant"]
-        held = corpora.mode_of(answers[-1].corpus) if answers and answers[-1].command else None
-    return {"session_id": session_id, "messages": out,
-            "held_corpus": held if held != corpora.AUTO else None}
+        held = commands.corpus_of(answers[-1].command) if answers else None
+    return {"session_id": session_id, "messages": out, "held_corpus": held}
 
 
 @router.delete("/api/conversations/{session_id}")

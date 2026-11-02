@@ -965,9 +965,10 @@ async function handleRejected(r, text, pending) {
     : "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
   try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
   if (pending) pending.remove();
+  if (!isCurrent(pending)) return;   // человек ушёл дальше: экран и черновик уже не этого вопроса
   setHint(hintBeforeAsk);   // вопрос не ушёл — подсказка снова актуальна
   // L8-1: отказ команде возвращает её режим и введённое значение, а не собранный текст
-  if (!restoreCommand(pending)) input.value = text;
+  if (!restoreCommand(pending) && !pending._sent.command) input.value = text;
   form.classList.add("ready");
   input.style.height = "auto";
   showInputBlock(msg);
@@ -1582,9 +1583,10 @@ function dropNew(pending, isNew) {
   if (sessionId === pending._sent.sid) sessionId = null;
 }
 
-// Сервер отказал или сеть подвела: команда и значение возвращаются в поле, если человек не ушёл дальше.
+// Сервер отказал или сеть подвела: команда и значение возвращаются в поле, если человек не ушёл дальше
+// и не начал набирать новое: его черновик дороже.
 function restoreCommand(pending) {
-  if (!isCurrent(pending) || !pending._sent.command) return false;
+  if (!isCurrent(pending) || !pending._sent.command || input.value.trim()) return false;
   setCommand(pending._sent.command);
   input.value = pending._sent.value;
   return true;

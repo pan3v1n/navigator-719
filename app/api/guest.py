@@ -185,7 +185,7 @@ def _load_history(gid: str, session_id: str, max_msgs: int = 12) -> list[dict]:
 def _last_answer(gid: str, session_id: str):
     try:
         with get_session() as db:
-            return q.guest_last_question(db, gid, session_id)[1]
+            return q.guest_last_answer(db, gid, session_id)
     except Exception:  # noqa: BLE001 — подпись не стоит упавшего ответа
         logger.exception("гость: не удалось прочитать последний ответ")
         return None
