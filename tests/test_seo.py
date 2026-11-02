@@ -105,11 +105,11 @@ class TestHead(unittest.TestCase):
     def test_structured_data(self):
         by_type = {n["@type"]: n for n in self.ld["@graph"]}
         self.assertEqual(by_type["WebSite"]["url"], CANON)
-        # WebApplication намеренно нет: Google требует для него рейтинг, а отзывы — плейсхолдеры
+        # WebApplication намеренно нет: Google требует для него рейтинг, а настоящих отзывов пока нет
         self.assertNotIn("WebApplication", by_type)
 
-    def test_placeholder_reviews_are_not_marked_up(self):
-        # отзывы на лендинге — плейсхолдеры: разметить их значит подать выдумку поиску как факт
+    def test_reviews_are_not_marked_up(self):
+        # настоящих отзывов пока нет: разметка подала бы выдумку поиску как факт
         blob = json.dumps(self.ld)
         self.assertNotIn("aggregateRating", blob)
         self.assertNotIn("Review", blob)
@@ -119,6 +119,27 @@ class TestHead(unittest.TestCase):
         self.assertIn('<meta name="robots" content="noindex">', src)
         # отдаётся по любому адресу, поэтому только абсолютные пути
         self.assertIn('href="/styles.css"', src)
+
+
+class TestNoPlaceholders(unittest.TestCase):
+    """Решение владельца 02.11.2026: блок отзывов снят, пока нет настоящих; цена первой недели без срока."""
+
+    def test_landing_has_no_placeholders(self):
+        src = _read("landing/index.html")
+        for text in ("Плейсхолдер", "Имя Фамилия", "ДД.ММ", "Предложение ограничено", "Отзывы экспертов"):
+            with self.subTest(text):
+                self.assertNotIn(text, src)
+
+    def test_cabinet_and_catalog_have_no_placeholders_either(self):
+        self.assertNotIn("Предложение ограничено", _read("app/web/templates/profile.html"))
+        self.assertNotIn("ДД.ММ", _read("app/core/pricing.py"))
+
+    def test_script_needs_only_elements_of_the_page(self):
+        """Скрипт один на страницу: обращение к снятому блоку остановит всё, что подключается ниже."""
+        ids = set(re.findall(r'\bid="([\w-]+)"', _read("landing/index.html")))
+        used = set(re.findall(r"getElementById\('([\w-]+)'\)\.", _read("landing/app.js")))
+        self.assertTrue(used)
+        self.assertEqual(used - ids, set())
 
 
 class TestAssetsAndFormSurviveStaleCache(unittest.TestCase):

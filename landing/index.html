@@ -21,7 +21,7 @@
   <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
   <link rel="preload" href="fonts/inter-tight-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/inter-tight-latin.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="styles.css?v=2761c016dd">
+  <link rel="stylesheet" href="styles.css?v=269109015b">
 </head>
 <body>
 <div class="wrap">
@@ -59,8 +59,8 @@
             <div class="demo-live">
               <div class="bubble" id="demo-q">Какие документы нужны для внесения продукции в реестр российской промышленной продукции?</div>
               <div class="demo-label" id="demo-label">Навигатор ПП 719</div>
-              <p class="demo-a" id="demo-a">Заявка на включение сведений в реестр подаётся через ГИСП и рассматривается ТПП. К ней прилагают конструкторскую и технологическую документацию, копии лицензий и сертификатов соответствия, а также документы под выбранный критерий ПП № 719.</p>
-              <div class="refs" id="demo-refs"><span class="ref">Приказ ТПП РФ № 52, п. 4.1</span><span class="ref">Правила ведения реестра, п. 7</span></div>
+              <p class="demo-a" id="demo-a">Заявка на включение сведений в реестр подаётся через ГИСП и рассматривается ТПП. К ней прилагают конструкторскую и технологическую документацию, копии лицензий и сертификатов соответствия, если они обязательны для этой продукции, а также документы под выбранный критерий ПП № 719.</p>
+              <div class="refs" id="demo-refs"><span class="ref">Приказ ТПП РФ № 52, пп. 4.1–4.3</span><span class="ref">Правила ведения реестра, пп. 5, 7</span></div>
             </div>
           </div>
           <div class="demo-foot">Постановление Правительства РФ от 17.07.2015 № 719, ред. от 05.10.2026 № 1297</div>
@@ -90,7 +90,6 @@
       </div>
       <div class="plans" id="plans-individual" role="tabpanel" aria-labelledby="ptab-individual" data-panel="individual">
         <div class="plan featured promo" data-plan="Старт">
-          <span class="promo-badge">Предложение ограничено</span>
           <div class="plan-head"><div class="plan-name">Старт</div></div>
           <div class="plan-desc">До 100 запросов в месяц для редких обращений или знакомства с сервисом</div>
           <div class="plan-price"><div class="price-old">9 900 ₽/мес</div><div class="price">1 ₽ первая неделя</div></div>
@@ -186,7 +185,7 @@
       </div>
       <div class="fine" data-panel="individual">
         <p>Цены без НДС. Лицензия на месяц предоставляется для 1 пользователя.</p>
-        <p>Акция до ДД.ММ.ГГГГ: первая неделя тарифа «Старт» — за 1 ₽, далее — по цене тарифа.</p>
+        <p>Первая неделя тарифа «Старт» — за 1 ₽, далее — по цене тарифа.</p>
         <p>Доступ к источникам в ответах Навигатора — бесплатно во всех тарифах. Окончательную стоимость тарифа сообщит специалист после заявки.</p>
         <p>Стоимость не включает проведение экспертизы ТПП и оформление акта экспертизы.</p>
       </div>
@@ -362,42 +361,6 @@
       <div id="lead-dialog-slot"></div>
     </dialog>
 
-    <section class="sec" aria-labelledby="rev-h">
-      <div class="rev-head">
-        <h2 id="rev-h">Отзывы экспертов</h2>
-        <div class="rev-nav">
-          <button class="ibtn gray" type="button" id="rev-prev" aria-label="Предыдущий отзыв"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M12.5 4.5 7 10l5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-          <button class="ibtn gray" type="button" id="rev-next" aria-label="Следующий отзыв"><svg viewBox="0 0 20 20" fill="none" aria-hidden="true"><path d="M7.5 4.5 13 10l-5.5 5.5" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
-        </div>
-      </div>
-      <div class="revs" id="revs">
-        <article class="rev">
-          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Эксперт ТПП, должность</div></div></div>
-          <div class="rev-text">Текст отзыва эксперта о работе с сервисом: какую задачу решал, сколько времени сэкономил, насколько точны ссылки на пункты.</div>
-          <div class="rev-meta"><div>Роль: эксперт ТПП</div><div>Задача: подготовка акта экспертизы</div></div>
-          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
-        </article>
-        <article class="rev">
-          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Должность, предприятие</div></div></div>
-          <div class="rev-text">Текст отзыва представителя производителя о подготовке к экспертизе и внесении продукции в реестр.</div>
-          <div class="rev-meta"><div>Роль: производитель</div><div>Задача: подготовка документов</div></div>
-          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
-        </article>
-        <article class="rev">
-          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Специалист по закупкам, организация</div></div></div>
-          <div class="rev-text">Текст отзыва специалиста по закупкам о проверке происхождения продукции участников.</div>
-          <div class="rev-meta"><div>Роль: закупщик</div><div>Задача: проверка участников закупки</div></div>
-          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
-        </article>
-        <article class="rev">
-          <div class="rev-who"><div class="ava">ИФ</div><div><div class="rev-name">Имя Фамилия</div><div class="rev-role">Эксперт ТПП, должность</div></div></div>
-          <div class="rev-text">Текст отзыва эксперта о сверке формулировок с действующей редакцией постановления.</div>
-          <div class="rev-meta"><div>Роль: эксперт ТПП</div><div>Задача: сверка редакции</div></div>
-          <span class="ph">Плейсхолдер — заменить реальным отзывом</span>
-        </article>
-      </div>
-    </section>
-
     <section class="sec sec-faq" id="faq" aria-labelledby="faq-h">
       <h2 id="faq-h" style="text-align:center">Часто задаваемые вопросы</h2>
       <div class="faq" id="faq-list">
@@ -451,6 +414,6 @@
     document.getElementById('lnk-privacy-form').href = base + '/privacy';
   })();
 </script>
-<script src="app.js?v=b67555e12f" defer></script>
+<script src="app.js?v=19b71b225f" defer></script>
 </body>
 </html>

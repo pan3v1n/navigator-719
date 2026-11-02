@@ -177,6 +177,31 @@ class TestLoginDemo(unittest.TestCase):
                 self.assertNotIn("территориальн", text, "«через территориальные палаты» в пунктах нет")
                 self.assertNotIn("п. 2.1", text, "ответ стоит на п. 7 Правил, а не на п. 2.1 Приказа № 52")
 
+    def test_landing_documents_example_stands_on_its_points(self):
+        """Первый пример лендинга: перечень не помещается в одну цитату, поэтому сверен по пунктам,
+        которые названы под ответом. Лицензии и сертификаты нужны не всегда — это условие в тексте."""
+        a = ("К ней прилагают конструкторскую и технологическую документацию, копии лицензий и сертификатов "
+             "соответствия, если они обязательны для этой продукции, а также документы под выбранный критерий")
+        refs = ("Приказ ТПП РФ № 52, пп. 4.1–4.3", "Правила ведения реестра, пп. 5, 7")
+        for name in ("index.html", "app.js"):
+            with self.subTest(name):
+                text = (ROOT / "landing" / name).read_text(encoding="utf-8")
+                self.assertIn(a, text)
+                for ref in refs:
+                    self.assertIn(ref, text)
+                self.assertNotIn("п. 4.1'", text, "прежняя ссылка: перечня документов в п. 4.1 нет")
+
+        order = self._norm((self.KB / "prikaz52_tpp_full.txt").read_text(encoding="utf-8"))
+        rules = self._norm((self.KB / "pp719_full.txt").read_text(encoding="utf-8"))
+        for quote in (
+            "комплект конструкторской документации", "комплект технологической документации",  # п. 4.2.3
+            "если такие лицензии и разрешения требуются",  # п. 4.2.3, условие
+            "на продукцию, подлежащую обязательному подтверждению соответствия",  # п. 4.2.3, условие
+            "4.3. В зависимости от критериев и требований",
+        ):
+            self.assertIn(self._norm(quote), order)
+        self.assertIn(self._norm("5. Заявка на включение сведений в реестр подается в электронной форме"), rules)
+
     def test_page_starts_with_the_checked_example_and_animates(self):
         from fastapi.testclient import TestClient
 
