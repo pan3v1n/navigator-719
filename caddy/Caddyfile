@@ -1,8 +1,10 @@
-# Caddy перед Навигатором ПП №719. Два имени на одном адресе VM:
+# Caddy перед Навигатором ПП №719. Три имени на одном адресе VM:
 #   {$PUBLIC_DOMAIN}      — лендинг (статика из ./landing), кнопка «Открыть сервис» → сервис.
 #   {$APP_SUBDOMAIN}.{$PUBLIC_DOMAIN} — само приложение (FastAPI в контейнере app, порт 8000);
 #                           метка «сервис» приходит в punycode (xn--b1afk4ade): `caddy adapt`
 #                           кириллицу НЕ кодирует, а браузер шлёт Host в punycode.
+#   www.{$PUBLIC_DOMAIN}  — только 301 на корень (сайта на www нет: запись DNS есть, и без этого
+#                           блока https://www обрывался на TLS).
 # PUBLIC_DOMAIN приходит из docker-compose (из .env) и ОБЯЗАН быть в punycode:
 # 719-навигатор.рф → xn--719--83dani8b8bqyy.xn--p1ai. HTTPS автоматический: Caddy выпускает
 # сертификаты Let's Encrypt (запасной ЦС — ZeroSSL) и редиректит http → https сам; для
@@ -15,18 +17,53 @@
 	handle /api/leads {
 		reverse_proxy app:8000
 	}
+	# Дубль главной для поиска: без редиректа /index.html отвечает 200 наравне с /.
+	redir /index.html / permanent
 	handle {
 		root * /srv/landing
+		# Заметки каталога (fonts/README.md) лежат рядом со статикой, но страницами сайта не являются.
+		@notes path *.md
+		error @notes 404
 		file_server
 	}
+	handle_errors {
+		@missing expression `{err.status_code} == 404`
+		handle @missing {
+			root * /srv/landing
+			rewrite * /404.html
+			# Заголовки основного маршрута здесь сохраняются: без этого 404 шрифта кэшировался бы на год.
+			header Cache-Control "no-store"
+			file_server {
+				status 404
+			}
+		}
+	}
+	# Шрифты не меняются под тем же именем. CSS и JS меняются вместе со страницей (`?v=` в index.html),
+	# поэтому саму страницу браузер обязан сверять с сервером: иначе новый HTML не дойдёт до старого кэша.
+	@page path /
+	header @page Cache-Control "no-cache"
+	@fonts path /fonts/*
+	header @fonts Cache-Control "public, max-age=31536000, immutable"
+	@assets path /styles.css /app.js /favicon.svg /og-image.png
+	header @assets Cache-Control "public, max-age=3600"
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=2592000"
 	}
 }
 
 {$APP_SUBDOMAIN}.{$PUBLIC_DOMAIN} {
 	encode gzip
+	# Для поиска открыты только справка и правовые страницы. Закрываем заголовком, а не в robots.txt:
+	# робот должен иметь право открыть страницу, чтобы увидеть запрет на индексацию.
+	@private not path /help /terms /privacy /robots.txt /static/*
+	header @private X-Robots-Tag "noindex"
+	@robots path /robots.txt
+	header @robots Content-Type "text/plain; charset=utf-8"
+	respond @robots `User-agent: *
+Disallow: /api/
+` 200
 	# Стриминг ответа (SSE /api/chat/stream): без flush_interval -1 прокси копил бы буфер,
 	# и ответ приходил бы одним куском в конце, а не по мере генерации.
 	reverse_proxy app:8000 {
@@ -35,5 +72,10 @@
 	header {
 		X-Content-Type-Options nosniff
 		Referrer-Policy strict-origin-when-cross-origin
+		Strict-Transport-Security "max-age=2592000"
 	}
+}
+
+www.{$PUBLIC_DOMAIN} {
+	redir https://{$PUBLIC_DOMAIN}{uri} permanent
 }
