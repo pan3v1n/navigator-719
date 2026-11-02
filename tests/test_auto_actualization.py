@@ -1407,6 +1407,29 @@ class TestRestructureNames(unittest.TestCase):
     def test_keep_empty_cell_keeps_the_model_name(self):
         self.assertEqual(self.run_patch(name_raw="")[0]["product_name"], "Иглы, пересказ модели")
 
+    def run_renumber(self, name_raw=None):
+        import restructure_changed as rc
+
+        p = self.product()
+        p.position = "7"
+        if name_raw is not None:
+            p.name_raw = name_raw
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "x.json"
+            planned = (mock.Mock(), "Раздел", out, [], [], [(p, "llm", None)], [], "текст", 2)
+            with mock.patch.object(rc, "plan", return_value=planned), mock.patch.object(rc.sk, "make_client"), \
+                    mock.patch.object(rc.sk, "normalize_product", side_effect=self.fresh), mock.patch.object(rc, "ROOT", Path(d)), \
+                    mock.patch.object(sys, "argv", ["x", "XXIII", "--anchors", "renumber", "--write"]), \
+                    contextlib.redirect_stdout(io.StringIO()):
+                rc.main()
+            return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_renumber_takes_name_from_the_cell(self):
+        self.assertEqual(self.run_renumber()[0]["product_name"], "Иглы из ячейки")
+
+    def test_renumber_empty_cell_keeps_the_model_name(self):
+        self.assertEqual(self.run_renumber(name_raw="")[0]["product_name"], "Иглы, пересказ модели")
+
 
 class TestThresholdSnapshot(unittest.TestCase):
     def test_snapshot_sees_procurement_threshold(self):
