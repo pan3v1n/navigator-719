@@ -27,7 +27,6 @@ import argparse
 import datetime as dt
 import json
 import os
-import shutil
 import subprocess
 import sys
 import traceback
@@ -38,6 +37,7 @@ for p in (ROOT, ROOT / "scripts"):
     if str(p) not in sys.path:
         sys.path.insert(0, str(p))
 
+import edition_source as es  # noqa: E402
 import watch_edition as we  # noqa: E402
 from app.core.console import enable_utf8  # noqa: E402
 
@@ -122,15 +122,19 @@ def edition_built(doc_id: str, sources: Path) -> bool:
             or bool(git("ls-remote", "--heads", "origin", branch).strip()))
 
 
-def discard_build(doc_id: str, sources: Path) -> None:
-    """Убрать сборку, упавшую на скачивании: данных в ней нет, завтра соберём заново."""
-    tree = sources / f"wt-{doc_id}"
-    if tree.exists():
-        git("worktree", "remove", "--force", str(tree))
-    git("worktree", "prune")
-    if git("branch", "--list", f"auto/edition-{doc_id}").strip():
-        git("branch", "-D", f"auto/edition-{doc_id}")
-    shutil.rmtree(sources / doc_id, ignore_errors=True)
+def prefetch(doc_id: str, sources: Path) -> str | None:
+    """Первоисточник — до ветки и дерева: при отказе сети убирать нечего. Причина отказа или `None`.
+
+    ⚠ Автомат ничего не удаляет: прежняя уборка неудачной сборки могла снести правку человека.
+    """
+    src = sources / doc_id
+    src.mkdir(parents=True, exist_ok=True)
+    for url, name in ((es.KONTUR_RTF, "edition.rtf"), (es.KONTUR_DOC, "edition.html")):
+        data, why = es.fetch(url.format(doc_id=doc_id))
+        if data is None:
+            return why or "пустой ответ"
+        (src / name).write_bytes(data)
+    return None
 
 
 def model_env(env_file: Path = MAIN_ENV) -> dict[str, str]:
@@ -144,25 +148,38 @@ def model_env(env_file: Path = MAIN_ENV) -> dict[str, str]:
 
 
 def read_report(doc_id: str, sources: Path) -> tuple[bool, dict]:
+    """Успех — только полный прогон на своей ветке: частичный запуск руками не должен уйти в публичный PR."""
     path = sources / doc_id / "report.json"
     report = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    return bool(report) and not str(report.get("вердикт", "")).startswith("ОСТАНОВЛЕНО"), report
+    ok = (report.get("последний шаг") == "tests" and not str(report.get("вердикт", "")).startswith("ОСТАНОВЛЕНО")
+          and report.get("факты", {}).get("ветка") == f"auto/edition-{doc_id}")
+    return ok, report
 
 
 def build_edition(doc_id: str, sources: Path) -> tuple[bool, dict]:
     """Ветка `auto/edition-<id>` от `origin/dev` в своём каталоге, конвейер внутри неё."""
-    tree = sources / f"wt-{doc_id}"
+    tree, src = sources / f"wt-{doc_id}", sources / doc_id
+    (src / "report.json").unlink(missing_ok=True)    # упавший при запуске конвейер не должен прочесть чужой отчёт
     git("fetch", "origin", "--quiet")
     git("worktree", "add", "-b", f"auto/edition-{doc_id}", str(tree), "origin/dev")
-    subprocess.run([sys.executable, "scripts/actualize_edition.py", "--doc-id", doc_id,
-                    "--sources", str(sources)], cwd=tree, env=model_env())
-    return read_report(doc_id, sources)
+    run = subprocess.run([sys.executable, "scripts/actualize_edition.py", "--doc-id", doc_id, "--sources", str(sources),
+                          "--rtf", str(src / "edition.rtf"), "--page", str(src / "edition.html")], cwd=tree, env=model_env())
+    ok, report = read_report(doc_id, sources)
+    return ok and run.returncode == 0, report
 
 
 def pr_opened(doc_id: str, runner=None) -> bool | None:
-    """`None` — GitHub не ответил: решать нечего, повтор завтра."""
-    found = (runner or gh)("pr", "list", "--head", f"auto/edition-{doc_id}", "--state", "all", "--json", "number")
-    return None if found.returncode != 0 else bool(json.loads(found.stdout or "[]"))
+    """Есть ли PR на нынешнюю вершину ветки. `None` — GitHub не ответил: решать нечего, повтор завтра.
+
+    Сравнение по коммиту: закрытый PR прошлой сборки не должен заглушить пересборку на исправленном коде.
+    """
+    branch = f"auto/edition-{doc_id}"
+    found = (runner or gh)("pr", "list", "--head", branch, "--state", "all", "--json", "headRefOid")
+    if found.returncode != 0:
+        return None
+    heads = {p["headRefOid"] for p in json.loads(found.stdout or "[]")}
+    tip = git("branch", "--list", "--format=%(objectname)", branch).strip()
+    return tip in heads if tip else bool(heads)
 
 
 def publish(doc_id: str, tree: Path, report_md: Path) -> str:
@@ -187,12 +204,17 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
     """Новая редакция. Каждый шаг повторяем: сообщение обязано дойти, даже если сегодня упал `gh`."""
     if issues.dry_run:
         return f"был бы запущен конвейер: документ {doc_id} ({link})"
-    ok, report = read_report(doc_id, sources) if edition_built(doc_id, sources) else build_edition(doc_id, sources)
+    if edition_built(doc_id, sources):
+        ok, report = read_report(doc_id, sources)
+    else:
+        if (why := prefetch(doc_id, sources)) is not None:
+            print(f"документ {doc_id}: первоисточник не скачался: {why}", flush=True)
+            return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: первоисточник не скачивается",
+                               "Контур показал новую редакцию, а её текст не скачался. Причина — в локальном журнале, "
+                               "попытка повторяется каждый день.", urgent=True)
+        ok, report = build_edition(doc_id, sources)
     if not ok:
         step = report.get("последний шаг", "неизвестен")
-        if step == "source":
-            discard_build(doc_id, sources)
-            return f"документ {doc_id}: первоисточник не скачался, повтор завтра"
         return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: конвейер остановился на шаге {step}",
                            f"Новая редакция, документ Контура {doc_id}. Подробности — в локальном отчёте "
                            "`report.md` каталога первоисточников.", urgent=True)
@@ -203,7 +225,7 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
         return f"документ {doc_id}: PR уже открыт"
     try:
         return publish(doc_id, sources / f"wt-{doc_id}", sources / doc_id / "report.md")
-    except (subprocess.CalledProcessError, RuntimeError) as e:
+    except (subprocess.CalledProcessError, RuntimeError, OSError) as e:
         print(f"публикация не удалась: {e}", flush=True)
         return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: сборка готова, PR не создан",
                            f"Конвейер прошёл, публикация не удалась ({type(e).__name__}). Завтра попытка повторится, "

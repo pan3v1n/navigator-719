@@ -290,7 +290,8 @@ def check_kontur(doc_id: str, known: dict[str, str], fetch=es.fetch, full_text: 
         return {"исход": "не проверено", "причина": "разметка страницы изменилась: текст документа не найден"}
     # ⚠⚠ На странице БУДУЩЕЙ редакции «Перейти в действующую» ведёт НАЗАД: корпус уже стоит на редакции,
     # которая ещё не вступила, а ссылка на прежнюю. Считать её новой — собрать откат (ревью A10, раунд 2).
-    docs = [] if info.is_future else sorted(d for d in info.jumps if d != doc_id)
+    past = set(KONTUR_719_BY_EDITION.values()) if info.is_future else set()
+    docs = sorted(d for d in info.jumps if d != doc_id and d not in past)
     if not info.is_actual and not info.is_future and not docs:
         return {"исход": "не проверено", "причина": f"редакция «{info.title}» не действует, ссылки на новую нет"}
     text = FULL_TEXT.read_text(encoding="utf-8") if full_text is None else full_text

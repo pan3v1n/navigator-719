@@ -266,8 +266,15 @@ class TestReviewRows(unittest.TestCase):
 
     def test_lost_requirement_without_points_is_visible(self):
         long_line = "наличие сервисного центра на территории страны союза"
-        rows, _ = self.rows(self.rec(), cells=("сварка рамы 20 баллов", "сборка узла 2 балла", long_line))
+        rows, notes = self.rows(self.rec(), cells=("сварка рамы 20 баллов", "сборка узла 2 балла", long_line))
         self.assertIn("0 / 1", rows[0])
+        self.assertIn("требования из ячейки не нашлись", notes[0])
+
+    def test_kept_requirement_is_quiet(self):
+        long_line = "наличие сервисного центра на территории страны союза"
+        rec = self.rec([*self.OPS, (long_line, None)])
+        _, notes = self.rows(rec, cells=("сварка рамы 20 баллов", "сборка узла 2 балла", long_line))
+        self.assertEqual(notes, [])
 
     def test_table_row_survives_line_breaks_and_pipes(self):
         self.assertEqual(ae.table_row("a\nb", "c|d"), "| a b | c/d |")
@@ -285,6 +292,8 @@ class TestReviewRows(unittest.TestCase):
     def test_decimal_points(self):
         self.assertEqual(ae.source_points("операция 0,5 балла"), Counter({0.5: 1}))
         self.assertTrue(ae.pair_confirmed("операция 0,5 балла", "операция", 0.5))
+        self.assertFalse(ae.pair_confirmed("операция 0,5 балла", "операция", 5))
+        self.assertEqual(ae.record_points({"requirement_blocks": [{"operations": [{"points": "2,5"}]}]}), Counter({2.5: 1}))
 
 
 def make_ctx(**over) -> ae.Ctx:
@@ -377,6 +386,70 @@ class TestTextStep(unittest.TestCase):
     def test_unparsed_header_stops(self):
         with self.assertRaisesRegex(ae.Stop, "шапка"):
             self.step(TEXT)
+
+
+class TestPostStep(unittest.TestCase):
+    def step(self, backfill="", cells=""):
+        out = {"backfill_block_thresholds.py": backfill, "build_code_cells.py": cells}
+        ctx = make_ctx()
+        with mock.patch.object(ae, "py", side_effect=lambda s, *a: SimpleNamespace(stdout=out.get(s, ""))) as py:
+            ae.step_post(ctx)
+        return ctx, [c.args[0] for c in py.call_args_list]
+
+    def test_order_from_backfill_output(self):
+        _, calls = self.step()
+        self.assertEqual(calls[0], "backfill_block_thresholds.py")
+        self.assertEqual(calls[-1], "build_code_cells.py")
+        self.assertEqual(calls.count("diag_orphan_requirements.py"), 2, "два режима — двумя запусками")
+        self.assertIn("verify_structured.py", calls)
+
+    def test_rollback_line_reaches_the_report(self):
+        ctx, _ = self.step(backfill="  ⚠ ОТКАТ [VII] Имя: причина\nобычная строка")
+        self.assertEqual(ctx.warnings, ["⚠ ОТКАТ [VII] Имя: причина"])
+
+    def test_undefined_codes_are_counted(self):
+        ctx, _ = self.step(cells="   НЕ ОПРЕДЕЛЕНО а\n   НЕ ОПРЕДЕЛЕНО б\n")
+        self.assertEqual(ctx.facts["кодов не определено"], 2)
+
+
+class TestWriteChunks(unittest.TestCase):
+    def run_write(self, sections):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            (base / "chunks").mkdir()
+            full, chunk = base / "full.txt", base / "chunks" / "00_a.txt"
+            chunk.write_text("# Вводная часть\n\nпрежнее", encoding="utf-8")
+            with mock.patch.object(ae, "FULL", full), mock.patch.object(ae, "CHUNKS", base / "chunks"), mock.patch.object(ae, "py"), \
+                    mock.patch("parse_rtf.split_sections", return_value=sections):
+                ae.write_chunks("текст")
+            return full.read_text(encoding="utf-8"), chunk.read_text(encoding="utf-8")
+
+    def test_chunk_is_header_and_body(self):
+        full, chunk = self.run_write([("Вводная часть", "новое")])
+        self.assertEqual(full, "текст")
+        self.assertEqual(chunk, "# Вводная часть\n\nновое")
+
+    def test_missing_or_ambiguous_header_stops(self):
+        for sections in ([], [("Вводная часть", "а"), ("Вводная часть", "б")]):
+            with self.assertRaisesRegex(ae.Stop, "заголовок"):
+                self.run_write(sections)
+
+
+class TestKbChanges(unittest.TestCase):
+    def test_new_files_count(self):
+        answers = {"diff": "knowledge_base/a\n", "ls-files": "knowledge_base/b\n"}
+        with mock.patch.object(ae, "git", side_effect=lambda *a: answers[a[2]]):
+            self.assertEqual(ae.kb_changes(), ["knowledge_base/a", "knowledge_base/b"])
+
+
+class TestSaveState(unittest.TestCase):
+    def test_interrupted_write_keeps_the_old_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "s.json"
+            aa.save_state(path, {"a": 1})
+            with mock.patch.object(aa.os, "replace", side_effect=OSError("обрыв")), self.assertRaises(OSError):
+                aa.save_state(path, {"a": 2})
+            self.assertEqual(aa.load_state(path), {"a": 1})
 
 
 class TestControlStep(unittest.TestCase):
@@ -549,6 +622,11 @@ class TestGatesStep(unittest.TestCase):
     def test_position_without_name_in_cell_skips_the_name_check(self):
         self.step(after_recs={"a": {**self.REC, "notes": "правка"}}, llm=[""])
 
+    def test_empty_name_does_not_excuse_other_records(self):
+        two = {"a": {**self.REC, "notes": "правка"}, "b": {**self.REC, "notes": "ещё"}}
+        with self.assertRaisesRegex(ae.Stop, "вне плана"):
+            self.step(after_recs=two, llm=["", "Гармони"])
+
     def test_unplanned_loss_stops(self):
         with self.assertRaisesRegex(ae.Stop, "записей было 1, стало 0"):
             self.step(after_recs={})
@@ -587,10 +665,11 @@ class TestTestsStep(unittest.TestCase):
         return ctx, run
 
     def test_pinned_failure_is_expected(self):
-        ctx, run = self.red("test_edition_2026_10_31.T.t", "tests.test_deploy_script.T.t")
+        ctx, run = self.red("test_edition_2026_10_31.T.t", "tests.test_deploy_script.T.t",
+                            "test_k15_metodrek_corpus.TestPassport.test_radius_editions_of_older_documents_unchanged")
         self.assertEqual(ctx.surprises, 0)
         self.assertEqual(ctx.warnings, [])
-        self.assertEqual(len(ctx.facts["тесты, закреплённые за редакцией"]), 2)
+        self.assertEqual(len(ctx.facts["тесты, закреплённые за редакцией"]), 3)
         self.assertIs(run.call_args.kwargs["utf8"], False)
 
     def test_unexpected_failure_changes_the_verdict(self):
@@ -608,15 +687,20 @@ class TestTestsStep(unittest.TestCase):
 class TestRetargetLabel(unittest.TestCase):
     OLD, NEW = "ред. от 05.10.2026 N 1297", "ред. от 20.12.2026 N 1500"
     MANIFEST = (f'documents:\n  - doc_type: decree_body\n    edition_expected: "{OLD}"\n    sources:\n'
-                f'      - pp719/a.txt\n  - doc_type: appendix_footnotes\n    edition_expected: "{OLD}"\n    sources:\n'
-                '      - pp719/b.txt\n  - doc_type: rules\n    edition_expected: "ред. от 13.04.2026 N 400"\n')
+                f'      - pp719/chunks/a.txt\n  - doc_type: appendix_footnotes\n    edition_expected: "{OLD}"\n    sources:\n'
+                '      - pp719/chunks/b.txt\n  - doc_type: rules\n    edition_expected: "ред. от 13.04.2026 N 400"\n    sources:\n'
+                '      - pp719/chunks/c.txt\n  - doc_type: sng\n    edition_expected: "ред. от 08.06.2023"\n    sources:\n'
+                '      - pp719/sng.txt\n')
 
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         base = Path(self.tmp.name)
-        (base / "knowledge_base" / "pp719").mkdir(parents=True)
-        (base / "knowledge_base" / "pp719" / "a.txt").write_text("в ред. от 20.12.2026 N 1500", encoding="utf-8")
-        (base / "knowledge_base" / "pp719" / "b.txt").write_text("в ред. от 05.10.2026 N 1297", encoding="utf-8")
+        chunks = base / "knowledge_base" / "pp719" / "chunks"
+        chunks.mkdir(parents=True)
+        (chunks / "a.txt").write_text("в ред. от 20.12.2026 N 1500", encoding="utf-8")
+        (chunks / "b.txt").write_text("в ред. от 05.10.2026 N 1297", encoding="utf-8")
+        (chunks / "c.txt").write_text("в ред. от 20.12.2026 N 1500", encoding="utf-8")
+        (chunks.parent / "sng.txt").write_text("ссылка от 18.06.2010 N 324", encoding="utf-8")
         self.man, self.land = base / "m.yaml", base / "i.html"
         self.man.write_text(self.MANIFEST, encoding="utf-8")
         self.land.write_text("ред. от 05.10.2026 № 1297<br>ред. от 05.10.2026</div>редакция от 05.10.2026 № 1297.", encoding="utf-8")
@@ -630,18 +714,33 @@ class TestRetargetLabel(unittest.TestCase):
             p.stop()
         self.tmp.cleanup()
 
-    def test_each_document_gets_its_own_label(self):
-        done = ae.retarget_label(self.OLD, self.NEW)
-        self.assertEqual(len(done), 2)
-        text = self.man.read_text(encoding="utf-8")
-        self.assertEqual(text.count(self.NEW), 1, "сноски акт не задел: их подпись остаётся")
-        self.assertEqual(text.count(self.OLD), 1)
-        self.assertIn("ред. от 13.04.2026 N 400", text)
+    def text(self):
+        return self.man.read_text(encoding="utf-8")
+
+    def test_each_changed_document_gets_its_own_label(self):
+        self.assertTrue(ae.retarget_manifest(self.NEW, ["knowledge_base/pp719/chunks/a.txt", "knowledge_base/pp719/chunks/b.txt"]))
+        self.assertEqual(self.text().count(self.NEW), 1, "сноски акт не задел: их подпись остаётся")
+        self.assertEqual(self.text().count(self.OLD), 1)
+
+    def test_rules_follow_their_own_text(self):
+        ae.retarget_manifest(self.NEW, ["knowledge_base/pp719/chunks/c.txt"])
+        self.assertNotIn("N 400", self.text())
+
+    def test_untouched_document_stays(self):
+        self.assertFalse(ae.retarget_manifest(self.NEW, []))
+        self.assertEqual(self.text(), self.MANIFEST)
+
+    def test_document_outside_chunks_stays_even_if_listed(self):
+        ae.retarget_manifest(self.NEW, ["knowledge_base/pp719/sng.txt"])
+        self.assertIn("ред. от 08.06.2023", self.text())
+
+    def test_landing_follows_the_label(self):
+        self.assertTrue(ae.retarget_landing(self.OLD, self.NEW))
         self.assertNotIn("05.10.2026", self.land.read_text(encoding="utf-8"))
 
     def test_unparsed_label_stops(self):
         with self.assertRaises(ae.Stop):
-            ae.retarget_label("редакция не определена", self.NEW)
+            ae.retarget_landing("редакция не определена", self.NEW)
 
     def test_real_manifest_with_glob_sources(self):
         # Настоящий манифест: выдуманная фикстура скрыла источник-маску, и реплей N 1297 упал на шаге ссылки.
@@ -649,24 +748,43 @@ class TestRetargetLabel(unittest.TestCase):
             p.stop()
         real = ROOT / "knowledge_base" / "manifest.yaml"
         self.man.write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
-        old = ae._LABEL_RE.search(re.search(r'edition_expected: "(ред\. от [^"]+ N \d+)"', self.man.read_text(encoding="utf-8"))[1])[0]
         with mock.patch.object(ae, "MANIFEST", self.man):
-            self.assertTrue(ae.retarget_manifest(old, self.NEW))
-        text = self.man.read_text(encoding="utf-8")
-        self.assertEqual(text.count(f'edition_expected: "{self.NEW}"'), 1, "товарный корпус с маской идёт за редакцией")
+            self.assertTrue(ae.retarget_manifest(self.NEW, []))
+        self.assertEqual(self.text().count(f'edition_expected: "{self.NEW}"'), 1, "товарный корпус с маской идёт за редакцией")
         for p in self.patches:
             p.start()
 
-    def test_link_step_moves_the_label(self):
-        ctx = make_ctx(before={"подпись": self.OLD})
-        with mock.patch.object(ae, "corpus_label", return_value=(self.NEW, self.NEW, "508574")):
-            self.assertIn("m.yaml", ae.step_link(ctx))
+    def test_real_manifest_labels_match_the_text(self):
+        # Положительный контроль: на нынешнем корпусе пересчёт не меняет ни одной подписи.
+        for p in self.patches:
+            p.stop()
+        real = ROOT / "knowledge_base" / "manifest.yaml"
+        self.man.write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+        chunks = sorted(f"knowledge_base/pp719/chunks/{x.name}" for x in ae.CHUNKS.glob("*.txt"))
+        from app.rag import edition
+
+        with mock.patch.object(ae, "MANIFEST", self.man):
+            self.assertFalse(ae.retarget_manifest(edition.corpus_edition(), chunks))
+        for p in self.patches:
+            p.start()
+
+    def step(self, label, known, before=None):
+        ctx = make_ctx(before={"подпись": before or self.OLD})
+        with mock.patch.object(ae, "corpus_label", return_value=(label, label, known)), \
+                mock.patch.object(ae, "kb_changes", return_value=["knowledge_base/pp719/chunks/a.txt"]):
+            return ae.step_link(ctx)
+
+    def test_link_step_moves_manifest_and_landing(self):
+        text = self.step(self.NEW, "508574")
+        self.assertIn("m.yaml", text)
+        self.assertIn("i.html", text)
+
+    def test_link_step_leaves_landing_when_label_is_the_same(self):
+        self.assertNotIn("i.html", self.step(self.NEW, "508574", before=self.NEW))
 
     def test_link_step_stops_on_foreign_document(self):
-        ctx = make_ctx(before={"подпись": self.NEW})
-        with mock.patch.object(ae, "corpus_label", return_value=(self.NEW, self.NEW, "111111")), \
-                self.assertRaisesRegex(ae.Stop, "LATER_IN_FORCE"):
-            ae.step_link(ctx)
+        with self.assertRaisesRegex(ae.Stop, "LATER_IN_FORCE"):
+            self.step(self.NEW, "111111", before=self.NEW)
 
 
 class TestVerdict(unittest.TestCase):
@@ -766,6 +884,10 @@ class TestCheckKontur(unittest.TestCase):
                               "Перейти в действующую</a></div>") + DOC.format("текст")
         r = self.check(page, known={})
         self.assertEqual((r["исход"], r["новые документы"]), ("нового нет", {}))
+
+    def test_future_page_pointing_to_unknown_document_is_news(self):
+        page = FUTURE.replace("</b></div>", "</b> <a href='/info/normativ/document/1/509999-x-n-719'>Перейти в редакцию</a></div>") + DOC.format("т")
+        self.assertEqual(self.check(page, known={})["новые документы"], {"509999": "Перейти в редакцию"})
 
     def test_new_pending_act(self):
         r = self.check(ACTUAL_PAGE, known={"N 1284 от 27.08.2025": "01.06.2027"})
@@ -868,25 +990,27 @@ class TestIssues(unittest.TestCase):
 class TestHandleDocument(unittest.TestCase):
     STOPPED = (False, {"последний шаг": "gates", "вердикт": "ОСТАНОВЛЕНО: input_value='секрет'"})
 
-    def run_doc(self, built=False, result=(True, {}), opened=False, publish=None):
+    def run_doc(self, built=False, result=(True, {}), opened=False, publish=None, fetched=None):
         issues = mock.Mock(dry_run=False)
         with mock.patch.object(aa, "edition_built", return_value=built), \
                 mock.patch.object(aa, "read_report", return_value=result) as read, \
                 mock.patch.object(aa, "build_edition", return_value=result) as build, \
                 mock.patch.object(aa, "pr_opened", return_value=opened), \
-                mock.patch.object(aa, "discard_build") as discard, \
+                mock.patch.object(aa, "prefetch", return_value=fetched) as prefetch, \
                 mock.patch.object(aa, "publish", **(publish or {"return_value": "https://x/pr/1"})) as pub:
             log = aa.handle_document("509000", "ссылка", Path("."), issues)
-        return SimpleNamespace(log=log, issues=issues, build=build, read=read, pub=pub, discard=discard)
+        return SimpleNamespace(log=log, issues=issues, build=build, read=read, pub=pub, prefetch=prefetch)
 
     def test_new_edition_is_built_and_published(self):
         r = self.run_doc()
+        r.prefetch.assert_called_once()
         r.build.assert_called_once()
         self.assertEqual(r.log, "https://x/pr/1")
 
     def test_existing_build_is_not_rebuilt(self):
         r = self.run_doc(built=True, opened=True)
         r.build.assert_not_called()
+        r.prefetch.assert_not_called()
         r.pub.assert_not_called()
         self.assertIn("PR уже открыт", r.log)
 
@@ -913,10 +1037,13 @@ class TestHandleDocument(unittest.TestCase):
         r.build.assert_not_called()
         r.issues.once.assert_called_once()
 
-    def test_download_failure_is_discarded_for_tomorrow(self):
-        r = self.run_doc(result=(False, {"последний шаг": "source"}))
-        r.discard.assert_called_once()
-        r.issues.once.assert_not_called()
+    def test_download_failure_builds_nothing_and_speaks_up(self):
+        r = self.run_doc(fetched="URLError: секретный хвост")
+        r.build.assert_not_called()
+        title, body = r.issues.once.call_args.args
+        self.assertIn("не скачивается", title)
+        self.assertNotIn("секретный", title + body)
+        self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
 
     def test_publish_failure_makes_urgent_issue(self):
         r = self.run_doc(publish={"side_effect": subprocess.CalledProcessError(1, "git push")})
@@ -926,6 +1053,15 @@ class TestHandleDocument(unittest.TestCase):
     def test_gh_pr_failure_makes_urgent_issue(self):
         r = self.run_doc(publish={"side_effect": RuntimeError("gh pr create")})
         self.assertIn("PR не создан", r.issues.once.call_args.args[0])
+
+    def test_missing_tree_makes_issue(self):
+        r = self.run_doc(publish={"side_effect": NotADirectoryError("нет каталога")})
+        self.assertIn("PR не создан", r.issues.once.call_args.args[0])
+
+    def test_nothing_in_the_module_deletes(self):
+        src = Path(aa.__file__).read_text(encoding="utf-8")
+        for word in ("rmtree", '"-D"', "worktree\", \"remove", "--force"):
+            self.assertNotIn(word, src, "автомат ничего не удаляет: уборка уже однажды сносила работу человека")
 
 
 class TestHandleFound(unittest.TestCase):
@@ -1062,30 +1198,75 @@ class TestBuild(unittest.TestCase):
         self.assertEqual(git.call_args_list[1].args[-1], "origin/dev")
         self.assertEqual(run.call_args.kwargs["env"], {"DEEPSEEK_API_KEY": "k"})
 
-    def test_discard_touches_only_this_build(self):
-        with tempfile.TemporaryDirectory() as d:
-            base = Path(d)
-            (base / "1").mkdir()
-            (base / "2").mkdir()
-            with mock.patch.object(aa, "git", return_value="x") as git:
-                aa.discard_build("1", base)
-            self.assertFalse((base / "1").exists())
-            self.assertTrue((base / "2").exists())
-            self.assertEqual(git.call_args_list[-1].args, ("branch", "-D", "auto/edition-1"))
+    def report(self, base, **data):
+        (base / "1").mkdir(exist_ok=True)
+        (base / "1" / "report.json").write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
 
-    def test_report_verdict(self):
+    GOOD = {"последний шаг": "tests", "вердикт": "ГОТОВО", "факты": {"ветка": "auto/edition-1"}}
+
+    def test_only_a_full_run_on_its_own_branch_counts(self):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             self.assertEqual(aa.read_report("1", base), (False, {}))
-            (base / "1").mkdir()
-            (base / "1" / "report.json").write_text('{"вердикт": "ОСТАНОВЛЕНО: x"}', encoding="utf-8")
-            self.assertFalse(aa.read_report("1", base)[0])
-            (base / "1" / "report.json").write_text('{"вердикт": "НУЖЕН РАЗБОР: 1"}', encoding="utf-8")
-            self.assertTrue(aa.read_report("1", base)[0])
+            for data, ok in ((self.GOOD, True), ({**self.GOOD, "вердикт": "НУЖЕН РАЗБОР: 1"}, True),
+                             ({**self.GOOD, "вердикт": "ОСТАНОВЛЕНО: x"}, False),
+                             ({**self.GOOD, "последний шаг": "chunks"}, False),
+                             ({**self.GOOD, "факты": {"ветка": "другая"}}, False)):
+                self.report(base, **data)
+                self.assertEqual(aa.read_report("1", base)[0], ok, data)
 
-    def test_pr_opened(self):
-        self.assertTrue(aa.pr_opened("1", mock.Mock(return_value=answer(out='[{"number": 1}]'))))
-        self.assertFalse(aa.pr_opened("1", mock.Mock(return_value=answer(out="[]"))))
+    def test_crashed_pipeline_does_not_read_an_old_report(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            self.report(base, **self.GOOD)
+            with mock.patch.object(aa, "git"), mock.patch.object(aa.subprocess, "run", return_value=answer(code=1)), \
+                    mock.patch.object(aa, "model_env", return_value={}):
+                self.assertEqual(aa.build_edition("1", base), (False, {}))
+
+    def test_failed_exit_code_is_not_success(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+
+            def run(*a, **k):
+                self.report(base, **self.GOOD)
+                return answer(code=1)
+
+            with mock.patch.object(aa, "git"), mock.patch.object(aa.subprocess, "run", side_effect=run), \
+                    mock.patch.object(aa, "model_env", return_value={}):
+                self.assertFalse(aa.build_edition("1", base)[0])
+
+    def test_pipeline_gets_the_downloaded_files(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(aa, "git"), \
+                mock.patch.object(aa.subprocess, "run", return_value=answer()) as run, \
+                mock.patch.object(aa, "model_env", return_value={}):
+            aa.build_edition("1", Path(d))
+        cmd = run.call_args.args[0]
+        self.assertTrue(cmd[cmd.index("--rtf") + 1].endswith("edition.rtf"))
+        self.assertTrue(cmd[cmd.index("--page") + 1].endswith("edition.html"))
+
+    def test_prefetch(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(aa.es, "fetch", return_value=(b"x", "")):
+                self.assertIsNone(aa.prefetch("1", Path(d)))
+            self.assertTrue((Path(d) / "1" / "edition.rtf").exists())
+            self.assertTrue((Path(d) / "1" / "edition.html").exists())
+            with mock.patch.object(aa.es, "fetch", return_value=(None, "timed out")):
+                self.assertEqual(aa.prefetch("2", Path(d)), "timed out")
+
+    def pr(self, prs, tip):
+        runner = mock.Mock(return_value=answer(out=json.dumps(prs)))
+        with mock.patch.object(aa, "git", return_value=tip):
+            return aa.pr_opened("1", runner)
+
+    def test_pr_is_matched_by_commit(self):
+        self.assertTrue(self.pr([{"headRefOid": "abc"}], "abc\n"))
+        self.assertFalse(self.pr([{"headRefOid": "old"}], "abc\n"), "закрытый PR прошлой сборки не глушит пересборку")
+        self.assertFalse(self.pr([], "abc\n"))
+
+    def test_pr_without_local_branch(self):
+        self.assertTrue(self.pr([{"headRefOid": "abc"}], ""))
+
+    def test_pr_silence(self):
         self.assertIsNone(aa.pr_opened("1", mock.Mock(return_value=answer(code=1))))
 
 

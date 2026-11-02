@@ -57,7 +57,9 @@ _SECRET_ENV = ("DEEPSEEK_API_KEY",)
 _RESERVED = ("source_anchor", "amendments")     # меняются у неизменённой позиции: нумерация и пометки актов
 # Тесты, закреплённые за конкретной редакцией и релизом: на новой редакции им положено падать, правит человек.
 # Всё остальное красное — неожиданность: иначе «красная» стала бы нормой и настоящий сигнал утонул.
-_PINNED_TESTS = re.compile(r"^(?:tests\.)?test_(?:edition_\d{4}_|deploy_script|ev24_paraphrase_anchors)")
+_PINNED_TESTS = re.compile(r"^(?:tests\.)?test_(?:edition_\d{4}_|deploy_script|ev24_paraphrase_anchors"
+                           r"|k15_metodrek_corpus\.TestPassport\.test_radius_editions)")
+_REQUIREMENT_RE = re.compile(r"налич|прав[ао]? на|сервисн|обязательн|запрет", re.I)
 
 
 class Stop(RuntimeError):
@@ -274,8 +276,13 @@ def source_points(raw_block: str) -> Counter:
     return Counter(float(n.replace(",", ".")) for n in re.findall(r"(\d+(?:[.,]\d+)?)\s*балл", text, flags=re.I))
 
 
+def _number(value) -> float:
+    """Балл записи: число или строка, в том числе с запятой («2,5»)."""
+    return float(str(value).replace(",", "."))
+
+
 def record_points(rec: dict) -> Counter:
-    return Counter(float(o["points"]) for o in record_operations(rec) if o.get("points") is not None)
+    return Counter(_number(o["points"]) for o in record_operations(rec) if o.get("points") is not None)
 
 
 def record_operations(rec: dict) -> list[dict]:
@@ -297,24 +304,30 @@ def pair_confirmed(source: str, text: str, points: float) -> bool | None:
     if i < 0:
         return None
     number = f"{points:g}".replace(".", ",")
-    return bool(re.match(r".{0,12}?\b" + re.escape(number) + r"\s*\(?\s*балл", source[i + len(needle):i + len(needle) + 40]))
+    return bool(re.match(r".{0,12}?(?<![\d,.])" + re.escape(number) + r"\s*\(?\s*балл",
+                         source[i + len(needle):i + len(needle) + 40]))
 
 
 def unconfirmed_pairs(raw_block: str, rec: dict) -> list[str]:
     """Операции с баллом, чью пару «текст — балл» источник не подтвердил."""
     source = _norm(raw_block)
     return [f"«{(o.get('text') or '')[:50]}» = {o['points']}" for o in record_operations(rec)
-            if o.get("points") is not None and not pair_confirmed(source, o.get("text") or "", float(o["points"]))]
+            if o.get("points") is not None and not pair_confirmed(source, o.get("text") or "", _number(o["points"]))]
 
 
-def source_lines_seen(raw_block: str, rec: dict) -> tuple[int, int]:
-    """Сколько строк ячейки источника нашлось в записи: требования без баллов сверке чисел не видны."""
+def source_lines(raw_block: str, rec: dict) -> tuple[list[str], list[str]]:
+    """Длинные строки ячейки источника и те из них, начала которых нет в записи."""
     parts = [_norm(o.get("text")) for o in record_operations(rec)]
     for block in rec.get("requirement_blocks") or []:
         parts += [_norm(block.get("component")), _norm(block.get("note"))]
     joined = " ".join(parts)
     lines = [n for n in map(_norm, raw_block.split("\n")) if len(n) > 25]
-    return sum(1 for n in lines if n[:60] in joined), len(lines)
+    return lines, [n for n in lines if n[:60] not in joined]
+
+
+def lost_requirements(raw_block: str, rec: dict) -> list[str]:
+    """Строки с обязательным требованием, которых нет в записи: сверка чисел их не видит, баллов у них нет."""
+    return [n[:70] for n in source_lines(raw_block, rec)[1] if _REQUIREMENT_RE.search(n)]
 
 
 def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[str, str]) -> tuple[list[str], list[str]]:
@@ -345,8 +358,10 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
                 notes.append(f"{anchor}: баллы расходятся с источником: нет в записи {lost}, лишние {extra}")
             if bad := unconfirmed_pairs(raw, rec):
                 notes.append(f"{anchor}: пара «операция — балл» не подтверждена у {len(bad)}: {bad[:3]}")
-            seen, total = source_lines_seen(raw, rec)
-            lines = f"{seen} / {total}"
+            if lost_req := lost_requirements(raw, rec):
+                notes.append(f"{anchor}: требования из ячейки не нашлись в записи, {len(lost_req)}: {lost_req[:2]}")
+            all_lines, absent = source_lines(raw, rec)
+            lines = f"{len(all_lines) - len(absent)} / {len(all_lines)}"
         if re.search(r"налич|обязательн", rec.get("notes") or "", re.I):
             notes.append(f"{anchor}: требование попало в notes, до ответа оно не дойдёт")
         src_ops = "?" if theirs is None else sum(theirs.values())
@@ -484,34 +499,39 @@ def document_label(sources: list[str], corpus: str) -> str | None:
     return f"ред. от {d:02d}.{m:02d}.{y} N {n}"
 
 
-def retarget_manifest(old: str, new: str) -> bool:
-    """`edition_expected` у каждого документа со старой подписью — из его текста, а не общей заменой."""
+def retarget_manifest(corpus: str, changed: list[str]) -> bool:
+    """`edition_expected` документов постановления, чьи чанки изменились: у каждого своя подпись.
+
+    Только `pp719/chunks/`: у Соглашения СНГ и приказов своя история, их подпись по актам считать нельзя.
+    """
+    touched = {name.removeprefix("knowledge_base/") for name in changed}
     blocks = re.split(r"(?m)^(?=  - doc_type: )", MANIFEST.read_text(encoding="utf-8"))
-    changed = False
+    moved = False
     for i, block in enumerate(blocks):
-        if f'edition_expected: "{old}"' not in block:
+        declared = re.search(r'edition_expected: "(ред\. от [^"]+)"', block)
+        sources = re.findall(r"(?m)^\s+- (pp719/\S+)", block)
+        own = any("*" in s or (s.startswith("pp719/chunks/") and s in touched) for s in sources)
+        if not declared or not own:
             continue
-        label = document_label(re.findall(r"(?m)^\s+- (pp719/\S+)", block), new)
-        if label and label != old:
-            blocks[i] = block.replace(f'edition_expected: "{old}"', f'edition_expected: "{label}"')
-            changed = True
-    if changed:
+        label = document_label(sources, corpus)
+        if label and label != declared[1]:
+            blocks[i] = block.replace(declared[0], f'edition_expected: "{label}"')
+            moved = True
+    if moved:
         MANIFEST.write_text("".join(blocks), encoding="utf-8", newline="\n")
-    return changed
+    return moved
 
 
-def retarget_label(old: str, new: str) -> list[str]:
-    """Подпись редакции записана ещё в манифесте и на лендинге: тесты требуют их равенства с корпусом."""
+def retarget_landing(old: str, new: str) -> bool:
+    """Подпись редакции на лендинге: тест требует её равенства с корпусом."""
     was, now = _LABEL_RE.fullmatch(old), _LABEL_RE.fullmatch(new)
     if not was or not now:
         raise Stop(f"подпись редакции не разобрана: «{old}» → «{new}»")
-    done = [MANIFEST.name] if retarget_manifest(old, new) else []
     page = LANDING.read_text(encoding="utf-8")
     out = page.replace(f"от {was[1]} № {was[2]}", f"от {now[1]} № {now[2]}").replace(f"ред. от {was[1]}<", f"ред. от {now[1]}<")
     if out != page:
         LANDING.write_text(out, encoding="utf-8", newline="\n")
-        done.append(LANDING.name)
-    return done
+    return out != page
 
 
 def step_link(ctx: Ctx) -> str:
@@ -519,7 +539,9 @@ def step_link(ctx: Ctx) -> str:
     label, key, known = corpus_label()
     ctx.facts["подпись"] = label
     old = ctx.before.get("подпись", label)
-    moved = retarget_label(old, label) if label != old else []
+    moved = [MANIFEST.name] if retarget_manifest(label, kb_changes()) else []
+    if label != old and retarget_landing(old, label):
+        moved.append(LANDING.name)
     if known == ctx.doc_id:
         return f"{key} → {known}; подпись обновлена в: {moved or 'не менялась'}"
     if known:
@@ -604,10 +626,11 @@ def step_gates(ctx: Ctx) -> str:
     if len(fresh) > allowed:
         raise Stop(f"изменено записей {len(fresh)}, а в плане {allowed}: {sorted(fresh)[:6]}")
     names = {n for p in ctx.plans.values() for n in p["в модель"] + p["без модели"] + p.get("прежние имена", [])}
-    if "" not in names:      # у пары позиций имени в ячейке нет: тогда сверять не с чем
-        stray = sorted(a for a in fresh if recs_after[a].get("product_name") not in names)
-        if stray:
-            raise Stop(f"изменены записи вне плана: {stray[:6]}")
+    # У пары позиций имени в ячейке нет (III/157, IX/91): столько записей может остаться с именем модели.
+    nameless = sum(n == "" for p in ctx.plans.values() for n in p["в модель"] + p["без модели"])
+    stray = sorted(a for a in fresh if recs_after[a].get("product_name") not in names)
+    if len(stray) > nameless:
+        raise Stop(f"изменены записи вне плана: {stray[:6]}")
     planned_gone = sum(len(p["исключены"]) for p in ctx.plans.values())
     if len(recs_after) < len(recs_before) - planned_gone:
         raise Stop(f"записей было {len(recs_before)}, стало {len(recs_after)}, в плане исключено {planned_gone}")
@@ -692,6 +715,8 @@ def render_report(doc_id: str, verdict: str, steps: list[dict], facts: dict, war
         if facts.get(key):
             lines += ["", f"**{title}:**", *[f"- {x}" for x in facts[key]]]
     acts = ", ".join(facts.get("новые акты") or []) or "см. шапку редакции"
+    if facts.get("кодов не определено"):
+        lines += ["", f"**Кодов с неопределённой пометкой «из»:** {facts['кодов не определено']}, разобрать поимённо."]
     lines += ["", "## Что остаётся человеку",
               f"- [ ] Сверить изменённые и исключённые позиции с текстом акта: {acts}. Источник — "
               "publication.pravo.gov.ru: вёрстки Контура расходятся между собой, а сверка с HTML этого не видит.",
