@@ -636,8 +636,12 @@ class TestGatesStep(unittest.TestCase):
                 mock.patch.object(ae, "verify_summary", return_value=summary or self.CLEAN), \
                 mock.patch.object(ae, "py", return_value=SimpleNamespace(stdout=out)), \
                 mock.patch.object(ae, "methodology_snapshot", return_value=metho or {"I": "м"}), \
-                mock.patch.object(ae, "review_rows", return_value=(["строка"], ["замечание"])):
+                mock.patch.object(ae, "review_rows", return_value=(["строка"], ["замечание"])) as self.review:
             return ctx, ae.step_gates(ctx)
+
+    def test_report_compares_with_the_previous_records(self):
+        self.step(after_recs={"a": {**self.REC, "notes": "правка"}}, llm=["Магниты"])
+        self.assertEqual(self.review.call_args.args[3], {"a": self.REC})
 
     def test_clean_run_passes_and_keeps_notes(self):
         ctx, text = self.step()
@@ -1289,9 +1293,11 @@ class TestBuild(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             base = Path(d)
             self.report(base, **self.GOOD)
+            (base / "1" / "report.md").write_text("отчёт прошлой сборки", encoding="utf-8")
             with mock.patch.object(aa, "git"), mock.patch.object(aa.subprocess, "run", return_value=answer(code=1)), \
                     mock.patch.object(aa, "model_env", return_value={}):
                 self.assertEqual(aa.build_edition("1", base), (False, {}))
+            self.assertFalse((base / "1" / "report.md").exists(), "задача послала бы к отчёту прошлой сборки")
 
     def test_failed_exit_code_is_not_success(self):
         with tempfile.TemporaryDirectory() as d:
