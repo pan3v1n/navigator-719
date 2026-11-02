@@ -357,6 +357,12 @@ class TestPages(_CabinetDB):
             **web._ctx(_request(), page_title="", active="privacy", updated="", user=None))
         self.assertIn("DaData", policy)
         self.assertIn("ООО «Дейта Кью»", policy)       # оператор по ЕГРЮЛ (ИНН 7721581040), сверено 29.10.2026
+        # §9: фраза «третьим лицам не передаются» была бы неверна — ИНН из заявки попадает в карточку
+        self.assertIn("кроме ИНН организации (10 цифр)", " ".join(policy.split()))
+        self.assertNotIn("Третьим лицам данные не передаются;", policy)
+        # §11: механизма показа при входе нет, обещание заменено фактом — дата редакции на странице
+        self.assertIn("публикуются на этой странице с новой датой редакции", " ".join(policy.split()))
+        self.assertNotIn("показываются при входе", policy)
         self.assertIn("ИНН индивидуального предпринимателя", policy)
 
 
