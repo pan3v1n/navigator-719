@@ -100,8 +100,9 @@
       if (e.key === 'ArrowLeft') { e.preventDefault(); goTab(cur - 1, true); }
     });
   });
-  aud.querySelectorAll('.aud-prev').forEach(function (b) { b.addEventListener('click', function () { goTab(cur - 1); }); });
-  aud.querySelectorAll('.aud-next').forEach(function (b) { b.addEventListener('click', function () { goTab(cur + 1); }); });
+  // Кнопка скрывается вместе со своей панелью: фокус переносим на такую же в новой, иначе клавиатура теряет место.
+  aud.querySelectorAll('.aud-prev').forEach(function (b) { b.addEventListener('click', function () { goTab(cur - 1); audPanels[cur].querySelector('.aud-prev').focus(); }); });
+  aud.querySelectorAll('.aud-next').forEach(function (b) { b.addEventListener('click', function () { goTab(cur + 1); audPanels[cur].querySelector('.aud-next').focus(); }); });
 
   // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; цены — из презентации, 14.10.2026) ----
   var ptabs = document.querySelectorAll('#price-tabs [role="tab"]'), ptitle = document.getElementById('pricing-h');

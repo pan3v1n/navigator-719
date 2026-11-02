@@ -17,11 +17,11 @@
   <meta property="og:image:height" content="630">
   <meta property="og:image:alt" content="Навигатор ПП 719 — ИИ-помощник по ПП 719">
   <meta name="twitter:card" content="summary_large_image">
-  <script type="application/ld+json">{"@context": "https://schema.org", "@graph": [{"@type": "WebSite", "name": "Навигатор ПП 719", "url": "https://xn--719--83dani8b8bqyy.xn--p1ai/", "inLanguage": "ru"}, {"@type": "WebApplication", "name": "Навигатор ПП 719", "url": "https://xn--719--83dani8b8bqyy.xn--p1ai/", "description": "ИИ-помощник по Постановлению Правительства РФ № 719: требования к продукции, порядок подтверждения производства и внесения в реестр — ответы со ссылками на пункты документов.", "inLanguage": "ru", "applicationCategory": "BusinessApplication", "applicationSubCategory": "Справочный сервис по промышленной продукции", "operatingSystem": "Web"}]}</script>
+  <script type="application/ld+json">{"@context": "https://schema.org", "@graph": [{"@type": "WebSite", "name": "Навигатор ПП 719", "url": "https://xn--719--83dani8b8bqyy.xn--p1ai/", "inLanguage": "ru"}]}</script>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg?v=2">
   <link rel="preload" href="fonts/inter-tight-cyrillic.woff2" as="font" type="font/woff2" crossorigin>
   <link rel="preload" href="fonts/inter-tight-latin.woff2" as="font" type="font/woff2" crossorigin>
-  <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="styles.css?v=2761c016dd">
 </head>
 <body>
 <div class="wrap">
@@ -211,6 +211,7 @@
           <button type="button" role="tab" id="tab-2" aria-selected="false" aria-controls="aud-panel-2" tabindex="-1">Закупщик</button>
         </div>
       </div>
+      <div aria-live="polite">
       <!-- Все три панели — в HTML: их тексты должен видеть поисковый робот, скрипт только переключает `hidden`. -->
       <div class="aud" id="aud-panel-0" role="tabpanel" aria-labelledby="tab-0">
         <div class="aud-left">
@@ -299,6 +300,7 @@
           </div>
         </div>
       </div>
+      </div>
     </section>
 
     <section class="sec" id="form" aria-labelledby="form-h">
@@ -307,7 +309,7 @@
         <div class="sub">Специалист свяжется с вами в течение одного рабочего дня и подготовит договор</div>
       </div>
       <div class="formbox">
-        <form class="form" id="lead-form" novalidate>
+        <form class="form" id="lead-form" method="post" novalidate>
           <div class="tariff">
             <div class="fl" id="tariff-l">Тариф</div>
             <div class="chips" role="group" aria-labelledby="tariff-l" id="tariff-chips">
@@ -449,6 +451,6 @@
     document.getElementById('lnk-privacy-form').href = base + '/privacy';
   })();
 </script>
-<script src="app.js" defer></script>
+<script src="app.js?v=b557572f1e" defer></script>
 </body>
 </html>

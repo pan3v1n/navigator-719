@@ -31,12 +31,17 @@
 		handle @missing {
 			root * /srv/landing
 			rewrite * /404.html
+			# Заголовки основного маршрута здесь сохраняются: без этого 404 шрифта кэшировался бы на год.
+			header Cache-Control "no-store"
 			file_server {
 				status 404
 			}
 		}
 	}
-	# Шрифты не меняются под тем же именем; CSS и JS идут без хеша в имени — поэтому только час.
+	# Шрифты не меняются под тем же именем. CSS и JS меняются вместе со страницей (`?v=` в index.html),
+	# поэтому саму страницу браузер обязан сверять с сервером: иначе новый HTML не дойдёт до старого кэша.
+	@page path /
+	header @page Cache-Control "no-cache"
 	@fonts path /fonts/*
 	header @fonts Cache-Control "public, max-age=31536000, immutable"
 	@assets path /styles.css /app.js /favicon.svg /og-image.png
@@ -58,8 +63,6 @@
 	header @robots Content-Type "text/plain; charset=utf-8"
 	respond @robots `User-agent: *
 Disallow: /api/
-Disallow: /admin
-Disallow: /profile
 ` 200
 	# Стриминг ответа (SSE /api/chat/stream): без flush_interval -1 прокси копил бы буфер,
 	# и ответ приходил бы одним куском в конце, а не по мере генерации.

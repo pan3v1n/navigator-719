@@ -8,9 +8,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
+import shutil
 import struct
+import subprocess
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -101,10 +104,8 @@ class TestHead(unittest.TestCase):
     def test_structured_data(self):
         by_type = {n["@type"]: n for n in self.ld["@graph"]}
         self.assertEqual(by_type["WebSite"]["url"], CANON)
-        app = by_type["WebApplication"]
-        self.assertEqual(app["description"], self.desc)
-        # Яндекс строит сниппет только при двух необязательных свойствах сверх описания
-        self.assertTrue(app["applicationSubCategory"] and app["operatingSystem"])
+        # WebApplication намеренно нет: Google требует для него рейтинг, а отзывы — плейсхолдеры
+        self.assertNotIn("WebApplication", by_type)
 
     def test_placeholder_reviews_are_not_marked_up(self):
         # отзывы на лендинге — плейсхолдеры: разметить их значит подать выдумку поиску как факт
@@ -117,6 +118,33 @@ class TestHead(unittest.TestCase):
         self.assertIn('<meta name="robots" content="noindex">', src)
         # отдаётся по любому адресу, поэтому только абсолютные пути
         self.assertIn('href="/styles.css"', src)
+
+
+class TestAssetsAndFormSurviveStaleCache(unittest.TestCase):
+    """Ревью PR #274: новый HTML со старым app.js из кэша падал до подключения формы, и заявка уходила
+    обычным GET — с именем, ИНН и телефоном в адресной строке."""
+
+    def setUp(self):
+        self.html = _read("landing/index.html")
+
+    @staticmethod
+    def _version(name: str) -> str:
+        data = (LANDING / name).read_bytes().replace(b"\r\n", b"\n")   # Windows и CI дают разные концы строк
+        return hashlib.sha256(data).hexdigest()[:10]
+
+    def test_assets_carry_current_version(self):
+        self.assertIn(f'href="styles.css?v={self._version("styles.css")}"', self.html,
+                      "styles.css менялся: обновите ?v= в index.html, иначе браузер оставит старый файл")
+        self.assertIn(f'src="app.js?v={self._version("app.js")}"', self.html,
+                      "app.js менялся: обновите ?v= в index.html, иначе браузер оставит старый файл")
+
+    def test_form_never_falls_back_to_get(self):
+        self.assertRegex(self.html, r'<form [^>]*id="lead-form"[^>]* method="post"')
+
+    def test_page_is_revalidated_and_404_is_not_cached(self):
+        site = _site(ROOT_SITE)
+        self.assertIn('header @page Cache-Control "no-cache"', site)
+        self.assertIn('header Cache-Control "no-store"', site[site.index("handle_errors"):])
 
 
 class TestAudiencePanelsInHtml(unittest.TestCase):
@@ -151,6 +179,14 @@ class TestAudiencePanelsInHtml(unittest.TestCase):
         code = "\n".join(ln for ln in self.js.splitlines() if not ln.lstrip().startswith("//"))
         self.assertNotIn(""".seg [role="tab"]""", code)
         self.assertIn("""aud.querySelectorAll('[role="tab"]')""", code)
+
+    def test_focus_follows_hidden_button(self):
+        # кнопка скрывается вместе с панелью: без переноса фокуса клавиатура теряет место
+        for cls in (".aud-prev", ".aud-next"):
+            self.assertIn(f"audPanels[cur].querySelector('{cls}').focus()", self.js)
+
+    def test_panel_change_is_announced(self):
+        self.assertRegex(self.sec, r'<div aria-live="polite">\s*<!-- Все три панели')
 
     def test_pricing_tabs_keep_keyboard_access(self):
         # неактивные вкладки вне порядка Tab: без стрелок до них не добраться с клавиатуры
@@ -190,25 +226,37 @@ class TestCaddy(unittest.TestCase):
     def test_app_robots_lets_crawler_read_the_noindex(self):
         body = re.search(r"respond @robots `(.*?)`", _site(APP_SITE), re.S).group(1)
         self.assertTrue(body.startswith("User-agent: *\n"))
-        rules = re.findall(r"(?m)^Disallow:\s*(\S*)\s*$", body)
-        self.assertNotIn("/", rules)
-        # страницу под запретом робот не откроет и `noindex` не увидит
-        for path in ("/chat", "/login"):
-            self.assertNotIn(path, rules)
+        # страницу под запретом робот не откроет и `noindex` не увидит, поэтому закрыт только API
+        self.assertEqual(re.findall(r"(?m)^Disallow:\s*(\S*)\s*$", body), ["/api/"])
 
     def test_streaming_survived(self):
         self.assertIn("flush_interval -1", _site(APP_SITE))
 
 
+@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
 class TestDeployChecksWww(unittest.TestCase):
-    def test_www_is_probed_as_warning(self):
+    """По поведению: фрагмент deploy.sh с подставным curl, по образцу TestCaddyConfMatches."""
+
+    def _run(self, reply: str) -> tuple[int, str]:
         src = _read("scripts/deploy/deploy.sh")
-        code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-        i = code.index('host="www.$PUBLIC_DOMAIN_ENV"')
-        block = code[i:code.index('"http://$PUBLIC_DOMAIN_ENV/"', i)]
-        self.assertIn('--resolve "$host:443:127.0.0.1"', block)
-        self.assertIn("[ \"$code\" = \"301\" ] || say", block)
-        self.assertNotIn("fail ", block, "имя второстепенное: сертификат не должен ронять выкатку")
+        frag = re.search(r'^  host="www\.\$PUBLIC_DOMAIN_ENV".*?compose logs caddy\)"\n', src, re.S | re.M).group(0)
+        script = (f'set -u\nPUBLIC_DOMAIN_ENV=x.test; FAILED=0\nsleep() {{ :; }}; say() {{ echo "$*"; }}\n'
+                  f'fail() {{ FAILED=1; }}\ncurl() {{ printf "{reply}"; }}\n{frag}'
+                  f'echo "FAILED=$FAILED retries=$n"\n')
+        r = subprocess.run([shutil.which("bash"), "-c", script], capture_output=True, text=True, encoding="utf-8")
+        return r.returncode, r.stdout
+
+    def test_redirect_passes_at_once(self):
+        rc, out = self._run("301")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("FAILED=0 retries=0", out)
+        self.assertNotIn("⚠", out)
+
+    def test_missing_certificate_warns_but_does_not_fail(self):
+        rc, out = self._run("000")
+        self.assertEqual(rc, 0, out)
+        self.assertIn("⚠ www не отдаёт 301", out)
+        self.assertIn("FAILED=0 retries=6", out, "имя второстепенное: сертификат не должен ронять выкатку")
 
 
 if __name__ == "__main__":
