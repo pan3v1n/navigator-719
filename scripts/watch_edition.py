@@ -258,6 +258,12 @@ def _date(text: str) -> tuple[int, int, int]:
     return int(y), int(m), int(d)
 
 
+def _act_of(key: str) -> tuple[int, int, int, int]:
+    """«N 1353 от 15.10.2026» → (2026, 10, 15, 1353): форма, в которой `acts` отдаёт акты текста."""
+    number, _, when = key.removeprefix("N ").partition(" от ")
+    return (*_date(when), int(number))
+
+
 def current_doc_id() -> str:
     """documentId редакции, на которой стоит корпус: из той же таблицы, что ссылка в интерфейсе."""
     return kontur_719_url().rsplit("=", 1)[1]
@@ -282,22 +288,29 @@ def check_kontur(doc_id: str, known: dict[str, str], fetch=es.fetch, full_text: 
     body = es.document_body(page, sep=" ")
     if not body.strip():
         return {"исход": "не проверено", "причина": "разметка страницы изменилась: текст документа не найден"}
-    docs = sorted(d for d in info.jumps if d != doc_id)
-    if not info.is_actual and not docs:
+    # ⚠⚠ На странице БУДУЩЕЙ редакции «Перейти в действующую» ведёт НАЗАД: корпус уже стоит на редакции,
+    # которая ещё не вступила, а ссылка на прежнюю. Считать её новой — собрать откат (ревью A10, раунд 2).
+    docs = [] if info.is_future else sorted(d for d in info.jumps if d != doc_id)
+    if not info.is_actual and not info.is_future and not docs:
         return {"исход": "не проверено", "причина": f"редакция «{info.title}» не действует, ссылки на новую нет"}
-    day = today or tuple(date.today().timetuple())[:3]
-    seen = {a.key for a in info.pending}
-    vanished = sorted(k for k, when in known.items() if k not in seen and _date(when) > day)
-    if vanished:
-        return {"исход": "не проверено", "причина": f"с страницы исчезли будущие акты: {vanished[:3]}. Разбор блока?"}
-    new_acts = [f"{a.key} (с {a.effective})" for a in info.pending if a.key not in known]
     text = FULL_TEXT.read_text(encoding="utf-8") if full_text is None else full_text
-    missing = sorted(acts(body) - acts(text))
-    found = bool(docs or new_acts or missing)
+    in_corpus = acts(text)
+    day = today or tuple(date.today().timetuple())[:3]
+    seen = {a.key: a.effective for a in info.pending}
+    # Акт, уже вошедший в текст корпуса, законно уходит из блока отложенных. Новый документ важнее сомнения
+    # в разборе блока, поэтому проверка стоит после него.
+    vanished = sorted(k for k, when in known.items()
+                      if k not in seen and _date(when) > day and _act_of(k) not in in_corpus)
+    if vanished and not docs:
+        return {"исход": "не проверено", "причина": f"со страницы исчезли будущие акты: {vanished[:3]}. Разбор блока?"}
+    new_acts = [f"{a.key} (с {a.effective})" for a in info.pending if a.key not in known]
+    shifted = [f"{k}: было {known[k]}, стало {when}" for k, when in seen.items() if k in known and known[k] != when]
+    missing = sorted(acts(body) - in_corpus)
+    found = bool(docs or new_acts or missing or shifted)
     return {"исход": "новое" if found else "нового нет", "редакция": info.title,
             "новые документы": {d: info.jumps[d] for d in docs},
-            "новые отложенные акты": new_acts, "актов нет в тексте": [label(a) for a in missing],
-            "отложенных всего": len(info.pending)}
+            "новые отложенные акты": new_acts, "сроки изменились": shifted,
+            "актов нет в тексте": [label(a) for a in missing], "отложенных всего": len(info.pending)}
 
 
 def main() -> None:

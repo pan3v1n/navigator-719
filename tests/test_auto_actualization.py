@@ -7,10 +7,13 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as dt
 import http.client
+import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -187,8 +190,9 @@ class TestRecords(unittest.TestCase):
     REC = {"product_name": "Магниты", "okpd2_codes": ["25.99.29.110"], "source_anchor": "XXIII, позиция 3"}
 
     def test_renumber_is_not_a_change(self):
-        moved = {**self.REC, "source_anchor": "XXIII, позиция 4", "amendments": ["N 1257"]}
-        self.assertEqual(ae.changed_anchors({"a": self.REC}, {"b": moved}), set())
+        moved = {**self.REC, "source_anchor": "XXIII, позиция 4", "amendments": ["N 1257"], "section_roman": "XXIII"}
+        before = {"a": {**self.REC, "section_roman": "XXIII"}}
+        self.assertEqual(ae.changed_anchors(before, {"b": moved}, frozenset({"XXIII"})), set())
 
     def test_new_and_edited_records_are_changes(self):
         self.assertEqual(ae.changed_anchors({"a": self.REC}, {"a": {**self.REC, "notes": "другое"}}), {"a"})
@@ -218,54 +222,69 @@ class TestRecords(unittest.TestCase):
     def test_record_points_skip_requirements_without_points(self):
         rec = {"requirement_blocks": [{"operations": [{"text": "а", "points": 20}, {"text": "б", "points": None}]}]}
         self.assertEqual(ae.record_points(rec), Counter({20: 1}))
-        self.assertEqual(ae.operations_count(rec), 2)
+        self.assertEqual(len(ae.record_operations(rec)), 2)
 
 
 class TestReviewRows(unittest.TestCase):
-    def rec(self, points, notes=None):
-        return {"product_name": "Иглы", "section_roman": "XXIII", "okpd2_codes": ["25.93"], "notes": notes,
-                "requirement_blocks": [{"operations": [{"text": "x", "points": n} for n in points]}]}
+    OPS = [("сварка рамы", 20), ("сборка узла", 2)]
 
-    def rows(self, rec):
-        # Настоящий `Product`: заглушка с атрибутом `raw_block` скрыла, что это метод, и реплей упал на бою шлюзов.
+    def rec(self, ops=None, notes=None):
+        return {"product_name": "Иглы", "section_roman": "XXIII", "okpd2_codes": ["25.93"], "notes": notes,
+                "requirement_blocks": [{"operations": [{"text": t, "points": n} for t, n in (ops or self.OPS)]}]}
+
+    def rows(self, rec, cells=("сварка рамы 20 баллов", "сборка узла 2 балла")):
+        # Настоящий `Product`: заглушка с атрибутом `raw_block` скрыла, что это метод, и реплей упал на шлюзах.
         import structure_kb as sk
 
-        product = sk.Product(okpd2_field="25.93", name_raw="Иглы", okpd2_codes=["25.93"],
-                             component_cells=["сварка 20 баллов", "сборка 2 балла"])
+        product = sk.Product(okpd2_field="25.93", name_raw="Иглы", okpd2_codes=["25.93"], component_cells=list(cells))
         chunk = SimpleNamespace(read_text=lambda encoding: "")
         with mock.patch("structure_kb.parse_section", return_value=("", [product])), \
                 mock.patch("structure_kb.find_chunk", return_value=chunk):
             return ae.review_rows({"a"}, {"a": rec}, {"a": "не менее 115"})
 
-    def test_swapped_points_inside_set_are_seen_as_sum_only(self):
-        rows, notes = self.rows(self.rec([20, 2]))
+    def test_clean_record_has_no_notes(self):
+        rows, notes = self.rows(self.rec())
         self.assertEqual(notes, [])
         self.assertIn("22 / 22", rows[0])
 
+    def test_swapped_points_are_seen(self):
+        _, notes = self.rows(self.rec([("сварка рамы", 2), ("сборка узла", 20)]))
+        self.assertEqual(len(notes), 1)
+        self.assertIn("не подтверждена у 2", notes[0])
+
     def test_lost_points_flagged(self):
-        _, notes = self.rows(self.rec([20]))
-        self.assertIn("нет в записи [2]", notes[0])
+        _, notes = self.rows(self.rec([("сварка рамы", 20)]))
+        self.assertIn("нет в записи [2.0]", notes[0])
 
     def test_extra_points_flagged(self):
-        _, notes = self.rows(self.rec([20, 2, 7]))
-        self.assertIn("лишние [7]", notes[0])
+        _, notes = self.rows(self.rec([*self.OPS, ("выдумка", 7)]))
+        self.assertIn("лишние [7.0]", notes[0])
 
     def test_operations_with_points_are_compared(self):
-        rows, _ = self.rows(self.rec([20, 2]))
+        rows, _ = self.rows(self.rec())
         self.assertIn("2 (2 / 2)", rows[0])
+
+    def test_lost_requirement_without_points_is_visible(self):
+        long_line = "наличие сервисного центра на территории страны союза"
+        rows, _ = self.rows(self.rec(), cells=("сварка рамы 20 баллов", "сборка узла 2 балла", long_line))
+        self.assertIn("0 / 1", rows[0])
 
     def test_table_row_survives_line_breaks_and_pipes(self):
         self.assertEqual(ae.table_row("a\nb", "c|d"), "| a b | c/d |")
 
     def test_requirement_in_notes_flagged(self):
-        _, notes = self.rows(self.rec([20, 2], notes="наличие прав на документацию"))
+        _, notes = self.rows(self.rec(notes="наличие прав на документацию"))
         self.assertTrue(any("notes" in n for n in notes))
 
     def test_unmatched_record_flagged(self):
-        rec = {**self.rec([20, 2]), "product_name": "Другое"}
+        rec = {**self.rec(), "product_name": "Другое"}
         rows, notes = self.rows(rec)
         self.assertIn("не сопоставлена", notes[0])
         self.assertIn("?", rows[0])
+
+    def test_decimal_points(self):
+        self.assertEqual(ae.source_points("операция 0,5 балла"), Counter({0.5: 1}))
+        self.assertTrue(ae.pair_confirmed("операция 0,5 балла", "операция", 0.5))
 
 
 def make_ctx(**over) -> ae.Ctx:
@@ -325,25 +344,39 @@ class TestSourceStep(unittest.TestCase):
 
 
 class TestTextStep(unittest.TestCase):
-    def step(self, page_text: str, witness_text: str = TEXT):
+    HEAD = "(в ред. от 01.01.2026 N 1, от 02.02.2026 N 2) Правительство постановляет: "
+
+    def step(self, new_text: str, old_text: str | None = None, page_text: str | None = None):
         with tempfile.TemporaryDirectory() as d:
-            rtf, page = Path(d) / "a.rtf", Path(d) / "a.html"
+            rtf, page, full = Path(d) / "a.rtf", Path(d) / "a.html", Path(d) / "full.txt"
             rtf.write_bytes(b"x")
-            page.write_text(DOC.format(f"<p>{page_text}</p>{TAIL}"), encoding="utf-8")
+            page.write_text(DOC.format(f"<p>{page_text or new_text}</p>{TAIL}"), encoding="utf-8")
+            full.write_text(old_text or self.HEAD + "старый текст", encoding="utf-8")
             ctx = make_ctx()
             ctx.args.rtf, ctx.args.page = str(rtf), str(page)
-            with mock.patch.object(ae.es, "rtf_to_corpus_text", return_value=witness_text), \
-                    mock.patch.object(ae, "FULL", Path(d) / "full.txt"):
-                (Path(d) / "full.txt").write_text("старый", encoding="utf-8")
+            with mock.patch.object(ae.es, "rtf_to_corpus_text", return_value=new_text), mock.patch.object(ae, "FULL", full):
                 return ctx, ae.step_text(ctx)
 
     def test_equal_text_goes_on(self):
-        ctx, _ = self.step(TEXT)
-        self.assertEqual(ctx.new_text, TEXT)
+        ctx, _ = self.step(self.HEAD + TEXT)
+        self.assertEqual(ctx.new_text, self.HEAD + TEXT)
 
     def test_mismatch_stops(self):
         with self.assertRaisesRegex(ae.Stop, "не совпал с HTML"):
-            self.step(TEXT.replace("30", "99", 1))
+            self.step(self.HEAD + TEXT, page_text=self.HEAD + TEXT.replace("30", "99", 1))
+
+    def test_new_acts_are_named(self):
+        ctx, _ = self.step(self.HEAD.replace("N 2)", "N 2, от 03.03.2026 N 3)") + TEXT)
+        self.assertEqual(ctx.facts["новые акты"], ["от 03.03.2026 N 3"])
+
+    def test_older_document_is_a_rollback(self):
+        old = self.HEAD.replace("N 2)", "N 2, от 03.03.2026 N 3)") + "текст"
+        with self.assertRaisesRegex(ae.Stop, "откат"):
+            self.step(self.HEAD + TEXT, old_text=old)
+
+    def test_unparsed_header_stops(self):
+        with self.assertRaisesRegex(ae.Stop, "шапка"):
+            self.step(TEXT)
 
 
 class TestControlStep(unittest.TestCase):
@@ -369,6 +402,39 @@ class TestSections(unittest.TestCase):
         ae.check_sections(["I", "II"], {"I", "II"})
 
 
+class TestChunksStep(unittest.TestCase):
+    """Защиты вызываются из шага: функции без вызова ничего не защищают."""
+
+    def step(self, found=("I",), lines=3):
+        ctx = make_ctx(new_text="новый", before={"разделы": {"I"}, "вне чанков": 3})
+        full = mock.Mock()
+        full.read_text.return_value = "старый"
+        with mock.patch.object(ae, "FULL", full), mock.patch.object(ae, "write_chunks") as write, \
+                mock.patch("rechunk_appendix.find_appendix_sections", return_value=[(r, "", "") for r in found]), \
+                mock.patch.object(ae, "uncovered_lines", return_value=lines), \
+                mock.patch.object(ae, "kb_changes", return_value=[]):
+            ae.step_chunks(ctx)
+        return write
+
+    def test_clean_run(self):
+        self.step().assert_called_once_with("новый")
+
+    def test_new_section_stops_before_writing(self):
+        with self.assertRaisesRegex(ae.Stop, "новые"):
+            self.step(found=("I", "XXX"))
+
+    def test_lost_lines_stop(self):
+        with self.assertRaisesRegex(ae.Stop, "вне чанков"):
+            self.step(lines=4)
+
+    def test_same_text_is_no_change(self):
+        ctx = make_ctx(new_text="один")
+        full = mock.Mock()
+        full.read_text.return_value = "один"
+        with mock.patch.object(ae, "FULL", full), self.assertRaisesRegex(ae.Stop, "НЕТ ИЗМЕНЕНИЙ"):
+            ae.step_chunks(ctx)
+
+
 class TestRegressions(unittest.TestCase):
     def test_only_growth_counts(self):
         self.assertEqual(ae.regressions({"a": 1, "b": 2}, {"a": 1, "b": 1}), [])
@@ -376,18 +442,22 @@ class TestRegressions(unittest.TestCase):
 
 
 class TestVerifySummary(unittest.TestCase):
-    OK = (SimpleNamespace(stdout="ИТОГО: 0 расхождений на 9 позиций"),
-          SimpleNamespace(stdout="Потеряно полностью (нет нигде в JSON): НЕТ"),
+    SECTION = "Потеряно полностью (нет нигде в JSON): НЕТ\nВыдуманные баллы (нет в законе): НЕТ"
+    OK = (SimpleNamespace(stdout="ИТОГО: 0 расхождений на 9 позиций"), SimpleNamespace(stdout=SECTION),
           SimpleNamespace(stdout="ИТОГО чисто: 29/29"))
 
+    def summary(self, section):
+        with mock.patch.object(ae, "py", side_effect=(self.OK[0], SimpleNamespace(stdout=section), self.OK[2])):
+            return ae.verify_summary()
+
     def test_numbers_from_output(self):
-        with mock.patch.object(ae, "py", side_effect=self.OK):
-            self.assertEqual(ae.verify_summary(), {"расхождений в записях": 0, "разделов с потерями": 0, "разделов не чисто": 0})
+        self.assertEqual(set(self.summary(self.SECTION).values()), {0})
 
     def test_lost_points_counted(self):
-        lost = (self.OK[0], SimpleNamespace(stdout="Потеряно полностью (нет нигде в JSON): {12}"), self.OK[2])
-        with mock.patch.object(ae, "py", side_effect=lost):
-            self.assertEqual(ae.verify_summary()["разделов с потерями"], 1)
+        self.assertEqual(self.summary(self.SECTION.replace("JSON): НЕТ", "JSON): {12}"))["разделов с потерями"], 1)
+
+    def test_fabricated_points_counted(self):
+        self.assertEqual(self.summary(self.SECTION.replace("законе): НЕТ", "законе): [23.0]"))["разделов с выдуманными баллами"], 1)
 
     def test_changed_output_format_stops(self):
         for i in range(3):
@@ -441,17 +511,18 @@ class TestPlanStep(unittest.TestCase):
 
 
 class TestGatesStep(unittest.TestCase):
-    REC = {"product_name": "Магниты", "okpd2_codes": ["1"]}
+    REC = {"product_name": "Магниты", "okpd2_codes": ["1"], "section_roman": "I"}
     CLEAN = {"расхождений в записях": 0, "разделов с потерями": 0, "разделов не чисто": 0}
 
-    def step(self, after_recs=None, after_thr=None, summary=None, consistent=True, llm=(), gone=()):
-        ctx = make_ctx(before={"пороги": {"a": "70"}, "записи": {"a": self.REC}, "сверки": self.CLEAN},
-                       plans={"I": {"в модель": list(llm), "без модели": [], "исключены": list(gone)}})
+    def step(self, after_recs=None, after_thr=None, summary=None, consistent=True, llm=(), gone=(), metho=None, modes=None):
+        ctx = make_ctx(before={"пороги": {"a": "70"}, "записи": {"a": self.REC}, "сверки": self.CLEAN, "методички": {"I": "м"}},
+                       plans={"I": {"в модель": list(llm), "без модели": [], "исключены": list(gone)}}, modes=modes or {})
         out = json.dumps({"корпус": {"части согласованы": consistent}})
         with mock.patch.object(ae, "threshold_snapshot", return_value=after_thr or {"a": "70"}), \
                 mock.patch.object(ae, "records_by_anchor", return_value={"a": self.REC} if after_recs is None else after_recs), \
                 mock.patch.object(ae, "verify_summary", return_value=summary or self.CLEAN), \
                 mock.patch.object(ae, "py", return_value=SimpleNamespace(stdout=out)), \
+                mock.patch.object(ae, "methodology_snapshot", return_value=metho or {"I": "м"}), \
                 mock.patch.object(ae, "review_rows", return_value=(["строка"], ["замечание"])):
             return ctx, ae.step_gates(ctx)
 
@@ -471,6 +542,13 @@ class TestGatesStep(unittest.TestCase):
     def test_planned_change_passes(self):
         self.step(after_recs={"a": {**self.REC, "notes": "правка"}}, llm=["Магниты"])
 
+    def test_change_of_another_record_stops(self):
+        with self.assertRaisesRegex(ae.Stop, "вне плана"):
+            self.step(after_recs={"a": {**self.REC, "notes": "правка"}}, llm=["Гармони"])
+
+    def test_position_without_name_in_cell_skips_the_name_check(self):
+        self.step(after_recs={"a": {**self.REC, "notes": "правка"}}, llm=[""])
+
     def test_unplanned_loss_stops(self):
         with self.assertRaisesRegex(ae.Stop, "записей было 1, стало 0"):
             self.step(after_recs={})
@@ -486,20 +564,40 @@ class TestGatesStep(unittest.TestCase):
         with self.assertRaisesRegex(ae.Stop, "не согласованы"):
             self.step(consistent=False)
 
+    def test_methodology_change_is_reported(self):
+        ctx, _ = self.step(metho={"I": "другая"})
+        self.assertIn("методички разделов изменились: ['I']", ctx.warnings)
+
+    def test_swap_of_records_seen_without_renumber(self):
+        one, two = {**self.REC, "notes": "а"}, {**self.REC, "notes": "б"}
+        self.assertEqual(ae.changed_anchors({"a": one, "b": two}, {"a": two, "b": one}), {"a", "b"})
+        self.assertEqual(ae.changed_anchors({"a": one, "b": two}, {"a": two, "b": one}, frozenset({"I"})), set())
+
 
 class TestTestsStep(unittest.TestCase):
     def test_green(self):
         with mock.patch.object(ae, "run", return_value=SimpleNamespace(returncode=0, stdout="", stderr="")):
             self.assertIn("зелёная", ae.step_tests(make_ctx()))
 
-    def test_red_is_a_warning_with_names(self):
+    def red(self, *names):
         ctx = make_ctx()
-        done = SimpleNamespace(returncode=1, stdout="", stderr="FAIL: test_x (tests.test_m.T.test_x)\n")
-        with mock.patch.object(ae, "run", return_value=done) as run:
+        err = "".join(f"FAIL: t ({n})\n" for n in names)
+        with mock.patch.object(ae, "run", return_value=SimpleNamespace(returncode=1, stdout="", stderr=err)) as run:
             ae.step_tests(ctx)
-        self.assertEqual(ctx.facts["упавшие тесты"], ["tests.test_m.T.test_x"])
-        self.assertTrue(ctx.warnings)
+        return ctx, run
+
+    def test_pinned_failure_is_expected(self):
+        ctx, run = self.red("test_edition_2026_10_31.T.t", "tests.test_deploy_script.T.t")
+        self.assertEqual(ctx.surprises, 0)
+        self.assertEqual(ctx.warnings, [])
+        self.assertEqual(len(ctx.facts["тесты, закреплённые за редакцией"]), 2)
         self.assertIs(run.call_args.kwargs["utf8"], False)
+
+    def test_unexpected_failure_changes_the_verdict(self):
+        ctx, _ = self.red("tests.test_rag.T.t", "test_edition_2026_10_31.T.t")
+        self.assertEqual(ctx.surprises, 1)
+        self.assertEqual(ctx.facts["неожиданные падения тестов"], ["tests.test_rag.T.t"])
+        self.assertTrue(ae.verdict_of(None, "tests", ctx.warnings, ctx.surprises).startswith("НУЖЕН РАЗБОР"))
 
     def test_crash_without_names_stops(self):
         done = SimpleNamespace(returncode=3, stdout="", stderr="ImportError")
@@ -508,21 +606,67 @@ class TestTestsStep(unittest.TestCase):
 
 
 class TestRetargetLabel(unittest.TestCase):
-    def test_manifest_and_landing_follow_the_label(self):
-        with tempfile.TemporaryDirectory() as d:
-            man, land = Path(d) / "m.yaml", Path(d) / "i.html"
-            man.write_text('edition_expected: "ред. от 05.10.2026 N 1297"\nedition_expected: "ред. от 13.04.2026 N 400"\n', encoding="utf-8")
-            land.write_text('ред. от 05.10.2026 № 1297<br>ред. от 05.10.2026</div>редакция от 05.10.2026 № 1297.', encoding="utf-8")
-            with mock.patch.object(ae, "MANIFEST", man), mock.patch.object(ae, "LANDING", land):
-                done = ae.retarget_label("ред. от 05.10.2026 N 1297", "ред. от 20.12.2026 N 1500")
-            self.assertEqual(len(done), 2)
-            self.assertIn('"ред. от 20.12.2026 N 1500"', man.read_text(encoding="utf-8"))
-            self.assertIn('"ред. от 13.04.2026 N 400"', man.read_text(encoding="utf-8"))
-            self.assertNotIn("05.10.2026", land.read_text(encoding="utf-8"))
+    OLD, NEW = "ред. от 05.10.2026 N 1297", "ред. от 20.12.2026 N 1500"
+    MANIFEST = (f'documents:\n  - doc_type: decree_body\n    edition_expected: "{OLD}"\n    sources:\n'
+                f'      - pp719/a.txt\n  - doc_type: appendix_footnotes\n    edition_expected: "{OLD}"\n    sources:\n'
+                '      - pp719/b.txt\n  - doc_type: rules\n    edition_expected: "ред. от 13.04.2026 N 400"\n')
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        base = Path(self.tmp.name)
+        (base / "knowledge_base" / "pp719").mkdir(parents=True)
+        (base / "knowledge_base" / "pp719" / "a.txt").write_text("в ред. от 20.12.2026 N 1500", encoding="utf-8")
+        (base / "knowledge_base" / "pp719" / "b.txt").write_text("в ред. от 05.10.2026 N 1297", encoding="utf-8")
+        self.man, self.land = base / "m.yaml", base / "i.html"
+        self.man.write_text(self.MANIFEST, encoding="utf-8")
+        self.land.write_text("ред. от 05.10.2026 № 1297<br>ред. от 05.10.2026</div>редакция от 05.10.2026 № 1297.", encoding="utf-8")
+        self.patches = [mock.patch.object(ae, "MANIFEST", self.man), mock.patch.object(ae, "LANDING", self.land),
+                        mock.patch.object(ae, "ROOT", base)]
+        for p in self.patches:
+            p.start()
+
+    def tearDown(self):
+        for p in self.patches:
+            p.stop()
+        self.tmp.cleanup()
+
+    def test_each_document_gets_its_own_label(self):
+        done = ae.retarget_label(self.OLD, self.NEW)
+        self.assertEqual(len(done), 2)
+        text = self.man.read_text(encoding="utf-8")
+        self.assertEqual(text.count(self.NEW), 1, "сноски акт не задел: их подпись остаётся")
+        self.assertEqual(text.count(self.OLD), 1)
+        self.assertIn("ред. от 13.04.2026 N 400", text)
+        self.assertNotIn("05.10.2026", self.land.read_text(encoding="utf-8"))
 
     def test_unparsed_label_stops(self):
         with self.assertRaises(ae.Stop):
-            ae.retarget_label("редакция не определена", "ред. от 20.12.2026 N 1500")
+            ae.retarget_label("редакция не определена", self.NEW)
+
+    def test_real_manifest_with_glob_sources(self):
+        # Настоящий манифест: выдуманная фикстура скрыла источник-маску, и реплей N 1297 упал на шаге ссылки.
+        for p in self.patches:
+            p.stop()
+        real = ROOT / "knowledge_base" / "manifest.yaml"
+        self.man.write_text(real.read_text(encoding="utf-8"), encoding="utf-8")
+        old = ae._LABEL_RE.search(re.search(r'edition_expected: "(ред\. от [^"]+ N \d+)"', self.man.read_text(encoding="utf-8"))[1])[0]
+        with mock.patch.object(ae, "MANIFEST", self.man):
+            self.assertTrue(ae.retarget_manifest(old, self.NEW))
+        text = self.man.read_text(encoding="utf-8")
+        self.assertEqual(text.count(f'edition_expected: "{self.NEW}"'), 1, "товарный корпус с маской идёт за редакцией")
+        for p in self.patches:
+            p.start()
+
+    def test_link_step_moves_the_label(self):
+        ctx = make_ctx(before={"подпись": self.OLD})
+        with mock.patch.object(ae, "corpus_label", return_value=(self.NEW, self.NEW, "508574")):
+            self.assertIn("m.yaml", ae.step_link(ctx))
+
+    def test_link_step_stops_on_foreign_document(self):
+        ctx = make_ctx(before={"подпись": self.NEW})
+        with mock.patch.object(ae, "corpus_label", return_value=(self.NEW, self.NEW, "111111")), \
+                self.assertRaisesRegex(ae.Stop, "LATER_IN_FORCE"):
+            ae.step_link(ctx)
 
 
 class TestVerdict(unittest.TestCase):
@@ -530,7 +674,10 @@ class TestVerdict(unittest.TestCase):
         self.assertIn("ЧАСТИЧНЫЙ", ae.verdict_of(None, "guard", []))
 
     def test_stop_wins(self):
-        self.assertTrue(ae.verdict_of("gates: x", "gates", []).startswith("ОСТАНОВЛЕНО"))
+        self.assertTrue(ae.verdict_of("gates: x", "gates", [], 3).startswith("ОСТАНОВЛЕНО"))
+
+    def test_surprises_are_not_ready(self):
+        self.assertTrue(ae.verdict_of(None, "tests", ["a"], 2).startswith("НУЖЕН РАЗБОР"))
 
     def test_warnings_are_counted(self):
         self.assertIn("ЗАМЕЧАНИЙ: 2", ae.verdict_of(None, "tests", ["a", "b"]))
@@ -589,16 +736,22 @@ class TestReport(unittest.TestCase):
         self.assertLess(text.index("замечание"), text.index("| Шаг |"))
 
     def test_positions_are_named(self):
-        facts = {"изменённые записи": ["| Иглы | XXIII | 16 / 16 | 145 / 145 | 115 |"], "исключённые позиции": ["Прежняя"]}
+        facts = {"изменённые записи": ["| Иглы | XXIII | 16 | 145 / 145 | 1 / 1 | 115 |"], "исключённые позиции": ["Прежняя"]}
         text = ae.render_report("1", "x", [], facts)
         self.assertIn("| Иглы |", text)
         self.assertIn("Прежняя", text)
 
+    def test_act_check_is_unconditional_and_names_acts(self):
+        text = ae.render_report("509000", "x", [], {"новые акты": ["от 01.12.2026 N 1500"]})
+        self.assertIn("Сверить изменённые и исключённые позиции с текстом акта: от 01.12.2026 N 1500", text)
+        self.assertIn("509000-postanovlenie", text)
+        self.assertNotIn("При расхождении", text)
+
 
 class TestCheckKontur(unittest.TestCase):
-    def check(self, page, known=None, doc_id="508574"):
+    def check(self, page, known=None, doc_id="508574", text=""):
         return we.check_kontur(doc_id, KNOWN if known is None else known,
-                               fetch=lambda url: (page.encode("utf-8"), ""), full_text="", today=TODAY)
+                               fetch=lambda url: (page.encode("utf-8"), ""), full_text=text, today=TODAY)
 
     def test_nothing_new(self):
         self.assertEqual(self.check(ACTUAL_PAGE)["исход"], "нового нет")
@@ -607,9 +760,21 @@ class TestCheckKontur(unittest.TestCase):
         r = self.check(OUTDATED_PAGE, known={}, doc_id="508767")
         self.assertEqual((r["исход"], r["новые документы"]), ("новое", {"508574": "Перейти в действующую"}))
 
+    def test_corpus_on_future_edition_is_not_a_rollback(self):
+        # Настоящая разметка: на будущей редакции «Перейти в действующую» ведёт НАЗАД.
+        page = FUTURE.replace("</b></div>", "</b> <a class='js-actualDocLink' href='/info/normativ/document/1/508767-x-n-719'>"
+                              "Перейти в действующую</a></div>") + DOC.format("текст")
+        r = self.check(page, known={})
+        self.assertEqual((r["исход"], r["новые документы"]), ("нового нет", {}))
+
     def test_new_pending_act(self):
         r = self.check(ACTUAL_PAGE, known={"N 1284 от 27.08.2025": "01.06.2027"})
         self.assertEqual(r["новые отложенные акты"], ["N 1353 от 15.10.2026 (с 01.01.2027)"])
+
+    def test_shifted_date_is_news(self):
+        r = self.check(ACTUAL_PAGE, known={**KNOWN, "N 1353 от 15.10.2026": "01.07.2026"})
+        self.assertEqual(r["исход"], "новое")
+        self.assertEqual(r["сроки изменились"], ["N 1353 от 15.10.2026: было 01.07.2026, стало 01.01.2027"])
 
     def test_act_absent_from_corpus(self):
         page = ACTUAL + DOC.format("в ред. Постановления от 01.11.2026 N 1500")
@@ -628,10 +793,17 @@ class TestCheckKontur(unittest.TestCase):
         self.assertIn("разметка", r["причина"])
 
     def test_vanished_future_act_is_not_calm(self):
-        page = ACTUAL_PAGE.replace("Примечания", "Сведения")
-        r = self.check(page)
+        r = self.check(ACTUAL_PAGE.replace("Примечания", "Сведения"))
         self.assertEqual(r["исход"], "не проверено")
         self.assertIn("исчезли", r["причина"])
+
+    def test_act_already_in_corpus_may_vanish(self):
+        known = {**KNOWN, "N 1257 от 29.09.2026": "31.12.2026"}
+        self.assertEqual(self.check(ACTUAL_PAGE, known=known, text="в ред. от 29.09.2026 N 1257")["исход"], "нового нет")
+
+    def test_new_document_outranks_vanished_acts(self):
+        r = self.check(OUTDATED_PAGE, known={"N 1353 от 15.10.2026": "01.01.2027"}, doc_id="508767")
+        self.assertEqual(r["новые документы"], {"508574": "Перейти в действующую"})
 
     def test_act_that_took_effect_may_leave_the_list(self):
         known = {**KNOWN, "N 1257 от 29.09.2026": "31.10.2026"}
@@ -672,51 +844,119 @@ class TestIssues(unittest.TestCase):
         self.assertIn("потолок", issues.once("t", "b"))
         runner.assert_not_called()
 
+    def test_limit_counts_created(self):
+        runner = mock.Mock(side_effect=[answer(out="[]"), answer(out="u\n")])
+        issues = aa.Issues(False, runner, limit=1)
+        issues.once("a", "b")
+        self.assertIn("потолок", issues.once("c", "d"))
+
+    def test_urgent_ignores_limit(self):
+        runner = mock.Mock(side_effect=[answer(out="[]"), answer(out="u\n")])
+        self.assertEqual(aa.Issues(False, runner, limit=0).once("t", "b", urgent=True), "u")
+
+    def test_reopen_looks_at_open_only(self):
+        runner = mock.Mock(side_effect=[answer(out="[]"), answer(out="u\n")])
+        aa.Issues(False, runner).once("t", "b", reopen=True)
+        self.assertEqual(runner.call_args_list[0].args[3], "open")
+
     def test_dry_run_touches_nothing(self):
         runner = mock.Mock()
         self.assertIn("была бы создана", aa.Issues(True, runner).once("t", "b"))
         runner.assert_not_called()
 
 
-class TestHandleFound(unittest.TestCase):
-    NEW_DOC = {"новые отложенные акты": [], "актов нет в тексте": [], "новые документы": {"509000": "Перейти"}}
+class TestHandleDocument(unittest.TestCase):
+    STOPPED = (False, {"последний шаг": "gates", "вердикт": "ОСТАНОВЛЕНО: input_value='секрет'"})
 
-    def test_dry_run_builds_nothing(self):
-        result = {**self.NEW_DOC, "новые отложенные акты": ["N 1 от 01.01.2027"]}
-        issues = aa.Issues(True, mock.Mock())
-        with mock.patch.object(aa, "build_edition") as build:
-            log = aa.handle_found(result, Path("."), issues)
-        build.assert_not_called()
-        self.assertEqual(len(log), 2)
-
-    def test_existing_build_is_skipped(self):
-        with mock.patch.object(aa, "edition_built", return_value=True), mock.patch.object(aa, "build_edition") as build:
-            log = aa.handle_found(self.NEW_DOC, Path("."), aa.Issues(False, mock.Mock()))
-        build.assert_not_called()
-        self.assertIn("ждёт разбора", log[0])
-
-    def test_stopped_pipeline_makes_short_issue_not_pr(self):
+    def run_doc(self, built=False, result=(True, {}), opened=False, publish=None):
         issues = mock.Mock(dry_run=False)
-        report = {"последний шаг": "gates", "вердикт": "ОСТАНОВЛЕНО: input_value='секрет'"}
-        with mock.patch.object(aa, "edition_built", return_value=False), \
-                mock.patch.object(aa, "build_edition", return_value=(False, report)), \
-                mock.patch.object(aa, "publish") as publish:
-            aa.handle_found(self.NEW_DOC, Path("."), issues)
-        publish.assert_not_called()
-        title, body = issues.once.call_args.args
+        with mock.patch.object(aa, "edition_built", return_value=built), \
+                mock.patch.object(aa, "read_report", return_value=result) as read, \
+                mock.patch.object(aa, "build_edition", return_value=result) as build, \
+                mock.patch.object(aa, "pr_opened", return_value=opened), \
+                mock.patch.object(aa, "discard_build") as discard, \
+                mock.patch.object(aa, "publish", **(publish or {"return_value": "https://x/pr/1"})) as pub:
+            log = aa.handle_document("509000", "ссылка", Path("."), issues)
+        return SimpleNamespace(log=log, issues=issues, build=build, read=read, pub=pub, discard=discard)
+
+    def test_new_edition_is_built_and_published(self):
+        r = self.run_doc()
+        r.build.assert_called_once()
+        self.assertEqual(r.log, "https://x/pr/1")
+
+    def test_existing_build_is_not_rebuilt(self):
+        r = self.run_doc(built=True, opened=True)
+        r.build.assert_not_called()
+        r.pub.assert_not_called()
+        self.assertIn("PR уже открыт", r.log)
+
+    def test_published_build_without_pr_is_retried(self):
+        r = self.run_doc(built=True, opened=False)
+        r.pub.assert_called_once()
+
+    def test_github_silence_retries_tomorrow(self):
+        r = self.run_doc(built=True, opened=None)
+        r.pub.assert_not_called()
+        r.issues.once.assert_not_called()
+        self.assertIn("повтор завтра", r.log)
+
+    def test_stopped_pipeline_makes_short_urgent_issue_not_pr(self):
+        r = self.run_doc(result=self.STOPPED)
+        r.pub.assert_not_called()
+        title, body = r.issues.once.call_args.args
         self.assertIn("gates", title)
         self.assertNotIn("секрет", title + body)
+        self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
 
-    def test_publish_failure_makes_issue(self):
-        issues = mock.Mock(dry_run=False)
-        with mock.patch.object(aa, "edition_built", return_value=False), \
-                mock.patch.object(aa, "build_edition", return_value=(True, {})), \
-                mock.patch.object(aa, "publish", side_effect=subprocess.CalledProcessError(1, "git push")):
-            aa.handle_found(self.NEW_DOC, Path("."), issues)
-        self.assertIn("PR не создан", issues.once.call_args.args[0])
+    def test_stop_is_repeated_next_day(self):
+        r = self.run_doc(built=True, result=self.STOPPED)
+        r.build.assert_not_called()
+        r.issues.once.assert_called_once()
+
+    def test_download_failure_is_discarded_for_tomorrow(self):
+        r = self.run_doc(result=(False, {"последний шаг": "source"}))
+        r.discard.assert_called_once()
+        r.issues.once.assert_not_called()
+
+    def test_publish_failure_makes_urgent_issue(self):
+        r = self.run_doc(publish={"side_effect": subprocess.CalledProcessError(1, "git push")})
+        self.assertIn("PR не создан", r.issues.once.call_args.args[0])
+        self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
+
+    def test_gh_pr_failure_makes_urgent_issue(self):
+        r = self.run_doc(publish={"side_effect": RuntimeError("gh pr create")})
+        self.assertIn("PR не создан", r.issues.once.call_args.args[0])
+
+
+class TestHandleFound(unittest.TestCase):
+    EMPTY = {"новые документы": {}, "новые отложенные акты": [], "сроки изменились": [], "актов нет в тексте": []}
+
+    def test_dry_run_builds_nothing(self):
+        result = {**self.EMPTY, "новые отложенные акты": ["N 1 от 01.01.2027"], "новые документы": {"509000": "x"}}
+        with mock.patch.object(aa, "build_edition") as build, mock.patch.object(aa, "edition_built") as built:
+            log = aa.handle_found(result, Path("."), aa.Issues(True, mock.Mock()))
+        build.assert_not_called()
+        built.assert_not_called()
+        self.assertEqual(len(log), 2)
+
+    def test_document_goes_first(self):
+        order = []
+        result = {**self.EMPTY, "новые отложенные акты": ["акт"], "новые документы": {"509000": "x"}}
+        issues = mock.Mock(once=lambda *a, **k: order.append("акт"))
+        with mock.patch.object(aa, "handle_document", side_effect=lambda *a: order.append("документ")):
+            aa.handle_found(result, Path("."), issues)
+        self.assertEqual(order, ["документ", "акт"])
+
+    def test_every_kind_of_news_reaches_an_issue(self):
+        result = {**self.EMPTY, "новые отложенные акты": ["а"], "сроки изменились": ["б"], "актов нет в тексте": ["в"]}
+        issues = mock.Mock()
+        aa.handle_found(result, Path("."), issues)
+        self.assertEqual(issues.once.call_count, 3)
 
 
 class TestRunOnce(unittest.TestCase):
+    LAST = dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc).isoformat()
+
     def run_with(self, result, state, moment=None):
         issues = mock.Mock(dry_run=False)
         with mock.patch.object(aa.we, "check_kontur", return_value=result), \
@@ -724,10 +964,8 @@ class TestRunOnce(unittest.TestCase):
                 mock.patch.object(aa.we, "known_pending", return_value={}), \
                 mock.patch.object(aa, "now", return_value=moment or dt.datetime(2026, 11, 10, tzinfo=dt.timezone.utc)), \
                 mock.patch.object(aa, "handle_found", return_value=[]) as found:
-            aa.run_once(SimpleNamespace(), Path("."), state, issues)
+            aa.run_once(Path("."), state, issues)
         return issues, found
-
-    LAST = dt.datetime(2026, 11, 1, tzinfo=dt.timezone.utc).isoformat()
 
     def test_success_moves_the_date(self):
         state = {"последняя успешная проверка": self.LAST}
@@ -739,9 +977,10 @@ class TestRunOnce(unittest.TestCase):
         _, found = self.run_with({"исход": "новое"}, {})
         found.assert_called_once()
 
-    def test_week_of_silence_makes_issue(self):
+    def test_week_of_silence_makes_urgent_issue(self):
         issues, _ = self.run_with({"исход": "не проверено", "причина": "сеть"}, {"последняя успешная проверка": self.LAST})
         self.assertIn("молчит", issues.once.call_args.args[0])
+        self.assertTrue(issues.once.call_args.kwargs["urgent"])
 
     def test_short_silence_is_quiet(self):
         last = dt.datetime(2026, 11, 8, tzinfo=dt.timezone.utc).isoformat()
@@ -759,7 +998,7 @@ class TestDailyMain(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             argv = ["x", "--sources", d]
 
-            def boom(args, sources, state, issues):
+            def boom(sources, state, issues):
                 state["последняя успешная проверка"] = "дата"
                 raise KeyError("секрет в тексте")
 
@@ -773,6 +1012,22 @@ class TestDailyMain(unittest.TestCase):
             title, body = once.call_args.args
             self.assertIn("KeyError", title)
             self.assertNotIn("секрет", title + body)
+            self.assertTrue(once.call_args.kwargs["reopen"])
+
+    def test_missing_gh_does_not_lose_state(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(sys, "argv", ["x", "--sources", d]), mock.patch.object(aa, "enable_utf8"), \
+                    mock.patch.object(aa, "run_once", side_effect=KeyError("x")), \
+                    mock.patch.object(aa.Issues, "once", side_effect=FileNotFoundError("gh")), \
+                    mock.patch("traceback.print_exc"):
+                aa.main()
+            self.assertTrue((Path(d) / "watch_state.json").exists())
+
+    def test_broken_state_is_not_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            path = Path(d) / "watch_state.json"
+            path.write_text("{обрыв", encoding="utf-8")
+            self.assertEqual(aa.load_state(path), {})
 
     def test_dry_run_writes_no_state(self):
         with tempfile.TemporaryDirectory() as d:
@@ -780,6 +1035,58 @@ class TestDailyMain(unittest.TestCase):
                     mock.patch.object(aa, "run_once"):
                 aa.main()
             self.assertFalse((Path(d) / "watch_state.json").exists())
+
+
+class TestBuild(unittest.TestCase):
+    def test_built_when_only_remote_branch_exists(self):
+        calls = []
+
+        def git(*args, **kw):
+            calls.append(args[0])
+            return "abc refs/heads/auto/edition-1\n" if args[0] == "ls-remote" else ""
+
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(aa, "git", side_effect=git):
+            self.assertTrue(aa.edition_built("1", Path(d)))
+        self.assertEqual(calls, ["branch", "ls-remote"])
+
+    def test_not_built(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(aa, "git", return_value=""):
+            self.assertFalse(aa.edition_built("1", Path(d)))
+
+    def test_built_from_fresh_dev_with_the_key_only(self):
+        with tempfile.TemporaryDirectory() as d, mock.patch.object(aa, "git") as git, \
+                mock.patch.object(aa.subprocess, "run") as run, \
+                mock.patch.object(aa, "model_env", return_value={"DEEPSEEK_API_KEY": "k"}):
+            aa.build_edition("1", Path(d))
+        self.assertEqual(git.call_args_list[0].args[:2], ("fetch", "origin"))
+        self.assertEqual(git.call_args_list[1].args[-1], "origin/dev")
+        self.assertEqual(run.call_args.kwargs["env"], {"DEEPSEEK_API_KEY": "k"})
+
+    def test_discard_touches_only_this_build(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            (base / "1").mkdir()
+            (base / "2").mkdir()
+            with mock.patch.object(aa, "git", return_value="x") as git:
+                aa.discard_build("1", base)
+            self.assertFalse((base / "1").exists())
+            self.assertTrue((base / "2").exists())
+            self.assertEqual(git.call_args_list[-1].args, ("branch", "-D", "auto/edition-1"))
+
+    def test_report_verdict(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            self.assertEqual(aa.read_report("1", base), (False, {}))
+            (base / "1").mkdir()
+            (base / "1" / "report.json").write_text('{"вердикт": "ОСТАНОВЛЕНО: x"}', encoding="utf-8")
+            self.assertFalse(aa.read_report("1", base)[0])
+            (base / "1" / "report.json").write_text('{"вердикт": "НУЖЕН РАЗБОР: 1"}', encoding="utf-8")
+            self.assertTrue(aa.read_report("1", base)[0])
+
+    def test_pr_opened(self):
+        self.assertTrue(aa.pr_opened("1", mock.Mock(return_value=answer(out='[{"number": 1}]'))))
+        self.assertFalse(aa.pr_opened("1", mock.Mock(return_value=answer(out="[]"))))
+        self.assertIsNone(aa.pr_opened("1", mock.Mock(return_value=answer(code=1))))
 
 
 class TestModelEnv(unittest.TestCase):
@@ -849,6 +1156,12 @@ class TestPublish(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.publish(gh_code=1)
 
+    def test_retry_after_failed_pr_does_not_need_a_new_commit(self):
+        with self.assertRaises(RuntimeError):
+            self.publish(gh_code=1)
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1")
+
 
 class TestParserPrompt(unittest.TestCase):
     def test_mandatory_requirement_goes_to_a_block(self):
@@ -862,10 +1175,70 @@ class TestRestructurePlan(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "p.json"
-            rc.write_plan(str(path), "keep", ["а"], ["б"], ["в"])
+            rc.write_plan(str(path), "keep", ["а"], ["б"], ["в"], ["г"])
             self.assertEqual(json.loads(path.read_text(encoding="utf-8")),
-                             {"режим": "keep", "в модель": ["а"], "без модели": ["б"], "исключены": ["в"]})
+                             {"режим": "keep", "в модель": ["а"], "без модели": ["б"], "исключены": ["в"], "прежние имена": ["г"]})
             rc.write_plan(None, "keep", [], [], [])
+
+
+class TestRestructureNames(unittest.TestCase):
+    """Имя записи из модели заменяется ячейкой источника, и шаг это делает, а не только функция умеет."""
+
+    def product(self):
+        import structure_kb as sk
+
+        return sk.Product(okpd2_field="1", name_raw="Иглы из ячейки", okpd2_codes=["1"], component_cells=["x"])
+
+    def fresh(self, *a, **k):
+        return {"product_name": "Иглы, пересказ модели", "source_anchor": "", "okpd2_codes": ["1"]}
+
+    def run_patch(self, name_raw=None):
+        import restructure_changed as rc
+
+        p = self.product()
+        if name_raw is not None:
+            p.name_raw = name_raw
+        old = [{"product_name": "Было", "source_anchor": "XXIII, позиция 1", "okpd2_codes": ["1"]},
+               {"record_type": "section_methodology", "text": "прежняя"}]
+        with tempfile.TemporaryDirectory() as d:
+            out = Path(d) / "x.json"
+            chunk = mock.Mock(stem="x")
+            chunk.read_text.return_value = "текст"
+            with mock.patch.object(rc.sk, "find_chunk", return_value=chunk), \
+                    mock.patch.object(rc.sk, "OUT_DIR", Path(d)), mock.patch.object(rc.sk, "out_name", return_value="x.json"), \
+                    mock.patch.object(rc, "git_text", return_value=json.dumps(old)), \
+                    mock.patch.object(rc.sk, "parse_section", return_value=("шапка", [p])), \
+                    mock.patch.object(rc.sk, "section_title", return_value="Раздел"), \
+                    mock.patch.object(rc, "patch_jobs", return_value=([(0, p, "llm")], [])), \
+                    mock.patch.object(rc.sk, "make_client"), mock.patch.object(rc.sk, "normalize_product", side_effect=self.fresh), \
+                    mock.patch.object(rc.sk, "collect_section_thresholds", return_value=["новая"]), \
+                    mock.patch.object(rc.sk, "methodology_record", return_value={"record_type": "section_methodology", "text": "новая"}), \
+                    mock.patch.object(rc, "ROOT", Path(d)), contextlib.redirect_stdout(io.StringIO()):
+                rc.run_patch("XXIII", "HEAD", True, 1, 9000)   # печать вне cp1251: без перехвата падает вне батареи
+            return json.loads(out.read_text(encoding="utf-8"))
+
+    def test_keep_takes_name_from_the_cell(self):
+        self.assertEqual(self.run_patch()[0]["product_name"], "Иглы из ячейки")
+
+    def test_keep_refreshes_methodology(self):
+        self.assertEqual(self.run_patch()[-1]["text"], "новая")
+
+    def test_keep_empty_cell_keeps_the_model_name(self):
+        self.assertEqual(self.run_patch(name_raw="")[0]["product_name"], "Иглы, пересказ модели")
+
+
+class TestThresholdSnapshot(unittest.TestCase):
+    def test_snapshot_sees_procurement_threshold(self):
+        snapshot = ae.threshold_snapshot()
+        self.assertGreater(len(snapshot), 1000)
+        self.assertTrue(any(v.split("закупка:")[1].strip() for v in snapshot.values()), "закупочных порогов нет в снимке")
+
+
+class TestWitnessCells(unittest.TestCase):
+    def test_neighbouring_cells_keep_their_boundary(self):
+        page = DOC.format(f"<table><tr><td>N 2139</td><td>28</td></tr></table><p>{TEXT}</p>{TAIL}")
+        self.assertTrue(es.witness(f"N 2139|28|{TEXT}", page).equal)
+        self.assertFalse(es.witness(f"N 213928|{TEXT}", page).equal)
 
 
 if __name__ == "__main__":

@@ -7,9 +7,9 @@
 человек (`AGENTS_PLAN` §A6). Запускается только на отдельной ветке, остальное защищено `step_guard`.
 
 ПОЧЕМУ СТОП, А НЕ ПОПЫТКА. Цена тихой ошибки — неверный балл в ответе эксперту. Условие, которое можно
-доказать, останавливает прогон. То, что доказать нельзя, попадает в отчёт для чтения глазами: у `verify`
-сверка идёт по множествам чисел, и подмену баллов между операциями он не видит, поэтому отчёт
-показывает по каждой изменённой записи баллы источника рядом с баллами записи.
+доказать, останавливает прогон. То, что доказать нельзя, попадает в отчёт для чтения глазами: `verify`
+сверяет множества чисел и подмены баллов между операциями не видит, поэтому по каждой изменённой записи
+отчёт сверяет пары «текст операции — балл» с ячейкой источника и называет неподтверждённые.
 
 ОТЧЁТ ПУБЛИЧЕН. Репозиторий открытый, отчёт идёт в тело PR: всё, что попадает в отчёт, проходит `scrub`.
 
@@ -37,6 +37,7 @@ for p in (ROOT, ROOT / "scripts"):
         sys.path.insert(0, str(p))
 
 import edition_source as es  # noqa: E402
+import watch_edition as we  # noqa: E402
 from app.core.console import enable_utf8  # noqa: E402
 
 KB = ROOT / "knowledge_base" / "pp719"
@@ -54,6 +55,9 @@ _LABEL_RE = re.compile(r"ред\. от (\d{2}\.\d{2}\.\d{4}) N (\d+)")
 _SECRET_RE = re.compile(r"""input_value=(['"]).*?\1|sk-[A-Za-z0-9_-]{8,}""")
 _SECRET_ENV = ("DEEPSEEK_API_KEY",)
 _RESERVED = ("source_anchor", "amendments")     # меняются у неизменённой позиции: нумерация и пометки актов
+# Тесты, закреплённые за конкретной редакцией и релизом: на новой редакции им положено падать, правит человек.
+# Всё остальное красное — неожиданность: иначе «красная» стала бы нормой и настоящий сигнал утонул.
+_PINNED_TESTS = re.compile(r"^(?:tests\.)?test_(?:edition_\d{4}_|deploy_script|ev24_paraphrase_anchors)")
 
 
 class Stop(RuntimeError):
@@ -72,6 +76,7 @@ class Ctx:
     plans: dict[str, dict] = field(default_factory=dict)   # раздел → план `restructure_changed`
     before: dict = field(default_factory=dict)             # снимки базы до изменений
     warnings: list[str] = field(default_factory=list)      # не доказано автоматически: глазами
+    surprises: int = 0                                     # падения батареи вне закреплённых за редакцией
 
 
 def scrub(text: str) -> str:
@@ -190,6 +195,16 @@ def records_by_anchor() -> dict[str, dict]:
     return out
 
 
+def methodology_snapshot() -> dict[str, str]:
+    """Запись-методичка каждого раздела: файл → её текст."""
+    out = {}
+    for f in sorted(STRUCTURED.glob("*.json")):
+        for r in json.loads(f.read_text(encoding="utf-8")):
+            if r.get("record_type") == "section_methodology":
+                out[f.stem] = json.dumps(r, ensure_ascii=False, sort_keys=True)
+    return out
+
+
 def verify_summary() -> dict[str, int]:
     """Проверки с кодом возврата 0 при любом исходе: итог берём из их строк. Нет строки — стоп."""
     records = py("verify_structured.py", "--records", timeout=900).stdout
@@ -197,7 +212,7 @@ def verify_summary() -> dict[str, int]:
     if not m:
         raise Stop("verify_structured --records: нет итоговой строки, проверка не состоялась")
     sections = py("verify_structured.py", timeout=900).stdout
-    if "Потеряно полностью" not in sections:
+    if "Потеряно полностью" not in sections or "Выдуманные баллы" not in sections:
         raise Stop("verify_structured: нет строк сверки разделов, проверка не состоялась")
     reconcile = py("reconcile_kb.py", timeout=900).stdout
     r = re.search(r"ИТОГО чисто: (\d+)/(\d+)", reconcile)
@@ -205,6 +220,7 @@ def verify_summary() -> dict[str, int]:
         raise Stop("reconcile_kb: нет итоговой строки, проверка не состоялась")
     return {"расхождений в записях": int(m.group(1)),
             "разделов с потерями": len(re.findall(r"Потеряно полностью \(нет нигде в JSON\): (?!НЕТ)", sections)),
+            "разделов с выдуманными баллами": len(re.findall(r"Выдуманные баллы \(нет в законе\): (?!НЕТ)", sections)),
             "разделов не чисто": int(r.group(2)) - int(r.group(1))}
 
 
@@ -221,10 +237,21 @@ def record_key(rec: dict) -> str:
     return json.dumps({k: v for k, v in rec.items() if k not in _RESERVED}, ensure_ascii=False, sort_keys=True)
 
 
-def changed_anchors(before: dict[str, dict], after: dict[str, dict]) -> set[str]:
-    """Новые и изменённые позиции. Сдвиг якоря изменением не считается."""
+def changed_anchors(before: dict[str, dict], after: dict[str, dict], renumbered: frozenset[str] = frozenset()) -> set[str]:
+    """Новые и изменённые позиции.
+
+    В перенумерованном разделе якорь сдвигается, поэтому запись ищется среди всех прежних. В остальных
+    сравнение по якорю: поиск по всем не заметил бы обмена содержимым двух записей.
+    """
     old = {record_key(r) for r in before.values()}
-    return {a for a, r in after.items() if record_key(r) not in old}
+    out = set()
+    for anchor, rec in after.items():
+        if rec.get("section_roman") in renumbered:
+            if record_key(rec) not in old:
+                out.add(anchor)
+        elif anchor not in before or record_key(before[anchor]) != record_key(rec):
+            out.add(anchor)
+    return out
 
 
 def foreign_thresholds(before: dict, after: dict, recs_before: dict, recs_after: dict) -> list[str]:
@@ -243,17 +270,51 @@ def foreign_thresholds(before: dict, after: dict, recs_before: dict, recs_after:
 
 def source_points(raw_block: str) -> Counter:
     """Баллы операций в ячейке источника. Порог («не менее N баллов») операцией не считается."""
-    text = re.sub(r"не\s+менее\s+\d+\s*балл\w*", " ", raw_block, flags=re.I)
-    return Counter(int(n) for n in re.findall(r"(\d+)\s*балл", text, flags=re.I))
+    text = re.sub(r"не\s+менее\s+\d+(?:[.,]\d+)?\s*балл\w*", " ", raw_block, flags=re.I)
+    return Counter(float(n.replace(",", ".")) for n in re.findall(r"(\d+(?:[.,]\d+)?)\s*балл", text, flags=re.I))
 
 
 def record_points(rec: dict) -> Counter:
-    return Counter(int(o["points"]) for b in rec.get("requirement_blocks") or []
-                   for o in b.get("operations") or [] if o.get("points") is not None)
+    return Counter(float(o["points"]) for o in record_operations(rec) if o.get("points") is not None)
 
 
-def operations_count(rec: dict) -> int:
-    return sum(len(b.get("operations") or []) for b in rec.get("requirement_blocks") or [])
+def record_operations(rec: dict) -> list[dict]:
+    return [o for b in rec.get("requirement_blocks") or [] for o in b.get("operations") or []]
+
+
+def _norm(text: str | None) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]{0,12}>", " ", text or "")).lower().strip(" ;,.")
+
+
+def pair_confirmed(source: str, text: str, points: float) -> bool | None:
+    """Стоит ли рядом с текстом операции в ячейке источника именно этот балл. `None` — текста там нет.
+
+    `verify` сверяет множества чисел и обмена баллами двух операций не видит. Замер на корпусе: пара
+    подтверждается у 85.9 % из 15 065 операций, смоделированные обмены пойманы 820 из 820.
+    """
+    needle = _norm(text)
+    i = source.find(needle) if needle else -1
+    if i < 0:
+        return None
+    number = f"{points:g}".replace(".", ",")
+    return bool(re.match(r".{0,12}?\b" + re.escape(number) + r"\s*\(?\s*балл", source[i + len(needle):i + len(needle) + 40]))
+
+
+def unconfirmed_pairs(raw_block: str, rec: dict) -> list[str]:
+    """Операции с баллом, чью пару «текст — балл» источник не подтвердил."""
+    source = _norm(raw_block)
+    return [f"«{(o.get('text') or '')[:50]}» = {o['points']}" for o in record_operations(rec)
+            if o.get("points") is not None and not pair_confirmed(source, o.get("text") or "", float(o["points"]))]
+
+
+def source_lines_seen(raw_block: str, rec: dict) -> tuple[int, int]:
+    """Сколько строк ячейки источника нашлось в записи: требования без баллов сверке чисел не видны."""
+    parts = [_norm(o.get("text")) for o in record_operations(rec)]
+    for block in rec.get("requirement_blocks") or []:
+        parts += [_norm(block.get("component")), _norm(block.get("note"))]
+    joined = " ".join(parts)
+    lines = [n for n in map(_norm, raw_block.split("\n")) if len(n) > 25]
+    return sum(1 for n in lines if n[:60] in joined), len(lines)
 
 
 def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[str, str]) -> tuple[list[str], list[str]]:
@@ -273,20 +334,25 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
         if len(same) > 1:
             same = [p for p in same if p.okpd2_codes == rec.get("okpd2_codes")]
         ours = record_points(rec)
-        theirs = None
+        theirs, lines = None, "?"
         if len(same) != 1:
             notes.append(f"{anchor}: запись не сопоставлена с ячейкой источника ({len(same)} кандидатов)")
         else:
-            theirs = source_points(same[0].raw_block())
+            raw = same[0].raw_block()
+            theirs = source_points(raw)
             if theirs != ours:
                 lost, extra = sorted((theirs - ours).elements()), sorted((ours - theirs).elements())
                 notes.append(f"{anchor}: баллы расходятся с источником: нет в записи {lost}, лишние {extra}")
+            if bad := unconfirmed_pairs(raw, rec):
+                notes.append(f"{anchor}: пара «операция — балл» не подтверждена у {len(bad)}: {bad[:3]}")
+            seen, total = source_lines_seen(raw, rec)
+            lines = f"{seen} / {total}"
         if re.search(r"налич|обязательн", rec.get("notes") or "", re.I):
             notes.append(f"{anchor}: требование попало в notes, до ответа оно не дойдёт")
         src_ops = "?" if theirs is None else sum(theirs.values())
-        src_sum = "?" if theirs is None else sum(theirs.elements())
-        rows.append(table_row(name[:60], roman, f"{operations_count(rec)} ({sum(ours.values())} / {src_ops})",
-                              f"{sum(ours.elements())} / {src_sum}", thresholds.get(anchor, "")[:90]))
+        src_sum = "?" if theirs is None else f"{sum(theirs.elements()):g}"
+        rows.append(table_row(name[:60], roman, f"{len(record_operations(rec))} ({sum(ours.values())} / {src_ops})",
+                              f"{sum(ours.elements()):g} / {src_sum}", lines, thresholds.get(anchor, "")[:90]))
     return rows, notes
 
 
@@ -332,14 +398,29 @@ def step_source(ctx: Ctx) -> str:
     return info.title
 
 
+def header_acts(text: str) -> set:
+    """Акты из шапки постановления: до слова «постановляет». Шапка только растёт, ссылки в тексте — нет."""
+    m = re.search(r"постановляет", text, re.I)
+    return we.acts(text[:m.start()]) if m else set()
+
+
 def step_text(ctx: Ctx) -> str:
+    old = FULL.read_text(encoding="utf-8")
     text = es.rtf_to_corpus_text(Path(ctx.args.rtf).read_bytes())
     try:
-        text, restored = es.restore_lost_blocks(text, FULL.read_text(encoding="utf-8"))
+        text, restored = es.restore_lost_blocks(text, old)
     except es.SourceError as e:
         raise Stop(str(e)) from e
     if es.LOST_MARK in text:
         raise Stop("маркер потери таблицы остался в тексте")
+    # Номера документов Контура не хронологичны (508574 новее 508767), поэтому откат виден только по актам.
+    was, now = header_acts(old), header_acts(text)
+    if not now:
+        raise Stop("шапка постановления не разобрана: сравнить редакции не с чем")
+    if was - now:
+        raise Stop(f"откат: в кандидате нет актов корпуса {[we.label(a) for a in sorted(was - now)]}. "
+                   "Документ старше редакции, на которой стоит корпус")
+    ctx.facts["новые акты"] = [we.label(a) for a in sorted(now - was)]
     w = es.witness(text, Path(ctx.args.page).read_text(encoding="utf-8", errors="replace"))
     ctx.facts["восстановлено блоков"] = [f"{r.chars} зн: {r.head[:50]}" for r in restored]
     ctx.facts["сверено символов с HTML"] = w.compared
@@ -366,7 +447,8 @@ def step_control(ctx: Ctx) -> str:
         git("checkout", "--", "knowledge_base")
         raise Stop(f"нарезка не воспроизводит прежний корпус: {changed[:6]}")
     ctx.before = {"пороги": threshold_snapshot(), "записи": records_by_anchor(), "сверки": verify_summary(),
-                  "вне чанков": uncovered_lines(), "подпись": corpus_label()[0], "разделы": known_sections()}
+                  "вне чанков": uncovered_lines(), "подпись": corpus_label()[0], "разделы": known_sections(),
+                  "методички": methodology_snapshot()}
     return "нарезка прежнего текста побайтно та же"
 
 
@@ -386,17 +468,44 @@ def step_chunks(ctx: Ctx) -> str:
     return f"чанков изменено {len(changed)}, разделов приложения: {ctx.sections or 'нет'}"
 
 
+def document_label(sources: list[str], corpus: str) -> str | None:
+    """Редакция документа манифеста — по его собственным файлам: сноски акт мог и не задеть.
+
+    Источник-маска — товарный корпус `structured/*.json`: его подпись по определению равна редакции корпуса.
+    """
+    if any("*" in name for name in sources):
+        return corpus
+    found: set = set()
+    for name in sources:
+        found |= we.acts((ROOT / "knowledge_base" / name).read_text(encoding="utf-8"))
+    if not found:
+        return None
+    y, m, d, n = max(found)
+    return f"ред. от {d:02d}.{m:02d}.{y} N {n}"
+
+
+def retarget_manifest(old: str, new: str) -> bool:
+    """`edition_expected` у каждого документа со старой подписью — из его текста, а не общей заменой."""
+    blocks = re.split(r"(?m)^(?=  - doc_type: )", MANIFEST.read_text(encoding="utf-8"))
+    changed = False
+    for i, block in enumerate(blocks):
+        if f'edition_expected: "{old}"' not in block:
+            continue
+        label = document_label(re.findall(r"(?m)^\s+- (pp719/\S+)", block), new)
+        if label and label != old:
+            blocks[i] = block.replace(f'edition_expected: "{old}"', f'edition_expected: "{label}"')
+            changed = True
+    if changed:
+        MANIFEST.write_text("".join(blocks), encoding="utf-8", newline="\n")
+    return changed
+
+
 def retarget_label(old: str, new: str) -> list[str]:
     """Подпись редакции записана ещё в манифесте и на лендинге: тесты требуют их равенства с корпусом."""
     was, now = _LABEL_RE.fullmatch(old), _LABEL_RE.fullmatch(new)
     if not was or not now:
         raise Stop(f"подпись редакции не разобрана: «{old}» → «{new}»")
-    done = []
-    src = MANIFEST.read_text(encoding="utf-8")
-    if f'edition_expected: "{old}"' in src:
-        MANIFEST.write_text(src.replace(f'edition_expected: "{old}"', f'edition_expected: "{new}"'),
-                            encoding="utf-8", newline="\n")
-        done.append(MANIFEST.name)
+    done = [MANIFEST.name] if retarget_manifest(old, new) else []
     page = LANDING.read_text(encoding="utf-8")
     out = page.replace(f"от {was[1]} № {was[2]}", f"от {now[1]} № {now[2]}").replace(f"ред. от {was[1]}<", f"ред. от {now[1]}<")
     if out != page:
@@ -472,11 +581,13 @@ def step_structure(ctx: Ctx) -> str:
 
 def step_post(ctx: Ctx) -> str:
     """Производные файлы. Порядок — из вывода `backfill`: сначала он, потом карты и список порогов."""
-    py("backfill_block_thresholds.py", "--write")
+    backfill = py("backfill_block_thresholds.py", "--write").stdout
+    ctx.warnings += [line.strip() for line in backfill.splitlines() if "ОТКАТ" in line]
     py("diag_orphan_requirements.py", "--fragments", "knowledge_base/pp719/fragmented_requirements.json")
     py("diag_orphan_requirements.py", "--inheritance", "knowledge_base/pp719/inherited_requirements.json")
     py("verify_structured.py", "--json", "knowledge_base/pp719/incomplete_thresholds.json")
-    py("build_code_cells.py")
+    cells = py("build_code_cells.py").stdout
+    ctx.facts["кодов не определено"] = cells.count("НЕ ОПРЕДЕЛЕНО")
     return "производные файлы пересобраны"
 
 
@@ -487,10 +598,16 @@ def step_gates(ctx: Ctx) -> str:
     if bad:
         raise Stop(f"чужие пороги ({len(bad)}): {bad[:5]}")
     # Изменено ровно то, что планировалось: иначе шаг задел записи, которых модель не видела.
-    fresh = changed_anchors(recs_before, recs_after)
+    renumbered = frozenset(r for r, mode in ctx.modes.items() if mode == "renumber")
+    fresh = changed_anchors(recs_before, recs_after, renumbered)
     allowed = sum(len(p["в модель"]) + len(p["без модели"]) for p in ctx.plans.values())
     if len(fresh) > allowed:
         raise Stop(f"изменено записей {len(fresh)}, а в плане {allowed}: {sorted(fresh)[:6]}")
+    names = {n for p in ctx.plans.values() for n in p["в модель"] + p["без модели"] + p.get("прежние имена", [])}
+    if "" not in names:      # у пары позиций имени в ячейке нет: тогда сверять не с чем
+        stray = sorted(a for a in fresh if recs_after[a].get("product_name") not in names)
+        if stray:
+            raise Stop(f"изменены записи вне плана: {stray[:6]}")
     planned_gone = sum(len(p["исключены"]) for p in ctx.plans.values())
     if len(recs_after) < len(recs_before) - planned_gone:
         raise Stop(f"записей было {len(recs_before)}, стало {len(recs_after)}, в плане исключено {planned_gone}")
@@ -504,24 +621,32 @@ def step_gates(ctx: Ctx) -> str:
     rows, notes = review_rows(fresh, recs_after, after)
     ctx.facts["изменённые записи"] = rows
     ctx.warnings += notes
+    # Методичка раздела идёт в индекс, а шлюзы её не сверяют: правка видна только глазами.
+    if moved := sorted(k for k, v in methodology_snapshot().items() if ctx.before.get("методички", {}).get(k) != v):
+        ctx.warnings.append(f"методички разделов изменились: {moved}")
     return f"чужих порогов 0, изменено записей {len(fresh)} из {allowed} в плане, сверки {now}, замечаний {len(notes)}"
 
 
 def step_tests(ctx: Ctx) -> str:
-    """Батарея на новых данных. Падение — не обязательно дефект: тест мог закреплять прежнюю редакцию.
+    """Батарея на новых данных. Закреплённым за редакцией тестам положено падать: их правит человек в PR.
 
-    Поэтому красная батарея не стоп, а заметное замечание: разбирать её удобнее в черновом PR, и CI там
-    покажет то же самое. ⚠ Без `PYTHONUTF8`: с ним батарея зеленеет там, где документированная среда падает.
+    Неожиданное падение меняет вердикт: это либо дефект данных, либо новый закреплённый тест.
+    ⚠ Без `PYTHONUTF8`: с ним батарея зеленеет там, где документированная среда падает.
     """
     r = run([sys.executable, "-m", "unittest", "discover", "-s", "tests"], check=False, timeout=3600, utf8=False)
     if r.returncode == 0:
         return "батарея зелёная"
-    failed = re.findall(r"^(?:FAIL|ERROR): (\S+) \((\S+)\)", r.stderr + r.stdout, flags=re.M)
+    failed = [mod for _, mod in re.findall(r"^(?:FAIL|ERROR): (\S+) \((\S+)\)", r.stderr + r.stdout, flags=re.M)]
     if not failed:
         raise Stop(f"батарея упала без списка тестов, код {r.returncode}\n{scrub(r.stderr[-600:])}")
-    ctx.facts["упавшие тесты"] = [mod for _, mod in failed]
-    ctx.warnings.append(f"батарея красная: падений {len(failed)}, разобрать, закрепляет ли тест прежнюю редакцию")
-    return f"падений {len(failed)}"
+    pinned = [t for t in failed if _PINNED_TESTS.match(t)]
+    surprises = [t for t in failed if t not in pinned]
+    ctx.surprises = len(surprises)
+    ctx.facts["тесты, закреплённые за редакцией"] = pinned
+    ctx.facts["неожиданные падения тестов"] = surprises
+    if surprises:
+        ctx.warnings.append(f"неожиданных падений тестов: {len(surprises)}, это мог быть дефект данных")
+    return f"закреплённых падений {len(pinned)}, неожиданных {len(surprises)}"
 
 
 HANDLERS = {"guard": step_guard, "source": step_source, "text": step_text, "control": step_control,
@@ -529,11 +654,13 @@ HANDLERS = {"guard": step_guard, "source": step_source, "text": step_text, "cont
             "post": step_post, "gates": step_gates, "tests": step_tests}
 
 
-def verdict_of(stopped: str | None, last_step: str, warnings: list[str]) -> str:
+def verdict_of(stopped: str | None, last_step: str, warnings: list[str], surprises: int = 0) -> str:
     if stopped:
         return f"ОСТАНОВЛЕНО: {stopped}"
     if last_step != STEPS[-1]:
         return f"ЧАСТИЧНЫЙ ПРОГОН до шага {last_step}: это не готовность"
+    if surprises:
+        return f"НУЖЕН РАЗБОР: неожиданных падений тестов {surprises}, замечаний {len(warnings)}"
     if warnings:
         return f"ГОТОВО К ПРОВЕРКЕ, ЗАМЕЧАНИЙ: {len(warnings)}"
     return "ГОТОВО К ПРОВЕРКЕ ЧЕЛОВЕКОМ"
@@ -551,26 +678,33 @@ def render_report(doc_id: str, verdict: str, steps: list[dict], facts: dict, war
         lines.append(f"| {s['шаг']} | {s['итог']} | {detail} |")
     if facts.get("изменённые записи"):
         lines += ["", "## Изменённые записи", "",
-                  "Операций: всего (с баллами в записи / в источнике). Баллы: сумма в записи / в источнике.", "",
-                  "| Позиция | Раздел | Операций | Баллы | Порог |", "|---|---|---|---|---|", *facts["изменённые записи"]]
-    for title, key in (("Изменённые разделы", "разделы"), ("План перепарса", "план перепарса"),
-                       ("Перепарс", "перепарс"), ("Исключённые позиции", "исключённые позиции"),
+                  "Операций: всего (с баллами в записи / в источнике). Баллы: сумма в записи / в источнике. "
+                  "Строки: нашлось в записи / длинных строк ячейки, требования без баллов видны только здесь.", "",
+                  "| Позиция | Раздел | Операций | Баллы | Строки | Порог |", "|---|---|---|---|---|---|",
+                  *facts["изменённые записи"]]
+    for title, key in (("Новые акты редакции", "новые акты"), ("Изменённые разделы", "разделы"),
+                       ("План перепарса", "план перепарса"), ("Перепарс", "перепарс"),
+                       ("Исключённые позиции", "исключённые позиции"),
                        ("Карты якорей: перевести наборы замеров (п. 15)", "карты якорей: перевести наборы замеров"),
-                       ("Отложенные акты", "отложенные"), ("Упавшие тесты", "упавшие тесты")):
+                       ("Отложенные акты", "отложенные"),
+                       ("Неожиданные падения тестов", "неожиданные падения тестов"),
+                       ("Тесты, закреплённые за редакцией: править", "тесты, закреплённые за редакцией")):
         if facts.get(key):
             lines += ["", f"**{title}:**", *[f"- {x}" for x in facts[key]]]
+    acts = ", ".join(facts.get("новые акты") or []) or "см. шапку редакции"
     lines += ["", "## Что остаётся человеку",
-              "- [ ] Сверить таблицу изменённых записей с текстом акта: шлюзы подмену баллов между операциями не видят.",
+              f"- [ ] Сверить изменённые и исключённые позиции с текстом акта: {acts}. Источник — "
+              "publication.pravo.gov.ru: вёрстки Контура расходятся между собой, а сверка с HTML этого не видит.",
+              f"- [ ] Сравнить с редакцией на Контуре: {es.KONTUR_DOC.format(doc_id=doc_id)}",
               "- [ ] Переиндексировать в параллельные коллекции и снять замер одним кодом (ACTUALIZATION, п. 8).",
-              "- [ ] Сделать профиль выкатки и выбрать ночь: окна зависят от размера корпуса.",
-              "- [ ] При расхождении вёрсток Контура: арбитр — акт на publication.pravo.gov.ru (п. 11).", ""]
+              "- [ ] Сделать профиль выкатки и выбрать ночь: окна зависят от размера корпуса.", ""]
     return scrub("\n".join(lines))
 
 
 def write_report(ctx: Ctx, stopped: str | None, last_step: str) -> Path:
     out = Path(ctx.args.sources) / ctx.doc_id / "report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
-    verdict = verdict_of(stopped, last_step, ctx.warnings)
+    verdict = verdict_of(stopped, last_step, ctx.warnings, ctx.surprises)
     data = {"документ": ctx.doc_id, "вердикт": verdict, "последний шаг": last_step, "шаги": ctx.log,
             "замечания": ctx.warnings, "факты": ctx.facts}
     out.write_text(scrub(json.dumps(data, ensure_ascii=False, indent=2)), encoding="utf-8")
