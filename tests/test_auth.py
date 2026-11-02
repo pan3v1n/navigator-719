@@ -166,6 +166,17 @@ class TestLoginDemo(unittest.TestCase):
             self.assertNotIn("территориальн", d["a"], "«через территориальные палаты» в пунктах нет")
             self.assertNotIn("конструкторск", d["a"], "перечня документов к заявке в пунктах нет")
 
+    def test_landing_answers_who_issues_the_act_with_the_checked_text(self):
+        """Панель «Эксперту ТПП» в индексируемом HTML и демо первого экрана: тот же сверенный ответ и его источник."""
+        d = web.LOGIN_DEMO[0]
+        for name in ("index.html", "app.js"):
+            with self.subTest(name):
+                text = (ROOT / "landing" / name).read_text(encoding="utf-8")
+                self.assertIn(d["a"], text)
+                self.assertIn(d["ref"], text)
+                self.assertNotIn("территориальн", text, "«через территориальные палаты» в пунктах нет")
+                self.assertNotIn("п. 2.1", text, "ответ стоит на п. 7 Правил, а не на п. 2.1 Приказа № 52")
+
     def test_page_starts_with_the_checked_example_and_animates(self):
         from fastapi.testclient import TestClient
 
