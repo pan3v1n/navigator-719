@@ -79,3 +79,7 @@ Disallow: /api/
 www.{$PUBLIC_DOMAIN} {
 	redir https://{$PUBLIC_DOMAIN}{uri} permanent
 }
+
+# Блоки сайтов, которые живут только на сервере (стенд). Маска намеренно: файлов нет — только
+# предупреждение в журнале, Caddy запускается. Точное имя файла уронило бы запуск.
+import stand.d/*.caddy
