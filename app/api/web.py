@@ -38,7 +38,7 @@ from app.api.leads import TARIFFS as LEAD_TARIFFS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import commands, plans, pricing
+from app.core import commands, org_registry, plans, pricing
 from app.core.plans import PLAN_LIMITS
 from app.core.inn import inn_valid
 from app.core.config import settings
@@ -71,6 +71,8 @@ def plural(n: int, one: str, few: str, many: str) -> str:
 templates.env.filters["plural"] = plural
 # Витрина тарифов (09.10.2026) — описание одно на все отрисовки кабинета, не поле контекста страницы.
 templates.env.globals["pricing"] = pricing
+# Организация по ИНН (DaData, 29.10.2026): кабинет и карточка в /admin показывают поиск, только если задан ключ.
+templates.env.globals["org_lookup_on"] = org_registry.enabled
 
 
 @lru_cache(maxsize=1)
@@ -145,9 +147,10 @@ def root(request: Request):
 # Демо-чат на синей панели входа — анимация как на первом экране лендинга (просьба владельца
 # 09.10.2026). ⚠ Страница публичная, и каждый пример ссылается на пункт: ответ обязан стоять на
 # тексте этого пункта. Поэтому у примера записаны источник и ДОСЛОВНАЯ цитата — их сверяет тест с
-# корпусом (`tests.test_auth.TestLoginDemo`). Примеры лендинга сюда не скопированы как есть: два из
-# четырёх (перечень документов к заявке, «через территориальные палаты») в цитируемых пунктах не
-# подтверждаются. Первый пример — тот, что стоял на странице статично и уже сверен с п. 7 Правил.
+# корпусом (`tests.test_auth.TestLoginDemo`). Примеры лендинга здесь свои: перечень документов к заявке
+# слишком длинен для одной цитаты, он сверен отдельным тестом там же. Первый пример — тот, что стоял на
+# странице статично и уже сверен с п. 7 Правил; с 02.11.2026 его текст стоит и на лендинге вместо
+# «через территориальные палаты» (этих слов в пунктах нет).
 LOGIN_DEMO = [
     {"q": "Кто выдаёт акт экспертизы для подтверждения производства?",
      "a": "Заявки для выдачи акта экспертизы рассматривает Торгово-промышленная палата Российской "
@@ -199,7 +202,7 @@ def login_page(request: Request, trial_over: str = ""):
 # а согласие даётся именно на её условиях. Дата редакции задаётся здесь и показывается на
 # странице: молча меняющийся правовой документ хуже отсутствующего.
 # --------------------------------------------------------------------------- #
-DOCS_UPDATED = "09.10.2026"  # кабинет: должность, email, телефон, организация и ИНН в политике
+DOCS_UPDATED = "02.11.2026"  # день публикации test45: ИНН организации уходит в DaData (поиск в ЕГРЮЛ)
 
 
 def _doc(request: Request, template: str, page_title: str, active: str) -> HTMLResponse:
