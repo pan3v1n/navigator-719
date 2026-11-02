@@ -36,6 +36,7 @@
     .venv\\Scripts\\python scripts\\watch_edition.py
     .venv\\Scripts\\python scripts\\watch_edition.py --source D:\\719_deystvuyushchaya.txt
     .venv\\Scripts\\python scripts\\watch_edition.py --json
+    .venv\\Scripts\\python scripts\\watch_edition.py --kontur    # проверка C, без файла, для расписания
 """
 
 from __future__ import annotations
@@ -44,17 +45,23 @@ import argparse
 import json
 import re
 import sys
+from datetime import date
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+import edition_source as es  # noqa: E402
 from app.rag.edition import (  # noqa: E402
     KONTUR_719_BY_EDITION,
     UNKNOWN,
     corpus_edition,
     edition_key,
+    kontur_719_url,
 )
 
 # «(в ред. Постановлений Правительства РФ от 22.07.2026 N 923, …)» — та же форма, что в
@@ -81,6 +88,8 @@ _AMEND_RE = re.compile(r"от\s*(\d{2})\.(\d{2})\.(\d{4})\s*[NН№]\s*(\d+)")
 # 16.08.2026), в сверку 719 не идёт.
 _CHUNKS = ROOT / "knowledge_base" / "pp719" / "chunks"
 BODY_FILE = _CHUNKS / "01_postanovlenie.txt"
+FULL_TEXT = ROOT / "knowledge_base" / "pp719" / "pp719_full.txt"
+WATCH_STATE = ROOT / "knowledge_base" / "pp719" / "edition_watch.json"
 
 
 # ⚠ Правила ведения реестра — ОТДЕЛЬНОЕ приложение со своей историей изменений, к редакции
@@ -239,12 +248,71 @@ def check_source(text: str, corpus_acts: set) -> dict:
     }
 
 
+def known_pending() -> dict[str, str]:
+    """Отложенные акты, о которых проект уже знает: акт → дата вступления (`edition_watch.json`)."""
+    return json.loads(WATCH_STATE.read_text(encoding="utf-8"))["отложенные"]
+
+
+def _date(text: str) -> tuple[int, int, int]:
+    d, m, y = text.split(".")
+    return int(y), int(m), int(d)
+
+
+def current_doc_id() -> str:
+    """documentId редакции, на которой стоит корпус: из той же таблицы, что ссылка в интерфейсе."""
+    return kontur_719_url().rsplit("=", 1)[1]
+
+
+def check_kontur(doc_id: str, known: dict[str, str], fetch=es.fetch, full_text: str | None = None,
+                 today: tuple[int, int, int] | None = None) -> dict:
+    """Проверка C (`A6-1`): что страница Контура говорит о редакции корпуса. Три исхода.
+
+    «не проверено» — сеть не пустила или разметка изменилась; это не тревога и не «всё хорошо».
+    «новое» — вышла другая редакция, появился неизвестный отложенный акт или акт, которого нет в тексте.
+    ⚠ Известный акт с будущей датой обязан стоять на странице. Исчез — скорее сломался разбор блока, а
+    не отменили акт: иначе смена заголовка блока читалась бы как «отложенных нет, всё спокойно».
+    """
+    data, why = fetch(es.KONTUR_DOC.format(doc_id=doc_id))
+    if data is None:
+        return {"исход": "не проверено", "причина": why}
+    page = data.decode("utf-8", errors="replace")
+    info = es.parse_page(page)
+    if info is None:
+        return {"исход": "не проверено", "причина": "разметка страницы не разобрана: статус редакции не найден"}
+    body = es.document_body(page, sep=" ")
+    if not body.strip():
+        return {"исход": "не проверено", "причина": "разметка страницы изменилась: текст документа не найден"}
+    docs = sorted(d for d in info.jumps if d != doc_id)
+    if not info.is_actual and not docs:
+        return {"исход": "не проверено", "причина": f"редакция «{info.title}» не действует, ссылки на новую нет"}
+    day = today or tuple(date.today().timetuple())[:3]
+    seen = {a.key for a in info.pending}
+    vanished = sorted(k for k, when in known.items() if k not in seen and _date(when) > day)
+    if vanished:
+        return {"исход": "не проверено", "причина": f"с страницы исчезли будущие акты: {vanished[:3]}. Разбор блока?"}
+    new_acts = [f"{a.key} (с {a.effective})" for a in info.pending if a.key not in known]
+    text = FULL_TEXT.read_text(encoding="utf-8") if full_text is None else full_text
+    missing = sorted(acts(body) - acts(text))
+    found = bool(docs or new_acts or missing)
+    return {"исход": "новое" if found else "нового нет", "редакция": info.title,
+            "новые документы": {d: info.jumps[d] for d in docs},
+            "новые отложенные акты": new_acts, "актов нет в тексте": [label(a) for a in missing],
+            "отложенных всего": len(info.pending)}
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description="A6: слежение за редакциями ПП №719")
     ap.add_argument("--source", metavar="FILE", help="текст ДЕЙСТВУЮЩЕЙ редакции (сохранённый файл)")
     ap.add_argument("--url", help="адрес действующей редакции (⚠ канал рвётся, файл надёжнее)")
+    ap.add_argument("--kontur", action="store_true",
+                    help="проверить страницу Контура: код 0 — нового нет, 1 — новое, 2 — не проверено")
     ap.add_argument("--json", action="store_true", help="машиночитаемый вывод")
     args = ap.parse_args()
+
+    if args.kontur:
+        result = check_kontur(current_doc_id(), known_pending())
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        sys.exit({"нового нет": 0, "новое": 1}.get(result["исход"], 2))
 
     report: dict = {"корпус": check_corpus()}
     corpus = report["корпус"]
