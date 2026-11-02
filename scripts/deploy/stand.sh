@@ -23,6 +23,9 @@ case "$DOCKER" in
 esac
 MIN_MEM_MB=3000
 MIN_DISK_GB=15
+# Настройки движка берутся у боя, если там заданы: иначе стенд покажет не то, что будет после выкатки.
+ENGINE_SETTINGS="DEEPSEEK_MODEL DEEPSEEK_BASE_URL EMBEDDING_MODEL EMBEDDING_DIM RERANK_ENABLED CASE_RELEVANCE_MIN
+PROCEDURAL_DEFLECT_ENABLED PROCEDURAL_ANSWER_FROM_RULES QDRANT_RULES_COLLECTION QDRANT_CASES_COLLECTION"
 
 say() { printf '%s\n' "$*"; }
 die() { printf 'СТОП: %s\n' "$*" >&2; exit 1; }
@@ -73,7 +76,7 @@ drop_site() {
 
 cmd_init() {
   cmd_check
-  local dom pw hash key svc_host dev_host code
+  local dom pw hash key svc_host dev_host code name value
   dom="$(domain)"
   svc_host="$(env_value APP_SUBDOMAIN).$dom"
   dev_host="dev.$dom"
@@ -87,6 +90,10 @@ cmd_init() {
       printf 'SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
       printf 'DEEPSEEK_API_KEY=%s\n' "$key"
       printf 'COOKIE_SECURE=true\nGUEST_TRIAL_ENABLED=true\nPUBLIC_DOMAIN=%s\n' "$dom"
+      for name in $ENGINE_SETTINGS; do
+        value="$(env_value "$name")"
+        [ -z "$value" ] || printf '%s=%s\n' "$name" "$value"
+      done
     } > "$STAND/.env.stand"
     say "настройки стенда записаны, секрет сессии свой"
   fi
@@ -99,6 +106,7 @@ cmd_init() {
   [ -n "$hash" ] || die "хеш пароля не получен"
   printf 'адрес: https://dev.719-навигатор.рф\nвход на стенд: stand / %s\n' "$pw" > "$STAND/ACCESS.txt"
   mkdir -p "$(dirname "$SITE")"
+  chmod 755 "$(dirname "$SITE")"   # umask выше закрыл бы каталог от контейнера caddy
   cat > "$SITE" <<EOF
 dev.{\$PUBLIC_DOMAIN} {
 	encode gzip
@@ -115,7 +123,7 @@ dev.{\$PUBLIC_DOMAIN} {
 	}
 }
 EOF
-  chmod 644 "$SITE"   # контейнер caddy читает его не от владельца файла
+  chmod 644 "$SITE"
   if ! caddy_cmd validate >/dev/null 2>&1; then
     rm -f "$SITE"
     die "конфиг caddy не прошёл проверку, блок убран, бой не тронут"
