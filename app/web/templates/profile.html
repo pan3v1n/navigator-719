@@ -201,7 +201,6 @@
       <div class="tcards" data-panel="{{ kind }}" role="tabpanel"{% if kind != tariff_kind %} hidden{% endif %}>
         {% for p in pricing.PLANS %}{% set promo = p.trial and kind == 'individual' %}
         <form class="tcard{% if promo %} promo{% endif %}" method="get" action="/profile#tariffs"{% if kind == 'corporate' %} data-price="{{ pricing.PRICES[p.name] }}"{% endif %}>
-          {% if promo %}<span class="tcard-badge">Предложение ограничено</span>{% endif %}
           <input type="hidden" name="tab" value="plan"><input type="hidden" name="confirm" value="1">
           <input type="hidden" name="tariff" value="{{ p.name }}"><input type="hidden" name="kind" value="{{ kind }}">
           {% if promo %}<input type="hidden" name="trial" value="1">{% endif %}

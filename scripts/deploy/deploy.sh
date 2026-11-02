@@ -794,6 +794,17 @@ if [ -n "$PUBLIC_DOMAIN_ENV" ]; then
       *) fail "публичный вход https://$host$path отдал $code — сертификат/caddy (compose logs caddy)" ;;
     esac
   done
+  # www — только 301 на корень (SEO, 02.11.2026). Предупреждение, а не провал: лендинг и приложение
+  # проверены выше, а сертификат на новое имя выпускается асинхронно.
+  host="www.$PUBLIC_DOMAIN_ENV"; code=000; n=0
+  while [ $n -lt 6 ]; do
+    code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
+           --resolve "$host:443:127.0.0.1" "https://$host/" 2>/dev/null || echo 000)
+    [ "$code" = "301" ] && break
+    n=$((n + 1)); sleep 10
+  done
+  echo "   https://$host/ → $code (ожидается 301 на корень)"
+  [ "$code" = "301" ] || say "  ⚠ www не отдаёт 301 ($code): сертификат или caddy (compose logs caddy)"
   code=$(curl -s -o /dev/null -w "%{http_code}" --max-time 15 \
          --resolve "$PUBLIC_DOMAIN_ENV:80:127.0.0.1" "http://$PUBLIC_DOMAIN_ENV/" 2>/dev/null || echo 000)
   echo "   http://$PUBLIC_DOMAIN_ENV/ → $code (ожидается редирект на https)"

@@ -1087,8 +1087,6 @@ body.tour-on { overflow: hidden; }
 .tcard.promo { box-shadow: inset 0 0 0 1px var(--blue); }
 .tcard.org { background: var(--gray); box-shadow: none; }
 .tcard.org .ds-btn.secondary { background: #fff; }
-.tcard-badge { position: absolute; top: -12px; left: 50%; transform: translateX(-50%); white-space: nowrap;
-  padding: 4px 10px; border-radius: 999px; background: var(--grad-btn); color: #fff; font: 600 12px/1.2 var(--font); }
 .tcard-name { font: 600 20px/1.25 var(--font); color: var(--ink); }
 .tcard-desc { font: 400 14px/1.4 var(--font); color: var(--ink-80); }
 .tcard-price { margin-top: auto; display: flex; flex-direction: column; gap: 2px; min-height: 58px; justify-content: flex-end; }
