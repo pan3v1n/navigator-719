@@ -91,6 +91,10 @@ class TestCaddyfile(unittest.TestCase):
     def setUp(self):
         self.src = _read("caddy/Caddyfile")
 
+    def test_server_only_blocks_are_imported_by_mask(self):
+        """Маска, а не имя файла: на тарболе и на чистом сервере каталога нет, и Caddy обязан подняться."""
+        self.assertRegex(self.src, r"(?m)^import stand\.d/\*\.caddy\r?$")
+
     def test_two_sites(self):
         self.assertRegex(self.src, r"(?m)^\{\$PUBLIC_DOMAIN\} \{", "корень → лендинг")
         self.assertRegex(self.src, r"(?m)^\{\$APP_SUBDOMAIN\}\.\{\$PUBLIC_DOMAIN\} \{",
