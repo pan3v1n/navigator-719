@@ -82,40 +82,16 @@
   }
 
   // ---- кому и зачем: вкладки ----
-  var TABS = [
-    { title: 'Производителю', lead: 'Подготовка к подтверждению производства без ручного поиска по тексту постановления и приложений.',
-      actions: ['Определить, какие требования приложения применяются к вашей продукции', 'Узнать порядок внесения продукции в реестр и перечень документов', 'Подготовиться к экспертизе ТПП и проверить сведения заранее'],
-      q: 'Какие требования применяются к металлообрабатывающим станкам?',
-      a: 'Станки входят в раздел I приложения — «Продукция станкоинструментальной промышленности». Требования балльные: например, управляющий программно-аппаратный комплекс российского производства даёт 25 баллов.',
-      ref: 'Приложение, разд. I', refFull: 'ПРИЛОЖЕНИЕ К ПОСТАНОВЛЕНИЮ № 719, РАЗДЕЛ I, ПОЗИЦИЯ 13' },
-    { title: 'Эксперту ТПП', lead: 'Быстрая сверка с нормой при проведении экспертизы и подготовке акта.',
-      actions: ['Найти норму для проверки заявленных технологических операций', 'Сверить формулировки акта экспертизы с текстом постановления и приказов ТПП РФ', 'Уточнить действующую редакцию пункта и дату изменений'],
-      q: 'Кто выдаёт акт экспертизы для подтверждения производства продукции?',
-      a: 'Торгово-промышленная палата Российской Федерации — через уполномоченные территориальные палаты. Акт оформляется и размещается в ГИСП.',
-      ref: 'Приказ ТПП РФ № 52, п. 2.1', refFull: 'ПРИКАЗ ТПП РФ № 52, РАЗДЕЛ 2, П. 2.1' },
-    { title: 'Закупщику', lead: 'Проверка российского происхождения продукции при подготовке и оценке заявок.',
-      actions: ['Проверить, внесена ли продукция участника в реестр российской промышленной продукции', 'Понять, какими документами подтверждается производство в РФ', 'Сформулировать требования к участникам в документации'],
-      q: 'Как участнику закупки подтвердить, что его продукция включена в реестр российской промышленной продукции?',
-      a: 'Производство подтверждается одним из критериев пункта 1 ПП № 719 — например, актом экспертизы ТПП или сертификатом СТ-1. Заявку на включение сведений в реестр подают только через ГИСП.',
-      ref: 'ПП № 719, п. 1', refFull: 'ПОСТАНОВЛЕНИЕ № 719, П. 1 — КРИТЕРИИ ПОДТВЕРЖДЕНИЯ ПРОИЗВОДСТВА' }
-  ];
-  var tabs = document.querySelectorAll('.seg [role="tab"]'), panel = document.getElementById('aud-panel'), cur = 0;
-  function setText(id, t) { document.getElementById(id).textContent = t; }
+  // Панели лежат в HTML (их тексты должен видеть поисковый робот), скрипт только переключает `hidden`.
+  // ⚠ Вкладки ищутся внутри секции: прежний `.seg [role="tab"]` захватывал и вкладки тарифов, и клик
+  // по тарифу листал роли, а клик по роли портил выбранную вкладку тарифа.
+  var aud = document.getElementById('audience'), tabs = aud.querySelectorAll('[role="tab"]'),
+      audPanels = aud.querySelectorAll('[role="tabpanel"]'), cur = 0;
   function goTab(i, focus) {
-    cur = (i + TABS.length) % TABS.length;
-    var t = TABS[cur];
+    cur = (i + tabs.length) % tabs.length;
     tabs.forEach(function (b, k) { b.setAttribute('aria-selected', String(k === cur)); b.tabIndex = k === cur ? 0 : -1; });
+    audPanels.forEach(function (p, k) { p.hidden = k !== cur; });
     if (focus) tabs[cur].focus();
-    panel.setAttribute('aria-labelledby', 'tab-' + cur);
-    setText('aud-title', t.title); setText('aud-lead', t.lead); setText('aud-q', t.q); setText('aud-a', t.a);
-    setText('aud-ref', t.ref); setText('aud-ref-full', t.refFull); setText('aud-counter', '0' + (cur + 1) + ' / 03');
-    var acts = document.getElementById('aud-acts'); acts.innerHTML = '';
-    t.actions.forEach(function (text, k) {
-      var row = document.createElement('div'); row.className = 'act';
-      var n = document.createElement('div'); n.className = 'act-n'; n.textContent = '0' + (k + 1);
-      var x = document.createElement('div'); x.className = 'act-t'; x.textContent = text;
-      row.appendChild(n); row.appendChild(x); acts.appendChild(row);
-    });
   }
   tabs.forEach(function (b, k) {
     b.addEventListener('click', function () { goTab(k); });
@@ -124,8 +100,8 @@
       if (e.key === 'ArrowLeft') { e.preventDefault(); goTab(cur - 1, true); }
     });
   });
-  document.getElementById('aud-prev').addEventListener('click', function () { goTab(cur - 1); });
-  document.getElementById('aud-next').addEventListener('click', function () { goTab(cur + 1); });
+  aud.querySelectorAll('.aud-prev').forEach(function (b) { b.addEventListener('click', function () { goTab(cur - 1); }); });
+  aud.querySelectorAll('.aud-next').forEach(function (b) { b.addEventListener('click', function () { goTab(cur + 1); }); });
 
   // ---- витрина тарифов (09.10.2026, по образцу Нейроюриста; цены — из презентации, 14.10.2026) ----
   var ptabs = document.querySelectorAll('#price-tabs [role="tab"]'), ptitle = document.getElementById('pricing-h');
@@ -137,7 +113,17 @@
     });
     document.querySelectorAll('#pricing [data-panel]').forEach(function (p) { p.hidden = p.getAttribute('data-panel') !== kind; });
   }
-  ptabs.forEach(function (t) { t.addEventListener('click', function () { showPlans(t.getAttribute('data-kind')); }); });
+  ptabs.forEach(function (t, k) {
+    t.addEventListener('click', function () { showPlans(t.getAttribute('data-kind')); });
+    // Стрелки: неактивные вкладки вне порядка Tab (tabIndex -1), без этого с клавиатуры до них не добраться.
+    t.addEventListener('keydown', function (e) {
+      var d = e.key === 'ArrowRight' ? 1 : e.key === 'ArrowLeft' ? -1 : 0;
+      if (!d) return;
+      e.preventDefault();
+      var next = ptabs[(k + d + ptabs.length) % ptabs.length];
+      showPlans(next.getAttribute('data-kind')); next.focus();
+    });
+  });
   document.querySelectorAll('[data-goto]').forEach(function (b) {
     b.addEventListener('click', function () { showPlans(b.getAttribute('data-goto')); ptitle.scrollIntoView({ block: 'start' }); });
   });
