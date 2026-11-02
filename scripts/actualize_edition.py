@@ -317,7 +317,7 @@ def unconfirmed_pairs(raw_block: str, rec: dict) -> list[str]:
 
 def source_lines(raw_block: str, rec: dict) -> tuple[list[str], list[str]]:
     """Длинные строки ячейки источника и те из них, начала которых нет в записи."""
-    parts = [_norm(o.get("text")) for o in record_operations(rec)]
+    parts = [_norm(rec.get("product_name")), *(_norm(o.get("text")) for o in record_operations(rec))]
     for block in rec.get("requirement_blocks") or []:
         parts += [_norm(block.get("component")), _norm(block.get("note"))]
     joined = " ".join(parts)
@@ -330,13 +330,25 @@ def lost_requirements(raw_block: str, rec: dict) -> list[str]:
     return [n[:70] for n in source_lines(raw_block, rec)[1] if _REQUIREMENT_RE.search(n)]
 
 
-def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[str, str]) -> tuple[list[str], list[str]]:
-    """Строки таблицы изменённых записей и замечания: баллы источника рядом с баллами записи."""
+def previous_record(name: str, codes: list[str] | None, previous: dict[str, dict]) -> dict | None:
+    """Прежняя запись той же позиции: якорь при `renumber` сдвигается, поэтому поиск по имени."""
+    same = [r for r in previous.values() if r.get("product_name") == name]
+    return ([r for r in same if r.get("okpd2_codes") == codes] or same or [None])[0]
+
+
+def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[str, str],
+                previous: dict[str, dict] | None = None) -> tuple[list[str], list[str]]:
+    """Строки таблицы изменённых записей и замечания: баллы источника рядом с баллами записи.
+
+    Строки требований вне записи есть у четверти корпуса и без всякой правки, поэтому они делятся на две
+    группы. «Было и пропало» — адресное замечание. Строку, которой нет и в прежней записи, отличить от новой
+    строки редакции нельзя: она не пропадает из отчёта, но идёт одной сводной строкой.
+    """
     import structure_kb as sk
     from restructure_changed import clean_name
 
     products: dict[str, list] = {}
-    rows, notes = [], []
+    rows, notes, old_gaps = [], [], []
     for anchor in sorted(anchors):
         rec = records[anchor]
         roman = rec.get("section_roman")
@@ -358,8 +370,13 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
                 notes.append(f"{anchor}: баллы расходятся с источником: нет в записи {lost}, лишние {extra}")
             if bad := unconfirmed_pairs(raw, rec):
                 notes.append(f"{anchor}: пара «операция — балл» не подтверждена у {len(bad)}: {bad[:3]}")
-            if lost_req := lost_requirements(raw, rec):
-                notes.append(f"{anchor}: требования из ячейки не нашлись в записи, {len(lost_req)}: {lost_req[:2]}")
+            lost_req = lost_requirements(raw, rec)
+            old = previous_record(name, rec.get("okpd2_codes"), previous or {})
+            before_gap = lost_requirements(raw, old) if old else []
+            if gone := [n for n in lost_req if n not in before_gap]:
+                notes.append(f"{anchor}: требования из ячейки не нашлись в записи, {len(gone)}: {gone[:2]}")
+            elif lost_req:
+                old_gaps.append(anchor)
             all_lines, absent = source_lines(raw, rec)
             lines = f"{len(all_lines) - len(absent)} / {len(all_lines)}"
         if re.search(r"налич|обязательн", rec.get("notes") or "", re.I):
@@ -368,6 +385,9 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
         src_sum = "?" if theirs is None else f"{sum(theirs.elements()):g}"
         rows.append(table_row(name[:60], roman, f"{len(record_operations(rec))} ({sum(ours.values())} / {src_ops})",
                               f"{sum(ours.elements()):g} / {src_sum}", lines, thresholds.get(anchor, "")[:90]))
+    if old_gaps:
+        notes.append(f"Ещё {len(old_gaps)} записей: строк требований из ячейки нет ни в прежней, ни в новой записи "
+                     f"(старый пробел или новая строка редакции): {old_gaps[:6]}")
     return rows, notes
 
 
@@ -641,7 +661,7 @@ def step_gates(ctx: Ctx) -> str:
     corpus = json.loads(py("watch_edition.py", "--json", check=False).stdout)["корпус"]
     if not corpus["части согласованы"]:
         raise Stop("watch_edition: тело постановления и разделы приложения не согласованы")
-    rows, notes = review_rows(fresh, recs_after, after)
+    rows, notes = review_rows(fresh, recs_after, after, recs_before)
     ctx.facts["изменённые записи"] = rows
     ctx.warnings += notes
     # Методичка раздела идёт в индекс, а шлюзы её не сверяют: правка видна только глазами.
@@ -726,6 +746,12 @@ def render_report(doc_id: str, verdict: str, steps: list[dict], facts: dict, war
     return scrub("\n".join(lines))
 
 
+def clear_report(sources: str, doc_id: str) -> None:
+    """Прогон, прерванный без отчёта, не должен оставить прежний успешный: автомат опубликовал бы его данные."""
+    for name in ("report.json", "report.md"):
+        (Path(sources) / doc_id / name).unlink(missing_ok=True)
+
+
 def write_report(ctx: Ctx, stopped: str | None, last_step: str) -> Path:
     out = Path(ctx.args.sources) / ctx.doc_id / "report.json"
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -750,6 +776,7 @@ def main() -> None:
                     help="принять страницу недействующей редакции: только для реплея прошлых редакций")
     args = ap.parse_args()
 
+    clear_report(args.sources, args.doc_id)
     ctx = Ctx(doc_id=args.doc_id, args=args)
     stopped, last = None, STEPS[0]
     for name in STEPS:

@@ -242,6 +242,46 @@ class TestReviewRows(unittest.TestCase):
                 mock.patch("structure_kb.find_chunk", return_value=chunk):
             return ae.review_rows({"a"}, {"a": rec}, {"a": "не менее 115"})
 
+    def rows_with_previous(self, previous, rec=None):
+        import structure_kb as sk
+
+        cell = "сварка рамы 20 баллов\nналичие прав на конструкторскую документацию у изготовителя"
+        product = sk.Product(okpd2_field="25.93", name_raw="Иглы", okpd2_codes=["25.93"], component_cells=[cell])
+        chunk = SimpleNamespace(read_text=lambda encoding: "")
+        rec = rec or self.rec([("сварка рамы", 20)])
+        with mock.patch("structure_kb.parse_section", return_value=("", [product])), \
+                mock.patch("structure_kb.find_chunk", return_value=chunk):
+            return ae.review_rows({"a"}, {"a": rec}, {}, previous)
+
+    def test_requirement_dropped_by_new_record_is_addressed(self):
+        was = self.rec([("сварка рамы", 20), ("наличие прав на конструкторскую документацию у изготовителя", None)])
+        _, notes = self.rows_with_previous({"старый якорь": was})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("a: требования из ячейки не нашлись", notes[0])
+
+    def test_gap_of_both_records_is_one_summary_line(self):
+        _, notes = self.rows_with_previous({"старый якорь": self.rec([("сварка рамы", 20)])})
+        self.assertEqual(len(notes), 1)
+        self.assertIn("Ещё 1 записей", notes[0])
+        self.assertIn("['a']", notes[0])
+
+    def test_new_position_reports_every_lost_requirement(self):
+        _, notes = self.rows_with_previous({})
+        self.assertIn("a: требования из ячейки не нашлись", notes[0])
+
+    def test_previous_record_prefers_same_codes(self):
+        same_name = {"x": {"product_name": "Иглы", "okpd2_codes": ["1"], "id": 1},
+                     "y": {"product_name": "Иглы", "okpd2_codes": ["2"], "id": 2}}
+        self.assertEqual(ae.previous_record("Иглы", ["2"], same_name)["id"], 2)
+        self.assertEqual(ae.previous_record("Иглы", ["3"], same_name)["id"], 1)
+        self.assertIsNone(ae.previous_record("Нет", ["1"], same_name))
+
+    def test_name_of_the_position_is_not_a_lost_line(self):
+        name = "Подшипники шариковые или роликовые особого назначения"
+        all_lines, absent = ae.source_lines(f"{name}\nнастоящая длинная строка требования источника", {"product_name": name})
+        self.assertEqual(len(all_lines), 2)
+        self.assertEqual(len(absent), 1)
+
     def test_clean_record_has_no_notes(self):
         rows, notes = self.rows(self.rec())
         self.assertEqual(notes, [])
@@ -838,6 +878,27 @@ class TestPipelineMain(unittest.TestCase):
         code, report = self.run_main({**self.ok(), "text": stop, "chunks": lambda ctx: calls.append(1)})
         self.assertEqual((code, calls), (1, []))
 
+    def test_old_reports_are_gone_when_run_is_interrupted(self):
+        with tempfile.TemporaryDirectory() as d:
+            src = Path(d) / "1"
+            src.mkdir()
+            (src / "report.json").write_text("{}", encoding="utf-8")
+            (src / "report.md").write_text("старый", encoding="utf-8")
+            ae.clear_report(d, "1")
+            self.assertEqual(list(src.iterdir()), [])
+            ae.clear_report(d, "нет такого")
+
+    def test_main_clears_report_before_the_first_step(self):
+        cleared = []
+
+        def guard(ctx):
+            self.assertEqual(cleared, ["1"])
+            return "ok"
+
+        with mock.patch.object(ae, "clear_report", side_effect=lambda sources, doc: cleared.append(doc)):
+            self.run_main({**self.ok(), "guard": guard})
+        self.assertEqual(cleared, ["1"])
+
     def test_partial_run_is_marked(self):
         code, report = self.run_main(self.ok(), until="guard")
         self.assertEqual(code, 0)
@@ -1031,6 +1092,7 @@ class TestHandleDocument(unittest.TestCase):
         self.assertIn("gates", title)
         self.assertNotIn("секрет", title + body)
         self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
+        self.assertTrue(r.issues.once.call_args.kwargs["reopen"], "закрытая задача не глушит новую остановку")
 
     def test_stop_is_repeated_next_day(self):
         r = self.run_doc(built=True, result=self.STOPPED)
@@ -1044,11 +1106,18 @@ class TestHandleDocument(unittest.TestCase):
         self.assertIn("не скачивается", title)
         self.assertNotIn("секретный", title + body)
         self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
+        self.assertTrue(r.issues.once.call_args.kwargs["reopen"], "закрытая задача не глушит непрекращающийся отказ")
 
     def test_publish_failure_makes_urgent_issue(self):
         r = self.run_doc(publish={"side_effect": subprocess.CalledProcessError(1, "git push")})
         self.assertIn("PR не создан", r.issues.once.call_args.args[0])
         self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
+        self.assertTrue(r.issues.once.call_args.kwargs["reopen"])
+
+    def test_human_commits_on_the_branch_make_issue(self):
+        r = self.run_doc(publish={"side_effect": aa.HumanCommits("на ветке коммиты человека")})
+        self.assertIn("PR не создан", r.issues.once.call_args.args[0])
+        self.assertIn("HumanCommits", r.issues.once.call_args.args[1])
 
     def test_gh_pr_failure_makes_urgent_issue(self):
         r = self.run_doc(publish={"side_effect": RuntimeError("gh pr create")})
@@ -1117,6 +1186,7 @@ class TestRunOnce(unittest.TestCase):
         issues, _ = self.run_with({"исход": "не проверено", "причина": "сеть"}, {"последняя успешная проверка": self.LAST})
         self.assertIn("молчит", issues.once.call_args.args[0])
         self.assertTrue(issues.once.call_args.kwargs["urgent"])
+        self.assertTrue(issues.once.call_args.kwargs["reopen"])
 
     def test_short_silence_is_quiet(self):
         last = dt.datetime(2026, 11, 8, tzinfo=dt.timezone.utc).isoformat()
@@ -1246,25 +1316,47 @@ class TestBuild(unittest.TestCase):
 
     def test_prefetch(self):
         with tempfile.TemporaryDirectory() as d:
-            with mock.patch.object(aa.es, "fetch", return_value=(b"x", "")):
+            real = [(b"{\\rtf1 x", ""), (b'<div id="js-doc-frame-container">', "")]
+            with mock.patch.object(aa.es, "fetch", side_effect=real):
                 self.assertIsNone(aa.prefetch("1", Path(d)))
             self.assertTrue((Path(d) / "1" / "edition.rtf").exists())
             self.assertTrue((Path(d) / "1" / "edition.html").exists())
             with mock.patch.object(aa.es, "fetch", return_value=(None, "timed out")):
                 self.assertEqual(aa.prefetch("2", Path(d)), "timed out")
 
+    def test_prefetch_rejects_answers_that_are_not_documents(self):
+        with tempfile.TemporaryDirectory() as d:
+            with mock.patch.object(aa.es, "fetch", return_value=(b"", "")):
+                self.assertEqual(aa.prefetch("1", Path(d)), "пустой ответ")
+            with mock.patch.object(aa.es, "fetch", return_value=(b"<html>sorry</html>", "")):
+                self.assertIn("edition.rtf", aa.prefetch("1", Path(d)))
+            page = [(b"{\\rtf1 x", ""), (b"<html>sorry</html>", "")]
+            with mock.patch.object(aa.es, "fetch", side_effect=page):
+                self.assertIn("edition.html", aa.prefetch("1", Path(d)))
+
     def pr(self, prs, tip):
         runner = mock.Mock(return_value=answer(out=json.dumps(prs)))
         with mock.patch.object(aa, "git", return_value=tip):
             return aa.pr_opened("1", runner)
 
-    def test_pr_is_matched_by_commit(self):
-        self.assertTrue(self.pr([{"headRefOid": "abc"}], "abc\n"))
-        self.assertFalse(self.pr([{"headRefOid": "old"}], "abc\n"), "закрытый PR прошлой сборки не глушит пересборку")
+    def test_closed_pr_is_matched_by_commit(self):
+        self.assertTrue(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], "abc\n"))
+        self.assertFalse(self.pr([{"headRefOid": "old", "state": "CLOSED"}], "abc\n"), "PR прошлой сборки не глушит пересборку")
+        self.assertFalse(self.pr([{"headRefOid": "old", "state": "MERGED"}], "abc\n"))
         self.assertFalse(self.pr([], "abc\n"))
 
+    def test_open_pr_stands_even_if_the_branch_moved(self):
+        self.assertTrue(self.pr([{"headRefOid": "old", "state": "OPEN"}], "abc\n"), "PR правит человек")
+        self.assertTrue(self.pr([{"headRefOid": "old", "state": "CLOSED"}, {"headRefOid": "x", "state": "OPEN"}], "abc\n"))
+
+    def test_github_is_asked_for_the_state(self):
+        runner = mock.Mock(return_value=answer(out="[]"))
+        with mock.patch.object(aa, "git", return_value=""):
+            aa.pr_opened("1", runner)
+        self.assertIn("headRefOid,state", runner.call_args.args)
+
     def test_pr_without_local_branch(self):
-        self.assertTrue(self.pr([{"headRefOid": "abc"}], ""))
+        self.assertTrue(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], ""))
 
     def test_pr_silence(self):
         self.assertIsNone(aa.pr_opened("1", mock.Mock(return_value=answer(code=1))))
@@ -1299,6 +1391,8 @@ class TestPublish(unittest.TestCase):
             (self.tree / name).write_text("1", encoding="utf-8")
         self.git("add", ".", cwd=self.tree)
         self.git("commit", "-q", "-m", "база", cwd=self.tree)
+        self.git("push", "-q", "origin", "HEAD:dev", cwd=self.tree)
+        self.git("fetch", "-q", "origin", cwd=self.tree)
         self.git("checkout", "-q", "-b", "auto/edition-1", cwd=self.tree)
         (self.tree / "knowledge_base" / "a.txt").write_text("2", encoding="utf-8")
         (self.tree / "stray.txt").write_text("чужое", encoding="utf-8")
@@ -1342,6 +1436,30 @@ class TestPublish(unittest.TestCase):
             self.publish(gh_code=1)
         out, _ = self.publish()
         self.assertEqual(out, "https://x/pr/1")
+
+    def remote_tip(self):
+        return subprocess.run(["git", "ls-remote", "--heads", str(self.remote), "auto/edition-1"],
+                              capture_output=True, text=True).stdout.split()[0]
+
+    def test_commit_of_a_human_is_never_published(self):
+        self.publish()
+        pushed = self.remote_tip()
+        (self.tree / "knowledge_base" / "a.txt").write_text("правка человека", encoding="utf-8")
+        self.git("add", ".", cwd=self.tree)
+        self.git("commit", "-q", "-m", "WIP человека", cwd=self.tree)
+        with self.assertRaises(aa.HumanCommits):
+            self.publish()
+        self.assertEqual(self.remote_tip(), pushed)
+
+    def test_uncommitted_edit_after_our_commit_stays_local(self):
+        with self.assertRaises(RuntimeError):
+            self.publish(gh_code=1)
+        (self.tree / "knowledge_base" / "a.txt").write_text("правка человека", encoding="utf-8")
+        self.publish()
+        shown = subprocess.run(["git", "show", "origin/auto/edition-1:knowledge_base/a.txt"], cwd=self.tree,
+                               capture_output=True, text=True, encoding="utf-8").stdout
+        self.assertEqual(shown, "2")
+        self.assertIn("правка человека", (self.tree / "knowledge_base" / "a.txt").read_text(encoding="utf-8"))
 
 
 class TestParserPrompt(unittest.TestCase):

@@ -48,6 +48,12 @@ MAIN_ENV = Path("D:/navigator-719/.env")
 KEY = "DEEPSEEK_API_KEY"
 # Что конвейер имеет право менять. `git add` всего дерева забрал бы лишнее.
 PUBLISH_PATHS = ("knowledge_base", "app/rag/edition.py", "landing/index.html")
+# Признаки настоящего ответа: заглушка с кодом 200 иначе дошла бы до конвейера и заняла ветку.
+SOURCE_FILES = ((es.KONTUR_RTF, "edition.rtf", b"{\\rtf"), (es.KONTUR_DOC, "edition.html", b"js-doc-frame-container"))
+
+
+class HumanCommits(RuntimeError):
+    """На ветке автомата есть чужие коммиты: уносить их в публичный репозиторий нельзя."""
 
 
 def now() -> dt.datetime:
@@ -91,7 +97,7 @@ class Issues:
         """Одна задача на заголовок. ⚠ Поиск не ответил — не заводим: лучше повторить завтра, чем дубль.
 
         `urgent` — вне потолка: о сборке и сбое нельзя молчать из-за трёх новых актов.
-        `reopen` — смотреть только открытые: сбой того же типа после закрытой задачи — новый случай.
+        `reopen` — смотреть только открытые: причина не устранена, и закрытая задача не должна её глушить.
         """
         if self.dry_run:
             return f"была бы создана задача: {title}"
@@ -129,10 +135,12 @@ def prefetch(doc_id: str, sources: Path) -> str | None:
     """
     src = sources / doc_id
     src.mkdir(parents=True, exist_ok=True)
-    for url, name in ((es.KONTUR_RTF, "edition.rtf"), (es.KONTUR_DOC, "edition.html")):
+    for url, name, mark in SOURCE_FILES:
         data, why = es.fetch(url.format(doc_id=doc_id))
-        if data is None:
+        if not data:
             return why or "пустой ответ"
+        if mark not in data:
+            return f"{name}: ответ не похож на документ"
         (src / name).write_bytes(data)
     return None
 
@@ -159,7 +167,8 @@ def read_report(doc_id: str, sources: Path) -> tuple[bool, dict]:
 def build_edition(doc_id: str, sources: Path) -> tuple[bool, dict]:
     """Ветка `auto/edition-<id>` от `origin/dev` в своём каталоге, конвейер внутри неё."""
     tree, src = sources / f"wt-{doc_id}", sources / doc_id
-    (src / "report.json").unlink(missing_ok=True)    # упавший при запуске конвейер не должен прочесть чужой отчёт
+    for name in ("report.json", "report.md"):     # упавший при запуске конвейер не должен прочесть чужой отчёт
+        (src / name).unlink(missing_ok=True)
     git("fetch", "origin", "--quiet")
     git("worktree", "add", "-b", f"auto/edition-{doc_id}", str(tree), "origin/dev")
     run = subprocess.run([sys.executable, "scripts/actualize_edition.py", "--doc-id", doc_id, "--sources", str(sources),
@@ -169,31 +178,41 @@ def build_edition(doc_id: str, sources: Path) -> tuple[bool, dict]:
 
 
 def pr_opened(doc_id: str, runner=None) -> bool | None:
-    """Есть ли PR на нынешнюю вершину ветки. `None` — GitHub не ответил: решать нечего, повтор завтра.
+    """Есть ли PR этой сборки. `None` — GitHub не ответил: решать нечего, повтор завтра.
 
-    Сравнение по коммиту: закрытый PR прошлой сборки не должен заглушить пересборку на исправленном коде.
+    Открытый PR — всегда да: его правит человек, и вершины локальной ветки и PR расходятся законно.
+    Коммит сверяется только у закрытых: PR прошлой сборки не должен заглушить пересборку.
     """
     branch = f"auto/edition-{doc_id}"
-    found = (runner or gh)("pr", "list", "--head", branch, "--state", "all", "--json", "headRefOid")
+    found = (runner or gh)("pr", "list", "--head", branch, "--state", "all", "--json", "headRefOid,state")
     if found.returncode != 0:
         return None
-    heads = {p["headRefOid"] for p in json.loads(found.stdout or "[]")}
+    prs = json.loads(found.stdout or "[]")
+    if any(p["state"] == "OPEN" for p in prs):
+        return True
     tip = git("branch", "--list", "--format=%(objectname)", branch).strip()
-    return tip in heads if tip else bool(heads)
+    return tip in {p["headRefOid"] for p in prs} if tip else bool(prs)
 
 
 def publish(doc_id: str, tree: Path, report_md: Path) -> str:
     """Черновой PR в `dev`, повторяемо: коммит и пуш могли пройти в прошлый запуск, а PR — нет.
 
     Черновик нельзя слить случайно: его сначала переводит в готовый человек.
+    ⚠ Ветку мог забрать в работу человек, а репозиторий публичен. Чужой коммит — отказ. Свой коммит уже есть —
+    сборка в нём, и всё незакоммиченное в дереве принадлежит человеку: его не трогаем.
     """
     branch = f"auto/edition-{doc_id}"
-    git("add", "-A", "--", *PUBLISH_PATHS, cwd=tree)
-    if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=tree).returncode != 0:
-        git("commit", "-m", f"data(auto): редакция ПП 719, документ Контура {doc_id}", cwd=tree)
+    title = f"data(auto): редакция ПП 719, документ Контура {doc_id}"
+    made_before = git("log", "--format=%s", "origin/dev..HEAD", cwd=tree).splitlines()
+    if any(subject != title for subject in made_before):
+        raise HumanCommits(f"на ветке {branch} есть коммиты не автомата")
+    if not made_before:
+        git("add", "-A", "--", *PUBLISH_PATHS, cwd=tree)
+        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=tree).returncode != 0:
+            git("commit", "-m", title, cwd=tree)
     git("push", "-u", "origin", branch, cwd=tree)
     made = subprocess.run(["gh", "pr", "create", "--draft", "--base", "dev", "--head", branch, "--title",
-                           f"data(auto): редакция ПП 719, документ Контура {doc_id}", "--body-file", str(report_md)],
+                           title, "--body-file", str(report_md)],
                           cwd=tree, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if made.returncode != 0:
         raise RuntimeError(f"gh pr create: код {made.returncode}")
@@ -211,13 +230,13 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
             print(f"документ {doc_id}: первоисточник не скачался: {why}", flush=True)
             return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: первоисточник не скачивается",
                                "Контур показал новую редакцию, а её текст не скачался. Причина — в локальном журнале, "
-                               "попытка повторяется каждый день.", urgent=True)
+                               "попытка повторяется каждый день.", urgent=True, reopen=True)
         ok, report = build_edition(doc_id, sources)
     if not ok:
         step = report.get("последний шаг", "неизвестен")
         return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: конвейер остановился на шаге {step}",
                            f"Новая редакция, документ Контура {doc_id}. Подробности — в локальном отчёте "
-                           "`report.md` каталога первоисточников.", urgent=True)
+                           "`report.md` каталога первоисточников.", urgent=True, reopen=True)
     opened = pr_opened(doc_id)
     if opened is None:
         return f"документ {doc_id}: GitHub не ответил, повтор завтра"
@@ -229,7 +248,7 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
         print(f"публикация не удалась: {e}", flush=True)
         return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: сборка готова, PR не создан",
                            f"Конвейер прошёл, публикация не удалась ({type(e).__name__}). Завтра попытка повторится, "
-                           f"работа лежит в локальной ветке `auto/edition-{doc_id}`.", urgent=True)
+                           f"работа лежит в локальной ветке `auto/edition-{doc_id}`.", urgent=True, reopen=True)
 
 
 def handle_found(result: dict, sources: Path, issues: Issues) -> list[str]:
@@ -259,7 +278,7 @@ def run_once(sources: Path, state: dict, issues: Issues) -> None:
         elif silent >= STALE_DAYS:
             print(issues.once(f"[A10] Слежение за редакциями молчит с {state['последняя успешная проверка'][:10]}",
                               f"Проверка Контура не удаётся {silent} дн. Причина: {result['причина'][:200]}",
-                              urgent=True), flush=True)
+                              urgent=True, reopen=True), flush=True)
         return
     state["последняя успешная проверка"] = moment.isoformat()
     if result["исход"] == "новое":
