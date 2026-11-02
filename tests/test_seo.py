@@ -14,6 +14,7 @@ import re
 import shutil
 import struct
 import subprocess
+import tempfile
 import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
@@ -233,27 +234,39 @@ class TestCaddy(unittest.TestCase):
         self.assertIn("flush_interval -1", _site(APP_SITE))
 
 
-@unittest.skipUnless(shutil.which("bash"), "bash недоступен")
+def _bash_works() -> bool:
+    # на Windows `which` может найти заглушку WSL: файл есть, а запустить нечего
+    bash = shutil.which("bash")
+    return bool(bash) and subprocess.run([bash, "-c", "true"], capture_output=True).returncode == 0
+
+
+@unittest.skipUnless(_bash_works(), "bash недоступен")
 class TestDeployChecksWww(unittest.TestCase):
     """По поведению: фрагмент deploy.sh с подставным curl, по образцу TestCaddyConfMatches."""
 
-    def _run(self, reply: str) -> tuple[int, str]:
+    def _run(self, reply: str) -> tuple[int, str, str]:
         src = _read("scripts/deploy/deploy.sh")
         frag = re.search(r'^  host="www\.\$PUBLIC_DOMAIN_ENV".*?compose logs caddy\)"\n', src, re.S | re.M).group(0)
-        script = (f'set -u\nPUBLIC_DOMAIN_ENV=x.test; FAILED=0\nsleep() {{ :; }}; say() {{ echo "$*"; }}\n'
-                  f'fail() {{ FAILED=1; }}\ncurl() {{ printf "{reply}"; }}\n{frag}'
-                  f'echo "FAILED=$FAILED retries=$n"\n')
-        r = subprocess.run([shutil.which("bash"), "-c", script], capture_output=True, text=True, encoding="utf-8")
-        return r.returncode, r.stdout
+        with tempfile.TemporaryDirectory() as tmp:
+            # curl зовётся внутри $(...): аргументы видны только через файл
+            script = (f'set -u\nPUBLIC_DOMAIN_ENV=x.test; FAILED=0\nsleep() {{ :; }}; say() {{ echo "$*"; }}\n'
+                      f'fail() {{ FAILED=1; }}\ncurl() {{ echo "$*" >> args.log; printf "{reply}"; }}\n{frag}'
+                      f'echo "FAILED=$FAILED retries=$n"\n')
+            r = subprocess.run([shutil.which("bash"), "-c", script], capture_output=True, text=True,
+                               encoding="utf-8", cwd=tmp)
+            return r.returncode, r.stdout, Path(tmp, "args.log").read_text(encoding="utf-8")
 
     def test_redirect_passes_at_once(self):
-        rc, out = self._run("301")
+        rc, out, args = self._run("301")
         self.assertEqual(rc, 0, out)
         self.assertIn("FAILED=0 retries=0", out)
         self.assertNotIn("⚠", out)
+        # через caddy на самой VM и по https: иначе проверяется не то, что видит пользователь
+        self.assertIn("--resolve www.x.test:443:127.0.0.1", args)
+        self.assertIn("https://www.x.test/", args)
 
     def test_missing_certificate_warns_but_does_not_fail(self):
-        rc, out = self._run("000")
+        rc, out, _ = self._run("000")
         self.assertEqual(rc, 0, out)
         self.assertIn("⚠ www не отдаёт 301", out)
         self.assertIn("FAILED=0 retries=6", out, "имя второстепенное: сертификат не должен ронять выкатку")
