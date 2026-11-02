@@ -38,7 +38,7 @@ from app.api.leads import TARIFFS as LEAD_TARIFFS
 from app.api.leads import _EMAIL_RE as EMAIL_RE
 from app.api.leads import _digits as digits
 from app.api.ratelimit import SlidingWindow, client_ip
-from app.core import plans, pricing
+from app.core import commands, plans, pricing
 from app.core.plans import PLAN_LIMITS
 from app.core.inn import inn_valid
 from app.core.config import settings
@@ -103,6 +103,7 @@ def _ctx(request: Request, **kw) -> dict:
     return {"request": request, "app_title": settings.APP_TITLE, "org": settings.ORG_NAME,
             "corpus_edition": corpus_edition(), "release_label": release_label(),
             "landing_url": landing, "asset_v": asset_version(),
+            "commands": commands.page_view(),  # L8-1: каталог готовых команд
             # пробный режим без входа — ссылка на него со страницы входа
             "guest_trial": settings.GUEST_TRIAL_ENABLED,
             "guest_questions": settings.GUEST_TRIAL_QUESTIONS,

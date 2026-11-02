@@ -1616,7 +1616,7 @@ def product_low_relevance(search_query: str, qvec: list[float] | None,
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
                  history: list[dict] | None = None, brief: bool = False,
-                 corpus: str = corpora.AUTO) -> "Answer | _Plan":
+                 corpus: str = corpora.AUTO, search_text: str | None = None) -> "Answer | _Plan":
     """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
     поиск/реранк/кейсы → out-of-scope guard → сборка messages. Возвращает либо ранний Answer
     (meta / процедурный / нет-позиции — модель уже не нужна или отработала), либо _Plan для
@@ -1635,7 +1635,11 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     `rules`/`metodrek` — процедурная ветка с жёстким фильтром документов. Заготовки (приветствие)
     идут до выбора корпуса в любом режиме — корпуса у них нет. Перевод кодов ТН ВЭД↔ОКПД2 — только
     в «Авто» (ревью: при ручном выборе сервис подменял выбор пользователя справочником, а подпись
-    говорила «выбран вручную»); в «Приложении» код ТН ВЭД переводится и ищется по приложению."""
+    говорила «выбран вручную»); в «Приложении» код ТН ВЭД переводится и ищется по приложению.
+
+    `search_text` — что искать, если это не сам вопрос (готовая команда `L8-1`): модель видит текст
+    запроса целиком, а поиск, гейт релевантности и `scope` — только продукцию. Они откалиброваны на
+    коротких вопросах, и формулировка шаблона мешала им (замер в `docs/L8_COMMANDS_TZ.md` §11)."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import followup, meta, topics
     if meta.is_meta(query):
@@ -1652,7 +1656,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Мультитёрн: уточняющий вопрос переписываем в самостоятельный — ТОЛЬКО для поиска/гейтов
     # (генерация ниже видит историю диалога через messages).
     search_query = query
-    if history and _needs_context(query):
+    if search_text:
+        search_query = search_text
+    elif history and _needs_context(query):
         search_query = _contextualize(query, history)
 
     # L1 #146: корпус норм, выбранный ВРУЧНУЮ, — процедурная ветка без гейта. Гейт здесь не
@@ -1810,7 +1816,8 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     ctx = format_context(hits, search_query, all_codes,
                          dialog_codes=[hist_code] if hist_code else None)
     cases_ctx = format_cases(cases) if cases else None
-    resolved = search_query if search_query != query else None
+    # `resolved` — переписанный уточняющий вопрос; значение команды вопросом не является
+    resolved = search_query if search_query != query and not search_text else None
     # K12: смешанный вопрос — про продукцию И про состав документов. Бинарный роутер считает такие
     # товарными (719-якоря в них нет), и до сих пор ответ советовал «спросите отдельно»: 23 реальных
     # вопроса июльской волны уходили без перечня, хотя это кластер жалоб №1. Тема известна
@@ -1931,13 +1938,14 @@ def _generation_kwargs(messages: list[dict], brief: bool) -> dict:
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
            history: list[dict] | None = None, brief: bool = False,
-           corpus: str = corpora.AUTO) -> Answer:
+           corpus: str = corpora.AUTO, search_text: str | None = None) -> Answer:
     """Синхронный ответ навигатора (non-stream). Пред-работа — в _plan_answer; здесь только
     финальная генерация DeepSeek + faithfulness-постпроверка. Поведение НЕ изменилось при
     выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения).
-    brief — пробный режим гостя (см. `_generation_kwargs`); corpus — режим `L1` #146."""
+    brief — пробный режим гостя (см. `_generation_kwargs`); corpus — режим `L1` #146;
+    search_text — что искать у готовой команды (см. `_plan_answer`)."""
     planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief,
-                           corpus=corpus)
+                           corpus=corpus, search_text=search_text)
     if isinstance(planned, Answer):  # ранний путь (meta / процедурный / нет-позиции)
         return planned
     resp = _client().chat.completions.create(
@@ -1987,7 +1995,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
 
 def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
                   history: list[dict] | None = None, brief: bool = False,
-                  corpus: str = corpora.AUTO):
+                  corpus: str = corpora.AUTO, search_text: str | None = None):
     """Стриминг ответа (T18): генератор — yield ('delta', str) по мере генерации, затем
     ('done', Answer) с финальными метаданными (hits→sources / флаги / токены).
 
@@ -1996,7 +2004,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     копим текст; эмодзи чистим по кускам (дисплей = финал), в КОНЦЕ — faithfulness-постпроверка.
     Исключения наружу НЕ глушим — эндпоинт ловит их и сигналит фронту фолбэк на /api/chat."""
     planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief,
-                           corpus=corpus)
+                           corpus=corpus, search_text=search_text)
     if isinstance(planned, Answer):  # ранний путь — генерация не нужна / уже сделана
         yield "delta", planned.text
         yield "done", planned

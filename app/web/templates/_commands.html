@@ -1,0 +1,45 @@
+{# L8-1 #153: карточки готовых команд (макет «Navigator 719 Service», экраны home и commands).
+   Иконки — по образцу набора макета: тот же смысл, нарисованы штрихом, как остальные значки сервиса. #}
+{% macro cmd_icon(name) -%}
+<svg viewBox="0 0 24 24" fill="none" width="20" height="20" aria-hidden="true">
+  {%- if name == "search" %}<circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="1.8"/><path d="M21 21l-4.2-4.2" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  {%- elif name == "mail" %}<rect x="3" y="5" width="18" height="14" rx="2" stroke="currentColor" stroke-width="1.8"/><path d="M4 7l8 6 8-6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  {%- elif name == "community" %}<circle cx="9" cy="8" r="3.5" stroke="currentColor" stroke-width="1.8"/><path d="M3 20c0-3.3 2.7-6 6-6s6 2.7 6 6M16 5a3.5 3.5 0 0 1 0 6.8M18 14.3c1.8.8 3 2.6 3 4.7" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  {%- elif name == "up" %}<path d="M6 12l6-6 6 6M6 19l6-6 6 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+  {%- else %}<path d="M4 7h16M4 12h16M4 17h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+  {%- endif %}</svg>
+{%- endmacro %}
+
+{% macro home_card(c) -%}
+<button type="button" class="cmd-card" data-command="{{ c.key }}">
+  <span class="cmd-card-name">{{ c.title }}</span>
+  <span class="cmd-card-desc">{{ c.desc }}</span>
+  <span class="cmd-card-ref">{{ c.ref }}</span>
+</button>
+{%- endmacro %}
+
+{% macro page_card(c) -%}
+<div class="cp-card">
+  <button type="button" class="cp-run" data-command="{{ c.key }}">
+    <span class="cp-top">{{ cmd_icon(c.icon) }}</span>
+    <span class="cp-name">{{ c.title }}</span>
+    <span class="cp-desc">{{ c.desc }}</span>
+    <span class="cp-ref">{{ c.ref }}</span>
+  </button>
+  <button type="button" class="cp-pin" data-pin="{{ c.key }}" aria-label="Добавить в боковое меню" title="Добавить в боковое меню">
+    <svg class="pin-on" viewBox="0 0 24 24" fill="none" width="18" height="18" aria-hidden="true"><path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+    <svg class="pin-off" viewBox="0 0 24 24" fill="none" width="18" height="18" aria-hidden="true"><path d="M5 12l5 5 9-10" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  </button>
+</div>
+{%- endmacro %}
+
+{% macro soon_card(s) -%}
+<div class="cp-card soon">
+  <div class="cp-run">
+    <span class="cp-top">{{ cmd_icon(s.icon) }}<span class="cp-soon">Скоро</span></span>
+    <span class="cp-name">{{ s.title }}</span>
+    <span class="cp-desc">{{ s.desc }}</span>
+    <span class="cp-ref">{{ s.ref }}</span>
+  </div>
+</div>
+{%- endmacro %}

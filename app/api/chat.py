@@ -26,14 +26,14 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import Response, StreamingResponse
 from loguru import logger
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 from app.api import quota
 from app.api.auth import require_user, require_user_profiled
 from app.api.events import log_answer_event
 from app.api.ratelimit import SlidingWindow
 from app.core.config import settings
-from app.core import plans, sensitive
+from app.core import commands, plans, sensitive
 from app.core.prompts import EXPERT_DISCLAIMER
 from app.rag.edition import (
     KONTUR_PRIKAZ_52_URL,
@@ -130,10 +130,71 @@ def _reject_sensitive(text: str, user_id: int) -> None:
 
 
 class ChatRequest(BaseModel):
-    message: str = Field(min_length=1, max_length=2000)
+    # L8-1: с командой здесь значение её поля (у команды без поля — пусто), а текст запроса собирает
+    # сервер (`_apply_command`). Без команды — вопрос, как прежде: пустой → 422.
+    message: str = Field(default="", max_length=2000)
     session_id: str | None = None  # None → начать новую беседу
     # L1 #146: по какому корпусу отвечать. `auto` — прежний автомат; чужое значение → 422.
     corpus: corpora.Mode = corpora.AUTO
+    command: str | None = Field(default=None, max_length=32)  # L8-1 #153: ключ готовой команды
+    # Что искать у товарной команды. Не поле запроса: клиент не задаёт поиск мимо текста вопроса.
+    _search_text: str | None = PrivateAttr(default=None)
+
+    @model_validator(mode="after")
+    def _message_or_command(self) -> "ChatRequest":
+        if not self.message and not self.command:
+            raise ValueError("Пустой вопрос")
+        return self
+
+    def engine_extra(self) -> dict:
+        """Добавка к вызову движка: у обычного вопроса пусто, вызов тот же, что до команд."""
+        return {"search_text": self._search_text} if self._search_text else {}
+
+
+def _apply_command(req: ChatRequest) -> str | None:
+    """Готовая команда (`L8-1` #153) → обычный вопрос. Возвращает её ключ для записи; без команды — None.
+
+    Одно место на четыре ручки: после вызова `req.message` — собранный текст, `req.corpus` — источник
+    команды, и дальше всё идёт как у вопроса, набранного руками: проверка ПДн, тариф, повтор, движок.
+    Поэтому зовётся ПЕРВЫМ делом, до тарифа: повтор команды сверяется по СОБРАННОМУ тексту и
+    ФАКТИЧЕСКОМУ корпусу, иначе второй запуск списывался бы заново (урок MED-1 PR #161).
+
+    Отказы — строкой `detail`, а не через валидатор модели: фронт показывает `detail` человеку."""
+    if not req.command:
+        return None
+    cmd = commands.find(req.command)
+    if cmd is None:
+        raise HTTPException(status_code=422, detail="Такой готовой команды нет. Обновите страницу.")
+    problem = commands.value_error(cmd, req.message)
+    if problem:
+        raise HTTPException(status_code=422, detail=problem)
+    if req.corpus not in (corpora.AUTO, cmd.corpus):
+        logger.warning(f"команда {cmd.key}: фронт прислал источник {req.corpus}, задан {cmd.corpus}")
+    if cmd.search_by_value:
+        req._search_text = commands.clean_value(req.message)
+    req.message, req.corpus = cmd.render(req.message), cmd.corpus
+    return cmd.key
+
+
+def _held_command(req: ChatRequest, last_answer) -> str | None:
+    """Уточнение после команды (решения 6 и 7): источник остался от неё, и подпись «выбран вручную»
+    была бы неправдой. Признак — из журнала беседы, а не от клиента: режим последнего ответа тот же,
+    ответ дала команда. Сменил человек источник — совпадения нет, подпись обычная."""
+    if req.command or not req.session_id or req.corpus == corpora.AUTO:
+        return None
+    last = last_answer()
+    if last is None or not last.command or corpora.mode_of(last.corpus) != req.corpus:
+        return None
+    return commands.held(last.command)
+
+
+def _last_answer(user_id: int, session_id: str):
+    try:
+        with get_session() as db:
+            return q.last_answer(db, user_id, session_id)
+    except Exception:  # noqa: BLE001 — подпись не стоит упавшего ответа
+        logger.exception(f"chat: не удалось прочитать последний ответ (user_id={user_id})")
+        return None
 
 
 class SourceItem(BaseModel):
@@ -162,6 +223,8 @@ class ChatResponse(BaseModel):
     input_hint: str = ""
     # L2 #147: «Ответ собран по … · источник выбран автоматически/вручную»; «» — корпуса нет.
     corpus_label: str = ""
+    # L8-1: заданный вопрос целиком. У команды его собирает сервер, и фронт сверяет с ним пузырь.
+    question: str = ""
 
 
 def _sources_from_hits(hits) -> list[SourceItem]:
@@ -343,6 +406,7 @@ def _log_question(user_id: int, session_id: str, text: str) -> None:
 def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatResponse:
     started = time.monotonic()  # O8: время ответа — в событие журнала
     _enforce_chat_limit(user.id)
+    command = _apply_command(req) or _held_command(req, lambda: _last_answer(user.id, req.session_id))
     charge = _enforce_plan_quota(user, req)
     _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
@@ -352,7 +416,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     _log_question(user.id, session_id, req.message)
     okpd2 = extract_okpd2(req.message)  # код ОКПД2 в тексте → авторитетный иерархический буст + правило 3а
     try:
-        ans = answer(req.message, okpd2=okpd2, history=history, corpus=req.corpus)
+        ans = answer(req.message, okpd2=okpd2, history=history, corpus=req.corpus, **req.engine_extra())
     except Exception:  # noqa: BLE001 — наружу дружелюбно, детали в лог (рваная сеть/DeepSeek)
         logger.exception(f"chat: движок упал на запросе от user_id={user.id}")
         raise HTTPException(status_code=503, detail="Сервис временно недоступен, повторите запрос.")
@@ -366,7 +430,7 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
                 sources=[s.model_dump() for s in sources],
                 low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
                 prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
-                corpus=corpora.stored(ans.corpus, req.corpus),
+                corpus=corpora.stored(ans.corpus, req.corpus), command=command,
             )
             message_id = asst.id
             if charge and ans.metered:  # #160: списание — отдельной таблицей, удаление бесед его не трогает
@@ -374,12 +438,13 @@ def chat(req: ChatRequest, user: User = Depends(require_user_profiled)) -> ChatR
     except Exception:  # noqa: BLE001 — лог не должен ронять ответ эксперту
         logger.exception(f"chat: не удалось записать лог диалога (user_id={user.id})")
     log_answer_event(ans, endpoint="chat", mode=req.corpus, started=started, sources=len(sources),
-                     message_id=message_id)
+                     message_id=message_id, command=command)
 
     return ChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=message_id,
-        input_hint=ans.input_hint, corpus_label=corpora.answered_by(ans.corpus, req.corpus),
+        input_hint=ans.input_hint, question=req.message,
+        corpus_label=corpora.answered_by(ans.corpus, req.corpus, commands.title_of(command)),
     )
 
 
@@ -405,6 +470,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
     потери всё равно нет: вопрос сохраняет тот путь, который в итоге отвечает."""
     started = time.monotonic()  # O8: время до первого куска и полное — в событие журнала
     _enforce_chat_limit(user.id)
+    command = _apply_command(req) or _held_command(req, lambda: _last_answer(user.id, req.session_id))
     charge = _enforce_plan_quota(user, req)  # 402 до старта потока: фронт показывает причину
     _reject_sensitive(req.message, user.id)
     session_id = req.session_id or uuid.uuid4().hex
@@ -415,7 +481,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
         first_token = None
         try:
             for kind, payload in answer_stream(req.message, okpd2=okpd2, history=history,
-                                               corpus=req.corpus):
+                                               corpus=req.corpus, **req.engine_extra()):
                 if kind == "delta":
                     first_token = first_token or time.monotonic()
                     yield _sse({"type": "delta", "text": payload})
@@ -433,7 +499,7 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                             content=ans.text, sources=[s.model_dump() for s in sources],
                             low_relevance=ans.low_relevance, unverified=ans.unverified_numbers,
                             prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
-                            corpus=corpora.stored(ans.corpus, req.corpus),
+                            corpus=corpora.stored(ans.corpus, req.corpus), command=command,
                         )
                         message_id = asst.id
                         if charge and ans.metered:  # #160: списание на финале, как в /api/chat
@@ -441,7 +507,8 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                 except Exception:  # noqa: BLE001 — лог не должен ронять стрим (как в /api/chat)
                     logger.exception(f"chat_stream: не удалось записать лог (user_id={user.id})")
                 log_answer_event(ans, endpoint="stream", mode=req.corpus, started=started,
-                                 sources=len(sources), first_token=first_token, message_id=message_id)
+                                 sources=len(sources), first_token=first_token, message_id=message_id,
+                                 command=command)
                 yield _sse({
                     "type": "done", "message_id": message_id,
                     "sources": [s.model_dump() for s in sources],
@@ -449,7 +516,9 @@ def chat_stream(req: ChatRequest, user: User = Depends(require_user_profiled)) -
                     "unverified_numbers": ans.unverified_numbers,
                     "session_id": session_id,
                     "input_hint": ans.input_hint,  # U5: подсказка следующего шага (см. ChatResponse)
-                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus),  # L2
+                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus,  # L2
+                                                        commands.title_of(command)),
+                    "question": req.message,  # L8-1: собранный вопрос, см. ChatResponse
                 })
         except Exception:  # noqa: BLE001 — движок упал (рваная сеть/DeepSeek) → сигнал фолбэка фронту
             logger.exception(f"chat_stream: движок упал на запросе от user_id={user.id}")
@@ -476,7 +545,8 @@ def list_conversations(user: User = Depends(require_user)) -> list[dict]:
     with get_session() as db:
         sess = q.get_user_sessions(db, user.id)
     return [
-        {"session_id": s["session_id"], "title": (s["title"] or "Диалог")[:48],
+        {"session_id": s["session_id"],
+         "title": commands.short_title(s["title"] or "Диалог")[:48],  # L8-1: запуски команды различимы
          "ts": s["ts"].isoformat()}
         for s in sess
     ]
@@ -496,9 +566,16 @@ def get_conversation(session_id: str, user: User = Depends(require_user)) -> dic
                 # Б2: id ответа — чтобы и в переоткрытой беседе можно было оценить ответ и сообщить
                 # об ошибке. Чужой ответ так не оценить: `/api/feedback` сверяет владельца сообщения.
                 item["message_id"] = m.id
-                item["corpus_label"] = corpora.label_from_stored(m.corpus)  # L2
+                item["corpus_label"] = _corpus_label(m)  # L2
+                # L8-1: подпись «Команда: …» стоит над вопросом, а ключ лежит у ответа; у уточнения её нет
+                if out and out[-1]["role"] == "user" and commands.find(m.command):
+                    out[-1]["command"] = commands.title_of(m.command)
             out.append(item)
-    return {"session_id": session_id, "messages": out}
+        # L8-1, решение 7: источник команды держится до конца беседы и в переоткрытой
+        answers = [m for m in msgs if m.role == "assistant"]
+        held = corpora.mode_of(answers[-1].corpus) if answers and answers[-1].command else None
+    return {"session_id": session_id, "messages": out,
+            "held_corpus": held if held != corpora.AUTO else None}
 
 
 @router.delete("/api/conversations/{session_id}")
@@ -551,11 +628,13 @@ def _who(role: str) -> str:
 # L2 #147: выгрузка уносит ответ без интерфейса, поэтому «по чему собран» едет вместе с ним — строкой
 # в шапке (что это значит) и подписью под КАЖДЫМ ответом (переживает копирование одного ответа).
 _CORPUS_NOTE = ("Под каждым ответом указано, по какому корпусу он собран и кто выбрал корпус — "
-                "сервис или пользователь; проверяйте и этот выбор.")
+                "сервис, пользователь или готовая команда; проверяйте и этот выбор.")
 
 
 def _corpus_label(m) -> str:
-    return corpora.label_from_stored(m.corpus) if m.role == "assistant" else ""
+    if m.role != "assistant":
+        return ""
+    return corpora.label_from_stored(m.corpus, commands.title_of(m.command))
 
 
 def _md_reply(m) -> list[str]:

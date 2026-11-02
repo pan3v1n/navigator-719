@@ -36,13 +36,15 @@ from app.api.chat import (
     ChatRequest,
     ChatResponse,
     _answer_sources,
+    _apply_command,
+    _held_command,
     _reject_sensitive,
     _sse,
 )
 from app.api.events import log_answer_event
 from app.api.ratelimit import SlidingWindow, client_ip
 from app.api.trial import guest_id, trial_view
-from app.core import plans
+from app.core import commands, plans
 from app.core.config import settings
 from app.db import queries as q
 from app.db.engine import get_session
@@ -180,6 +182,15 @@ def _load_history(gid: str, session_id: str, max_msgs: int = 12) -> list[dict]:
             for m in pairs[-max_msgs:]]
 
 
+def _last_answer(gid: str, session_id: str):
+    try:
+        with get_session() as db:
+            return q.guest_last_question(db, gid, session_id)[1]
+    except Exception:  # noqa: BLE001 — подпись не стоит упавшего ответа
+        logger.exception("гость: не удалось прочитать последний ответ")
+        return None
+
+
 def _guest_sources(ans) -> list:
     """Источники без полного текста: гость видит, на какой пункт опирается ответ, и ссылку на
     первоисточник; текст пункта в панели — после входа (макет: «видеть полный текст источников»)."""
@@ -205,7 +216,8 @@ class GuestChatResponse(ChatResponse):
 def _engine_kwargs(req: ChatRequest, history: list[dict]) -> dict:
     return {"okpd2": extract_okpd2(req.message), "history": history,
             "limit": settings.GUEST_CONTEXT_LIMIT, "brief": True,
-            "corpus": req.corpus}  # L1 #146 — тот же переключатель, что у вошедшего
+            "corpus": req.corpus,  # L1 #146 — тот же переключатель, что у вошедшего
+            **req.engine_extra()}
 
 
 def _trial(gid: str) -> dict:
@@ -213,23 +225,27 @@ def _trial(gid: str) -> dict:
         return trial_view(db, gid)
 
 
-def _stored_payload(row, gid: str, session_id: str) -> dict:
+def _stored_payload(row, gid: str, session_id: str, question: str = "") -> dict:
     """Сохранённый ответ гостю в форме ответа движка (источники в базе уже без полного текста)."""
     return {"answer": row.content, "sources": json.loads(row.sources_json or "[]"),
             "low_relevance": bool(row.low_relevance), "unverified_numbers": [],
             "session_id": session_id, "message_id": None, "input_hint": "", "trial": _trial(gid),
-            "corpus_label": corpora.label_from_stored(row.corpus)}  # L2: подпись и у сохранённого
+            "question": question,  # L8-1: собранный вопрос, см. ChatResponse
+            # L2: подпись и у сохранённого
+            "corpus_label": corpora.label_from_stored(row.corpus, commands.title_of(row.command))}
 
 
 @router.post("/api/guest/chat", response_model=GuestChatResponse)
 def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     started = time.monotonic()  # O8
     gid = _require_guest(request)
+    # до счёта и до повтора: они смотрят на собранный текст
+    command = _apply_command(req) or _held_command(req, lambda: _last_answer(gid, req.session_id))
     _reject_sensitive(req.message, "guest")   # до счёта: отклонённый вопрос пробу не тратит
     last, stored = _last_same(gid, req)
     if stored is not None:
         logger.info("гость: повтор отвеченного вопроса — сохранённый ответ, без движка")
-        return GuestChatResponse(**_stored_payload(stored, gid, req.session_id))
+        return GuestChatResponse(**_stored_payload(stored, gid, req.session_id, req.message))
     session_id = req.session_id or uuid.uuid4().hex
     history = _load_history(gid, session_id)
     question_id = _reserve(request, gid, session_id, req.message, unanswered=last)   # R26: до движка
@@ -244,13 +260,15 @@ def guest_chat(req: ChatRequest, request: Request) -> GuestChatResponse:
     sources = _guest_sources(ans)
     _log(gid, session_id, "assistant", ans.text, sources=[s.model_dump() for s in sources],
          low_relevance=ans.low_relevance, prompt_tokens=ans.prompt_tokens,
-         completion_tokens=ans.completion_tokens, corpus=corpora.stored(ans.corpus, req.corpus))
+         completion_tokens=ans.completion_tokens, corpus=corpora.stored(ans.corpus, req.corpus),
+         command=command)
     log_answer_event(ans, endpoint="chat", mode=req.corpus, started=started, sources=len(sources),
-                     guest=True)
+                     guest=True, command=command)
     return GuestChatResponse(
         answer=ans.text, sources=sources, low_relevance=ans.low_relevance,
         unverified_numbers=ans.unverified_numbers, session_id=session_id, message_id=None,
-        input_hint=ans.input_hint, corpus_label=corpora.answered_by(ans.corpus, req.corpus),
+        input_hint=ans.input_hint, question=req.message,
+        corpus_label=corpora.answered_by(ans.corpus, req.corpus, commands.title_of(command)),
         trial=_trial(gid))
 
 
@@ -261,12 +279,13 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     бронь снимается целиком: фолбэк фронта придёт на `/api/guest/chat` и запишет вопрос сам."""
     started = time.monotonic()  # O8
     gid = _require_guest(request)
+    command = _apply_command(req) or _held_command(req, lambda: _last_answer(gid, req.session_id))
     _reject_sensitive(req.message, "guest")
     headers = {"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
     last, stored = _last_same(gid, req)
     if stored is not None:
         logger.info("гость: повтор отвеченного вопроса — сохранённый ответ, без движка")
-        done = {"type": "done", **_stored_payload(stored, gid, req.session_id)}
+        done = {"type": "done", **_stored_payload(stored, gid, req.session_id, req.message)}
         done.pop("answer")
         return StreamingResponse(iter([_sse({"type": "delta", "text": stored.content}), _sse(done)]),
                                  media_type="text/event-stream", headers=headers)
@@ -289,16 +308,19 @@ def guest_chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
                 _log(gid, session_id, "assistant", ans.text,
                      sources=[s.model_dump() for s in sources], low_relevance=ans.low_relevance,
                      prompt_tokens=ans.prompt_tokens, completion_tokens=ans.completion_tokens,
-                     corpus=corpora.stored(ans.corpus, req.corpus))
+                     corpus=corpora.stored(ans.corpus, req.corpus), command=command)
                 log_answer_event(ans, endpoint="stream", mode=req.corpus, started=started,
-                                 sources=len(sources), first_token=first_token, guest=True)
+                                 sources=len(sources), first_token=first_token, guest=True,
+                                 command=command)
                 yield _sse({
                     "type": "done", "message_id": None,
                     "sources": [s.model_dump() for s in sources],
                     "low_relevance": ans.low_relevance,
                     "unverified_numbers": ans.unverified_numbers,
                     "session_id": session_id, "input_hint": ans.input_hint, "trial": _trial(gid),
-                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus),  # L2
+                    "corpus_label": corpora.answered_by(ans.corpus, req.corpus,  # L2
+                                                        commands.title_of(command)),
+                    "question": req.message,  # L8-1
                 })
         except Exception:  # noqa: BLE001 — сигнал фолбэка фронту
             logger.exception("гость: стрим упал")
