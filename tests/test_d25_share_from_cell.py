@@ -115,6 +115,17 @@ class TestPlanRecord(unittest.TestCase):
         self.assertEqual(d25.threshold_without_share(r["min_threshold"]), "Выполнение операций - не менее 90 баллов")
         self.assertIsNone(d25.threshold_without_share(d25.share_sentences(self.CELLS)[0]))
 
+    def test_undated_operation_gets_cell_sentence(self):
+        # раунд 7, MED 1 (XXV-29, 34, 35): доля операцией без даты, даты нигде в записи нет — текст фразы ячейки с датой
+        body = "соблюдение процентной доли стоимости использованных при производстве иностранных товаров - не более 30 процентов цены товара"
+        blocks = [{"component": "Процентная доля иностранных товаров", "note": None,
+                   "operations": [{"text": body, "points": None}]}]
+        fixes = d25.undated_in_record(self.rec(None, blocks), self.CELLS)
+        self.assertEqual(len(fixes), 1)
+        self.assertTrue(fixes[0][2].startswith("с 15 ноября 2020 г."))
+        blocks[0]["note"] = "с 15 ноября 2020 г."                  # дата в note блока — текст не трогается
+        self.assertEqual(d25.undated_in_record(self.rec(None, blocks), self.CELLS), [])
+
     def test_share_without_date_in_operation_is_present(self):
         # раунд 6, MED 2 (XXV-25, 28…40): доля стоит операцией без даты, дата — в note блока; второй раз не ставим
         body = "соблюдение процентной доли стоимости использованных при производстве иностранных товаров - не более 30 процентов цены товара"
@@ -180,6 +191,29 @@ class TestCorpus(unittest.TestCase):
         log, issues = d25.run(write=False)
         self.assertEqual(log, [])
         self.assertEqual(issues, [])
+
+    def test_share_dates_reach_expert_output(self):
+        """Раунд 7, MED 1: дата каждой фразы о доле из ячейки — в выводе для эксперта (`source_text`), не только
+        текст без даты (у XXV-29, 34, 35 оставались голые 55 / 50 / 45 % без «до 31 декабря 2020 г.» и т. п.)."""
+        from app.rag import pipeline, retriever
+        missing, checked = [], 0
+        for r in self.xxv:
+            cells = d25.find_cells(r, self.cells)
+            if cells is None:
+                continue
+            h = retriever.Hit(score=1.0, section_roman="XXV", section_title=r.get("section_title") or "",
+                              product_name=r["product_name"], okpd2_codes=r["okpd2_codes"],
+                              min_threshold=r.get("min_threshold"), requirement_blocks=r["requirement_blocks"],
+                              source_anchor=r.get("source_anchor"), okpd2_match=True, payload=r)
+            shown = d25.norm(pipeline.source_text(h, cap=10 ** 7))
+            for s in d25.share_sentences(cells):
+                m = re.match(r"^((?:до|с|по)\s+\d{1,2}\s+\w+\s+\d{4}\s*г\.?)", s)
+                if m:
+                    checked += 1
+                    if d25.norm(m.group(1)) not in shown:
+                        missing.append((r["source_anchor"], m.group(1)))
+        self.assertEqual(missing, [])
+        self.assertGreaterEqual(checked, 50)
 
     def test_reaches_model_context(self):
         from app.rag import pipeline, retriever

@@ -133,6 +133,27 @@ def plan_record(rec: dict, cells: list[str]) -> tuple[list[str], str | None, lis
     return add, new_notes, issues
 
 
+def undated_in_record(rec: dict, cells: list[str]) -> list[tuple[int, int | None, str]]:
+    """[(блок, операция | None — подпись, фраза ячейки)]: доля стоит в записи БЕЗ даты, а даты этой фразы в записи нет
+    нигде — ни в note блока, ни в `notes` (XXV-29 «Корнеты», XXV-34, XXV-35: голые 55 / 50 / 45 %, эксперт не знает,
+    какая доля действует сейчас — ревью PR #268, раунд 7, MED 1). На место такого текста встаёт фраза ячейки с датой.
+    Где дата есть в note блока «Процентная доля…» (XXV-25, 28, 30, 31, 37, 39, 40), текст не трогается."""
+    everywhere = blocks_text(rec) + " " + norm(rec.get("notes"))
+    out = []
+    for s in share_sentences(cells):
+        m = re.match(rf"^({_DATE})\s*,?\s*", s, re.I)
+        if not m or norm(m.group(1)) in everywhere:
+            continue
+        body = norm(s[m.end():])
+        for bi, b in enumerate(rec.get("requirement_blocks") or []):
+            if norm(b.get("component")) == body and not b.get("operations"):
+                out.append((bi, None, s))
+            for oi, o in enumerate(b.get("operations") or []):
+                if norm(o.get("text")) == body:
+                    out.append((bi, oi, s))
+    return out
+
+
 def threshold_without_share(thr: str | None) -> str | None:
     """Поле порога без фраз о доле иностранных товаров: «с 1 января 2021 г. соблюдение процентной доли … <4>; …
     Выполнение … не менее 50 баллов, …» → «Выполнение … не менее 50 баллов, …». Без баллов не остаётся ничего — None."""
@@ -190,6 +211,15 @@ def run(write: bool, root: Path = STRUCTURED) -> tuple[list[dict], list[str]]:
                 if notes_mentions_share(rec):
                     issues.append(f"{anchor}: позиция не сопоставлена с ячейкой источника — не тронута")
                 continue
+            for bi, oi, s in undated_in_record(rec, cells):
+                b = rec["requirement_blocks"][bi]
+                if oi is None:
+                    b["component"] = s
+                else:
+                    b["operations"][oi] = {**b["operations"][oi], "text": s}
+                changed = True
+                log.append({"section": rec["section_roman"], "anchor": anchor, "product": rec["product_name"][:80],
+                            "dated": s, "added": [], "notes_left": rec.get("notes")})
             add, new_notes, why = plan_record(rec, cells)
             issues += [f"{anchor}: {w}" for w in why]
             new_thr = threshold_without_share(rec.get("min_threshold")) if add else rec.get("min_threshold")
@@ -216,7 +246,8 @@ def main() -> int:
     enable_utf8()
     log, issues = run(args.write)
     for e in log:
-        print(f"{e['anchor']} «{e['product'][:50]}»: +{len(e['added'])} фраз о доле"
+        print(f"{e['anchor']} «{e['product'][:50]}»: "
+              + (f"дата доли из ячейки: «{e['dated'][:45]}…»" if e.get("dated") else f"+{len(e['added'])} фраз о доле")
               + ("" if e["notes_left"] is None else f"; в notes осталось: «{e['notes_left'][:60]}»"))
     for i in issues:
         print("  ⚠", i)

@@ -302,11 +302,19 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     # показаны»). За ними — вводные списков (`_heading`): после пересортировки они уже не стоят над своими пунктами,
     # но территория и правила начисления, которые они называют, относятся ко всему перечню. Порядок внутри групп —
     # прежний (сортировка стабильна).
+    def hits(o):
+        return len(qtok & set(sparse.tokenize(o.get("text", "")))) if qtok else 0
+
     def group(o):
-        return 0 if o.get("_required") else 1 if o.get("_heading") else 3 if o.get("_explain") else 2
+        # пояснение (`_explain`) — после операций, но совпавшее с вопросом — наравне с ними: на прямой вопрос
+        # («чем подтверждается наличие конструкторской документации») оно обязано дойти до контекста (ревью PR #268,
+        # раунд 7, LOW 3: у I-13 оно стояло после всех 217 операций и под кап не попадало никогда)
+        if o.get("_explain"):
+            return 2 if hits(o) else 3
+        return 0 if o.get("_required") else 1 if o.get("_heading") else 2
     if not qtok:
         return sorted(ops, key=group)
-    return sorted(ops, key=lambda o: (group(o), -len(qtok & set(sparse.tokenize(o.get("text", ""))))))
+    return sorted(ops, key=lambda o: (group(o), -hits(o)))
 
 
 # Б1 (дизайн 08.10.2026): текст позиции для панели «Источник». Кап — потому что текст уезжает в

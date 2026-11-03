@@ -960,6 +960,12 @@ class TestD24Review4(unittest.TestCase):
         # раунд 6, LOW 6: правило в конце ячейки — пояснение (`explanation`), а не обязательное требование
         self.assertTrue([b for b in r["requirement_blocks"] if b.get("explanation")
                          and b["component"].startswith("подтверждением наличия")])
+        # раунд 7, LOW 3: правило со строчной и «;» в конце (I-13…19) — тоже пояснение, признак — по смыслу
+        r = self._r(_blk("документация", [("наличие прав на конструкторскую документацию", None)]))
+        self._apply(r, "наличие прав на конструкторскую документацию;\nдля каждой группы комплектующих изделий баллы "
+                       "начисляются только при наличии комплекта документации;")
+        self.assertTrue([b for b in r["requirement_blocks"] if b.get("explanation")
+                         and b["component"].startswith("для каждой группы")])
 
     def test_date_variants_without_labels_are_not_reconciled(self):
         """VII-15: варианты «до/с 1 января 2019 г.:», а в записи их меток нет — строки одного выровнялись бы с другим."""
@@ -1707,6 +1713,44 @@ class TestD24Review6(unittest.TestCase):
             dropped_scored = [o for o in ops if o.get("points") is not None and id(o) not in ids]
             shown_explain = [o for o in shown if o.get("_explain")]
             self.assertFalse(dropped_scored and shown_explain, pos)
+            # раунд 7, LOW 3: ни одно правило «подтверждением наличия …» / «для каждой группы … баллы …» не осталось
+            # обязательным требованием — под капом все места, кроме настоящих требований, у операций с баллами
+            self.assertFalse([o for o in ops if o.get("_required") and re.match(
+                r"(подтверждени\w* налич|для каждой групп)", o.get("text") or "")], pos)
+            required = sum(1 for o in shown if o.get("_required"))
+            scored = sum(1 for o in shown if o.get("points") is not None)
+            self.assertEqual(scored, min(pipeline.MAX_OPS_TARGET - required,
+                                         sum(1 for o in ops if o.get("points") is not None)), pos)
+            # и по прямому вопросу пояснение доходит до контекста
+            shown_q, _ = pipeline._shown_operations(ops, "чем подтверждается наличие конструкторской документации приказ")
+            self.assertTrue([o for o in shown_q if o.get("_explain") and "приказ" in o["text"]], pos)
+
+    def test_r7_low6_inheritance_map_knows_explanation(self):
+        """Раунд 7, LOW 6: карта наследования (`diag_orphan_requirements.record_operations`) — пояснение родителя
+        `_explain`, а не обязательное требование, которое у наследника встало бы первым под капом."""
+        from scripts import diag_orphan_requirements as dg
+        parent = {"requirement_blocks": [
+            {"component": "узел", "note": None, "operations": [{"text": "сборка", "points": 5}]},
+            {"component": "подтверждением наличия документации является приказ", "note": None, "operations": [],
+             "explanation": True},
+            {"component": "наличие сервисного центра", "note": None, "operations": []}]}
+        ops = dg.record_operations(parent)
+        self.assertTrue([o for o in ops if o.get("_explain") and o["text"].startswith("подтверждением")])
+        self.assertTrue([o for o in ops if o.get("_required") and o["text"].startswith("наличие")])
+
+    def test_r7_med2_inline_threshold_in_component_stays_defect(self):
+        """Раунд 7, MED 2 (мутация ревьюера): порог внутри ТЕКСТА требования — дефект `inline_in_record`, не порог блока;
+        в поле блока (`min_threshold`, `note`) — `block_threshold` (D9)."""
+        from scripts.classify_missing_thresholds import classify, note_rows
+        rows = note_rows()
+        base = {"okpd2_codes": ["12.34.56.789"], "product_name": "Изделие испытательное", "section_roman": "I",
+                "min_threshold": None, "requirement_type": "points"}
+        txt = "осуществление операций, оцениваемых в совокупности суммарным количеством баллов, не менее 96 баллов:"
+        rec = {**base, "requirement_blocks": [{"component": txt, "note": None, "operations": []}]}
+        self.assertEqual(classify(rec, rows)["class"], "inline_in_record")
+        rec = {**base, "requirement_blocks": [{"component": "узел", "note": None, "min_threshold": txt,
+                                               "operations": [{"text": "сборка", "points": 5}]}]}
+        self.assertEqual(classify(rec, rows)["class"], "block_threshold")
 
     def test_med3_glued_heading_lines_not_restored_twice(self):
         """MED 3: подпись, склеенная разборщиком из нескольких строк ячейки, — строки не встают второй раз (IX-72

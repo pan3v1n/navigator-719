@@ -489,7 +489,11 @@ def record_operations(rec: dict) -> list[dict]:
         if text:
             # вводная списка («…следующих операций:», D24) — заголовок, как у рантайма: наследник печатает её «▸»;
             # остальное — обязательное требование, при усечении оно идёт первым (`pipeline._rank_operations`)
-            out.append({"text": text, "points": None, ("_heading" if comp.endswith(":") else "_required"): True})
+            # пояснение первоисточника (`explanation`, D24 — правило из конца ячейки I-13…19) — `_explain`, как у
+            # рантайма (`pipeline._hit_operations`): наследник не должен получить его обязательным требованием, которое
+            # при усечении идёт первым (ревью PR #268, раунд 7, LOW 6)
+            kind = "_heading" if comp.endswith(":") else "_explain" if b.get("explanation") else "_required"
+            out.append({"text": text, "points": None, kind: True})
     return out
 
 
