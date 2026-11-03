@@ -807,11 +807,14 @@ def _cell_numbers(text: str) -> Counter:
     return Counter(_numbers(text))
 
 
-def _record_numbers(r: dict) -> Counter:
+def _record_numbers(r: dict, block_notes: bool = True) -> Counter:
     """Числа записи: в тексте блоков (операции, подписи, пороги блоков) и в баллах операций — мультимножеством:
     одно «2018» в операции о числе операций не «покрывает» потерянную метку даты «с 1 января 2018 г.» у доли
     (раунд 3 ревью, M-2: XIX «Комплектующие», XIII, VII-41…43)."""
-    nums = Counter(_numbers(own_text({"requirement_blocks": r.get("requirement_blocks")})))
+    blocks = r.get("requirement_blocks") or []
+    if not block_notes:
+        blocks = [{**x, "note": None} for x in blocks]
+    nums = Counter(_numbers(own_text({"requirement_blocks": blocks})))
     for b in r.get("requirement_blocks") or []:
         for o in b.get("operations") or []:
             p = o.get("points")
@@ -902,26 +905,42 @@ def _d24_points(ln: str) -> list[float | int]:
 
 
 def _d24_items(r: dict) -> list[tuple[int, int | None, set, float | int | None, set | None, Counter, bool,
-                                      set | None]]:
+                                      set | None, set | None, bool]]:
     """Элементы записи по порядку: (блок, операция | None для подписи блока, слова и числа, баллы операции, слова
     подзаголовка, который разборщик вклеил в операцию: «применение печатных плат, произведенных на территории РФ: не
     менее одной печатной платы» — у IX-43 строки «2.1. применение печатных плат …:» и «2.1.1. не менее одной …»), те же
-    слова мультимножеством, подпись — вводная списка на «:», слова пункта после вклеенного подзаголовка). Note блока —
-    при подписи: туда разборщик кладёт порог
-    узла из строки подписи («крио-шарнир (с 1 января 2024 г. - не менее 120 баллов, …):» у XXVI-8)."""
+    слова мультимножеством, подпись — вводная списка на «:», слова пункта после вклеенного подзаголовка, слова самой
+    подписи у подписи с note, элемент — note подписи за операциями блока). Note блока — при подписи: туда разборщик
+    кладёт порог узла из строки подписи («крио-шарнир (с 1 января 2024 г. - не менее 120 баллов, …):» у XXVI-8)."""
     out = []
     for bi, b in enumerate(r.get("requirement_blocks") or []):
         head = " ".join(x for x in (b.get("component"), b.get("note"), b.get("min_threshold")) if x)
-        if head:
+        ops = b.get("operations") or []
+        # Раунд 5 ревью, MED 4 (XX-12): note подписи — часто строки ячейки, стоящие ПОСЛЕ операций блока (график
+        # «до 31 декабря 2027 г. - не более 35 процентов …» азотных установок). Подпись с note совпадает только со
+        # строкой, где есть слова самой подписи (`it[8]`), — иначе график насосной установки, идущий в ячейке перед
+        # подписью криогенной, вставал к её note, а свой график терялся; и note — ещё одним элементом за операциями
+        # блока (`it[9]`), чтобы строки графика после операций нашли её на своём месте, а не ушли дублем в операцию.
+        comp_w = set(_d24_toks(b.get("component"))) if b.get("note") and b.get("component") else None
+        # подпись, дословно повторяющая операцию своего блока (рантайм её тоже считает дублем, `_hit_operations`), —
+        # не элемент: при ничьей строка «производство адаптера (жатки) самоходной косилки (25 баллов);» вставала к ней,
+        # и восстановленная следом строка уходила В НАЧАЛО блока, а не после операции (III-64, раунд 5 ревью, LOW 9)
+        dup = (not b.get("note") and not b.get("min_threshold") and b.get("component")
+               and any(norm(b["component"]) == norm(o.get("text")) for o in ops))
+        if head and not dup:
             w = _d24_toks(head)
             out.append((bi, None, set(w), None, None, Counter(w), (b.get("component") or "").rstrip().endswith(":"),
-                        None))
-        for oi, o in enumerate(b.get("operations") or []):
+                        None, comp_w or None, False))
+        for oi, o in enumerate(ops):
             t = o.get("text") or ""
             pre, suf = ((set(_d24_toks(t.split(":", 1)[0])), set(_d24_toks(t.split(":", 1)[1])))
                         if ":" in t.rstrip(": ") else (None, None))
             w = _d24_toks(t)
-            out.append((bi, oi, set(w), o.get("points"), pre, Counter(w), False, suf))
+            out.append((bi, oi, set(w), o.get("points"), pre, Counter(w), False, suf, None, False))
+        if ops and b.get("note"):
+            w = _d24_toks(b["note"])
+            if w:
+                out.append((bi, len(ops) - 1, set(w), None, None, Counter(w), False, None, None, True))
     return out
 
 
@@ -957,6 +976,8 @@ def _d24_cands(lt: list[str], pts: list, items: list, thr: set = frozenset(), he
     for j, it in enumerate(items):
         if (p is not None and it[3] is not None and it[3] != p) or not all(k in it[2] for k in key):
             continue
+        if it[8] and sum(w in lset for w in it[8]) < 0.75 * len(it[8]):
+            continue                         # подпись с note — только строкой, где есть слова подписи (MED 4, XX-12)
         s = it[2]
         c = cov(s)
         if head and it[4] and cov(it[4]) >= 0.75:
@@ -1070,6 +1091,19 @@ def _d24_align(info: list[dict | None], items: list) -> list[tuple[int, int, str
 
 # Строка ячейки, оборванная на служебном слове («по 31 декабря 2019 г. осуществление на территории Российской Федерации
 # не» + «менее трех из следующих операций (при наличии):» у IX-36), — перенос HTML, а не две строки.
+_D24_NUM_RE = re.compile(r"^\d+(?:\.\d+)*\.\s+")              # нумерация пункта «2.», «1.1.1.»
+_SUBPOINT_RE = re.compile(r"подпункт\w*\s+(\d+(?:\.\d+)+)", re.I)
+# Обязательство, а не пояснение: «юридическое лицо обязано обеспечить …», «срок лицензии должен быть не менее …»
+_D24_DUTY_RE = re.compile(r"\b(?:обязан\w*|должн\w*|необходимо|требуется)\b", re.I)
+
+
+def _d24_glued(ln: str) -> bool:
+    """Склейка HTML: после баллов строки идёт ещё фраза в три слова и больше («… (5 баллов) конвейеры ленточные … при
+    обеспечении:» у VI-24) — текстом операции её не пишут (раунд 5 ревью, LOW 8)."""
+    m = list(_D24_PTS_RE.finditer(ln))
+    return bool(m) and len(toks(ln[m[-1].end():])) >= 3
+
+
 _D24_WRAP_END_RE = re.compile(r"(?:^|\s)(?:не|и|или|в|во|на|с|со|по|для|от|до|к|ко|а|из|при|без|о|об|у|за|под|над|"
                               r"между|через|[-–—])$", re.I)
 _D24_FORMULA_HEAD_RE = re.compile(r"по\s+формул\w*(?:\s*<[^>]*>)*\s*:?$", re.I)
@@ -1086,7 +1120,14 @@ def _d24_lines(text: str) -> list[str]:
         if not ln or AMEND_RE.match(ln):
             continue
         if out and ((_D24_WRAP_END_RE.search(out[-1]) and ln[:1].islower())
-                    or (out[-1].endswith("Российской") and ln.startswith("Федерац"))):       # V-2
+                    or (out[-1].endswith("Российской") and ln.startswith("Федерац"))       # V-2
+                    # «… аккредитованных лабораторий,» + «отвечающих за проверку качества …» у XXI-87…90: фраза
+                    # продолжается со строчной после запятой (раунд 5 ревью, MED 3 — хвост уходил в note блока)
+                    or (out[-1].endswith(",") and ln[:1].islower() and not _D24_REQ_START_RE.match(ln))
+                    # «2. выполнение … технологических операций» + «(если установлено технологическим процессом)
+                    # <51>:» у IX-46 — одна вводная; скобка «(2 балла);» — баллы предыдущей строки, не перенос
+                    or (ln.startswith("(") and not _D24_PTS_ONLY_RE.match(ln)
+                        and not out[-1].rstrip().endswith((";", ":", ".", ")")))):
             out[-1] += " " + ln
         else:
             out.append(ln)
@@ -1100,7 +1141,13 @@ def _d24_info(ln: str, items: list, thr: set = frozenset()) -> dict | None:
     if not lt:
         return None
     pts = _d24_points(ln)
-    key = tuple(n for m in _D24_BOUND_RE.finditer(_D24_PTS_RE.sub(" ", ln)) for n in _numbers(m.group(1)))
+    t = _D24_PTS_RE.sub(" ", ln)
+    # «(не более 30 баллов)» — потолок баллов операции, а не график («до 31 декабря 2027 г. - не более 35 процентов»,
+    # «с 1 января 2024 г. - не менее 1050 баллов»): разборщик унёс его в note, и ключ отрезал строке НИОКР её же
+    # операцию у VII-11 — строка вставала note-дублем (раунд 5 ревью, MED 3)
+    key = tuple(n for m in _D24_BOUND_RE.finditer(t)
+                if not (re.match(r"не\s+более", m.group(0), re.I) and re.match(r"\s*балл", t[m.end():], re.I))
+                for n in _numbers(m.group(1)))
     return {"n": len(lt), "lt": lt, "pts": pts, "key": key,
             "cands": _d24_cands(lt, pts, items, thr, ln.rstrip().rstrip(";,.").endswith(":"), key)}
 
@@ -1186,10 +1233,13 @@ def _d24_resolve(items: list, text: str, threshold: str | None = None, position_
                     hit += 1
             return hit / len(lt) >= 0.75
         return all(k not in taken for k in range(c[0], c[1] + 1))
-    res: list[tuple[int, str] | None] = []
+    # (последний элемент пары, вид, ПЕРВЫЙ элемент пары): вводная списка встаёт перед первым элементом окна, а не за
+    # ним (раунд 5 ревью, MED 5: у III-208 «… не менее 8 из следующих операций:» вставала после первой операции списка,
+    # совпавшей окном из двух элементов, и под ней оставалось 7 операций из 8)
+    res: list[tuple[int, str, int] | None] = []
     for x, mt in zip(info, match):
         if mt is not None:
-            res.append((mt[1], mt[2]))
+            res.append((mt[1], mt[2], mt[0]))
             continue
         if x is None:
             res.append(None)
@@ -1200,9 +1250,9 @@ def _d24_resolve(items: list, text: str, threshold: str | None = None, position_
             js, je, _, kind = max(ok, key=lambda c: c[2])
             for k in range(js, je + 1) if kind != "pre" else ():
                 taken[k] += Counter(x["lt"])
-            res.append((je, kind))
+            res.append((je, kind, js))
         elif thr and sum(w in thr for w in x["lt"]) / x["n"] >= 0.75 and all(k in thr for k in x["key"]):
-            res.append((-2, "thr"))
+            res.append((-2, "thr", -2))
         else:
             res.append(None)
     return lines, info, res
@@ -1260,8 +1310,11 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
     prev: list[int | None] = []                      # предыдущая строка ячейки со словами
     for i in range(len(lines)):
         prev.append(next((k for k in range(i - 1, -1, -1) if info[k] is not None), None))
+    later: list[bool] = [False] * len(lines)         # за строкой есть совпавшие строки (она — не конец ячейки)
+    for k in range(len(lines) - 2, -1, -1):
+        later[k] = later[k + 1] or (res[k + 1] is not None and res[k + 1][0] >= 0)
     for i, (ln, x, mt) in enumerate(zip(lines, info, res)):
-        j, kind = mt if mt is not None else (None, None)
+        j, kind, j0 = mt if mt is not None else (None, None, None)
         if x is None:
             m = _D24_PTS_ONLY_RE.match(ln)
             if m and cur is not None and cur["ops"] and cur["ops"][-1]["points"] is None:
@@ -1272,7 +1325,9 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
                 it = items[j]
                 pts = x["pts"]
                 b = blocks[it[0]]
-                if (it[1] is None and len(pts) == 1 and not b.get("operations") and not b.get("note")
+                if it[9]:
+                    pass                            # note подписи за операциями блока (MED 4): строка на месте
+                elif (it[1] is None and len(pts) == 1 and not b.get("operations") and not b.get("note")
                         and not b.get("min_threshold") and not (b.get("component") or "").rstrip().endswith(":")):
                     units.append({"after": j, "op_of": it[0], "points": pts[0], "ops": []})
                 elif kind == "sub":
@@ -1289,12 +1344,12 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
                         units.append({"after": j, "relabel": it[0], "component": unstale(text), "ops": []})
                     elif len(lost_w) >= 3 and it[1] is None and not b.get("operations"):
                         units.append({"after": j, "retext": (it[0], None), "text": text, "ops": []})
-                    elif len(lost_w) >= 3 and it[1] is not None:
+                    elif len(lost_w) >= 3 and it[1] is not None and not _d24_glued(ln):
                         units.append({"after": j, "retext": (it[0], it[1]), "text": text, "ops": [],
                                       "points": pts[0] if len(pts) == 1 else None})
                 last = j
                 for u in pending:
-                    u["next"] = j
+                    u["next"] = j0
                 pending = []
             elif (j == -2 and cur is not None and units and units[-1] is cur and not cur["ops"]
                   and (cur.get("component") or "").endswith(":")):
@@ -1308,7 +1363,7 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
             continue
         pts = list(_D24_PTS_RE.finditer(ln))
         vtop = None if pts else _D24_VTOP_RE.search(ln)
-        is_req = bool(_D24_REQ_START_RE.match(ln))
+        is_req = bool(_D24_REQ_START_RE.match(_D24_NUM_RE.sub("", ln)))     # «2. выполнение …» у IX-46
         if not is_req and not pts and _D24_FORMULA_HEAD_RE.search(ln.rstrip().rstrip(";,.")):
             # заголовок формулы без самой формулы (в HTML — картинка): «количество баллов (Yt), начисляемых за … по
             # формуле:» у IX-23, «при этом расчет баллов осуществляется по формуле:» у IX-29 — не требование
@@ -1385,7 +1440,15 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
         elif (cur is not None and comp and not cur["ops"] and ln[:1].islower()
               and not is_req and not raw_end.endswith((";", ":"))):
             cur["component"] += " " + body                              # перенос строки одного требования
-        elif not is_req and last >= 0:
+        elif (not is_req and last >= 0 and later[i] and not _D24_DUTY_RE.search(ln)
+              and not (ln[:1].islower() and ln.rstrip().endswith(";"))):
+            # Раунд 5 ревью, MED 3: правило цепляло к note последнего совпавшего блока что угодно. Теперь — только
+            # пояснение ВНУТРИ ячейки (за ним есть совпавшие строки: «Допускается применение лифтов … иностранного
+            # производства» у XXIII-1). Не пояснение: обязательство («… обязано обеспечить …», «срок лицензии должен
+            # быть не менее …» у IX-15/19 — относятся к правам на КД, а не к последнему блоку о доле); пункт перечня
+            # («исключительного права на товарный знак …;» у IX-25); правило в КОНЦЕ ячейки о всей позиции
+            # («подтверждением наличия комплекта КД … являются …» у I-13…19 — было условием одного узла и резалось
+            # по 600 символов). Они — требования записи: блок без операций в своём месте ячейки.
             # пояснение, а не требование («подтверждением наличия конструкторской документации является …» у I-13,
             # «Допускается применение лифтов … иностранного производства» у XXIII-1): note блока, к которому оно
             # относится в ячейке, — обязательным требованием оно вставало бы при усечении первым (ревью D24)
@@ -1503,6 +1566,15 @@ def apply_units(r: dict, units: list[dict]) -> int:
             seg["operations"] += ins.get(k, [])
         if i not in into and i not in starts:
             segs = [{**b, "operations": ops} if any(key[0] == i for key in appended) else b]   # и note-пояснения
+        elif len(segs) > 1 and (m := _SUBPOINT_RE.search(segs[0].get("note") or "")):
+            # note о подпункте («Для подпункта 2.2.2: с 1 января 2028 г. обязательное требование» у IX-62) — к той части
+            # блока, чья вводная открывает этот подпункт («2.2. …:»), а не к первой (раунд 5 ревью, LOW 7)
+            cand = [(len(n.group(0).strip()), k) for k, x in enumerate(segs) if k
+                    and (n := _D24_NUM_RE.match(x.get("component") or ""))
+                    and (m.group(1) + ".").startswith(n.group(0).strip())]
+            tgt = segs[max(cand)[1]] if cand else None          # самый узкий подпункт, открывающий номер
+            if tgt is not None:
+                tgt["note"], segs[0] = segs[0]["note"], {**segs[0], "note": None}
         out += segs
         out += new_after.get(i, [])
     r["requirement_blocks"] = out
@@ -1553,6 +1625,20 @@ _THRESHOLD_STMT_RE = re.compile(r"не\s+менее\s+\d+[^;]{0,60}?балл|с�
 _BARE_POINTS_RE = re.compile(r"\(?\s*(\d+(?:[.,]\d+)?)\s*балл\w*\s*\)?\.?")
 
 
+_BARE_MIN_POINTS_RE = re.compile(r"\s*не\s+менее\s+(\d+)\s+балл\w*\s*\.?\s*", re.I)
+
+
+def _threshold_is_stale_intro(t: str | None, cell: str, note_threshold: str | None) -> bool:
+    """Порог записи — оговорка вводной ячейки («осуществление … следующих операций (…), которые в совокупности
+    оцениваются не менее 50 баллов:»), а у позиции свой порог примечания с ДРУГИМ числом: у XXVII-11 «не менее 50
+    баллов» стояло в поле порога, рантайм брал его первым и показывал 50 вместо 55 / 60 / 70 прим. 32 (раунд 5 ревью,
+    MED 2). Та же оговорка во вводной снимается `_d24_unstale` — здесь её копия в поле порога."""
+    m = _BARE_MIN_POINTS_RE.fullmatch(t or "")
+    if not m or not note_threshold or m.group(1) in re.findall(r"\d+", note_threshold):
+        return False
+    return any((s := _D24_STALE_THR_RE.search(ln)) is not None and s.group(1) == m.group(1) for ln in _d24_lines(cell))
+
+
 def _threshold_is_cell_requirement(t: str | None, cell: str, cell_t: set) -> bool:
     """Порог записи — строка требования ячейки, а не порог: её слова есть в ячейке, и это не формулировка порога. Или
     голые «20 баллов» — баллы заголовка группы требований («выполнение обязательных требований, в совокупности
@@ -1582,13 +1668,16 @@ def restore_lost_lines(report: dict) -> tuple[list[dict], list[dict]]:
                     continue                    # без своих операций — требования через карту наследования
                 seen.add(id(r))
                 t = r.get("min_threshold")
-                drop = (_threshold_is_cell_requirement(t, x["text"], cell_t)
-                        and T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], sec))
+                note_thr = T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], sec)
+                # Порог-требование снимается и без порога примечания (раунд 5 ревью, HIGH 1): «140 баллов» у IX-112 и
+                # ещё девяти — баллы группы требований, а не порог, и пустой lookup не делает их порогом; прежде условие
+                # `and lookup` оставляло их на бою. Оговорка вводной («… оцениваются не менее 50 баллов:»), которую
+                # разборщик вынул в поле порога, — только при пороге примечания с другим числом (MED 2, XXVII-11).
+                drop = bool(_threshold_is_cell_requirement(t, x["text"], cell_t)
+                            or _threshold_is_stale_intro(t, x["text"], note_thr))
                 # порог, который остаётся, — тоже текст ячейки: его строки не потеряны (VI-5: «до 31 декабря 2023 г. -
                 # не менее 60 баллов» разборщик положил в поле порога — вставка дала бы их второй раз, требованиями)
-                units, skip = lost_units(r, x["text"], None if drop else t,
-                                         (None if drop else t)
-                                         or T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], sec))
+                units, skip = lost_units(r, x["text"], None if drop else t, (None if drop else t) or note_thr)
                 skipped += [{"section": sec, "anchor": r.get("source_anchor"), "why": w, "line": ln[:200]}
                             for w, ln in skip]
                 what = []
@@ -1611,7 +1700,8 @@ def restore_lost_lines(report: dict) -> tuple[list[dict], list[dict]]:
                         what.append("тип")
                 if drop:
                     r["min_threshold"] = None
-                    what.append("снят порог-требование (есть порог примечания)")
+                    what.append("снят порог-требование"
+                                + (" (есть порог примечания)" if note_thr else " (порога примечания нет)"))
                 nt = toks(r.get("notes"))
                 if nt and n:
                     bt = set(toks(own_text({"requirement_blocks": r["requirement_blocks"]})))
@@ -1619,8 +1709,10 @@ def restore_lost_lines(report: dict) -> tuple[list[dict], list[dict]]:
                     # процентов …» повторён для трёх установок, и по словам notes «были в блоках» после первой копии
                     bt |= set(toks(r.get("min_threshold")))
                     if (sum(w in cell_t for w in nt) / len(nt) >= 0.9 and sum(w in bt for w in nt) / len(nt) >= 0.9
-                            and not (Counter(_numbers(r.get("notes"))) - _record_numbers(r)
+                            and not (Counter(_numbers(r.get("notes"))) - _record_numbers(r, block_notes=False)
                                      - Counter(_numbers(r.get("min_threshold"))))):
+                        # без note блоков: у XX-12 график азотных установок в их note засчитывался за график насосной,
+                        # которого в записи не было, и notes снимался с потерей (раунд 5 ревью, MED 4)
                         r["notes"] = None
                         what.append("notes (текст ячейки) перенесён в блоки")
                 if what:

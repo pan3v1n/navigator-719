@@ -877,7 +877,7 @@ class TestD24Review4(unittest.TestCase):
                          note="с 1 января 2024 г. - не менее 120 баллов, с 1 января 2025 г. - не менее 170 баллов"))
         thr = "с 1 января 2024 г. - не менее 1050 баллов, с 1 января 2025 г. - не менее 1300 баллов"
         lines, _, res = d._d24_resolve(d._d24_items(r), f"{thr}:\nузел:\nсварка узла (10 баллов)", thr)
-        self.assertEqual(res[0], (-2, "thr"))
+        self.assertEqual(res[0], (-2, "thr", -2))
 
     def test_wrapped_heading_with_semicolon_in_parentheses_is_one(self):
         """III-65: вводная перенесена внутри скобки после «;» — одна вводная, а не требование и вводная."""
@@ -1430,13 +1430,34 @@ class TestD24Corpus(unittest.TestCase):
 
     def test_group_points_are_not_position_threshold(self):
         """H1: «20 баллов» у IX-6, 10, 11, 16, 18, 28, 71 и «140 баллов» у IX-85…133 — баллы группы требований, не
-        порог: порог позиции — прим. 26 и прим. 38."""
+        порог: порог позиции — прим. 26, прим. 38 (автомобильные блоки IX-85…107) и прим. 38.1 (спецмашиностроение
+        IX-108…133, раунд 5 ревью, HIGH 1: прежде 16 из них получали строку прим. 38 по общему коду, у 10 оставалось
+        «140 баллов» — `<38.1>` в чанке разбор не видел)."""
         from app.rag import thresholds as T
         for pos, note in (("6", "[прим. 26]"), ("11", "[прим. 26]"), ("71", "[прим. 26]"), ("85", "[прим. 38]"),
-                          ("111", "[прим. 38]"), ("133", "[прим. 38]")):
+                          ("107", "[прим. 38]"), ("108", "[прим. 38.1]"), ("111", "[прим. 38.1]"),
+                          ("112", "[прим. 38.1]"), ("124", "[прим. 38.1]"), ("132", "[прим. 38.1]"),
+                          ("133", "[прим. 38.1]")):
             r = next(x for x in self.recs["IX"] if x["source_anchor"].endswith(f"позиция {pos}"))
             self.assertIsNone(r.get("min_threshold"), pos)
             self.assertIn(note, T.lookup_threshold(r["okpd2_codes"], r["product_name"], "IX") or "", pos)
+
+    def test_special_machinery_units_use_own_schedule(self):
+        """HIGH 1 раунда 5: у всех 26 позиций IX-108…133 — график прим. 38.1 со своей шапкой лет (до 2026 года
+        включительно — 200, 2027 — 205, 2028 — 205, 2029 и далее — 245), а не прим. 38 (2026 — 205, 2028 и далее — 245)."""
+        from app.rag import thresholds as T
+        seen = 0
+        for r in self.recs["IX"]:
+            m = re.search(r"позиция (\d+)$", r.get("source_anchor") or "")
+            if not m or not 108 <= int(m.group(1)) <= 133:
+                continue
+            seen += 1
+            got = T.lookup_threshold(r["okpd2_codes"], r["product_name"], "IX") or ""
+            self.assertIn("до 2026 года включительно — не менее 200 баллов", got, m.group(1))
+            self.assertIn("2029 год и далее — не менее 245 баллов", got, m.group(1))
+            self.assertIn("[прим. 38.1]", got, m.group(1))
+            self.assertIsNone(r.get("min_threshold"), m.group(1))
+        self.assertEqual(seen, 26)
 
     def test_glued_line_is_not_a_second_operation(self):
         """H2: склеенная строка HTML у IX-111 не вставлена четвёртой операцией на 20 баллов, у IV-30 — на 3 балла."""
@@ -1460,13 +1481,18 @@ class TestD24Corpus(unittest.TestCase):
             self.assertFalse(re.search(r"(?:до|с) \d+ \w+ 20\d\d (?:г\. |года )?- не менее \d+ балл", text), (sec, pos))
 
     def test_toys_heading_keeps_only_consistent_threshold(self):
-        """M5: у XXVII-12…14 (порог прим. 32) вводная без «не менее 50 баллов»; у XXVII-11 (порог 50) — с ней."""
-        for pos, kept in (("11", True), ("12", False), ("13", False), ("14", False)):
+        """M5: у XXVII-11…14 (порог прим. 32) вводная без «не менее 50 баллов». Раунд 5, MED 2: у XXVII-11 «не менее
+        50 баллов» стояло в поле порога (разборщик вынул оговорку вводной), рантайм брал его ПЕРВЫМ и показывал 50
+        вместо 55 / 60 / 70 прим. 32 — прежняя редакция теста закрепляла это как «порог 50»."""
+        from app.rag import thresholds as T
+        for pos in ("11", "12", "13", "14"):
             r = next(x for x in self.recs["XXVII"] if x["source_anchor"].endswith(f"позиция {pos}"))
             heads = [b["component"] for b in r["requirement_blocks"]
                      if (b.get("component") or "").startswith("осуществление на территории")]
             self.assertTrue(heads, pos)
-            self.assertEqual(any("не менее 50 баллов" in h for h in heads), kept, pos)
+            self.assertFalse(any("не менее 50 баллов" in h for h in heads), pos)
+            self.assertIsNone(r.get("min_threshold"), pos)
+            self.assertIn("[прим. 32", T.lookup_threshold(r["okpd2_codes"], r["product_name"], "XXVII") or "", pos)
 
 
 class TestD18KonturServiceLine(unittest.TestCase):
