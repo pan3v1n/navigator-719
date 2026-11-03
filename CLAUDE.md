@@ -197,6 +197,8 @@ navigator-719/             ← дерево сверено с файлами 202
 ├── scripts/
 │   ├── load_kb.py         ← скрипт: загрузить knowledge_base в Qdrant
 │   ├── seed_cases.py      ← скрипт: загрузить кейсы экспертов
+│   ├── edition_source.py · actualize_edition.py · auto_actualize.py ← A10: авто-актуализация под
+│   │                        новую редакцию: Контур → текст → шлюзы → черновой PR, см. docs/ACTUALIZATION.md
 │   ├── convert_metodrek.py ← PDF Методрекомендаций ТПП → текст корпуса (K15)
 │   ├── eval_*.py          ← замеры по EVAL_GUIDE (в т.ч. eval_cases_influence — влияние петли кейсов)
 │   ├── pc_transfer.sh     ← переезд на другой ПК: всё, чего нет в git (.env, модель, граф, хуки,
