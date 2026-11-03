@@ -21,11 +21,16 @@ stdout. Здесь: сверка sha256 (обрыв канала на серед
 ⚠⚠ ТУННЕЛЬ (02.11.2026). На рабочем ПК весь трафик идёт через туннель Happ (TUN `happ-xray`), и ssh к
 бою через него перестал проходить: «Connection timed out during banner exchange», забор падал каждые
 сутки. Мимо туннеля вход сразу. Поэтому ssh привязывается к адресу ФИЗИЧЕСКОГО адаптера (`ssh -b`):
-  --bind auto      (по умолчанию) найти адрес самому: Windows, включённый адаптер с HardwareInterface,
-                   не виртуальный, IPv4 не из 169.254/16, со шлюзом по умолчанию; подходящих несколько —
-                   с меньшей метрикой. Не нашёлся — понятная ошибка и код 1 ДО подключения.
-                   Вне Windows `auto` = без привязки.
-  --bind <адрес>   явно (адрес адаптера — в `ipconfig`); --bind none — без привязки.
+  --bind auto      (по умолчанию; пустое значение — тоже auto) найти адрес самому: Windows, включённый
+                   адаптер с HardwareInterface, не виртуальный, IPv4 не из 169.254/16, со шлюзом по
+                   умолчанию; подходящих несколько — с меньшей суммой метрик интерфейса и маршрута. Нет
+                   такого — ждать до --wait-adapter секунд (по умолчанию 180, опрос раз в 15 с: после
+                   пробуждения ПК сеть поднимается не сразу, а попытка одна в сутки), затем понятная
+                   ошибка и код 1 ДО подключения. Вне Windows `auto` = без привязки.
+  --bind <адрес>   явно (адрес адаптера — в `ipconfig`). Заведомо негодный адрес (0.0.0.0, петля,
+                   169.254/16, групповой, не IPv4) — отказ до подключения; адрес не физического
+                   адаптера со шлюзом (туннель) или ничей — забор идёт, в журнале `[!]` предупреждение.
+  --bind none      без привязки — только так, пустое значение привязку НЕ отключает.
 То же — переменной окружения NAVIGATOR_SSH_BIND. Адрес в код не зашит: его раздаёт DHCP, он сменится.
 
 Запуск:
@@ -35,7 +40,15 @@ stdout. Здесь: сверка sha256 (обрыв канала на серед
     /TR "D:\\navigator-719\\.venv\\Scripts\\python.exe D:\\navigator-719-backup\\scripts\\pull_backup.py --dest E:\\navigator-backups"
 ⚠ Скрипт для расписания — из ОТДЕЛЬНОЙ detached-копии (`git worktree add --detach D:\\navigator-719-backup
 origin/dev`), а не из основной: основная стоит на чужих рабочих ветках и посреди слияний, и задача
-бралась бы из той версии, какая там окажется. Копию обновлять осознанно, после слияния правки забора.
+бралась бы из той версии, какая там окажется. В обёртке `.cmd` путь к скрипту — ИМЕННО в этой копии
+(`D:\\navigator-719-backup\\scripts\\pull_backup.py`): сама копия без правки пути ничего не меняет.
+Копию обновлять осознанно, после слияния правки забора:
+  git -C D:/navigator-719 fetch origin && git -C D:/navigator-719-backup checkout --detach origin/dev
+⚠ Обёртка `.cmd` с русскими комментариями — только в CRLF: в LF-файле cmd теряет позицию строки и
+исполняет обрывки комментариев как команды. `chcp 65001` ей не нужен: вывод PowerShell скрипт сам
+пишет в UTF-8, кодировку вывода Python задаёт `PYTHONIOENCODING=utf-8`.
+⚠ Проверка «`--dest` вне репозитория» смотрит на копию, из которой запущен скрипт; держите `--dest`
+вне ЛЮБОЙ копии репозитория.
 ⚠ 29.10.2026: ПК спал в 09:00, и «запускать пропущенное» (StartWhenAvailable) после пробуждения запуск
 не догнал — копии за сутки не было. Задаче нужны ещё триггеры «вход» и «разблокировка», а обёртке
 (`D:\\navigator-backups\\pull-backup-daily.cmd`) — одна попытка в сутки по файлу `last-attempt.txt`:
@@ -46,6 +59,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import functools
 import hashlib
 import ipaddress
 import json
@@ -53,8 +67,10 @@ import os
 import re
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import NamedTuple
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -70,7 +86,8 @@ NAME_RE = re.compile(r"^navigator_app-(\d{4}-\d{2}-\d{2})_(\d{4})\.db$")
 OK, FAILED, STALE = 0, 1, 2
 
 BIND_ENV = "NAVIGATOR_SSH_BIND"
-NO_BIND = {"", "none", "off", "no"}
+NO_BIND = {"none", "off", "no"}           # пустое значение — auto, а не отключение
+DEFAULT_WAIT_ADAPTER = 180                 # с: ждать адаптер после пробуждения (лимит задачи 30 мин, ssh сам до 10)
 _BIND_HELP = ("Адрес адаптера Ethernet — в `ipconfig`; задать явно: --bind <адрес> или переменная "
               f"{BIND_ENV}; без привязки: --bind none")
 
@@ -83,8 +100,10 @@ class BindError(Exception):
 # Все адаптеры одним вызовом PowerShell (модуль NetAdapter есть в Windows 8+). Отбор «физический»
 # делается В PYTHON по полям hardware / virtual, а не ключом `-Physical`: так правило проверяется
 # тестом без Windows. Вывод — JSON в UTF-8: имена адаптеров здесь кириллицей («Беспроводная сеть»).
+# ⚠ UTF-8 пишется БАЙТАМИ прямо в stdout, а не через `[Console]::OutputEncoding = UTF8`: то
+# присваивание переключает кодовую страницу ОБЩЕЙ консоли (ей пользуется и обёртка `.cmd` под
+# Планировщиком) и обратно её не возвращает (ревью #289, 03.11.2026).
 _PS_ADAPTERS = r"""
-[Console]::OutputEncoding = [Text.Encoding]::UTF8
 $r = @(foreach ($a in Get-NetAdapter) {
   $i = $a.ifIndex
   $routes = @(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
@@ -97,7 +116,10 @@ $r = @(foreach ($a in Get-NetAdapter) {
     route_metric = ($routes | Measure-Object -Property RouteMetric -Minimum).Minimum
   }
 })
-ConvertTo-Json -InputObject $r -Compress -Depth 3
+$bytes = [Text.Encoding]::UTF8.GetBytes((ConvertTo-Json -InputObject $r -Compress -Depth 3))
+$stdout = [Console]::OpenStandardOutput()
+$stdout.Write($bytes, 0, $bytes.Length)
+$stdout.Flush()
 """
 
 
@@ -159,21 +181,28 @@ def _metric(a: dict) -> int:
     return m + rm
 
 
-def pick_adapter(adapters: list[dict]) -> tuple[str, str]:
-    """Адрес физического адаптера, через который ПК выходит в сеть, — и его имя для журнала.
+def _exit_ips(a: dict) -> list[str]:
+    """Адреса, через которые этот адаптер выводит ПК в сеть, — или пусто, если он не годится.
 
     Годится адаптер: физический (`hardware` и не `virtual` — туннель Happ, Hyper-V, Bluetooth
     виртуальные), включён (`Up`), с IPv4 не из 169.254/16 (такой Windows выдаёт сама, когда сети
-    нет) и со шлюзом по умолчанию. Подходящих несколько (кабель и Wi-Fi) — меньшая метрика, как
+    нет) и со шлюзом по умолчанию."""
+    if a.get("hardware") is not True or a.get("virtual") is not False or a.get("status") != "Up":
+        return []
+    if not _has_gateway(a.get("gateways")):
+        return []
+    return [str(ip) for ip in _as_list(a.get("ipv4")) if _usable_ipv4(ip)]
+
+
+def pick_adapter(adapters: list[dict]) -> tuple[str, str]:
+    """Адрес физического адаптера, через который ПК выходит в сеть, — и его имя для журнала.
+
+    Правило отбора — `_exit_ips`. Подходящих несколько (кабель и Wi-Fi) — меньшая метрика, как
     выбирает сама Windows. Нет ни одного — BindError: подключаться не через что."""
     candidates = []
     for a in adapters:
-        if a.get("hardware") is not True or a.get("virtual") is not False:
-            continue
-        if a.get("status") != "Up":
-            continue
-        ips = [str(ip) for ip in _as_list(a.get("ipv4")) if _usable_ipv4(ip)]
-        if not ips or not _has_gateway(a.get("gateways")):
+        ips = _exit_ips(a)
+        if not ips:
             continue
         index = a.get("index") if isinstance(a.get("index"), int) else 10 ** 6
         candidates.append((_metric(a), index, ips[0], a))
@@ -190,40 +219,124 @@ def pick_adapter(adapters: list[dict]) -> tuple[str, str]:
     return ip, note
 
 
-def resolve_bind(bind: str | None, adapters=list_adapters,
-                 windows: bool = os.name == "nt") -> tuple[str | None, str]:
-    """`auto` / адрес / `none` → (адрес для `ssh -b` или None, строка для журнала).
+class Bind(NamedTuple):
+    """Итог разбора `--bind`: адрес для `ssh -b` (None — без привязки), строка для журнала и
+    предупреждение (None — его нет). Предупреждение не останавливает забор — оно попадает в журнал."""
+    addr: str | None
+    note: str
+    warning: str | None = None
 
-    BindError — привязку определить нельзя, подключаться не надо."""
-    value = (bind or "").strip()
-    if value.lower() in NO_BIND:
-        return None, "ssh без привязки к адаптеру (--bind none)"
-    if value.lower() == "auto":
-        if not windows:
-            return None, "автопривязка к адаптеру — только на Windows; ssh без привязки"
+
+def bind_mode(bind: str | None) -> str:
+    """`none` / `auto` / `explicit`. Пустое значение — `auto`: отключить привязку можно только
+    явным `none` (ревью #289: пустая переменная давала auto, а пустой `--bind ""` — отключение)."""
+    value = (bind or "").strip().lower()
+    if value in NO_BIND:
+        return "none"
+    return "auto" if value in ("", "auto") else "explicit"
+
+
+def _unusable_reason(ip) -> str | None:
+    """Почему с этим адресом ssh до сервера заведомо не дойдёт, — или None, если адрес возможен."""
+    if ip.version != 4:
+        return "не IPv4-адрес, а сервер доступен по IPv4"
+    if ip.is_unspecified:
+        return "адрес «любой» не привязывает ssh ни к какому адаптеру"
+    if ip.is_loopback:
+        return "адрес петли — с него в сеть не выйти"
+    if ip.is_link_local:
+        return "адрес 169.254/16 Windows выдаёт сама, когда сети нет"
+    if ip.is_multicast:
+        return "групповой адрес"
+    return None
+
+
+def _wait_for_adapter(adapters, wait: float, interval: float, sleep, clock) -> tuple[str, str, float]:
+    """`pick_adapter` с ожиданием: после пробуждения ПК (StartWhenAvailable, триггеры «вход» и
+    «разблокировка») Ethernet поднимается не сразу, а попытка подключения к бою — одна в сутки.
+    Опрос раз в `interval` с, не дольше `wait` с. → (адрес, имя адаптера, сколько ждали; 0 — нашёлся
+    с первого опроса: сам опрос PowerShell идёт секунды, это не ожидание)."""
+    start = clock()
+    deadline = start + max(0.0, wait)
+    retried = False
+    while True:
         try:
             ip, note = pick_adapter(adapters())
+            return ip, note, (clock() - start if retried else 0.0)
         except BindError as e:
-            raise BindError(f"{e}. {_BIND_HELP}") from None
-        return ip, f"ssh мимо туннеля — привязка к адаптеру {note}"
+            last = e
+        if clock() + interval > deadline:
+            break
+        sleep(interval)
+        retried = True
+    waited = f" (ждал {clock() - start:.0f} с)" if wait > 0 else ""
+    raise BindError(f"{last}{waited}. {_BIND_HELP}")
+
+
+def resolve_bind(bind: str | None, adapters=None, windows: bool | None = None,
+                 wait: float = 0, interval: float = 15, sleep=time.sleep, clock=time.monotonic) -> Bind:
+    """`auto` / адрес / `none` → `Bind` (адрес для `ssh -b` или None, строка для журнала, предупреждение).
+
+    BindError — привязку определить нельзя, подключаться не надо. `wait` — сколько секунд ждать
+    подходящий адаптер в режиме `auto` (у запуска по расписанию — `DEFAULT_WAIT_ADAPTER`)."""
+    adapters = adapters or list_adapters
+    windows = (os.name == "nt") if windows is None else windows
+    mode = bind_mode(bind)
+    if mode == "none":
+        return Bind(None, "ssh без привязки к адаптеру (--bind none)")
+    if mode == "auto":
+        if not windows:
+            return Bind(None, "автопривязка к адаптеру — только на Windows; ssh без привязки")
+        ip, note, waited = _wait_for_adapter(adapters, wait, interval, sleep, clock)
+        after = f", адаптер ждал {waited:.0f} с" if waited else ""
+        return Bind(ip, f"ssh мимо туннеля — привязка к адаптеру {note}{after}")
+    value = bind.strip()
     try:
         ip = ipaddress.ip_address(value)
     except ValueError:
         raise BindError(f"--bind {value!r} — не IP-адрес. {_BIND_HELP}") from None
-    return str(ip), f"ssh с привязкой к {ip} (адрес задан явно)"
+    reason = _unusable_reason(ip)
+    if reason:
+        raise BindError(f"--bind {value} — {reason}. {_BIND_HELP}")
+    note = f"ssh с привязкой к {ip} (адрес задан явно)"
+    if not windows:
+        return Bind(str(ip), note)
+    try:
+        listed = adapters()
+    except BindError as e:
+        return Bind(str(ip), note, f"проверить, чей это адрес, не удалось ({e}); если он не у "
+                                   "физического адаптера со шлюзом, ssh уйдёт в туннель")
+    owners = [a for a in listed if str(ip) in {str(x) for x in _as_list(a.get("ipv4"))}]
+    if not owners:
+        return Bind(str(ip), note, f"адрес {ip} не найден ни у одного адаптера этого ПК — ssh к нему "
+                                   "не привяжется; сверьте `ipconfig` или уберите явный адрес (по умолчанию auto)")
+    alias = owners[0].get("alias")
+    if any(str(ip) in _exit_ips(a) for a in owners):
+        return Bind(str(ip), f"{note}, адаптер «{alias}»")
+    return Bind(str(ip), f"{note}, адаптер «{alias}»",
+                f"адрес {ip} принадлежит «{alias}» — это не физический адаптер со шлюзом (туннель, "
+                "виртуальный или без сети): ssh может уйти в туннель; по умолчанию — auto")
 
 
-def failure_hint(stderr: str, addr: str | None) -> str | None:
-    """Подсказка к отказу ssh — чтобы в журнале было видно, что чинить, а не только «код 255»."""
+def failure_hint(stderr: str, addr: str | None, mode: str = "auto") -> str | None:
+    """Подсказка к отказу ssh — чтобы в журнале было видно, что чинить, а не только «код 255».
+    `mode` — как получен адрес (`bind_mode`): у явного адреса причина может быть в самом адресе."""
     s = stderr.lower()
     if addr and f"bind {addr}".lower() in s:
-        return (f"адрес {addr} не принадлежит этому ПК (адаптер сменил адрес?) — "
-                "запустите с --bind auto или сверьте `ipconfig`")
+        if mode == "explicit":
+            return (f"адрес {addr} не принадлежит этому ПК — сверьте `ipconfig` или уберите явный "
+                    "адрес (по умолчанию auto)")
+        return (f"адрес {addr} пропал у адаптера между выбором и подключением (сменился по DHCP?) — "
+                "следующий запуск выберет адрес заново; сверить `ipconfig`")
     if "timed out" in s or "banner exchange" in s:
+        if addr and mode == "explicit":
+            return (f"адрес {addr} задан явно: если он не у физического адаптера со шлюзом (см. "
+                    "`ipconfig`), ssh ушёл в туннель — уберите явный адрес (по умолчанию auto); "
+                    "если у физического — дело в канале до сервера или в самом сервере")
         if addr:
             return "таймаут и мимо туннеля — дело в канале до сервера или в самом сервере"
         return ("ssh шёл без привязки к адаптеру: если включён туннель (Happ), ssh к бою он не "
-                "пропускает — запустите с --bind auto")
+                "пропускает — запустите с --bind auto (он и по умолчанию: уберите --bind none)")
     return None
 
 
@@ -286,13 +399,18 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
         say("[ОШИБКА] --dest внутри репозитория: в копии ПДн (CLAUDE.md, 152-ФЗ). Укажите папку вне него.")
         return FAILED
     addr = None
+    mode = bind_mode(bind) if bind is not None else "none"
     if bind is not None:
         try:
-            addr, note = resolve(bind)
+            got = resolve(bind)
         except BindError as e:
             say(f"[ОШИБКА] привязка ssh к адаптеру: {e} — к серверу НЕ подключался")
             return FAILED
+        addr, note = got[0], got[1]
+        warning = got[2] if len(got) > 2 else None
         say(f"[i] {note}")
+        if warning:
+            say(f"[!] {warning}")
     dest.mkdir(parents=True, exist_ok=True)
 
     # ⚠⚠ ssh ПИШЕТ ПРЯМО В ФАЙЛ, А НЕ В КАНАЛ (27.10.2026, первый боевой забор). `ssh` из Git для
@@ -317,7 +435,7 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
         part.unlink(missing_ok=True)
         why = "на сервере нет ни одной копии в /data/backups" if "NO_BACKUP" in stderr else stderr.strip()[-300:]
         say(f"[ОШИБКА] забор не удался (код {res.returncode}): {why}")
-        hint = failure_hint(stderr, addr)
+        hint = failure_hint(stderr, addr, mode)
         if hint:
             say(f"[подсказка] {hint}")
         return FAILED
@@ -375,11 +493,15 @@ def main() -> None:
     ap.add_argument("--keep-days", type=int, default=30)
     ap.add_argument("--max-age-hours", type=int, default=36, help="старше — тревога: ночной бэкап не работает")
     ap.add_argument("--bind", default=os.environ.get(BIND_ENV) or "auto",
-                    help=f"адрес для `ssh -b` мимо туннеля: auto (по умолчанию) | <IP> | none; "
-                         f"или переменная {BIND_ENV}")
+                    help=f"адрес для `ssh -b` мимо туннеля: auto (по умолчанию; пустое значение — тоже auto) "
+                         f"| <IP> | none; или переменная {BIND_ENV}")
+    ap.add_argument("--wait-adapter", type=int, default=DEFAULT_WAIT_ADAPTER,
+                    help=f"сколько секунд ждать физический адаптер со шлюзом в режиме auto "
+                         f"(по умолчанию {DEFAULT_WAIT_ADAPTER}; 0 — не ждать)")
     args = ap.parse_args()
+    resolve = functools.partial(resolve_bind, wait=max(0, args.wait_adapter))
     sys.exit(pull(Path(args.dest), args.host, args.app_dir, args.docker, args.keep_days, args.max_age_hours,
-                  bind=args.bind))
+                  bind=args.bind, resolve=resolve))
 
 
 if __name__ == "__main__":
