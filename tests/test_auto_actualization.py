@@ -1525,7 +1525,35 @@ class TestBuild(unittest.TestCase):
         runner = mock.Mock(return_value=answer(out="[]"))
         with mock.patch.object(aa, "git", return_value=""):
             aa.pr_state("1", runner)
-        self.assertIn("headRefOid,state,isCrossRepository", runner.call_args.args)
+        self.assertIn("headRefOid,state,isCrossRepository,commits", runner.call_args.args)
+
+    def pr_own(self, prs, tip, own, ancestor=False):
+        def fake_git(*args, **kw):
+            if args[0] == "merge-base":
+                if ancestor:
+                    return ""
+                raise subprocess.CalledProcessError(1, "git merge-base")
+            return tip
+        runner = mock.Mock(return_value=answer(out=json.dumps(prs)))
+        with mock.patch.object(aa, "git", side_effect=fake_git):
+            return aa.pr_state("1", runner, own=own)
+
+    def test_closed_pr_with_a_moved_head_is_matched_by_our_commit(self):
+        # Ревью 3c885bd, MED 1: голову PR сдвинули вне дерева сборки — коммит автомата всё равно среди коммитов PR.
+        moved = [{"headRefOid": "H", "state": "CLOSED", "commits": [{"oid": "S"}, {"oid": "H"}]}]
+        self.assertEqual(self.pr_own(moved, "S\n", ["S"]), "closed")
+        merged = [{"headRefOid": "H", "state": "MERGED", "commits": [{"oid": "S"}, {"oid": "H"}]}]
+        self.assertEqual(self.pr_own(merged, "S\n", ["S"]), "merged")
+        self.assertEqual(self.pr_own(moved, "S\n", []), "", "без файла SHA — как раньше: сверка по вершине")
+        other = [{"headRefOid": "H", "state": "CLOSED", "commits": [{"oid": "P"}, {"oid": "H"}]}]
+        self.assertEqual(self.pr_own(other, "S\n", ["S"]), "", "PR прошлой сборки не глушит пересборку")
+        fork = [{**moved[0], "isCrossRepository": True}]
+        self.assertEqual(self.pr_own(fork, "S\n", ["S"]), "")
+
+    def test_closed_pr_without_the_commit_list_falls_back_to_ancestry(self):
+        bare = [{"headRefOid": "H", "state": "CLOSED"}]
+        self.assertEqual(self.pr_own(bare, "S\n", ["S"], ancestor=True), "closed")
+        self.assertEqual(self.pr_own(bare, "S\n", ["S"], ancestor=False), "")
 
     def test_pull_request_from_a_fork_is_not_ours(self):
         # Репозиторий публичен: `--head` фильтрует только по имени ветки, PR из форка с тем же именем — чужой.
@@ -1576,7 +1604,7 @@ class TestPublish(unittest.TestCase):
         self.git("clone", "-q", str(self.remote), str(self.tree), cwd=base)
         for key, value in (("user.email", "t@example.invalid"), ("user.name", "t"), ("core.hooksPath", "/dev/null")):
             self.git("config", key, value, cwd=self.tree)
-        for name in ("knowledge_base/a.txt", "app/rag/edition.py", "landing/index.html"):
+        for name in ("knowledge_base/a.txt", "app/rag/edition.py", "landing/index.html", "README.md"):
             (self.tree / name).parent.mkdir(parents=True, exist_ok=True)
             (self.tree / name).write_text("1", encoding="utf-8")
         self.git("add", ".", cwd=self.tree)
@@ -1607,7 +1635,247 @@ class TestPublish(unittest.TestCase):
             return aa.publish("1", self.tree, self.report), calls
 
     def own(self):
-        return self.report.with_name(aa.OWN_COMMIT).read_text(encoding="utf-8").strip()
+        """Последний записанный SHA коммита автомата (файл — список, по строке на коммит)."""
+        text = self.report.with_name(aa.OWN_COMMIT).read_text(encoding="utf-8")
+        return [line.strip() for line in text.splitlines() if line.strip()][-1]
+
+    def subject(self, rev):
+        return subprocess.run(["git", "log", "-1", "--format=%s", rev], cwd=self.tree, capture_output=True, text=True,
+                              encoding="utf-8").stdout.strip()
+
+    def remote_files(self):
+        return subprocess.run(["git", "ls-tree", "-r", "--name-only", "refs/remotes/origin/auto/edition-1"],
+                              cwd=self.tree, capture_output=True, text=True).stdout.split()
+
+    def human_commit(self, subject="человек"):
+        """Коммит человека на ветку сборки из другой копии того же репозитория (дерево на время снято с ветки)."""
+        other = Path(self.tmp.name) / "other"
+        self.git("switch", "-q", "--detach", cwd=self.tree)
+        self.git("worktree", "add", "-q", str(other), "auto/edition-1", cwd=self.tree)
+        (other / "landing" / "index.html").write_text("правка человека", encoding="utf-8")
+        self.git("commit", "-q", "-am", subject, cwd=other)
+        self.git("worktree", "remove", "--force", str(other), cwd=self.tree)
+        self.git("switch", "-q", "auto/edition-1", cwd=self.tree)
+
+    def test_human_commit_between_the_check_and_the_commit_is_not_published(self):
+        # Ревью 3c885bd, LOW 2: вершина ветки читалась ПОСЛЕ проверки «коммитов человека нет», и коммит человека в
+        # этом окне (секунды на `git add` и запись отчёта) уезжал в PR автомата: сравнение со старым значением в
+        # `update-ref` его не видело — старым значением была уже его вершина.
+        real_git = aa.git
+
+        def racing(*args, **kw):
+            out = real_git(*args, **kw)
+            if args[0] == "log":
+                self.human_commit()
+            return out
+
+        with mock.patch.object(aa, "git", side_effect=racing), self.assertRaises(subprocess.CalledProcessError):
+            self.publish()
+        self.assertEqual(self.remote_heads(), "", "коммит человека не должен уйти на GitHub")
+        self.assertEqual(self.subject("auto/edition-1"), "человек", "коммит человека не затёрт")
+
+    def test_human_commit_after_ours_is_not_pushed_with_it(self):
+        # Пушится проверенный коммит, а не ветка по имени: коммит человека после `update-ref` остаётся локальным.
+        real_git = aa.git
+
+        def racing(*args, **kw):
+            if args[0] == "push":
+                self.human_commit()
+            return real_git(*args, **kw)
+
+        with mock.patch.object(aa, "git", side_effect=racing):
+            out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1")
+        self.assertEqual(self.remote_tip(), self.own())
+        self.assertEqual(self.subject("auto/edition-1"), "человек")
+
+    def test_two_runs_at_once_leave_the_branch_recognised(self):
+        # Ревью 3c885bd, LOW 3: проигравший из двух одновременных запусков (Планировщик + ручной) перезаписывал файл
+        # SHA своим коммитом, хотя его `update-ref` отвергнут, — назавтра коммит победителя был «чужой работой».
+        # Порядок 1: второй прошёл проверку раньше, чем первый передвинул ветку, и проиграл.
+        real_git, state = aa.git, {}
+
+        def second(*args, **kw):
+            if args[0] == "update-ref":
+                state["first"] = real_git(*state["args"], **state["kw"])     # первый успел раньше
+            return real_git(*args, **kw)
+
+        def first(*args, **kw):
+            if args[0] == "update-ref" and "args" not in state:
+                state["args"], state["kw"] = args, kw
+                with mock.patch.object(aa, "git", side_effect=second), \
+                        mock.patch.dict(os.environ, {"GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"}), \
+                        self.assertRaises(subprocess.CalledProcessError):
+                    self.publish()
+                return state["first"]
+            return real_git(*args, **kw)
+
+        with mock.patch.object(aa, "git", side_effect=first):
+            self.publish()
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1", "назавтра ветка — своя: на ней коммит победителя")
+
+    def test_two_runs_at_once_when_the_second_wins(self):
+        # Порядок 2: второй прошёл целиком, пока первый собирал коммит; первый проиграл. «Вернуть прежнее содержимое
+        # файла» здесь стёрло бы SHA победителя: прежним у первого был пустой файл.
+        real_git, state = aa.git, {}
+
+        def first(*args, **kw):
+            out = real_git(*args, **kw)
+            if args[0] == "commit-tree" and "second" not in state:
+                state["second"] = True
+                with mock.patch.object(aa, "git", side_effect=real_git), \
+                        mock.patch.dict(os.environ, {"GIT_COMMITTER_DATE": "2000-01-01T00:00:00+00:00"}):
+                    self.publish()
+            return out
+
+        with mock.patch.object(aa, "git", side_effect=first), self.assertRaises(subprocess.CalledProcessError):
+            self.publish()
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1", "назавтра ветка — своя: на ней коммит победителя")
+
+    def test_our_commit_on_top_of_someone_elses_is_not_published(self):
+        # На ветке — ровно один коммит автомата от dev: свой SHA на вершине не прячет чужой коммит под ним.
+        (self.tree / "landing" / "index.html").write_text("правка человека", encoding="utf-8")
+        self.git("commit", "-q", "-am", "человек", cwd=self.tree)
+        (self.tree / "knowledge_base" / "a.txt").write_text("3", encoding="utf-8")
+        self.git("commit", "-q", "-am", "data(auto): редакция ПП 719, документ Контура 1", cwd=self.tree)
+        top = subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.tree, capture_output=True, text=True).stdout.strip()
+        aa.record_own(self.report.with_name(aa.OWN_COMMIT), top)
+        with self.assertRaises(aa.HumanCommits):
+            self.publish()
+        self.assertEqual(self.remote_heads(), "")
+
+    def test_unverifiable_change_set_stops_before_the_commit(self):
+        # `diff-index` не ответил «есть изменения» или «нет» — коммит не собирается: пустой коммит ушёл бы в PR.
+        real = self.real_run
+
+        def broken(cmd, **kw):
+            if cmd[:2] == ["git", "diff-index"]:
+                return answer(code=128)
+            return real(cmd, **kw)
+
+        self.real_run = broken
+        with self.assertRaises(subprocess.CalledProcessError):
+            self.publish()
+        self.real_run = real
+        self.assertEqual(self.remote_heads(), "")
+        self.assertFalse(self.report.with_name(aa.OWN_COMMIT).exists())
+
+    def test_torn_line_in_the_sha_file_does_not_swallow_ours(self):
+        # Файл SHA дописывается: оборванная прошлым сбоем строка не должна склеиться с новым SHA.
+        self.report.with_name(aa.OWN_COMMIT).write_text("abc", encoding="utf-8")
+        with self.assertRaises(RuntimeError):
+            self.publish(gh_code=1)
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1")
+
+    def test_staged_work_of_a_human_outside_the_publish_paths_stays_out(self):
+        # Ревью 3c885bd, LOW 4: `write-tree` брал весь индекс — застейдженный человеком файл вне путей публикации
+        # уходил в коммит автомата и в публичный PR.
+        (self.tree / "scripts").mkdir()
+        (self.tree / "scripts" / "human.py").write_text("print('человек')", encoding="utf-8")
+        self.git("add", "scripts/human.py", cwd=self.tree)
+        self.publish()
+        self.assertNotIn("scripts/human.py", self.remote_files())
+        staged = subprocess.run(["git", "diff", "--cached", "--name-only"], cwd=self.tree, capture_output=True,
+                                text=True).stdout.split()
+        self.assertIn("scripts/human.py", staged, "застейдженное человеком остаётся как было")
+
+    def test_lost_index_does_not_delete_the_rest_of_the_tree(self):
+        # Пропавший индекс давал коммит, удаляющий всё вне путей публикации.
+        (self.tree / ".git" / "index").unlink()
+        self.publish()
+        self.assertIn("README.md", self.remote_files())
+        self.assertIn("knowledge_base/a.txt", self.remote_files())
+
+    def test_index_of_the_published_paths_matches_the_commit(self):
+        self.publish()
+        staged = subprocess.run(["git", "diff", "--cached", "--name-only", "--", *aa.PUBLISH_PATHS], cwd=self.tree,
+                                capture_output=True, text=True).stdout.split()
+        self.assertEqual(staged, [], "`git status` не должен показывать опубликованное «застейдженным назад»")
+
+    def closed_elsewhere(self, delete_branch, commits=True):
+        """Сборка опубликована, голову PR сдвинули ВНЕ дерева сборки (другой клон — как «Update branch» или
+        «Resolve conflicts» в вебе), затем PR закрыли без слияния. Назавтра — `handle_document` с готовым отчётом."""
+        sources = Path(self.tmp.name) / "src"
+        (sources / "1").mkdir(parents=True)
+        self.report = sources / "1" / "report.md"
+        self.report.write_text("отчёт", encoding="utf-8")
+        self.publish()
+        ours = self.own()
+        other = Path(self.tmp.name) / "elsewhere"
+        self.git("clone", "-q", "-b", "auto/edition-1", str(self.remote), str(other), cwd=self.tmp.name)
+        for key, value in (("user.email", "h@example.invalid"), ("user.name", "h"), ("core.hooksPath", "/dev/null")):
+            self.git("config", key, value, cwd=other)
+        (other / "landing" / "index.html").write_text("правка в вебе", encoding="utf-8")
+        self.git("commit", "-q", "-am", "Resolve conflicts", cwd=other)
+        self.git("push", "-q", "origin", "auto/edition-1", cwd=other)
+        moved = subprocess.run(["git", "rev-parse", "HEAD"], cwd=other, capture_output=True, text=True).stdout.strip()
+        if delete_branch:
+            self.git("push", "-q", "origin", "--delete", "auto/edition-1", cwd=other)
+        pr = {"headRefOid": moved, "state": "CLOSED", "isCrossRepository": False}
+        if commits:
+            pr["commits"] = [{"oid": ours}, {"oid": moved}]
+        return self.next_day(sources, pr), moved
+
+    def next_day(self, sources, pr):
+        issues, gh_calls = mock.Mock(dry_run=False), []
+        real_git, real_publish = aa.git, aa.publish
+
+        def git_here(*args, cwd=None, **kw):
+            return real_git(*args, cwd=cwd or self.tree, **kw)
+
+        def run(cmd, **kw):
+            if cmd[0] == "gh":
+                gh_calls.append(cmd)
+                return answer(out="https://x/pr/NEW\n")
+            return self.real_run(cmd, **kw)
+
+        ready = (True, {"последний шаг": "tests", "вердикт": "ГОТОВО", "факты": {"ветка": "auto/edition-1"}})
+        with mock.patch.object(aa, "gh", return_value=answer(out=json.dumps([pr]))), \
+                mock.patch.object(aa, "git", side_effect=git_here), \
+                mock.patch.object(aa, "edition_built", return_value=True), \
+                mock.patch.object(aa, "read_report", return_value=ready), \
+                mock.patch.object(aa, "publish", side_effect=lambda d, t, r: real_publish(d, self.tree, self.report)), \
+                mock.patch.object(aa.subprocess, "run", side_effect=run):
+            log = aa.handle_document("1", "ссылка", sources, issues)
+        return SimpleNamespace(log=log, issues=issues, gh=gh_calls)
+
+    def test_closed_pr_with_a_head_moved_elsewhere_is_not_published_again(self):
+        # Ревью 3c885bd, MED 1: закрытый PR признавался своим, только если его голова = вершине ЛОКАЛЬНОЙ ветки.
+        # Голову сдвинули вне дерева, PR закрыли: удалённая ветка осталась — non-ff и ежедневная ложная задача
+        # «PR не создан»; ветку удалили — автомат заново публиковал закрытую сборку новым черновым PR.
+        for delete_branch in (False, True):
+            with self.subTest(delete_branch=delete_branch):
+                self.tearDown()
+                self.setUp()
+                r, moved = self.closed_elsewhere(delete_branch)
+                self.assertIn("закрыт без слияния", r.log)
+                r.issues.once.assert_not_called()
+                self.assertEqual(r.gh, [], "закрытую сборку автомат повторно не публикует")
+                self.assertEqual(self.remote_heads().split()[0] if self.remote_heads() else "",
+                                 "" if delete_branch else moved, "на GitHub ничего не сдвинуто")
+
+    def test_closed_pr_moved_from_a_local_copy_is_matched_without_the_commit_list(self):
+        # Запасной путь: GitHub не прислал список коммитов, но голова PR — в локальном репозитории (её запушили из
+        # основной копии), и коммит автомата — её предок.
+        sources = Path(self.tmp.name) / "src"
+        (sources / "1").mkdir(parents=True)
+        self.report = sources / "1" / "report.md"
+        self.report.write_text("отчёт", encoding="utf-8")
+        self.publish()
+        other = Path(self.tmp.name) / "main_copy"
+        self.git("branch", "fix", "auto/edition-1", cwd=self.tree)
+        self.git("worktree", "add", "-q", str(other), "fix", cwd=self.tree)
+        (other / "landing" / "index.html").write_text("правка из основной копии", encoding="utf-8")
+        self.git("commit", "-q", "-am", "правка", cwd=other)
+        self.git("push", "-q", "origin", "fix:auto/edition-1", cwd=other)
+        moved = subprocess.run(["git", "rev-parse", "fix"], cwd=self.tree, capture_output=True, text=True).stdout.strip()
+        self.git("worktree", "remove", "--force", str(other), cwd=self.tree)
+        r = self.next_day(sources, {"headRefOid": moved, "state": "CLOSED", "isCrossRepository": False})
+        self.assertIn("закрыт без слияния", r.log)
+        self.assertEqual(r.gh, [])
 
     def branch_commits(self):
         return subprocess.run(["git", "log", "--format=%H", "origin/dev..auto/edition-1"], cwd=self.tree,
@@ -1630,14 +1898,7 @@ class TestPublish(unittest.TestCase):
 
     def test_failure_before_the_sha_is_recorded_is_retried_tomorrow(self):
         # Ревью, раунд 6: сбой между коммитом и записью SHA навсегда делал свой коммит «чужой работой».
-        real_write = Path.write_text
-
-        def failing(path, *args, **kw):
-            if path.name.startswith("auto_commit"):
-                raise OSError("диск")
-            return real_write(path, *args, **kw)
-
-        with mock.patch.object(Path, "write_text", failing), self.assertRaises(OSError):
+        with mock.patch.object(aa, "record_own", side_effect=OSError("диск")), self.assertRaises(OSError):
             self.publish()
         self.assertEqual(self.branch_commits(), [], "ветка не встаёт на коммит, SHA которого не записан")
         out, _ = self.publish()
@@ -1834,6 +2095,11 @@ class TestActualizationDoc(unittest.TestCase):
     def test_the_shared_hook_is_named(self):
         self.assertIn("post-commit", self.DOC)
         self.assertNotIn("ветку с коммитом человека не публикует", self.DOC)
+
+    def test_the_closed_pr_rule_and_its_limit_are_stated(self):
+        # Ревью 3c885bd, MED 1: документ обещал «повторно не публикует» шире, чем делал код.
+        self.assertRegex(self.DOC, r"среди\s+коммитов PR есть коммит автомата")
+        self.assertIn("force-push", self.DOC)
 
 
 class TestParserPrompt(unittest.TestCase):

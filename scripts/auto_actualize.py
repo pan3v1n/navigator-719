@@ -29,6 +29,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -49,7 +50,8 @@ MAIN_ENV = Path("D:/navigator-719/.env")
 KEY = "DEEPSEEK_API_KEY"
 # Что конвейер имеет право менять. `git add` всего дерева забрал бы лишнее.
 PUBLISH_PATHS = ("knowledge_base", "app/rag/edition.py", "landing/index.html")
-# SHA коммита автомата, рядом с отчётом. Тема коммита не годится: `--amend --no-edit` её сохраняет.
+# SHA коммитов автомата этой сборки, рядом с отчётом, по строке на коммит. Тема коммита не годится: `--amend --no-edit`
+# её сохраняет.
 OWN_COMMIT = "auto_commit.txt"
 # Тело PR у GitHub — не длиннее 65 536 знаков; запас на хвост со ссылкой. Не влез — отчёт целиком едет файлом.
 PR_BODY_LIMIT = 60_000
@@ -132,9 +134,9 @@ class Issues:
         return made.stdout.strip()
 
 
-def git(*args: str, cwd: Path = ROOT) -> str:
+def git(*args: str, cwd: Path = ROOT, env: dict[str, str] | None = None) -> str:
     return subprocess.run(["git", *args], cwd=cwd, check=True, capture_output=True, text=True,
-                          encoding="utf-8", errors="replace").stdout
+                          encoding="utf-8", errors="replace", env=env).stdout
 
 
 def edition_built(doc_id: str, sources: Path) -> bool:
@@ -194,35 +196,89 @@ def build_edition(doc_id: str, sources: Path) -> tuple[bool, dict]:
     return ok and run.returncode == 0, report
 
 
-def pr_state(doc_id: str, runner=None) -> str | None:
+def own_commits(path: Path) -> list[str]:
+    """SHA коммитов, которые автомат собрал для этой сборки. Файла нет — свежая сборка или он ещё не коммитил."""
+    if not path.exists():
+        return []
+    return [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+def record_own(path: Path, sha: str) -> None:
+    """Только ДОПИСАТЬ, до того как ветка встанет на коммит. Два одновременных запуска (Планировщик и ручной) пишут
+    каждый свой SHA, ветку передвигает один; перезапись — или «вернуть прежнее» после отказа `update-ref` — стёрла бы
+    SHA победителя, и назавтра его коммит стал бы «чужой работой». SHA проигравшего безвреден: на его коммит ветка
+    не встала. Перевод строки впереди — оборванная прошлым сбоем строка не склеится с новым SHA."""
+    with open(path, "a", encoding="utf-8", newline="\n") as f:
+        f.write(f"\n{sha}\n")
+
+
+def carries_own(pr: dict, own: list[str]) -> bool:
+    """Закрытый PR несёт коммит автомата, хотя его голову сдвинули вне дерева сборки («Update branch» или «Resolve
+    conflicts» в вебе, другой ПК): SHA из `auto_commit.txt` — среди коммитов PR. Списка GitHub не прислал — запасной
+    путь: коммит автомата — предок головы PR, если она есть в локальном репозитории (её пушили из основной копии).
+    ⚠ История PR переписана без коммита автомата (force-push) — не опознаётся."""
+    if not own:
+        return False
+    if {c.get("oid") for c in pr.get("commits") or []} & set(own):
+        return True
+    for sha in own:
+        try:
+            git("merge-base", "--is-ancestor", sha, pr["headRefOid"])
+            return True
+        except subprocess.CalledProcessError:     # не предок или головы нет в локальном репозитории
+            continue
+    return False
+
+
+def pr_state(doc_id: str, runner=None, own: list[str] | tuple = ()) -> str | None:
     """PR этой сборки: `"open"`, `"closed"` (закрыт без слияния), `"merged"` или `""` — PR нет.
     `None` — GitHub не ответил: решать нечего, повтор завтра.
 
     Открытый PR — всегда этой сборки: его правит человек, и вершины локальной ветки и PR расходятся законно.
-    Закрытые сверяются по коммиту: PR прошлой сборки не должен заглушить пересборку. Закрытый и слитый различаются:
-    закрытый без слияния не глушит отчёт «остановлено», а журнал не называет его открытым.
+    Закрытые сверяются по коммиту: PR прошлой сборки не должен заглушить пересборку. Свой — если голова PR равна
+    вершине локальной ветки (или локальной ветки нет) либо PR несёт коммит автомата (`own`, `carries_own`).
+    Закрытый и слитый различаются: закрытый без слияния не глушит отчёт «остановлено», а журнал не называет его открытым.
     ⚠ `--head` фильтрует только по имени ветки, а репозиторий публичен: PR из форка с тем же именем — не наш.
     """
     branch = f"auto/edition-{doc_id}"
     found = (runner or gh)("pr", "list", "--head", branch, "--state", "all", "--json",
-                           "headRefOid,state,isCrossRepository")
+                           "headRefOid,state,isCrossRepository,commits")
     if found.returncode != 0:
         return None
     prs = [p for p in json.loads(found.stdout or "[]") if not p.get("isCrossRepository")]
     if any(p["state"] == "OPEN" for p in prs):
         return "open"
     tip = git("branch", "--list", "--format=%(objectname)", branch).strip()
-    ours = [p for p in prs if not tip or p["headRefOid"] == tip]
+    ours = [p for p in prs if not tip or p["headRefOid"] == tip or carries_own(p, list(own))]
     if not ours:
         return ""
     return "merged" if any(p["state"] == "MERGED" for p in ours) else "closed"
 
 
-def write_own(path: Path, sha: str) -> None:
-    """Атомарно: оборванная запись не должна оставить чужой SHA вместо своего."""
-    tmp = path.with_name(path.name + ".tmp")
-    tmp.write_text(sha, encoding="utf-8")
-    os.replace(tmp, path)
+def commit_paths(tree: Path, parent: str, paths: list[str], title: str, scratch: Path) -> str | None:
+    """Коммит ТОЛЬКО путей публикации поверх `parent` — через временный индекс. Настоящий индекс дерева в коммит не
+    идёт: в нём может лежать застейдженная правка человека вне путей публикации (ушла бы в публичный PR), а пропавший
+    индекс дал бы коммит, удаляющий всё остальное. → SHA коммита или None, если менять нечего."""
+    with tempfile.TemporaryDirectory(dir=scratch, prefix="auto_index_") as d:
+        env = {**os.environ, "GIT_INDEX_FILE": str(Path(d, "index").resolve())}
+        git("read-tree", parent, cwd=tree, env=env)
+        git("add", "-A", "--", *paths, cwd=tree, env=env)
+        same = subprocess.run(["git", "diff-index", "--cached", "--quiet", parent, "--"], cwd=tree, env=env)
+        if same.returncode == 0:
+            return None
+        if same.returncode != 1:
+            raise subprocess.CalledProcessError(same.returncode, "git diff-index")
+        tree_sha = git("write-tree", cwd=tree, env=env).strip()
+    return git("commit-tree", tree_sha, "-p", parent, "-m", title, cwd=tree).strip()
+
+
+def align_index(tree: Path, sha: str, paths: list[str]) -> None:
+    """Настоящий индекс путей публикации — как в коммите автомата, иначе `git status` показывал бы их «застейдженными
+    назад». Индекс прочих путей не трогается. Не вышло — только журнал: коммит уже на ветке, индекс — удобство."""
+    try:
+        git("reset", "-q", sha, "--", *paths, cwd=tree)
+    except subprocess.CalledProcessError as e:
+        print(f"индекс дерева сборки не выровнен (git reset: код {e.returncode})", flush=True)
 
 
 def pr_body(report: str, full: str | None) -> str:
@@ -239,43 +295,47 @@ def publish(doc_id: str, tree: Path, report_md: Path) -> str:
     """Черновой PR в `dev`, повторяемо: коммит и пуш могли пройти в прошлый запуск, а PR — нет.
 
     Черновик нельзя слить случайно: его сначала переводит в готовый человек.
-    ⚠ Ветку мог забрать в работу человек, а репозиторий публичен. Публикуется ветка ПО ИМЕНИ, поэтому проверяется
-    она, а не HEAD дерева: дерево обязано стоять на ней, а на ней — только коммит автомата, опознанный по SHA
-    (тему сохраняет `--amend`). Иначе отказ. Свой коммит уже есть — сборка в нём, и всё незакоммиченное в дереве
-    принадлежит человеку: его не трогаем.
+    ⚠ Ветку мог забрать в работу человек, а репозиторий публичен. Проверяется сама ветка, а не HEAD дерева: дерево
+    обязано стоять на ней, а на ней — только коммит автомата, опознанный по SHA (тему сохраняет `--amend`). Иначе
+    отказ. Свой коммит уже есть — сборка в нём, и всё незакоммиченное в дереве принадлежит человеку: его не трогаем.
+    ⚠ Вершина ветки читается ОДИН раз, до проверки, и дальше всё идёт от неё: проверка коммитов, родитель коммита,
+    старое значение `update-ref` и то, что пушится. Коммит человека, сделанный после чтения, либо отклоняет
+    `update-ref`, либо остаётся локальным: пушится проверенный коммит, а не ветка по имени.
     ⚠ Коммит собирается `commit-tree` + `update-ref`, а не `git commit`: SHA записан ДО того, как ветка на него
     встала. Сбой в любой точке оставляет либо ветку без коммита (завтра соберётся заново), либо ветку на коммите с уже
     записанным SHA. `git commit` звал бы общие хуки репозитория — автопуш по сети и пересборку графа — между коммитом
-    и записью SHA, и сбой в этом окне навсегда делал свой коммит «чужой работой». Пушит автомат сам, ниже.
+    и записью SHA, и сбой в этом окне навсегда делал свой коммит «чужой работой». В коммит идут только пути
+    публикации, через временный индекс (`commit_paths`).
     """
     branch = f"auto/edition-{doc_id}"
     ref = f"refs/heads/{branch}"
     title = f"data(auto): редакция ПП 719, документ Контура {doc_id}"
     own_file = report_md.with_name(OWN_COMMIT)
-    own = own_file.read_text(encoding="utf-8").strip() if own_file.exists() else ""
     head = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=tree, capture_output=True, text=True,
                           encoding="utf-8", errors="replace").stdout.strip()
     if head != ref:
         raise HumanCommits(f"дерево сборки не стоит на ветке {branch}")
-    made_before = git("log", "--format=%H", f"origin/dev..{ref}", cwd=tree).split()
-    if made_before and made_before != [own]:
+    parent = git("rev-parse", ref, cwd=tree).strip()
+    made_before = git("log", "--format=%H", f"origin/dev..{parent}", cwd=tree).split()
+    if made_before and (len(made_before) != 1 or made_before[0] not in own_commits(own_file)):
         raise HumanCommits(f"на ветке {branch} есть коммиты не автомата")
     report = report_md.read_text(encoding="utf-8")
     full = FULL_REPORT.format(doc_id=doc_id)
+    tip = parent
     if not made_before:
         paths = list(PUBLISH_PATHS)
         if len(report) > PR_BODY_LIMIT:     # адресные замечания не теряются: целиком — файлом в коммите сборки
             (tree / full).parent.mkdir(parents=True, exist_ok=True)
             (tree / full).write_bytes(report.encode("utf-8"))
             paths.append(full)
-        git("add", "-A", "--", *paths, cwd=tree)
-        if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=tree).returncode != 0:
-            parent = git("rev-parse", ref, cwd=tree).strip()
-            sha = git("commit-tree", git("write-tree", cwd=tree).strip(), "-p", parent, "-m", title, cwd=tree).strip()
-            write_own(own_file, sha)
+        sha = commit_paths(tree, parent, paths, title, scratch=report_md.parent)
+        if sha:
+            record_own(own_file, sha)
             git("update-ref", "-m", title, ref, sha, parent, cwd=tree)
-    git("push", "-u", "origin", branch, cwd=tree)
-    in_branch = subprocess.run(["git", "cat-file", "-e", f"{ref}:{full}"], cwd=tree, capture_output=True).returncode == 0
+            tip = sha
+            align_index(tree, sha, paths)
+    git("push", "origin", f"{tip}:{ref}", cwd=tree)
+    in_branch = subprocess.run(["git", "cat-file", "-e", f"{tip}:{full}"], cwd=tree, capture_output=True).returncode == 0
     body = report_md.with_name("pr_body.md")
     body.write_bytes(pr_body(report, full if in_branch else None).encode("utf-8"))
     made = subprocess.run(["gh", "pr", "create", "--draft", "--base", "dev", "--head", branch, "--title",
@@ -300,7 +360,7 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
         # PR — раньше отчёта. Пока сборка существует, автомат её не пересобирает, и отчёт меняет только ручной
         # прогон человека в том же каталоге. Пока PR ОТКРЫТ, сборка у человека: частичный отчёт не повод для
         # ежедневной срочной задачи. Закрытый или слитый PR отчёт не глушит: «остановлено» снова станет задачей.
-        pr = pr_state(doc_id)
+        pr = pr_state(doc_id, own=own_commits(sources / doc_id / OWN_COMMIT))
         if pr is None:
             return f"документ {doc_id}: GitHub не ответил, повтор завтра"
         if pr == "open":
