@@ -39,6 +39,7 @@ for p in (ROOT, ROOT / "scripts"):
 
 import edition_source as es  # noqa: E402
 import watch_edition as we  # noqa: E402
+from actualize_edition import scrub  # noqa: E402
 from app.core.console import enable_utf8  # noqa: E402
 
 STALE_DAYS = 7
@@ -50,12 +51,22 @@ KEY = "DEEPSEEK_API_KEY"
 PUBLISH_PATHS = ("knowledge_base", "app/rag/edition.py", "landing/index.html")
 # SHA коммита автомата, рядом с отчётом. Тема коммита не годится: `--amend --no-edit` её сохраняет.
 OWN_COMMIT = "auto_commit.txt"
+# Тело PR у GitHub — не длиннее 65 536 знаков; запас на хвост со ссылкой. Не влез — отчёт целиком едет файлом.
+PR_BODY_LIMIT = 60_000
+FULL_REPORT = "docs/actualization/edition-{doc_id}.md"
+# Отказы `gh pr create`, которые повтор завтра не исправит: о них задача говорит иначе.
+FINAL_REFUSALS = {"body is too long": "тело PR длиннее лимита GitHub",
+                  "no commits between": "на ветке сборки нет изменений относительно dev"}
 # Признаки настоящего ответа: заглушка с кодом 200 иначе дошла бы до конвейера и заняла ветку.
 SOURCE_FILES = ((es.KONTUR_RTF, "edition.rtf", b"{\\rtf"), (es.KONTUR_DOC, "edition.html", b"js-doc-frame-container"))
 
 
 class HumanCommits(RuntimeError):
     """На ветке автомата есть чужие коммиты: уносить их в публичный репозиторий нельзя."""
+
+
+class PublishRefused(RuntimeError):
+    """GitHub отказал так, что повтор завтра ничего не изменит. Сообщение — фиксированная фраза, без вывода `gh`."""
 
 
 def now() -> dt.datetime:
@@ -100,13 +111,16 @@ class Issues:
 
         `urgent` — вне потолка: о сборке и сбое нельзя молчать из-за трёх новых актов.
         `reopen` — смотреть только открытые: причина не устранена, и закрытая задача не должна её глушить.
+        ⚠ Репозиторий публичен: в счёт идут только задачи учётной записи автомата, иначе посторонний заглушил бы
+        его, заведя задачу с тем же заголовком (формат заголовка и номер документа Контура открыты).
         """
         if self.dry_run:
             return f"была бы создана задача: {title}"
         if self.made >= self.limit and not urgent:
             return f"потолок задач за запуск, повтор завтра: {title}"
         state = "open" if reopen else "all"
-        found = self.runner("issue", "list", "--state", state, "--search", f'"{title}" in:title', "--json", "number")
+        found = self.runner("issue", "list", "--state", state, "--search", f'"{title}" in:title', "--author", "@me",
+                            "--json", "number")
         if found.returncode != 0:
             return f"поиск задач не ответил, повтор завтра: {found.stderr.strip()[:120]}"
         if json.loads(found.stdout or "[]"):
@@ -180,11 +194,13 @@ def build_edition(doc_id: str, sources: Path) -> tuple[bool, dict]:
     return ok and run.returncode == 0, report
 
 
-def pr_opened(doc_id: str, runner=None) -> bool | None:
-    """Есть ли PR этой сборки. `None` — GitHub не ответил: решать нечего, повтор завтра.
+def pr_state(doc_id: str, runner=None) -> str | None:
+    """PR этой сборки: `"open"`, `"closed"` (закрыт без слияния), `"merged"` или `""` — PR нет.
+    `None` — GitHub не ответил: решать нечего, повтор завтра.
 
-    Открытый PR — всегда да: его правит человек, и вершины локальной ветки и PR расходятся законно.
-    Коммит сверяется только у закрытых: PR прошлой сборки не должен заглушить пересборку.
+    Открытый PR — всегда этой сборки: его правит человек, и вершины локальной ветки и PR расходятся законно.
+    Закрытые сверяются по коммиту: PR прошлой сборки не должен заглушить пересборку. Закрытый и слитый различаются:
+    закрытый без слияния не глушит отчёт «остановлено», а журнал не называет его открытым.
     ⚠ `--head` фильтрует только по имени ветки, а репозиторий публичен: PR из форка с тем же именем — не наш.
     """
     branch = f"auto/edition-{doc_id}"
@@ -194,9 +210,29 @@ def pr_opened(doc_id: str, runner=None) -> bool | None:
         return None
     prs = [p for p in json.loads(found.stdout or "[]") if not p.get("isCrossRepository")]
     if any(p["state"] == "OPEN" for p in prs):
-        return True
+        return "open"
     tip = git("branch", "--list", "--format=%(objectname)", branch).strip()
-    return tip in {p["headRefOid"] for p in prs} if tip else bool(prs)
+    ours = [p for p in prs if not tip or p["headRefOid"] == tip]
+    if not ours:
+        return ""
+    return "merged" if any(p["state"] == "MERGED" for p in ours) else "closed"
+
+
+def write_own(path: Path, sha: str) -> None:
+    """Атомарно: оборванная запись не должна оставить чужой SHA вместо своего."""
+    tmp = path.with_name(path.name + ".tmp")
+    tmp.write_text(sha, encoding="utf-8")
+    os.replace(tmp, path)
+
+
+def pr_body(report: str, full: str | None) -> str:
+    """Тело PR в лимите GitHub. Не влезло — начало отчёта до границы строки и где лежит целиком."""
+    if len(report) <= PR_BODY_LIMIT:
+        return report
+    where = f"файл `{full}` в этой ветке" if full else "локальный `report.md` в каталоге первоисточников"
+    tail = f"\n\n---\n⚠ Отчёт длиннее лимита GitHub на тело PR ({len(report)} знаков): здесь начало, целиком — {where}."
+    head = report[:PR_BODY_LIMIT - len(tail)]
+    return head[:head.rfind("\n")] + tail if "\n" in head else head + tail
 
 
 def publish(doc_id: str, tree: Path, report_md: Path) -> str:
@@ -207,28 +243,50 @@ def publish(doc_id: str, tree: Path, report_md: Path) -> str:
     она, а не HEAD дерева: дерево обязано стоять на ней, а на ней — только коммит автомата, опознанный по SHA
     (тему сохраняет `--amend`). Иначе отказ. Свой коммит уже есть — сборка в нём, и всё незакоммиченное в дереве
     принадлежит человеку: его не трогаем.
+    ⚠ Коммит собирается `commit-tree` + `update-ref`, а не `git commit`: SHA записан ДО того, как ветка на него
+    встала. Сбой в любой точке оставляет либо ветку без коммита (завтра соберётся заново), либо ветку на коммите с уже
+    записанным SHA. `git commit` звал бы общие хуки репозитория — автопуш по сети и пересборку графа — между коммитом
+    и записью SHA, и сбой в этом окне навсегда делал свой коммит «чужой работой». Пушит автомат сам, ниже.
     """
     branch = f"auto/edition-{doc_id}"
+    ref = f"refs/heads/{branch}"
     title = f"data(auto): редакция ПП 719, документ Контура {doc_id}"
     own_file = report_md.with_name(OWN_COMMIT)
     own = own_file.read_text(encoding="utf-8").strip() if own_file.exists() else ""
     head = subprocess.run(["git", "symbolic-ref", "-q", "HEAD"], cwd=tree, capture_output=True, text=True,
                           encoding="utf-8", errors="replace").stdout.strip()
-    if head != f"refs/heads/{branch}":
+    if head != ref:
         raise HumanCommits(f"дерево сборки не стоит на ветке {branch}")
-    made_before = git("log", "--format=%H", f"origin/dev..refs/heads/{branch}", cwd=tree).split()
+    made_before = git("log", "--format=%H", f"origin/dev..{ref}", cwd=tree).split()
     if made_before and made_before != [own]:
         raise HumanCommits(f"на ветке {branch} есть коммиты не автомата")
+    report = report_md.read_text(encoding="utf-8")
+    full = FULL_REPORT.format(doc_id=doc_id)
     if not made_before:
-        git("add", "-A", "--", *PUBLISH_PATHS, cwd=tree)
+        paths = list(PUBLISH_PATHS)
+        if len(report) > PR_BODY_LIMIT:     # адресные замечания не теряются: целиком — файлом в коммите сборки
+            (tree / full).parent.mkdir(parents=True, exist_ok=True)
+            (tree / full).write_bytes(report.encode("utf-8"))
+            paths.append(full)
+        git("add", "-A", "--", *paths, cwd=tree)
         if subprocess.run(["git", "diff", "--cached", "--quiet"], cwd=tree).returncode != 0:
-            git("commit", "-m", title, cwd=tree)
-            own_file.write_text(git("rev-parse", "HEAD", cwd=tree).strip(), encoding="utf-8")
+            parent = git("rev-parse", ref, cwd=tree).strip()
+            sha = git("commit-tree", git("write-tree", cwd=tree).strip(), "-p", parent, "-m", title, cwd=tree).strip()
+            write_own(own_file, sha)
+            git("update-ref", "-m", title, ref, sha, parent, cwd=tree)
     git("push", "-u", "origin", branch, cwd=tree)
+    in_branch = subprocess.run(["git", "cat-file", "-e", f"{ref}:{full}"], cwd=tree, capture_output=True).returncode == 0
+    body = report_md.with_name("pr_body.md")
+    body.write_bytes(pr_body(report, full if in_branch else None).encode("utf-8"))
     made = subprocess.run(["gh", "pr", "create", "--draft", "--base", "dev", "--head", branch, "--title",
-                           title, "--body-file", str(report_md)],
+                           title, "--body-file", str(body)],
                           cwd=tree, capture_output=True, text=True, encoding="utf-8", errors="replace")
     if made.returncode != 0:
+        why = scrub(made.stderr or "").strip()[-300:]
+        print(f"gh pr create: код {made.returncode}: {why}", flush=True)     # причина — только в локальный журнал
+        for mark, meaning in FINAL_REFUSALS.items():
+            if mark in why.lower():
+                raise PublishRefused(meaning)
         raise RuntimeError(f"gh pr create: код {made.returncode}")
     return made.stdout.strip()
 
@@ -240,13 +298,18 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
     branch = f"auto/edition-{doc_id}"
     if edition_built(doc_id, sources):
         # PR — раньше отчёта. Пока сборка существует, автомат её не пересобирает, и отчёт меняет только ручной
-        # прогон человека в том же каталоге: частичный или прерванный, он не повод для ежедневной срочной задачи.
-        opened = pr_opened(doc_id)
-        if opened is None:
+        # прогон человека в том же каталоге. Пока PR ОТКРЫТ, сборка у человека: частичный отчёт не повод для
+        # ежедневной срочной задачи. Закрытый или слитый PR отчёт не глушит: «остановлено» снова станет задачей.
+        pr = pr_state(doc_id)
+        if pr is None:
             return f"документ {doc_id}: GitHub не ответил, повтор завтра"
-        if opened:
-            return f"документ {doc_id}: PR уже открыт"
+        if pr == "open":
+            return f"документ {doc_id}: PR открыт, сборка у человека"
         ok, report = read_report(doc_id, sources)
+        if ok and pr:
+            # Решение по этой сборке человек уже принял. Пересборка — после уборки дерева и обеих веток.
+            return (f"документ {doc_id}: PR этой сборки {'слит' if pr == 'merged' else 'закрыт без слияния'}, "
+                    "повторно не публикуется")
     else:
         if (why := prefetch(doc_id, sources)) is not None:
             print(f"документ {doc_id}: первоисточник не скачался: {why}", flush=True)
@@ -272,6 +335,12 @@ def handle_document(doc_id: str, link: str, sources: Path, issues: Issues) -> st
                            f"({type(e).__name__}). Публиковать её автомат не будет, и каждый день исход будет тот же, "
                            "пока вы сами не откроете PR с этой веткой или не уберёте свои коммиты.",
                            urgent=True, reopen=True)
+    except PublishRefused as e:
+        print(f"публикация не удалась: {e}", flush=True)
+        return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: GitHub не принимает PR, повтор не поможет",
+                           f"Конвейер прошёл, ветка `{branch}` запушена, а PR GitHub отклоняет: {e}. Каждый день исход "
+                           "будет тот же. Причина — в локальном журнале `watch.log`. Откройте PR вручную или уберите "
+                           f"дерево `wt-{doc_id}` и обе ветки для пересборки.", urgent=True, reopen=True)
     except (subprocess.CalledProcessError, RuntimeError, OSError) as e:
         print(f"публикация не удалась: {e}", flush=True)
         return issues.once(f"[A10] Новая редакция ПП 719 {doc_id}: сборка готова, PR не создан",

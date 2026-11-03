@@ -1126,6 +1126,13 @@ class TestIssues(unittest.TestCase):
         aa.Issues(False, runner).once("t", "b", reopen=True)
         self.assertEqual(runner.call_args_list[0].args[3], "open")
 
+    def test_only_issues_of_the_automaton_count(self):
+        # Ревью, раунд 6: репозиторий публичен — задача постороннего с тем же заголовком глушила бы автомат.
+        runner = mock.Mock(side_effect=[answer(out="[]"), answer(out="u\n")])
+        aa.Issues(False, runner).once("t", "b")
+        search = runner.call_args_list[0].args
+        self.assertEqual(search[search.index("--author") + 1], "@me")
+
     def test_dry_run_touches_nothing(self):
         runner = mock.Mock()
         self.assertIn("была бы создана", aa.Issues(True, runner).once("t", "b"))
@@ -1135,12 +1142,12 @@ class TestIssues(unittest.TestCase):
 class TestHandleDocument(unittest.TestCase):
     STOPPED = (False, {"последний шаг": "gates", "вердикт": "ОСТАНОВЛЕНО: input_value='секрет'"})
 
-    def run_doc(self, built=False, result=(True, {}), opened=False, publish=None, fetched=None):
+    def run_doc(self, built=False, result=(True, {}), pr="", publish=None, fetched=None):
         issues = mock.Mock(dry_run=False)
         with mock.patch.object(aa, "edition_built", return_value=built), \
                 mock.patch.object(aa, "read_report", return_value=result) as read, \
                 mock.patch.object(aa, "build_edition", return_value=result) as build, \
-                mock.patch.object(aa, "pr_opened", return_value=opened), \
+                mock.patch.object(aa, "pr_state", return_value=pr), \
                 mock.patch.object(aa, "prefetch", return_value=fetched) as prefetch, \
                 mock.patch.object(aa, "publish", **(publish or {"return_value": "https://x/pr/1"})) as pub:
             log = aa.handle_document("509000", "ссылка", Path("."), issues)
@@ -1153,18 +1160,18 @@ class TestHandleDocument(unittest.TestCase):
         self.assertEqual(r.log, "https://x/pr/1")
 
     def test_existing_build_is_not_rebuilt(self):
-        r = self.run_doc(built=True, opened=True)
+        r = self.run_doc(built=True, pr="open")
         r.build.assert_not_called()
         r.prefetch.assert_not_called()
         r.pub.assert_not_called()
-        self.assertIn("PR уже открыт", r.log)
+        self.assertIn("PR открыт", r.log)
 
     def test_published_build_without_pr_is_retried(self):
-        r = self.run_doc(built=True, opened=False)
+        r = self.run_doc(built=True, pr="")
         r.pub.assert_called_once()
 
     def test_github_silence_retries_tomorrow(self):
-        r = self.run_doc(built=True, opened=None)
+        r = self.run_doc(built=True, pr=None)
         r.pub.assert_not_called()
         r.issues.once.assert_not_called()
         self.assertIn("повтор завтра", r.log)
@@ -1219,15 +1226,60 @@ class TestHandleDocument(unittest.TestCase):
 
     def test_open_pr_silences_the_report_of_a_manual_run(self):
         # PR открыт — сборка у человека; частичный отчёт его ручного прогона не повод для срочной задачи.
-        r = self.run_doc(built=True, opened=True, result=self.STOPPED)
+        r = self.run_doc(built=True, pr="open", result=self.STOPPED)
         r.issues.once.assert_not_called()
         r.read.assert_not_called()
-        self.assertIn("PR уже открыт", r.log)
+        self.assertIn("PR открыт", r.log)
 
     def test_github_silence_is_checked_before_the_report(self):
-        r = self.run_doc(built=True, opened=None, result=self.STOPPED)
+        r = self.run_doc(built=True, pr=None, result=self.STOPPED)
         r.issues.once.assert_not_called()
         self.assertIn("повтор завтра", r.log)
+
+    def real_pr(self, state, result=None):
+        """`pr_state` живой: GitHub отвечает одним PR этой сборки (та же вершина) в состоянии `state`."""
+        issues = mock.Mock(dry_run=False)
+        prs = json.dumps([{"headRefOid": "abc", "state": state, "isCrossRepository": False}])
+        with mock.patch.object(aa, "gh", return_value=answer(out=prs)), \
+                mock.patch.object(aa, "git", return_value="abc\n"), \
+                mock.patch.object(aa, "edition_built", return_value=True), \
+                mock.patch.object(aa, "read_report", return_value=result or self.STOPPED), \
+                mock.patch.object(aa, "publish") as pub:
+            log = aa.handle_document("509000", "ссылка", Path("."), issues)
+        return SimpleNamespace(log=log, issues=issues, pub=pub)
+
+    def test_closed_pr_does_not_silence_a_stopped_report(self):
+        # Ревью, раунд 6: закрытый без слияния PR с той же вершиной принимался за открытый и глушил отчёт навсегда.
+        r = self.real_pr("CLOSED")
+        r.pub.assert_not_called()
+        self.assertIn("остановился", r.issues.once.call_args.args[0])
+        self.assertIs(r.log, r.issues.once.return_value)
+
+    def test_closed_pr_of_a_ready_build_is_named_and_not_republished(self):
+        r = self.real_pr("CLOSED", result=(True, {}))
+        r.pub.assert_not_called()
+        r.issues.once.assert_not_called()
+        self.assertIn("закрыт без слияния", r.log)
+
+    def test_merged_pr_is_named(self):
+        r = self.real_pr("MERGED", result=(True, {}))
+        r.pub.assert_not_called()
+        self.assertIn("слит", r.log)
+
+    def test_open_pr_is_named_open(self):
+        r = self.real_pr("OPEN")
+        r.issues.once.assert_not_called()
+        self.assertIn("PR открыт", r.log)
+
+    def test_refusal_a_retry_cannot_fix_says_so(self):
+        # Ревью, раунд 6: тело длиннее лимита GitHub или пустая ветка — «завтра повторится» было бы неправдой.
+        r = self.run_doc(publish={"side_effect": aa.PublishRefused("тело PR длиннее лимита GitHub")})
+        title, body = r.issues.once.call_args.args
+        self.assertIn("повтор не поможет", title)
+        self.assertNotIn("повторится", body)
+        self.assertIn("тело PR длиннее лимита GitHub", body)
+        self.assertTrue(r.issues.once.call_args.kwargs["urgent"])
+        self.assertTrue(r.issues.once.call_args.kwargs["reopen"])
 
     def test_gh_pr_failure_makes_urgent_issue(self):
         r = self.run_doc(publish={"side_effect": RuntimeError("gh pr create")})
@@ -1449,31 +1501,39 @@ class TestBuild(unittest.TestCase):
     def pr(self, prs, tip):
         runner = mock.Mock(return_value=answer(out=json.dumps(prs)))
         with mock.patch.object(aa, "git", return_value=tip):
-            return aa.pr_opened("1", runner)
+            return aa.pr_state("1", runner)
 
     def test_closed_pr_is_matched_by_commit(self):
-        self.assertTrue(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], "abc\n"))
-        self.assertFalse(self.pr([{"headRefOid": "old", "state": "CLOSED"}], "abc\n"), "PR прошлой сборки не глушит пересборку")
-        self.assertFalse(self.pr([{"headRefOid": "old", "state": "MERGED"}], "abc\n"))
-        self.assertFalse(self.pr([], "abc\n"))
+        self.assertEqual(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], "abc\n"), "closed")
+        self.assertEqual(self.pr([{"headRefOid": "old", "state": "CLOSED"}], "abc\n"), "",
+                         "PR прошлой сборки не глушит пересборку")
+        self.assertEqual(self.pr([{"headRefOid": "old", "state": "MERGED"}], "abc\n"), "")
+        self.assertEqual(self.pr([], "abc\n"), "")
+
+    def test_closed_and_merged_are_told_apart(self):
+        # Ревью, раунд 6: закрытый PR назывался «открытым» — и в журнале, и в решении глушить отчёт.
+        self.assertEqual(self.pr([{"headRefOid": "abc", "state": "MERGED"}], "abc\n"), "merged")
+        self.assertEqual(self.pr([{"headRefOid": "abc", "state": "CLOSED"}, {"headRefOid": "abc", "state": "MERGED"}],
+                                 "abc\n"), "merged")
 
     def test_open_pr_stands_even_if_the_branch_moved(self):
-        self.assertTrue(self.pr([{"headRefOid": "old", "state": "OPEN"}], "abc\n"), "PR правит человек")
-        self.assertTrue(self.pr([{"headRefOid": "old", "state": "CLOSED"}, {"headRefOid": "x", "state": "OPEN"}], "abc\n"))
+        self.assertEqual(self.pr([{"headRefOid": "old", "state": "OPEN"}], "abc\n"), "open", "PR правит человек")
+        self.assertEqual(self.pr([{"headRefOid": "old", "state": "CLOSED"}, {"headRefOid": "x", "state": "OPEN"}],
+                                 "abc\n"), "open")
 
     def test_github_is_asked_for_the_state(self):
         runner = mock.Mock(return_value=answer(out="[]"))
         with mock.patch.object(aa, "git", return_value=""):
-            aa.pr_opened("1", runner)
+            aa.pr_state("1", runner)
         self.assertIn("headRefOid,state,isCrossRepository", runner.call_args.args)
 
     def test_pull_request_from_a_fork_is_not_ours(self):
         # Репозиторий публичен: `--head` фильтрует только по имени ветки, PR из форка с тем же именем — чужой.
         fork = {"isCrossRepository": True}
-        self.assertFalse(self.pr([{"headRefOid": "x", "state": "OPEN", **fork}], "abc\n"))
-        self.assertFalse(self.pr([{"headRefOid": "abc", "state": "CLOSED", **fork}], "abc\n"))
-        self.assertFalse(self.pr([{"headRefOid": "abc", "state": "CLOSED", **fork}], ""))
-        self.assertTrue(self.pr([{"headRefOid": "x", "state": "OPEN", "isCrossRepository": False}], "abc\n"))
+        self.assertEqual(self.pr([{"headRefOid": "x", "state": "OPEN", **fork}], "abc\n"), "")
+        self.assertEqual(self.pr([{"headRefOid": "abc", "state": "CLOSED", **fork}], "abc\n"), "")
+        self.assertEqual(self.pr([{"headRefOid": "abc", "state": "CLOSED", **fork}], ""), "")
+        self.assertEqual(self.pr([{"headRefOid": "x", "state": "OPEN", "isCrossRepository": False}], "abc\n"), "open")
 
     def test_fresh_build_forgets_the_commit_of_the_previous_one(self):
         with tempfile.TemporaryDirectory() as d:
@@ -1486,10 +1546,10 @@ class TestBuild(unittest.TestCase):
             self.assertFalse((base / "1" / aa.OWN_COMMIT).exists())
 
     def test_pr_without_local_branch(self):
-        self.assertTrue(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], ""))
+        self.assertEqual(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], ""), "closed")
 
     def test_pr_silence(self):
-        self.assertIsNone(aa.pr_opened("1", mock.Mock(return_value=answer(code=1))))
+        self.assertIsNone(aa.pr_state("1", mock.Mock(return_value=answer(code=1))))
 
 
 class TestModelEnv(unittest.TestCase):
@@ -1533,17 +1593,143 @@ class TestPublish(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
-    def publish(self, gh_code=0):
-        calls = []
+    def publish(self, gh_code=0, gh_err=""):
+        calls, self.bodies = [], []
 
         def run(cmd, **kw):
             if cmd[0] == "gh":
                 calls.append(cmd)
-                return answer(code=gh_code, out="https://x/pr/1\n")
+                self.bodies.append(Path(cmd[cmd.index("--body-file") + 1]).read_text(encoding="utf-8"))
+                return answer(code=gh_code, out="https://x/pr/1\n", err=gh_err)
             return self.real_run(cmd, **kw)
 
         with mock.patch.object(aa.subprocess, "run", side_effect=run):
             return aa.publish("1", self.tree, self.report), calls
+
+    def own(self):
+        return self.report.with_name(aa.OWN_COMMIT).read_text(encoding="utf-8").strip()
+
+    def branch_commits(self):
+        return subprocess.run(["git", "log", "--format=%H", "origin/dev..auto/edition-1"], cwd=self.tree,
+                              capture_output=True, text=True).stdout.split()
+
+    def test_the_automaton_commits_without_hooks(self):
+        # Ревью, раунд 6: общий post-commit репозитория (автопуш по сети, пересборка графа) шёл между коммитом
+        # и записью SHA. Хук здесь настоящий и падает — коммит автомата обязан его не звать вовсе.
+        hooks, marker = Path(self.tmp.name) / "hooks", Path(self.tmp.name) / "hook_ran"
+        hooks.mkdir()
+        (hooks / "post-commit").write_text(f"#!/bin/sh\necho ran > '{marker.as_posix()}'\nexit 1\n",
+                                           encoding="utf-8", newline="\n")
+        (hooks / "pre-commit").write_text(f"#!/bin/sh\necho ran > '{marker.as_posix()}'\nexit 1\n",
+                                          encoding="utf-8", newline="\n")
+        self.git("config", "core.hooksPath", hooks.as_posix(), cwd=self.tree)
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1")
+        self.assertFalse(marker.exists(), "хуки репозитория не должны запускаться коммитом автомата")
+        self.assertEqual(self.own(), self.remote_tip())
+
+    def test_failure_before_the_sha_is_recorded_is_retried_tomorrow(self):
+        # Ревью, раунд 6: сбой между коммитом и записью SHA навсегда делал свой коммит «чужой работой».
+        real_write = Path.write_text
+
+        def failing(path, *args, **kw):
+            if path.name.startswith("auto_commit"):
+                raise OSError("диск")
+            return real_write(path, *args, **kw)
+
+        with mock.patch.object(Path, "write_text", failing), self.assertRaises(OSError):
+            self.publish()
+        self.assertEqual(self.branch_commits(), [], "ветка не встаёт на коммит, SHA которого не записан")
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1")
+        self.assertEqual(self.branch_commits(), [self.own()])
+        self.assertEqual(self.own(), self.remote_tip())
+
+    def test_failure_after_the_sha_is_recorded_is_retried_tomorrow(self):
+        real_git = aa.git
+
+        def failing(*args, **kw):
+            if args[0] == "update-ref":
+                raise subprocess.CalledProcessError(1, "git update-ref")
+            return real_git(*args, **kw)
+
+        with mock.patch.object(aa, "git", side_effect=failing), self.assertRaises(subprocess.CalledProcessError):
+            self.publish()
+        out, _ = self.publish()
+        self.assertEqual(out, "https://x/pr/1")
+        self.assertEqual(self.branch_commits(), [self.own()])
+
+    def test_human_commit_made_while_the_automaton_commits_is_not_overwritten(self):
+        # Ветка сдвинулась между чтением её вершины и `update-ref`: автомат не затирает чужой коммит.
+        real_git = aa.git
+        other = Path(self.tmp.name) / "other"
+
+        def racing(*args, **kw):
+            out = real_git(*args, **kw)
+            if args[0] == "commit-tree":
+                self.git("switch", "-q", "--detach", cwd=self.tree)
+                self.git("worktree", "add", "-q", str(other), "auto/edition-1", cwd=self.tree)
+                (other / "landing" / "index.html").write_text("правка человека", encoding="utf-8")
+                self.git("commit", "-q", "-am", "человек", cwd=other)
+                self.git("worktree", "remove", "--force", str(other), cwd=self.tree)
+                self.git("switch", "-q", "auto/edition-1", cwd=self.tree)
+            return out
+
+        with mock.patch.object(aa, "git", side_effect=racing), self.assertRaises(subprocess.CalledProcessError):
+            self.publish()
+        human = subprocess.run(["git", "log", "-1", "--format=%s", "auto/edition-1"], cwd=self.tree,
+                               capture_output=True, text=True, encoding="utf-8").stdout.strip()
+        self.assertEqual(human, "человек")
+        self.assertEqual(self.remote_heads(), "")
+
+    def test_short_report_is_the_body_as_is(self):
+        self.publish()
+        self.assertEqual(self.bodies[0], "отчёт")
+        files = subprocess.run(["git", "ls-tree", "-r", "--name-only", "origin/auto/edition-1"], cwd=self.tree,
+                               capture_output=True, text=True).stdout.split()
+        self.assertNotIn("docs/actualization/edition-1.md", files)
+
+    def test_long_report_fits_the_limit_and_goes_whole_into_the_branch(self):
+        # Ревью, раунд 6: тело PR длиннее 65 536 знаков GitHub не принимает, и повтор этого не исправит.
+        report = "# отчёт\n\n**ГОТОВО**\n\n" + "\n".join(f"- запись {i}: строка ячейки не дошла: " + "т" * 80
+                                                         for i in range(1000))
+        self.report.write_text(report, encoding="utf-8", newline="\n")
+        self.publish()
+        body = self.bodies[0]
+        self.assertLessEqual(len(body), 65_536)
+        self.assertIn("**ГОТОВО**", body)
+        self.assertIn("docs/actualization/edition-1.md", body)
+        whole = subprocess.run(["git", "show", "origin/auto/edition-1:docs/actualization/edition-1.md"],
+                               cwd=self.tree, capture_output=True).stdout.replace(b"\r\n", b"\n")
+        self.assertEqual(whole.decode("utf-8"), report, "адресные замечания не теряются: отчёт целиком в ветке")
+
+    def test_long_report_without_its_file_in_the_branch_points_to_the_local_report(self):
+        # Свой коммит сделан в прошлый запуск, когда отчёт был коротким: ссылаться на файл, которого нет, нельзя.
+        with self.assertRaises(RuntimeError):
+            self.publish(gh_code=1)
+        self.report.write_text("x\n" * 40_000, encoding="utf-8", newline="\n")
+        self.publish()
+        self.assertLessEqual(len(self.bodies[0]), 65_536)
+        self.assertNotIn("docs/actualization/edition-1.md", self.bodies[0])
+        self.assertIn("report.md", self.bodies[0])
+
+    def test_github_refusal_is_logged_and_marked_final(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(aa.PublishRefused):
+            self.publish(gh_code=1, gh_err="pull request create failed: GraphQL: Body is too long (createPullRequest)")
+        self.assertIn("Body is too long", out.getvalue())
+
+    def test_empty_branch_refusal_is_final(self):
+        with contextlib.redirect_stdout(io.StringIO()), self.assertRaises(aa.PublishRefused):
+            self.publish(gh_code=1, gh_err="pull request create failed: GraphQL: No commits between dev and auto/edition-1")
+
+    def test_transient_github_failure_is_logged_scrubbed_and_retried(self):
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out), self.assertRaises(RuntimeError) as caught:
+            self.publish(gh_code=1, gh_err="HTTP 502: Bad Gateway sk-abcdefgh12345678")
+        self.assertNotIsInstance(caught.exception, aa.PublishRefused)
+        self.assertIn("502", out.getvalue())
+        self.assertNotIn("sk-abcdefgh12345678", out.getvalue())
 
     def test_draft_pr_with_only_allowed_paths(self):
         out, calls = self.publish()
@@ -1633,6 +1819,21 @@ class TestPublish(unittest.TestCase):
                                capture_output=True, text=True, encoding="utf-8").stdout
         self.assertEqual(shown, "2")
         self.assertIn("правка человека", (self.tree / "knowledge_base" / "a.txt").read_text(encoding="utf-8"))
+
+
+class TestActualizationDoc(unittest.TestCase):
+    """Ревью, раунд 6: документ давал команду, которая на остановленной сборке не сработает, и обещал за хук."""
+
+    DOC = (ROOT / "docs" / "ACTUALIZATION.md").read_text(encoding="utf-8")
+
+    def test_removal_of_a_stopped_build_needs_force_and_warns(self):
+        self.assertIn("git worktree remove --force", self.DOC)
+        self.assertNotIn("(`git worktree remove`)", self.DOC)
+        self.assertRegex(self.DOC, r"--force[^\n]*(?:\n[^\n]*)?незакоммиченн")
+
+    def test_the_shared_hook_is_named(self):
+        self.assertIn("post-commit", self.DOC)
+        self.assertNotIn("ветку с коммитом человека не публикует", self.DOC)
 
 
 class TestParserPrompt(unittest.TestCase):
