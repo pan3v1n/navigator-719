@@ -262,7 +262,11 @@ def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET,
         # таких блоков в корпусе не было: разборщик ставил на место вводной свой ярлык.
         text = _block_intro(comp, note, note_cap, thr)
         if text:
-            kind = "_heading" if comp.endswith(":") else "_required"
+            # `_explain` — пояснение первоисточника о всей позиции («подтверждением наличия конструкторской
+            # документации является …» в конце ячейки I-13…19, данные D24 помечают блок `explanation`): не
+            # обязательное требование — при капе идёт ПОСЛЕ операций и операции с баллами не вытесняет (ревью PR #268,
+            # раунд 6, LOW 6: у I-13 из капа 60 уходили три операции шпинделя)
+            kind = ("_heading" if comp.endswith(":") else "_explain" if b.get("explanation") else "_required")
             ops.append({"text": text, "points": None, kind: True})
     return ops
 
@@ -299,7 +303,7 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
     # но территория и правила начисления, которые они называют, относятся ко всему перечню. Порядок внутри групп —
     # прежний (сортировка стабильна).
     def group(o):
-        return 0 if o.get("_required") else 1 if o.get("_heading") else 2
+        return 0 if o.get("_required") else 1 if o.get("_heading") else 3 if o.get("_explain") else 2
     if not qtok:
         return sorted(ops, key=group)
     return sorted(ops, key=lambda o: (group(o), -len(qtok & set(sparse.tokenize(o.get("text", ""))))))
@@ -690,7 +694,8 @@ def format_context(hits: list[Hit], query: str | None = None,
                     lines.append(f"      ▸ {op_parent}")
                 cur_parent = op_parent
                 pts = o.get("points")
-                ptxt = f" — {pts} балл." if pts is not None else " — баллы не приведены"
+                ptxt = (f" — {pts} балл." if pts is not None else "" if o.get("_explain")
+                        else " — баллы не приведены")
                 indent = "        " if op_parent else "      "
                 lines.append(f"{indent}• {o.get('text', '')}{ptxt}")
             if total > cap:

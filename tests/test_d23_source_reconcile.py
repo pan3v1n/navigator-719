@@ -711,8 +711,7 @@ class TestD24LostLines(unittest.TestCase):
         text = "сборка изделия (10 баллов);\nрасчет баллов по формуле:\nгде К - количество модулей,\nделенное на общее количество"
         n, skipped = self._apply(r, text)
         self.assertEqual(n, 0)
-        # «где К - количество модулей,» + «деленное на …» — одна строка формулы (перенос после запятой, раунд 5)
-        self.assertEqual([w for w, _ in skipped], ["формула (заголовок)", "формула"])
+        self.assertEqual([w for w, _ in skipped], ["формула (заголовок)", "формула", "формула"])
 
     def test_several_points_in_one_line_are_not_split(self):
         r = _rec("Погрузчик", [("сборка", 1)], 1)
@@ -1634,6 +1633,76 @@ class TestD24Review5(unittest.TestCase):
         units, _ = d.lost_units(r, "наличие сервисного центра уполномоченного осуществлять ремонт гарантийное "
                                    "обслуживание продукции;")
         self.assertTrue([u for u in units if u.get("retext") == (0, None) and "гарантийное обслуживание" in u["text"]])
+
+
+class TestD24Review6(unittest.TestCase):
+    """Ревью PR #268, раунд 6: записи корпуса, на которых ошибались правки раунда 5."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.recs = d.load_records()
+
+    def _pos(self, sec, pos):
+        return next(x for x in self.recs[sec] if x["source_anchor"].endswith(f"позиция {pos}"))
+
+    def _hit(self, r):
+        from app.rag import retriever
+        return retriever.Hit(score=1.0, section_roman=r["section_roman"], section_title=r.get("section_title") or "",
+                             product_name=r["product_name"], okpd2_codes=r.get("okpd2_codes") or [],
+                             min_threshold=r.get("min_threshold"), requirement_blocks=r["requirement_blocks"],
+                             source_anchor=r.get("source_anchor"), okpd2_match=True, payload=r)
+
+    def test_high1_fragment_takes_previous_position_threshold(self):
+        """HIGH 1: IX-92 (строка кодов 29.32.30.365/366 без наименования — продолжение IX-91 «Компоненты телематических
+        систем…») — порог прим. 38 по имени предыдущей позиции, а не пусто и не чужой график 38.1."""
+        r = self._pos("IX", "92")
+        self.assertIn("[прим. 38]", r.get("min_threshold") or "")
+        self.assertIn("2028 год и далее — не менее 245 баллов", r["min_threshold"])
+
+    def test_med4_continuation_after_comma_replaces_cut_requirement(self):
+        """MED 4: XXI-87…90 — требование о лабораториях одно, полным текстом («… гарантийного срока хранения»)."""
+        for pos in ("87", "88", "89", "90"):
+            r = self._pos("XXI", pos)
+            texts = [b.get("component") or "" for b in r["requirement_blocks"]] + [
+                o.get("text") or "" for b in r["requirement_blocks"] for o in b.get("operations") or []]
+            hits = [t for t in texts if "аккредитованных лабораторий" in t]
+            self.assertEqual(len(hits), 1, pos)
+            self.assertIn("срока хранения", hits[0], pos)
+
+    def test_low5_numbered_intro_with_parenthesis_is_heading(self):
+        """LOW 5: IX-46 — «2. выполнение … технологических операций (если установлено технологическим процессом) <51>:»
+        — вводная перечня, а не обязательное требование без баллов."""
+        from app.rag import pipeline
+        r = self._pos("IX", "46")
+        ops = pipeline._hit_operations(self._hit(r))
+        req = [o for o in ops if o.get("_required") and "технологических операций" in o["text"]]
+        self.assertEqual(req, [])
+        self.assertTrue([b for b in r["requirement_blocks"]
+                         if (b.get("component") or "").startswith("2. выполнение") and b.get("operations")])
+
+    def test_low6_explanation_does_not_push_scored_operations_out_of_cap(self):
+        """LOW 6: правило из конца ячейки I-13…19 — пояснение (`explanation`), при капе идёт после операций и не
+        вытесняет операции с баллами (у I-13 уходили три операции шпинделя 3 / 5 / 5)."""
+        from app.rag import pipeline
+        for pos in ("13", "19"):
+            r = self._pos("I", pos)
+            self.assertTrue([b for b in r["requirement_blocks"] if b.get("explanation")], pos)
+            ops = pipeline._hit_operations(self._hit(r))
+            shown, total = pipeline._shown_operations(ops, None)
+            self.assertGreater(total, pipeline.MAX_OPS_TARGET, pos)
+            ids = {id(o) for o in shown}
+            dropped_scored = [o for o in ops if o.get("points") is not None and id(o) not in ids]
+            shown_explain = [o for o in shown if o.get("_explain")]
+            self.assertFalse(dropped_scored and shown_explain, pos)
+
+    def test_med3_glued_heading_lines_not_restored_twice(self):
+        """MED 3: подпись, склеенная разборщиком из нескольких строк ячейки, — строки не встают второй раз (IX-72
+        «▸ составе:»; III-14, III-15, III-152, VI-13 — вводная дважды подряд)."""
+        r = self._pos("IX", "72")
+        self.assertFalse([b for b in r["requirement_blocks"] if (b.get("component") or "").strip() == "составе:"])
+        for sec, pos in (("III", "14"), ("III", "15"), ("III", "152"), ("VI", "13")):
+            comps = [d.norm(b.get("component")) for b in self._pos(sec, pos)["requirement_blocks"]]
+            self.assertFalse([1 for a, b in zip(comps, comps[1:]) if a and a == b], (sec, pos))
 
 
 class TestD18KonturServiceLine(unittest.TestCase):

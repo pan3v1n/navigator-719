@@ -710,6 +710,29 @@ _SECTION_NOTE_RE = re.compile(r"Заключения, выданные до \S+ 
                               r"(?:\s*\([^()]*\))?\.?")
 
 
+def fragment_thresholds(files: dict[Path, list[dict]]) -> list[dict]:
+    """Запись-обрывок — строка кодов без наименования, продолжение предыдущей позиции («из 29.32.30.365 / из
+    29.32.30.366» под «Компонентами телематических систем…» IX-91; разборщик дал ей имя раздела «Продукция
+    радиоэлектроники», IX-92): своего порога у неё нет, а по коду он неоднозначен (366 — и в прим. 38, и в 38.1, там
+    чужой график спецмашиностроения). Порог — по имени ПРЕДЫДУЩЕЙ позиции и своим кодам (ревью PR #268, раунд 6,
+    HIGH 1). Класс на 508574: IX-92 (порог прим. 38), III-159 и XV-1 — порога примечания нет, остаются без порога."""
+    from app.rag import retriever, thresholds as T
+    out = []
+    for data in files.values():
+        for i, r in enumerate(data):
+            if (i == 0 or r.get("record_type") == "section_methodology" or r.get("min_threshold")
+                    or norm(r.get("product_name")) != norm(retriever.section_name(r.get("section_title") or ""))
+                    or T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], r["section_roman"])):
+                continue
+            prev = data[i - 1]
+            thr = T.lookup_threshold(r.get("okpd2_codes") or [], prev.get("product_name") or "", r["section_roman"])
+            if thr:
+                r["min_threshold"] = thr
+                out.append({"section": r["section_roman"], "anchor": r.get("source_anchor"),
+                            "product": r["product_name"], "prev": prev.get("product_name") or "", "thr": thr})
+    return out
+
+
 def move_section_notes(files: dict[Path, list[dict]]) -> list[dict]:
     """Примечание о целом разделе — из `notes` позиций в `notes` записи методики этого раздела (один раз)."""
     meth = {r["section_roman"]: r for data in files.values() for r in data
@@ -976,8 +999,15 @@ def _d24_cands(lt: list[str], pts: list, items: list, thr: set = frozenset(), he
     for j, it in enumerate(items):
         if (p is not None and it[3] is not None and it[3] != p) or not all(k in it[2] for k in key):
             continue
-        if it[8] and sum(w in lset for w in it[8]) < 0.75 * len(it[8]):
-            continue                         # подпись с note — только строкой, где есть слова подписи (MED 4, XX-12)
+        if (it[8] and sum(w in lset for w in it[8]) < 0.75 * len(it[8])
+                and sum(w in it[8] for w in lt) < 2):
+            # подпись с note — строкой, где подпись почти целиком, или где есть хотя бы два слова подписи (раунд 5,
+            # MED 4, XX-12: в строке графика «до 31 декабря 2027 г. - не более 35 процентов» слов подписи «азотная
+            # установка криогенного типа» нет ни одного — она не пара подписи). Раунд 6, MED 3: подпись, которую
+            # разборщик склеил из нескольких строк ячейки (IX-72 «наличие у … ЕАЭС:» + «прав на КД … в следующем» +
+            # «составе:»; III-14, III-152, VI-13 — вводная + «а) при использовании шасси …»), целиком не стоит ни в
+            # одной строке — «≥ 75 % слов подписи в строке» отвергал каждую, и строки вставали второй раз
+            continue
         s = it[2]
         c = cov(s)
         if head and it[4] and cov(it[4]) >= 0.75:
@@ -1121,9 +1151,12 @@ def _d24_lines(text: str) -> list[str]:
             continue
         if out and ((_D24_WRAP_END_RE.search(out[-1]) and ln[:1].islower())
                     or (out[-1].endswith("Российской") and ln.startswith("Федерац"))       # V-2
-                    # «… аккредитованных лабораторий,» + «отвечающих за проверку качества …» у XXI-87…90: фраза
-                    # продолжается со строчной после запятой (раунд 5 ревью, MED 3 — хвост уходил в note блока)
-                    or (out[-1].endswith(",") and ln[:1].islower() and not _D24_REQ_START_RE.match(ln))):
+                    # «2. выполнение … технологических операций» + «(если установлено технологическим процессом)
+                    # <51>:» у IX-46: строка пункта с номером, оборванная без знака конца, продолжается скобкой (раунд 6,
+                    # LOW 5). Скобка после строки БЕЗ номера — не перенос (IV-32: «(при отсутствии … операции …):» —
+                    # вводная следующего перечня)
+                    or (ln.startswith("(") and _D24_NUM_RE.match(out[-1]) and not _D24_PTS_ONLY_RE.match(ln)
+                        and not out[-1].rstrip().endswith((";", ":", ".", ")")))):
                     # ⚠ Строка «(…)» без знака конца перед ней — НЕ признак переноса: у IX-46 «(если установлено
                     # технологическим процессом) <51>:» продолжает вводную, а у IV-32 «(при отсутствии технологической
                     # операции …):» — вводная следующего перечня после требования о ПО (замер раунда 5, правило снято)
@@ -1175,6 +1208,17 @@ def _d24_split(ln: str, items: list, thr: set = frozenset()) -> list[str] | None
         head, tail = ln[:cut + 1].strip(), ln[cut + 1:].strip()
         if len(toks(head)) >= 2 and tail and found(tail.rstrip(";,. ")):
             return [head, tail]
+    # По «, <требование>» вне скобок: склейка HTML «наличие у юридического лица … исключительных прав на программное
+    # обеспечение … (если …), производство (осуществление) на территории РФ следующих компонентов …:» у IV-30…32 —
+    # требование, которое в записи есть, и вводная следующего перечня (раунд 6 ревью, инвариант (а): требование стояло
+    # дважды — операцией и строкой целиком)
+    depth = 0
+    for i, ch in enumerate(ln):
+        depth += (ch == "(") - (ch == ")")
+        if ch == "," and depth == 0 and _D24_REQ_START_RE.match(ln[i + 1:].strip()):
+            head, tail = ln[:i].strip(), ln[i + 1:].strip()
+            if found(head):
+                return [head, tail]
     return None
 
 
@@ -1370,6 +1414,20 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
             cur, in_formula = None, True
             continue
         k = prev[i]
+        if (k is not None and res[k] is not None and res[k][0] >= 0 and res[k][1] in ("one", "sub")
+                and lines[k].rstrip().endswith(",") and ln[:1].islower() and not is_req and not pts
+                and not items[res[k][0]][9]):
+            # продолжение совпавшей строки после запятой («… аккредитованных лабораторий,» + «отвечающих за проверку
+            # качества … гарантийного срока хранения;» у XXI-87…90): элемент записи обрезан на запятой — на место встаёт
+            # строка ячейки целиком, а не второй блок рядом с обрезком (раунд 6 ревью, MED 4)
+            it = items[res[k][0]]
+            full = re.sub(r"\s+", " ", _D24_PTS_RE.sub("", lines[k] + " " + ln)).strip().rstrip(";,.").strip()
+            b = blocks[it[0]]
+            if it[1] is not None:
+                units.append({"after": res[k][0], "retext": (it[0], it[1]), "text": full, "ops": [], "points": None})
+            elif not b.get("operations"):
+                units.append({"after": res[k][0], "retext": (it[0], None), "text": full, "ops": []})
+            continue
         if (k is not None and res[k] is not None and ln[:1].islower() and x["n"] <= 3 and not pts
                 and not lines[k].rstrip().endswith((";", ":", "."))):
             # хвост переноса строки, которая в записи есть («… на срок не менее 5 лет в следующем» + «составе:» у
@@ -1453,6 +1511,14 @@ def lost_units(r: dict, text: str, threshold: str | None = None,
             # относится в ячейке, — обязательным требованием оно вставало бы при усечении первым (ревью D24)
             cur = {"after": last, "component": body, "ops": [], "note_of": True}
             units.append(cur)
+        elif (not is_req and last >= 0 and not later[i] and not _D24_DUTY_RE.search(ln)
+              and not (ln[:1].islower() and ln.rstrip().endswith(";"))):
+            # правило о всей позиции в КОНЦЕ ячейки («подтверждением наличия конструкторской документации является …»,
+            # «для каждой группы комплектующих изделий баллы … начисляются только при наличии …» у I-13…19) —
+            # пояснение первоисточника, а не обязательное требование: рантайм ставит его ПОСЛЕ операций и при капе не
+            # вытесняет им операции с баллами (раунд 6 ревью, LOW 6: у I-13 из капа 60 уходили три операции шпинделя)
+            cur = {"after": last, "component": body, "ops": [], "explain": True}
+            units.append(cur)
         else:
             cur = {"after": last, "component": body, "ops": []}
             units.append(cur)
@@ -1529,7 +1595,8 @@ def apply_units(r: dict, units: list[dict]) -> int:
             else:
                 starts[nxt[0]][np_].append(blk)
         else:
-            new_after[bi].append({"component": u.get("component"), "operations": u["ops"], "note": None})
+            new_after[bi].append({"component": u.get("component"), "operations": u["ops"], "note": None,
+                                  **({"explanation": True} if u.get("explain") else {})})
     out = list(new_after.get(-1, []))
     for i, b in enumerate(blocks):
         out += before.get(i, [])
@@ -1601,6 +1668,17 @@ def fold_headings(r: dict, cell_text: str) -> int:
         b = blocks[i]
         head = (b.get("component") or "").rstrip()
         nxt = blocks[i + 1] if i + 1 < len(blocks) else None
+        nh, nn = norm(head), norm((nxt or {}).get("component"))
+        if (nxt is not None and not b.get("operations") and head.endswith(":") and not b.get("note")
+                and len(min(nh, nn, key=len)) >= 25 and (nh.startswith(nn) or nn.startswith(nh))):
+            # вводная перед блоком с той же подписью — или с её началом («▸ осуществление … :» дважды подряд у III-213,
+            # XXIII-2, XXVI-6; «использование комплектующих, сырья и материалов, произведенных на территориях …:» над
+            # ярлыком «Использование комплектующих, сырья и материалов» у VII-60, VII-70 — всё на `dev`; инвариант (в)
+            # `scripts/kb_invariants.py`): в ячейке строка одна — блок один, с полным текстом
+            out.append({**nxt, "component": head if len(nh) >= len(nn) else nxt.get("component")})
+            n += 1
+            i += 2
+            continue
         if (nxt is not None and not b.get("operations") and head.endswith(":") and not b.get("note")
                 and nxt.get("operations")):
             label = (nxt.get("component") or "").strip()
@@ -1806,6 +1884,11 @@ def main() -> int:
     print(f"примечаний о целом разделе перенесено в методику: {len(moved)}")
     log += [{"section": e["section"], "code": "", "product": e["product"], "anchor": e["from"], "ops": [0, 0],
              "what": ["примечание раздела → методика"], "source": "D19 п. 2"} for e in moved]
+    frag = fragment_thresholds(files)
+    for e in frag:
+        print(f"  порог обрывка {e['anchor']}: по имени предыдущей позиции «{e['prev'][:50]}» — {e['thr'][:60]}")
+    log += [{"section": e["section"], "code": "", "product": e["product"], "anchor": e["anchor"], "ops": [0, 0],
+             "what": ["порог обрывка по предыдущей позиции"], "source": "раунд 6, HIGH 1"} for e in frag]
     if args.log:
         args.log.write_text(json.dumps(log, ensure_ascii=False, indent=1), encoding="utf-8")
     manifest = shared_manifest(report, hashlib.sha256(raw).hexdigest()[:16], args.html.name)

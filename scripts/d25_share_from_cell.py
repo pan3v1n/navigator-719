@@ -8,8 +8,9 @@
 вместе с II, VIII, X. Допуск XXV в общий инструмент замерен (03.11.2026) и отвергнут: строки ячейки XXV переносятся
 посреди фразы, а вводная с порогом («… не менее 90 баллов:») встала бы блоком, у двух позиций дважды.
 
-Ещё у 10 позиций XXV (аккордеоны, духовые) той же фразы не было в записи вовсе — ни в блоках, ни в пороге, ни в
-`notes`: разборщик её выронил. Шаг закрывает оба случая.
+⚠ Поправка раунда 6 ревью (MED 2): прежняя редакция утверждала, что у 10 позиций XXV (аккордеоны, духовые) фразы «не
+было вовсе». Неверно: она стоит операцией без даты, дата — в note блока «Процентная доля…»; шаг ставил её второй раз.
+Теперь фраза ищется и без даты. У XXV-3, 11, 13–15 доля стояла в поле порога — уходит в блоки (решение LOW 10).
 
 Что делает шаг. Текст — из ячейки источника (чанк `knowledge_base/pp719/chunks/*`, разбор `structure_kb`, та же
 вёрстка Контура, из которой собран корпус), а не пересказ из `notes`: строки ячейки склеиваются до «;» / «.» / «:»,
@@ -106,10 +107,14 @@ def notes_mentions_share(rec: dict) -> bool:
 def plan_record(rec: dict, cells: list[str]) -> tuple[list[str], str | None, list[str]]:
     """(фразы к вставке, новые notes, замечания). Пустой список фраз — запись не трогается.
 
-    Фраза ячейки «есть в записи», если она в блоках или в пороге записи (`min_threshold` рантайм печатает строкой
-    «Порог» как есть — так у XXV-3, 11, 13–15; тот же довод у `D24`, VI-5)."""
-    have = blocks_text(rec) + " " + norm(rec.get("min_threshold"))
-    add = [s for s in share_sentences(cells) if norm(s) not in have]
+    Фраза ячейки «есть в записи», если она есть в блоках — и без даты в начале: у XXV-25, 28…31, 34, 35, 37, 39, 40
+    разборщик положил долю операцией («соблюдение процентной доли … - не более 50 процентов цены товара»), а дату —
+    в note блока «Процентная доля…»; поиск фразы вместе с датой ставил её второй раз (ревью PR #268, раунд 6, MED 2).
+    Порог записи «присутствием» больше не считается: доля иностранных товаров — требование, а не порог (решение
+    LOW 10 раунда 5, раунд 6 LOW 7 — XXV-3, 11, 13–15); из поля порога её снимает `threshold_without_share`."""
+    have = blocks_text(rec)
+    add = [s for s in share_sentences(cells)
+           if norm(s) not in have and norm(re.sub(rf"^{_DATE}\s*,?\s*", "", s, flags=re.I)) not in have]
     if not add:
         return [], rec.get("notes"), []
     if not notes_mentions_share(rec):
@@ -126,6 +131,18 @@ def plan_record(rec: dict, cells: list[str]) -> tuple[list[str], str | None, lis
                 issues.append(f"кусок notes о доле не подтверждён фразами ячейки: «{piece[:90]}»")
     new_notes = "; ".join(keep) or None
     return add, new_notes, issues
+
+
+def threshold_without_share(thr: str | None) -> str | None:
+    """Поле порога без фраз о доле иностранных товаров: «с 1 января 2021 г. соблюдение процентной доли … <4>; …
+    Выполнение … не менее 50 баллов, …» → «Выполнение … не менее 50 баллов, …». Без баллов не остаётся ничего — None."""
+    if not thr:
+        return thr
+    parts = cell_sentences([thr])
+    if not any(SHARE_RE.match(p) for p in parts):
+        return thr
+    rest = " ".join(p for p in parts if not SHARE_RE.match(p)).strip()
+    return rest if re.search(r"балл", rest, re.I) else None
 
 
 def product_cells(roman: str) -> dict[tuple[str, tuple[str, ...]], list[list[str]]]:
@@ -175,14 +192,16 @@ def run(write: bool, root: Path = STRUCTURED) -> tuple[list[dict], list[str]]:
                 continue
             add, new_notes, why = plan_record(rec, cells)
             issues += [f"{anchor}: {w}" for w in why]
+            new_thr = threshold_without_share(rec.get("min_threshold")) if add else rec.get("min_threshold")
             if not add:
                 continue
             rec["requirement_blocks"] = ([{"component": s, "operations": [], "note": None} for s in add]
                                          + (rec.get("requirement_blocks") or []))
             rec["notes"] = new_notes
+            rec["min_threshold"] = new_thr
             changed = True
             log.append({"section": rec["section_roman"], "anchor": anchor, "product": rec["product_name"][:80],
-                        "added": add, "notes_left": new_notes})
+                        "added": add, "notes_left": new_notes, "threshold": new_thr})
         if changed and write:
             new = json.dumps(data, ensure_ascii=False, indent=json_indent(old)) + ("\n" if old.endswith("\n") else "")
             f.write_text(new, encoding="utf-8")

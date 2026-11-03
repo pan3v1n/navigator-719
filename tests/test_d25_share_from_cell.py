@@ -100,18 +100,27 @@ class TestPlanRecord(unittest.TestCase):
         self.assertIn("25 процентов", notes)
         self.assertTrue(issues)
 
-    def test_share_dropped_by_parser_is_restored_and_notes_kept(self):
-        # «Трубы» XXV-28: фразы нет ни в блоках, ни в пороге, ни в notes — разборщик её выронил
+    def test_share_missing_from_record_is_restored_and_notes_kept(self):
+        # фразы нет ни в блоках, ни в notes — встаёт блоком, оговорка в notes остаётся
         add, notes, issues = d25.plan_record(self.rec("оговорка о сроке"), self.CELLS)
         self.assertEqual(len(add), 1)
         self.assertEqual(notes, "оговорка о сроке")
         self.assertEqual(issues, [])
 
-    def test_share_in_position_threshold_counts_as_present(self):
-        # XXV-3, 11, 13–15: доля в `min_threshold`, рантайм печатает её строкой «Порог» — второй раз не ставим
+    def test_share_in_position_threshold_moves_to_blocks(self):
+        # раунд 6, LOW 7 (XXV-3, 11, 13–15): доля — требование, а не порог; в пороге остаётся только часть с баллами
         r = self.rec(None)
         r["min_threshold"] = d25.share_sentences(self.CELLS)[0] + ". Выполнение операций - не менее 90 баллов"
-        self.assertEqual(d25.plan_record(r, self.CELLS)[0], [])
+        self.assertEqual(len(d25.plan_record(r, self.CELLS)[0]), 1)
+        self.assertEqual(d25.threshold_without_share(r["min_threshold"]), "Выполнение операций - не менее 90 баллов")
+        self.assertIsNone(d25.threshold_without_share(d25.share_sentences(self.CELLS)[0]))
+
+    def test_share_without_date_in_operation_is_present(self):
+        # раунд 6, MED 2 (XXV-25, 28…40): доля стоит операцией без даты, дата — в note блока; второй раз не ставим
+        body = "соблюдение процентной доли стоимости использованных при производстве иностранных товаров - не более 30 процентов цены товара"
+        blocks = [{"component": "Процентная доля иностранных товаров", "note": "с 15 ноября 2020 г.",
+                   "operations": [{"text": body, "points": None}]}]
+        self.assertEqual(d25.plan_record(self.rec(None, blocks), self.CELLS)[0], [])
 
     def test_already_in_blocks_is_not_duplicated(self):
         s = d25.share_sentences(self.CELLS)[0]
@@ -141,11 +150,14 @@ class TestCorpus(unittest.TestCase):
             cells = d25.find_cells(r, self.cells)
             if cells is None:
                 continue
-            have = d25.blocks_text(r) + " " + d25.norm(r.get("min_threshold"))
+            have = d25.blocks_text(r)
             for s in d25.share_sentences(cells):
                 checked += 1
-                if d25.norm(s) not in have:
+                body = d25.norm(re.sub(r"^(?:до|с|по)\s+\d{1,2}\s+\w+\s+\d{4}\s*г\.?\s*,?\s*", "", s))
+                if d25.norm(s) not in have and body not in have:
                     missing.append((r["source_anchor"], s[:60]))
+            self.assertFalse(re.search(r"соблюдение\s+процентной\s+доли", r.get("min_threshold") or "", re.I),
+                             r["source_anchor"])                                            # раунд 6, LOW 7
         self.assertEqual(missing, [])
         self.assertGreaterEqual(checked, 60)       # положительный контроль: фраз в ячейках XXV — десятки
 
@@ -156,11 +168,13 @@ class TestCorpus(unittest.TestCase):
             self.assertTrue(any(f"не более {pct} процентов цены товара" in c for c in comps), pct)
         self.assertIsNone(piano.get("notes"))
 
-    def test_dropped_by_parser_positions_restored(self):
-        for name in ("Аккордеоны", "Трубы", "Фаготы"):
-            r = next(x for x in self.xxv if x["product_name"] == name)
-            self.assertTrue(any("соблюдение процентной доли" in (b["component"] or "")
-                                for b in r["requirement_blocks"] if not b["operations"]), name)
+    def test_no_share_duplicate_in_record(self):
+        """Раунд 6, MED 2: у XXV-25, 28…31, 34, 35, 37, 39, 40 доля стояла дважды — операцией без даты и блоком D25."""
+        for r in self.xxv:
+            texts = [d25.norm(b.get("component")) for b in r["requirement_blocks"]] + [
+                d25.norm(o.get("text")) for b in r["requirement_blocks"] for o in b.get("operations") or []]
+            shares = [re.sub(r"^(?:до|с|по) \d{1,2} \w+ \d{4} г ", "", t) for t in texts if "процентной доли" in t]
+            self.assertEqual(len(shares), len(set(shares)), r["source_anchor"])
 
     def test_idempotent(self):
         log, issues = d25.run(write=False)
