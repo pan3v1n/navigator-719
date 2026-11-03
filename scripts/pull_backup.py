@@ -18,11 +18,24 @@ stdout. Здесь: сверка sha256 (обрыв канала на серед
 ⚠ 152-ФЗ. В копии ПДн пользователей. `--dest` обязан лежать ВНЕ репозитория (иначе отказ) и на
 зашифрованном носителе (BitLocker / VeraCrypt — проверить это скрипт не может, это на владельце).
 
+⚠⚠ ТУННЕЛЬ (02.11.2026). На рабочем ПК весь трафик идёт через туннель Happ (TUN `happ-xray`), и ssh к
+бою через него перестал проходить: «Connection timed out during banner exchange», забор падал каждые
+сутки. Мимо туннеля вход сразу. Поэтому ssh привязывается к адресу ФИЗИЧЕСКОГО адаптера (`ssh -b`):
+  --bind auto      (по умолчанию) найти адрес самому: Windows, включённый адаптер с HardwareInterface,
+                   не виртуальный, IPv4 не из 169.254/16, со шлюзом по умолчанию; подходящих несколько —
+                   с меньшей метрикой. Не нашёлся — понятная ошибка и код 1 ДО подключения.
+                   Вне Windows `auto` = без привязки.
+  --bind <адрес>   явно (адрес адаптера — в `ipconfig`); --bind none — без привязки.
+То же — переменной окружения NAVIGATOR_SSH_BIND. Адрес в код не зашит: его раздаёт DHCP, он сменится.
+
 Запуск:
   .venv\\Scripts\\python scripts\\pull_backup.py --dest E:\\navigator-backups
 По расписанию — Планировщик заданий Windows, раз в сутки после 03:00 UTC (06:00 МСК), например:
   schtasks /Create /SC DAILY /ST 09:00 /TN navigator-pull-backup ^
-    /TR "D:\\navigator-719\\.venv\\Scripts\\python.exe D:\\navigator-719\\scripts\\pull_backup.py --dest E:\\navigator-backups"
+    /TR "D:\\navigator-719\\.venv\\Scripts\\python.exe D:\\navigator-719-backup\\scripts\\pull_backup.py --dest E:\\navigator-backups"
+⚠ Скрипт для расписания — из ОТДЕЛЬНОЙ detached-копии (`git worktree add --detach D:\\navigator-719-backup
+origin/dev`), а не из основной: основная стоит на чужих рабочих ветках и посреди слияний, и задача
+бралась бы из той версии, какая там окажется. Копию обновлять осознанно, после слияния правки забора.
 ⚠ 29.10.2026: ПК спал в 09:00, и «запускать пропущенное» (StartWhenAvailable) после пробуждения запуск
 не догнал — копии за сутки не было. Задаче нужны ещё триггеры «вход» и «разблокировка», а обёртке
 (`D:\\navigator-backups\\pull-backup-daily.cmd`) — одна попытка в сутки по файлу `last-attempt.txt`:
@@ -32,7 +45,11 @@ stdout. Здесь: сверка sha256 (обрыв канала на серед
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
+import ipaddress
+import json
+import os
 import re
 import subprocess
 import sys
@@ -51,6 +68,163 @@ DEFAULT_DOCKER = "sudo -n docker"          # как у deploy.sh: `DOCKER="${DOC
 NAME_RE = re.compile(r"^navigator_app-(\d{4}-\d{2}-\d{2})_(\d{4})\.db$")
 
 OK, FAILED, STALE = 0, 1, 2
+
+BIND_ENV = "NAVIGATOR_SSH_BIND"
+NO_BIND = {"", "none", "off", "no"}
+_BIND_HELP = ("Адрес адаптера Ethernet — в `ipconfig`; задать явно: --bind <адрес> или переменная "
+              f"{BIND_ENV}; без привязки: --bind none")
+
+
+class BindError(Exception):
+    """Адрес привязки ssh определить нельзя. Подключение не пробуем: без привязки ssh ушёл бы в
+    туннель и через 30 с упал бы таймаутом, который о настоящей причине ничего не говорит."""
+
+
+# Все адаптеры одним вызовом PowerShell (модуль NetAdapter есть в Windows 8+). Отбор «физический»
+# делается В PYTHON по полям hardware / virtual, а не ключом `-Physical`: так правило проверяется
+# тестом без Windows. Вывод — JSON в UTF-8: имена адаптеров здесь кириллицей («Беспроводная сеть»).
+_PS_ADAPTERS = r"""
+[Console]::OutputEncoding = [Text.Encoding]::UTF8
+$r = @(foreach ($a in Get-NetAdapter) {
+  $i = $a.ifIndex
+  $routes = @(Get-NetRoute -InterfaceIndex $i -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue)
+  [pscustomobject]@{
+    alias = $a.Name; description = $a.InterfaceDescription; index = $i; status = [string]$a.Status
+    hardware = [bool]$a.HardwareInterface; virtual = [bool]$a.Virtual
+    ipv4 = @(Get-NetIPAddress -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue | ForEach-Object { $_.IPAddress })
+    gateways = @($routes | ForEach-Object { $_.NextHop })
+    metric = (Get-NetIPInterface -InterfaceIndex $i -AddressFamily IPv4 -ErrorAction SilentlyContinue).InterfaceMetric
+    route_metric = ($routes | Measure-Object -Property RouteMetric -Minimum).Minimum
+  }
+})
+ConvertTo-Json -InputObject $r -Compress -Depth 3
+"""
+
+
+def list_adapters(run=subprocess.run) -> list[dict]:
+    """Сетевые адаптеры этого ПК (Windows). Любой сбой — BindError с причиной."""
+    encoded = base64.b64encode(_PS_ADAPTERS.encode("utf-16-le")).decode("ascii")
+    try:
+        res = run(["powershell.exe", "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass",
+                   "-EncodedCommand", encoded], capture_output=True, timeout=120)
+    except (OSError, subprocess.TimeoutExpired) as e:
+        raise BindError(f"список адаптеров не получен — PowerShell не выполнился: {type(e).__name__}: {e}") from e
+    out = (res.stdout or b"").decode("utf-8", errors="replace").lstrip("\ufeff").strip()
+    if res.returncode != 0 or not out:
+        err = (res.stderr or b"").decode("utf-8", errors="replace").strip()[-300:]
+        raise BindError(f"список адаптеров не получен — PowerShell вернул код {res.returncode}: "
+                        f"{err or 'пустой вывод'}")
+    try:
+        data = json.loads(out)
+    except ValueError:
+        raise BindError(f"список адаптеров не получен — PowerShell прислал не JSON: {out[:200]!r}") from None
+    if isinstance(data, dict):        # один адаптер PowerShell может отдать объектом, а не списком
+        data = [data]
+    if not isinstance(data, list):
+        raise BindError(f"список адаптеров не получен — неожиданный ответ PowerShell: {out[:200]!r}")
+    return [d for d in data if isinstance(d, dict)]
+
+
+def _as_list(value) -> list:
+    if value is None:
+        return []
+    return list(value) if isinstance(value, (list, tuple)) else [value]
+
+
+def _usable_ipv4(text) -> bool:
+    try:
+        ip = ipaddress.ip_address(str(text))
+    except ValueError:
+        return False
+    return (ip.version == 4 and not ip.is_link_local and not ip.is_loopback
+            and not ip.is_unspecified and not ip.is_multicast)
+
+
+def _has_gateway(gateways) -> bool:
+    """Шлюз по умолчанию — настоящий адрес. `0.0.0.0` (маршрут «на линии», так у TUN) — не шлюз."""
+    for g in _as_list(gateways):
+        try:
+            if not ipaddress.ip_address(str(g)).is_unspecified:
+                return True
+        except ValueError:
+            continue
+    return False
+
+
+def _metric(a: dict) -> int:
+    """Чем меньше, тем раньше Windows выбирает этот выход (метрика интерфейса + метрика маршрута)."""
+    m, rm = a.get("metric"), a.get("route_metric")
+    m = m if isinstance(m, int) and not isinstance(m, bool) else 10 ** 6
+    rm = rm if isinstance(rm, int) and not isinstance(rm, bool) else 0
+    return m + rm
+
+
+def pick_adapter(adapters: list[dict]) -> tuple[str, str]:
+    """Адрес физического адаптера, через который ПК выходит в сеть, — и его имя для журнала.
+
+    Годится адаптер: физический (`hardware` и не `virtual` — туннель Happ, Hyper-V, Bluetooth
+    виртуальные), включён (`Up`), с IPv4 не из 169.254/16 (такой Windows выдаёт сама, когда сети
+    нет) и со шлюзом по умолчанию. Подходящих несколько (кабель и Wi-Fi) — меньшая метрика, как
+    выбирает сама Windows. Нет ни одного — BindError: подключаться не через что."""
+    candidates = []
+    for a in adapters:
+        if a.get("hardware") is not True or a.get("virtual") is not False:
+            continue
+        if a.get("status") != "Up":
+            continue
+        ips = [str(ip) for ip in _as_list(a.get("ipv4")) if _usable_ipv4(ip)]
+        if not ips or not _has_gateway(a.get("gateways")):
+            continue
+        index = a.get("index") if isinstance(a.get("index"), int) else 10 ** 6
+        candidates.append((_metric(a), index, ips[0], a))
+    if not candidates:
+        seen = "; ".join(f"«{a.get('alias')}» — {a.get('status')}" for a in adapters
+                         if a.get("hardware") is True and a.get("virtual") is False)
+        raise BindError("нет включённого физического адаптера с IPv4 и шлюзом по умолчанию "
+                        f"(физические адаптеры: {seen or 'ни одного'})")
+    candidates.sort(key=lambda c: (c[0], c[1]))
+    _, _, ip, a = candidates[0]
+    note = f"«{a.get('alias')}» ({ip})"
+    if len(candidates) > 1:
+        note += f" — из {len(candidates)} подходящих, с меньшей метрикой"
+    return ip, note
+
+
+def resolve_bind(bind: str | None, adapters=list_adapters,
+                 windows: bool = os.name == "nt") -> tuple[str | None, str]:
+    """`auto` / адрес / `none` → (адрес для `ssh -b` или None, строка для журнала).
+
+    BindError — привязку определить нельзя, подключаться не надо."""
+    value = (bind or "").strip()
+    if value.lower() in NO_BIND:
+        return None, "ssh без привязки к адаптеру (--bind none)"
+    if value.lower() == "auto":
+        if not windows:
+            return None, "автопривязка к адаптеру — только на Windows; ssh без привязки"
+        try:
+            ip, note = pick_adapter(adapters())
+        except BindError as e:
+            raise BindError(f"{e}. {_BIND_HELP}") from None
+        return ip, f"ssh мимо туннеля — привязка к адаптеру {note}"
+    try:
+        ip = ipaddress.ip_address(value)
+    except ValueError:
+        raise BindError(f"--bind {value!r} — не IP-адрес. {_BIND_HELP}") from None
+    return str(ip), f"ssh с привязкой к {ip} (адрес задан явно)"
+
+
+def failure_hint(stderr: str, addr: str | None) -> str | None:
+    """Подсказка к отказу ssh — чтобы в журнале было видно, что чинить, а не только «код 255»."""
+    s = stderr.lower()
+    if addr and f"bind {addr}".lower() in s:
+        return (f"адрес {addr} не принадлежит этому ПК (адаптер сменил адрес?) — "
+                "запустите с --bind auto или сверьте `ipconfig`")
+    if "timed out" in s or "banner exchange" in s:
+        if addr:
+            return "таймаут и мимо туннеля — дело в канале до сервера или в самом сервере"
+        return ("ssh шёл без привязки к адаптеру: если включён туннель (Happ), ssh к бою он не "
+                "пропускает — запустите с --bind auto")
+    return None
 
 
 def remote_command(app_dir: str, docker: str) -> str:
@@ -101,13 +275,24 @@ def rotate(dest: Path, keep_days: int, now: datetime) -> list[str]:
 
 def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
          docker: str = DEFAULT_DOCKER, keep_days: int = 30, max_age_hours: int = 36,
-         run=subprocess.run, now: datetime | None = None, say=print) -> int:
-    """Забрать, проверить, сохранить, ротировать. Возвращает код выхода (OK / FAILED / STALE)."""
+         run=subprocess.run, now: datetime | None = None, say=print,
+         bind: str | None = None, resolve=resolve_bind) -> int:
+    """Забрать, проверить, сохранить, ротировать. Возвращает код выхода (OK / FAILED / STALE).
+
+    `bind` — `auto` / адрес / `none` (см. шапку); None — без привязки и без строки в журнале."""
     now = now or datetime.now(timezone.utc)
     dest = dest.resolve()
     if dest == ROOT or ROOT in dest.parents:
         say("[ОШИБКА] --dest внутри репозитория: в копии ПДн (CLAUDE.md, 152-ФЗ). Укажите папку вне него.")
         return FAILED
+    addr = None
+    if bind is not None:
+        try:
+            addr, note = resolve(bind)
+        except BindError as e:
+            say(f"[ОШИБКА] привязка ssh к адаптеру: {e} — к серверу НЕ подключался")
+            return FAILED
+        say(f"[i] {note}")
     dest.mkdir(parents=True, exist_ok=True)
 
     # ⚠⚠ ssh ПИШЕТ ПРЯМО В ФАЙЛ, А НЕ В КАНАЛ (27.10.2026, первый боевой забор). `ssh` из Git для
@@ -116,11 +301,13 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
     # сервере все три способа чтения отдавали файл целиком; в файл тот же ssh — целиком, сумма
     # сошлась. Поймала это сверка sha256 ниже — она здесь не формальность.
     part = dest / ".incoming.part"
+    cmd = ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30"]
+    if addr:
+        cmd += ["-b", addr]
+    cmd += [host, remote_command(app_dir, docker)]
     try:
         with open(part, "wb") as fh:
-            res = run(["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=30", host,
-                       remote_command(app_dir, docker)],
-                      stdout=fh, stderr=subprocess.PIPE, timeout=600)
+            res = run(cmd, stdout=fh, stderr=subprocess.PIPE, timeout=600)
     except (OSError, subprocess.TimeoutExpired) as e:
         part.unlink(missing_ok=True)
         say(f"[ОШИБКА] ssh не выполнился: {type(e).__name__}: {e}")
@@ -130,6 +317,9 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
         part.unlink(missing_ok=True)
         why = "на сервере нет ни одной копии в /data/backups" if "NO_BACKUP" in stderr else stderr.strip()[-300:]
         say(f"[ОШИБКА] забор не удался (код {res.returncode}): {why}")
+        hint = failure_hint(stderr, addr)
+        if hint:
+            say(f"[подсказка] {hint}")
         return FAILED
 
     name, sha = parse_meta(stderr)
@@ -167,16 +357,29 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
     return OK
 
 
+class _Parser(argparse.ArgumentParser):
+    """Ошибка аргументов — код 1 («копии нет»), а не штатный 2 argparse: код 2 здесь значит «ночной
+    бэкап сервера не работает», и опечатка в задаче Планировщика читалась бы тревогой о сервере."""
+
+    def error(self, message):
+        self.print_usage(sys.stderr)
+        self.exit(FAILED, f"{self.prog}: ошибка: {message}\n")
+
+
 def main() -> None:
-    ap = argparse.ArgumentParser(description="Забрать свежую копию боевой базы с сервера и проверить её")
+    ap = _Parser(description="Забрать свежую копию боевой базы с сервера и проверить её")
     ap.add_argument("--dest", required=True, help="папка ВНЕ репозитория, на зашифрованном носителе")
     ap.add_argument("--host", default=DEFAULT_HOST)
     ap.add_argument("--app-dir", default=DEFAULT_APP_DIR, help="каталог проекта в домашнем каталоге на сервере")
     ap.add_argument("--docker", default=DEFAULT_DOCKER, help='как звать docker на сервере (по умолчанию "sudo -n docker")')
     ap.add_argument("--keep-days", type=int, default=30)
     ap.add_argument("--max-age-hours", type=int, default=36, help="старше — тревога: ночной бэкап не работает")
+    ap.add_argument("--bind", default=os.environ.get(BIND_ENV) or "auto",
+                    help=f"адрес для `ssh -b` мимо туннеля: auto (по умолчанию) | <IP> | none; "
+                         f"или переменная {BIND_ENV}")
     args = ap.parse_args()
-    sys.exit(pull(Path(args.dest), args.host, args.app_dir, args.docker, args.keep_days, args.max_age_hours))
+    sys.exit(pull(Path(args.dest), args.host, args.app_dir, args.docker, args.keep_days, args.max_age_hours,
+                  bind=args.bind))
 
 
 if __name__ == "__main__":
