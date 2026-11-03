@@ -957,6 +957,9 @@ class TestD24Review4(unittest.TestCase):
                        "приказ о ее разработке")
         self.assertIsNone(r["requirement_blocks"][0].get("note"))
         self.assertIn("подтверждением наличия документации является приказ о ее разработке", self._comps(r))
+        # раунд 6, LOW 6: правило в конце ячейки — пояснение (`explanation`), а не обязательное требование
+        self.assertTrue([b for b in r["requirement_blocks"] if b.get("explanation")
+                         and b["component"].startswith("подтверждением наличия")])
 
     def test_date_variants_without_labels_are_not_reconciled(self):
         """VII-15: варианты «до/с 1 января 2019 г.:», а в записи их меток нет — строки одного выровнялись бы с другим."""
@@ -1139,7 +1142,7 @@ class TestD24Golden(unittest.TestCase):
 
     def test_records_rebuild_to_corpus(self):
         data = json.loads((ROOT / "tests" / "d24_golden.json").read_text(encoding="utf-8"))["records"]
-        self.assertEqual(len(data), 28)
+        self.assertEqual(len(data), 32)
         for x in data:
             r = json.loads(json.dumps(x["before"]))
             sec = r["section_roman"]
@@ -1651,6 +1654,16 @@ class TestD24Review6(unittest.TestCase):
                              product_name=r["product_name"], okpd2_codes=r.get("okpd2_codes") or [],
                              min_threshold=r.get("min_threshold"), requirement_blocks=r["requirement_blocks"],
                              source_anchor=r.get("source_anchor"), okpd2_match=True, payload=r)
+
+    def test_high1_fragment_rule_on_copies(self):
+        """HIGH 1, код: копия IX-91 и IX-92 без порога — шаг `fragment_thresholds` ставит обрывку порог прим. 38."""
+        r91 = json.loads(json.dumps(self._pos("IX", "91")))
+        r92 = json.loads(json.dumps(self._pos("IX", "92")))
+        r92["min_threshold"] = None
+        log = d.fragment_thresholds({Path("x"): [r91, r92]})
+        self.assertEqual(len(log), 1)
+        self.assertIn("[прим. 38]", r92["min_threshold"] or "")
+        self.assertEqual(d.fragment_thresholds({Path("x"): [r91, r92]}), [])          # повтор — 0
 
     def test_high1_fragment_takes_previous_position_threshold(self):
         """HIGH 1: IX-92 (строка кодов 29.32.30.365/366 без наименования — продолжение IX-91 «Компоненты телематических

@@ -66,7 +66,8 @@ class TestCorpusInvariants(unittest.TestCase):
                   "note": None},
                  {"component": "осуществление на территории Российской Федерации следующих операций:",
                   "operations": [{"text": "сборка", "points": 5}], "note": None}])
-        self.assertTrue([k for k, _ in K.record_violations(r) if k == "в"])
+        self.assertTrue([t for k, t in K.record_violations(r) if k == "в" and not t.startswith("панель")])
+        self.assertTrue([t for k, t in K.record_violations(r) if k == "в" and t.startswith("панель")])
 
 
 if __name__ == "__main__":
