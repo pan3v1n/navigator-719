@@ -323,8 +323,13 @@ def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
     Payload выбранных id вторым запросом (`retrieve`) замерен и отвергнут: локально qdrant_client
     не держит соединение с `localhost` (keep-alive выключен самим клиентом), и второй запрос — это
     второе TCP-соединение: p50 `search` с кодом 38 → 61 мс, а при замерах — исчерпание портов
-    Windows (WinError 10048). Цена payload в списках (до 2 × max(limit, 20) точек): `search` с кодом
-    p50 +0.8 %, сам запрос пула top-40 +6.8 мс — `docs/eval_runs/2026-11-03_r31_3_hybrid_ties.md`."""
+    Windows (WinError 10048). На бою (`QDRANT_URL` — имя сервиса compose) keep-alive включён, там
+    `retrieve` не мерился. Цена payload в списках (до 2 × max(limit, 20) точек), ревью PR #291, p50
+    локально: пул top-40 +3.9 мс (+26 %), `search` без кода +23 %, с кодом +4…15 %, `search_rules`
+    +10 % — `docs/eval_runs/2026-11-03_r31_3_hybrid_ties.md`.
+    ⚠ Предел: ничья, которая ПЕРЕСЕКАЕТ глубину списка (`max(limit, 20)`), в пул попадает той
+    частью, что выбрал Qdrant, — слияние здесь бессильно. На живом Qdrant выбор устойчив между
+    прогонами (0 расхождений из 62 × 10), сменить его может перестройка сегментов."""
     from qdrant_client import models
 
     name = collection or settings.QDRANT_COLLECTION

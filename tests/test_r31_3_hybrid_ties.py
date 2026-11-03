@@ -114,7 +114,9 @@ class TestHybridTies(unittest.TestCase):
 
     def test_tie_order_in_list_does_not_change_result(self):
         """Главное: порядок, в котором Qdrant отдал ничьи списка, на выдачу не влияет. С рангом по
-        месту (как `FusionQuery`) у b и c суммы разные и зависят от перемешивания."""
+        месту (как `FusionQuery`) у b и c суммы разные и зависят от перемешивания.
+        ⚠ Только для ничьей, которая целиком внутри глубины списка: если группа равных score
+        пересекает `max(limit, 20)`, какая её часть попадёт в список, решает Qdrant (ревью PR #291)."""
         want = [("c", BC), ("b", BC), ("a", _rrf(0, 3)), ("e", _rrf(2)), ("d", _rrf(3))]
         for seed in range(24):
             pts, _ = self._run(seed=seed)
