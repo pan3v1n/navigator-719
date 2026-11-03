@@ -265,9 +265,12 @@ def _wait_for_adapter(adapters, wait: float, interval: float, sleep, clock) -> t
             return ip, note, (clock() - start if retried else 0.0)
         except BindError as e:
             last = e
-        if clock() + interval > deadline:
+        remaining = deadline - clock()
+        if remaining <= 0:
             break
-        sleep(interval)
+        # Остаток короче интервала — досыпаем ровно до срока и опрашиваем ещё раз: иначе последний
+        # опрос шёл на ~150-й секунде из 180, а при wait < interval ожидания не было вовсе (ревью 37bdab8).
+        sleep(min(interval, remaining))
         retried = True
     waited = f" (ждал {clock() - start:.0f} с)" if wait > 0 else ""
     raise BindError(f"{last}{waited}. {_BIND_HELP}")

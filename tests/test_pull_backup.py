@@ -312,6 +312,21 @@ class TestWaitForAdapter(unittest.TestCase):
         self.assertGreaterEqual(len(polls), 10, "адаптер опрошен не на всём отрезке ожидания")
         self.assertIn("180 с", str(cm.exception))
 
+    def test_adapter_late_in_the_window_is_still_found(self):
+        """Ревью 37bdab8, LOW 1: цикл не спал, если полный интервал не влезал в остаток, — адаптер,
+        поднявшийся на 179-й секунде из 180 (или на 5-й из 10), был пропущен. Опрос PowerShell — 1.4 с."""
+        for wait, up_at in ((180, 179), (10, 5), (20, 19)):
+            with self.subTest(wait=wait, up_at=up_at):
+                state, clock, sleep = _clock()
+
+                def powershell():
+                    state["t"] += 1.4
+                    return WORKSTATION if state["t"] >= up_at else []
+                got = pb.resolve_bind("auto", adapters=powershell, windows=True,
+                                      wait=wait, interval=15, sleep=sleep, clock=clock)
+                self.assertEqual(got[0], "192.0.2.12")
+                self.assertLessEqual(sum(state["slept"]), wait, "сон вышел за предел ожидания")
+
     def test_no_wait_means_one_poll(self):
         state, clock, sleep = _clock()
         polls = []
@@ -439,8 +454,13 @@ class TestListAdapters(unittest.TestCase):
             with self.subTest(adapter=a.get("alias")):
                 self.assertIsInstance(a.get("alias"), str, a)
                 self.assertIsInstance(a.get("status"), str, a)
-                self.assertIn(a["status"], {"Up", "Disconnected", "Disabled", "Not Present", "Dormant",
-                                            "Testing", "Unknown", "LowerLayerDown"}, a)
+                # Строки — из NetAdapter.Types.ps1xml (ревью 37bdab8, LOW 2): «Lower Layer Down» с
+                # пробелами, «Not Authenticated», составные через «, » («Disconnected, Low Power
+                # State») и пустая строка (состояние 2 без флагов причины). Скрипт сравнивает только с «Up».
+                known = {"Up", "Disconnected", "Disabled", "Not Present", "Dormant", "Testing", "Unknown",
+                         "Lower Layer Down", "Not Authenticated", "Low Power State"}
+                parts = [p for p in a["status"].split(", ") if p]
+                self.assertTrue(all(p in known for p in parts), a)
                 self.assertIsInstance(a.get("hardware"), bool, a)
                 self.assertIsInstance(a.get("virtual"), bool, a)
                 self.assertIsInstance(a.get("index"), int, a)
