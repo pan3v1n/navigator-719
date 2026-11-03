@@ -25,9 +25,22 @@
   * процедурные и meta-вопросы — у них нет позиции приложения, значит нет и эталона;
   * ответы без `source_anchor` — не на что ссылаться.
 
-Запуск:
-  .venv/Scripts/python.exe scripts/build_gs_natural.py --db D:/navigator-backups/navigator_app.db \\
-      --wave 3 --out scripts/eval_gs_natural.json
+⚠ 03.11.2026 (гейт `1.0`, решение владельца 28.10): волны больше не будет — источник набора
+оценки пользователей боя. Отсюда правила, которых не было в июле:
+  * оценки — по правилу «Качества» админки: последняя оценка пользователя на ответ (#166,
+    `admin_stats._superseded_ratings`), снятая (последняя = 0) не считается;
+  * якорь — только у ПОЗИЦИИ приложения (источник с кодом ОКПД2); с `UI-1` в `sources_json`
+    товарного ответа лежат и пункты Приказа №52 (`kind = rule`), они эталоном позиции не бывают;
+  * якорь сверяется с ТЕКУЩИМ корпусом по наименованию: номера позиций у редакций не вечны
+    (XVIII изложен заново N 1254, VII — N 1297), и июльский якорь может указывать на чужую позицию
+    (класс `EV24` #244). Наименование разошлось — ищем позицию с тем же наименованием; одна —
+    перепривязываем, нет или несколько — кейс отбрасываем со счётчиком;
+  * набор пишется ТОЛЬКО ВНЕ репозитория: репозиторий публичный, а тексты вопросов — данные
+    пользователей, даже прошедшие детектор (`CLAUDE.md`, 152-ФЗ). На экран тексты не печатаются.
+
+Запуск (и база, и набор — вне репозитория):
+  .venv/Scripts/python.exe scripts/build_gs_natural.py --db D:/navigator-backups/navigator_app-<дата>.db \\
+      --out D:/navigator-export/gs_natural.json
 """
 
 from __future__ import annotations
@@ -37,7 +50,9 @@ import json
 import re
 import sqlite3
 import sys
+from collections import defaultdict
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -56,18 +71,89 @@ CONTINUATION = re.compile(
     r"а|и|это|тот|так)\b", re.I)
 
 
-def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict]:
-    with sqlite3.connect(db_path) as db:   # закрываем: на Windows открытый файл не даёт его убрать
+def _norm_name(name) -> str:
+    return " ".join(str(name or "").split()).casefold()
+
+
+def _feedback(db) -> list:
+    """Оценки ответов объектами с полями `admin_stats` (id, user_id, ts, kind, rating, message_id).
+
+    У баз до миграций нет колонок `kind`, `user_id`, `ts` — тогда все строки считаются оценками
+    ответа одного пользователя в порядке id (так они и писались)."""
+    cols = {r[1] for r in db.execute("pragma table_info(feedback)")}
+    pick = [c if c in cols else f"null as {c}" for c in ("id", "user_id", "ts", "kind")]
+    rows = db.execute(f"select {', '.join(pick)}, rating, message_id from feedback "
+                      "where message_id is not null and rating is not null order by id")
+    # ts — строкой ISO (в SQLite так и лежит); пустую заменяем непустой: `_superseded_ratings`
+    # подставляет `datetime.min` вместо ложного ts, и сравнение строки с датой упало бы.
+    return [SimpleNamespace(id=r["id"], user_id=r["user_id"] or 0, ts=r["ts"] or "0000",
+                            kind=r["kind"] or "answer", rating=r["rating"],
+                            message_id=r["message_id"]) for r in rows]
+
+
+def final_ratings(fb: list) -> dict[int, int]:
+    """{message_id: оценка} по правилу «Качества»: последняя оценка пользователя на ответ (#166),
+    снятая (последняя = 0) не считается. Если ответ оценили несколько пользователей — берётся
+    наименьшая: эталоном идёт только то, что никто не оспорил."""
+    from app.api.admin_stats import _superseded_ratings
+
+    answer = [f for f in fb if (f.kind or "answer") == "answer"]
+    by_user: dict = defaultdict(list)
+    for f in answer:
+        by_user[f.user_id].append(f)
+    superseded = _superseded_ratings(by_user)
+    out: dict[int, int] = {}
+    for f in answer:
+        if f.id in superseded or f.rating == 0:
+            continue
+        out[f.message_id] = min(out.get(f.message_id, f.rating), f.rating)
+    return out
+
+
+def position_source(sources: list) -> dict | None:
+    """Первый источник-ПОЗИЦИЯ ответа: с якорем и кодом ОКПД2, не пункт норм (`kind = rule`)."""
+    for s in sources:
+        if (isinstance(s, dict) and s.get("source_anchor") and s.get("okpd2")
+                and s.get("kind") != "rule"):
+            return s
+    return None
+
+
+def resolve_anchor(src: dict, records: list[dict] | None) -> tuple[str | None, str]:
+    """(якорь в ТЕКУЩЕМ корпусе, исход): «как был» · «перепривязан» · «устарел» · «неоднозначен».
+
+    Без `records` (разбор старых баз, `--no-corpus-check`) якорь берётся как есть."""
+    anchor = src.get("source_anchor")
+    if records is None:
+        return anchor, "как был"
+    name = _norm_name(src.get("product_name"))
+    rec = next((r for r in records if r.get("source_anchor") == anchor), None)
+    if rec is not None and (not name or _norm_name(rec.get("product_name")) == name):
+        return anchor, "как был"
+    if not name:
+        return None, "устарел"
+    same = [r for r in records if _norm_name(r.get("product_name")) == name]
+    if len(same) > 1:   # одно наименование у нескольких позиций — уточняем кодом ответа
+        codes = set(src.get("okpd2") or [])
+        same = [r for r in same if codes & set(r.get("okpd2_codes") or [])] or same
+    if len(same) == 1:
+        return same[0].get("source_anchor"), "перепривязан"
+    return None, ("неоднозначен" if same else "устарел")
+
+
+def collect(db_path: Path, min_rating: int, wave: str,
+            records: list[dict] | None = None) -> tuple[list[dict], dict]:
+    # Только чтение: на вход идёт копия боевой базы, менять её нельзя.
+    with sqlite3.connect(f"file:{Path(db_path).resolve().as_posix()}?mode=ro", uri=True) as db:
         db.row_factory = sqlite3.Row
         msgs = list(db.execute("select id, session_id, ts, role, content, sources_json, "
                                "low_relevance from messages order by session_id, ts, id"))
-        rated = {r["message_id"]: r["rating"] for r in db.execute(
-            "select message_id, rating from feedback "
-            "where message_id is not null and rating is not null")}
-    db.close()
+        rated = final_ratings(_feedback(db))
+    db.close()                         # закрываем: на Windows открытый файл не даёт его убрать
 
     stats = {"оценённых ответов": 0, "есть вопрос": 0, "товарных": 0,
              "с якорем позиции": 0, "отброшено: guard поднимал флаг": 0,
+             "якорь перепривязан по наименованию": 0, "отброшено: якорь устарел": 0,
              "отброшено по ПДн": 0, "итого кейсов": 0}
     cases, seen = [], set()
     for i, m in enumerate(msgs):
@@ -94,16 +180,25 @@ def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict
             continue
         stats["товарных"] += 1
         try:
-            sources = json.loads(m["sources_json"] or "[]")
+            sources = json.loads(m["sources_json"] or "[]") or []
         except Exception:  # noqa: BLE001
             sources = []
         # Якорь и код берём из ОДНОГО источника: раньше anchor искался по первому с якорем, а
         # okpd2 читался из sources[0] — две половины эталона могли описывать разные позиции.
-        src = next((s for s in sources if s.get("source_anchor")), None)
-        anchor = src.get("source_anchor") if src else None
-        if not anchor:
+        # Источник — только ПОЗИЦИЯ: с UI-1 первым с якорем может оказаться пункт Приказа №52.
+        # Старые базы (до кода в источнике) берут первый источник с якорем, как раньше.
+        src = position_source(sources) if records is not None else next(
+            (s for s in sources if isinstance(s, dict) and s.get("source_anchor")
+             and s.get("kind") != "rule"), None)
+        if not src:
             continue
         stats["с якорем позиции"] += 1
+        anchor, how = resolve_anchor(src, records)
+        if anchor is None:
+            stats["отброшено: якорь устарел"] += 1
+            continue
+        if how == "перепривязан":
+            stats["якорь перепривязан по наименованию"] += 1
         if detect(query):          # ПДн → кейс не берём вовсе (частичное обезличивание — иллюзия)
             stats["отброшено по ПДн"] += 1
             continue
@@ -112,18 +207,20 @@ def collect(db_path: Path, min_rating: int, wave: str) -> tuple[list[dict], dict
             "id": f"nat_{len(cases) + 1:03d}",
             "query": query,
             "expect": {"anchor": anchor, "okpd2": src.get("okpd2") or []},
-            "source": f"волна {wave}, оценка {rated[m['id']]}★",
+            "source": f"{wave}, оценка {rated[m['id']]}★",
         })
     stats["итого кейсов"] = len(cases)
     return cases, stats
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description="EV3: собрать gs_natural из оценённых ответов волны")
-    ap.add_argument("--db", required=True, help="боевая БД (вне репозитория!)")
-    ap.add_argument("--wave", default="3")
+    ap = argparse.ArgumentParser(description="EV3: собрать gs_natural из оценённых ответов боя")
+    ap.add_argument("--db", required=True, help="копия боевой БД (вне репозитория!)")
+    ap.add_argument("--wave", default="бой", help="подпись источника кейса")
     ap.add_argument("--min-rating", type=int, default=4)
-    ap.add_argument("--out", default="")
+    ap.add_argument("--out", default="", help="файл набора — ТОЛЬКО вне репозитория")
+    ap.add_argument("--no-corpus-check", action="store_true",
+                    help="не сверять якоря с текущим корпусом (только для разбора старых баз)")
     args = ap.parse_args()
 
     db_path = Path(args.db)
@@ -131,23 +228,29 @@ def main() -> None:
         sys.exit(f"Нет файла базы: {db_path}")
     if ROOT in db_path.resolve().parents:
         sys.exit("База с ПДн лежит ВНУТРИ репозитория — вынеси её наружу (CLAUDE.md, 152-ФЗ).")
+    out = Path(args.out).resolve() if args.out else None
+    if out is not None and ROOT in out.parents:
+        sys.exit("Набор с текстами вопросов пишется ВНЕ репозитория: он публичный (152-ФЗ).")
 
-    cases, stats = collect(db_path, args.min_rating, args.wave)
+    records = None
+    if not args.no_corpus_check:
+        from scripts.load_kb import load_records
+        records = load_records()
+    cases, stats = collect(db_path, args.min_rating, args.wave, records)
     print("=" * 70)
     print(f"gs_natural из {db_path.name} (оценка ≥{args.min_rating}★)")
     print("=" * 70)
     for k, v in stats.items():
-        print(f"  {k:<22} {v}")
-    print(f"\n  Цель гайда — 120+ кейсов. Сейчас: {len(cases)}."
-          f" {'Готово.' if len(cases) >= 120 else 'Набор пополняется после каждой волны тем же прогоном.'}")
-    if not args.out:
-        for c in cases[:10]:
-            print(f"    {c['id']}: {c['query'][:56]:56} → {c['expect']['anchor'][:34]}")
+        print(f"  {k:<36} {v}")
+    print(f"\n  Цель гайда — 120+ кейсов. Сейчас: {len(cases)}.")
+    if out is None:   # тексты вопросов на экран не печатаются: вывод уходит в журналы и беседы
+        print("  (--out не задан — набор не сохранён)")
         return
-    out = Path(args.out) if Path(args.out).is_absolute() else ROOT / args.out
     payload = {"_meta": {
         "purpose": "gs_natural (EV3): вопросы так, как их задают люди, с верной позицией. "
-                   "Эталон — не ручная разметка, а оценка эксперта ≥4★ в волне тестирования.",
+                   "Эталон — не ручная разметка, а последняя оценка ≥4★ пользователя боя "
+                   "(правило «Качества», #166); якоря сверены с текущим корпусом.",
+        "stats": stats,
         "built_by": "scripts/build_gs_natural.py",
         "pii": "Тексты прогнаны детектором app/core/sensitive.py; кейсы со срабатыванием отброшены "
                "целиком. Идентификаторов пользователей, регионов и времени в наборе нет.",
