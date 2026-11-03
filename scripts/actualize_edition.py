@@ -336,18 +336,44 @@ def previous_record(name: str, codes: list[str] | None, previous: dict[str, dict
     return ([r for r in same if r.get("okpd2_codes") == codes] or same or [None])[0]
 
 
+def previous_cells(roman: str) -> list | None:
+    """Позиции раздела в прежней редакции: чанк из `HEAD`. `None` — прежнего чанка нет, сравнивать не с чем.
+
+    Шаги до публикации ничего не коммитят (`guard` требует чистую базу), поэтому в `HEAD` лежит ровно тот текст,
+    из которого собраны прежние записи.
+    """
+    import structure_kb as sk
+
+    try:
+        rel = sk.find_chunk(roman, None).resolve().relative_to(sk.ROOT.resolve()).as_posix()
+    except (SystemExit, ValueError):
+        return None
+    shown = run(["git", "show", f"HEAD:{rel}"], check=False)
+    return sk.parse_section(shown.stdout)[1] if shown.returncode == 0 else None
+
+
+def matching_cell(products: list, name: str, codes: list[str] | None) -> list:
+    """Ячейки источника той же позиции: по имени, при дублях имени — ещё и по кодам."""
+    from restructure_changed import clean_name
+
+    same = [p for p in products if clean_name(p) == name]
+    return [p for p in same if p.okpd2_codes == codes] if len(same) > 1 else same
+
+
 def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[str, str],
                 previous: dict[str, dict] | None = None) -> tuple[list[str], list[str]]:
     """Строки таблицы изменённых записей и замечания: баллы источника рядом с баллами записи.
 
     Строки требований вне записи есть у четверти корпуса и без всякой правки, поэтому они делятся на две
-    группы. «Было и пропало» — адресное замечание. Строку, которой нет и в прежней записи, отличить от новой
-    строки редакции нельзя: она не пропадает из отчёта, но идёт одной сводной строкой.
+    группы. Старый пробел — строка стоит в ПРЕЖНЕЙ ячейке источника (чанк из `HEAD`), и прежняя запись её тоже
+    не несла: такие записи идут одной сводной строкой, поимённо все. Всё остальное — адресное замечание с текстом
+    строки: новая строка редакции, начало строки переписано, строка была в прежней записи и пропала, прежней
+    ячейки нет. Сравнивать с новой ячейкой нельзя: новая строка редакции нашлась бы «пробелом» и прежней записи.
     """
     import structure_kb as sk
-    from restructure_changed import clean_name
 
     products: dict[str, list] = {}
+    before: dict[str, list | None] = {}
     rows, notes, old_gaps = [], [], []
     for anchor in sorted(anchors):
         rec = records[anchor]
@@ -355,9 +381,7 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
         if roman not in products:
             _, products[roman] = sk.parse_section(sk.find_chunk(roman, None).read_text(encoding="utf-8"))
         name = rec.get("product_name") or ""
-        same = [p for p in products[roman] if clean_name(p) == name]
-        if len(same) > 1:
-            same = [p for p in same if p.okpd2_codes == rec.get("okpd2_codes")]
+        same = matching_cell(products[roman], name, rec.get("okpd2_codes"))
         ours = record_points(rec)
         theirs, lines = None, "?"
         if len(same) != 1:
@@ -372,10 +396,15 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
                 notes.append(f"{anchor}: пара «операция — балл» не подтверждена у {len(bad)}: {bad[:3]}")
             lost_req = lost_requirements(raw, rec)
             old = previous_record(name, rec.get("okpd2_codes"), previous or {})
-            before_gap = lost_requirements(raw, old) if old else []
-            if gone := [n for n in lost_req if n not in before_gap]:
-                notes.append(f"{anchor}: требования из ячейки не нашлись в записи, {len(gone)}: {gone[:2]}")
-            elif lost_req:
+            old_gap: set[str] = set()
+            if old is not None and lost_req:
+                if roman not in before:
+                    before[roman] = previous_cells(roman)
+                was = matching_cell(before[roman] or [], old.get("product_name") or "", old.get("okpd2_codes"))
+                old_gap = set(lost_requirements(was[0].raw_block(), old)) if len(was) == 1 else set()
+            if gone := [n for n in lost_req if n not in old_gap]:
+                notes.append(f"{anchor}: требования из ячейки не нашлись в записи, {len(gone)}: {gone[:3]}")
+            if len(gone) < len(lost_req):
                 old_gaps.append(anchor)
             all_lines, absent = source_lines(raw, rec)
             lines = f"{len(all_lines) - len(absent)} / {len(all_lines)}"
@@ -386,8 +415,8 @@ def review_rows(anchors: set[str], records: dict[str, dict], thresholds: dict[st
         rows.append(table_row(name[:60], roman, f"{len(record_operations(rec))} ({sum(ours.values())} / {src_ops})",
                               f"{sum(ours.elements()):g} / {src_sum}", lines, thresholds.get(anchor, "")[:90]))
     if old_gaps:
-        notes.append(f"Ещё {len(old_gaps)} записей: строк требований из ячейки нет ни в прежней, ни в новой записи "
-                     f"(старый пробел или новая строка редакции): {old_gaps[:6]}")
+        notes.append(f"Ещё {len(old_gaps)} записей: строки требований из ячейки не дошли до записи и в прежней "
+                     f"редакции, строка в источнике та же (старый пробел): {old_gaps}")
     return rows, notes
 
 

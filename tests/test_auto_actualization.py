@@ -242,15 +242,22 @@ class TestReviewRows(unittest.TestCase):
                 mock.patch("structure_kb.find_chunk", return_value=chunk):
             return ae.review_rows({"a"}, {"a": rec}, {"a": "не менее 115"})
 
-    def rows_with_previous(self, previous, rec=None):
+    CELL = "сварка рамы 20 баллов\nналичие прав на конструкторскую документацию у изготовителя"
+
+    @staticmethod
+    def product(cell, name="Иглы", code="25.93"):
         import structure_kb as sk
 
-        cell = "сварка рамы 20 баллов\nналичие прав на конструкторскую документацию у изготовителя"
-        product = sk.Product(okpd2_field="25.93", name_raw="Иглы", okpd2_codes=["25.93"], component_cells=[cell])
+        return sk.Product(okpd2_field=code, name_raw=name, okpd2_codes=[code], component_cells=[cell])
+
+    def rows_with_previous(self, previous, rec=None, cell=CELL, old_cell=CELL):
+        """`old_cell` — ячейка прежней редакции (чанк из `HEAD`); `None` — прежнего чанка нет."""
         chunk = SimpleNamespace(read_text=lambda encoding: "")
         rec = rec or self.rec([("сварка рамы", 20)])
-        with mock.patch("structure_kb.parse_section", return_value=("", [product])), \
-                mock.patch("structure_kb.find_chunk", return_value=chunk):
+        old = None if old_cell is None else [self.product(old_cell)]
+        with mock.patch("structure_kb.parse_section", return_value=("", [self.product(cell)])), \
+                mock.patch("structure_kb.find_chunk", return_value=chunk), \
+                mock.patch.object(ae, "previous_cells", return_value=old, create=True):
             return ae.review_rows({"a"}, {"a": rec}, {}, previous)
 
     def test_requirement_dropped_by_new_record_is_addressed(self):
@@ -264,6 +271,79 @@ class TestReviewRows(unittest.TestCase):
         self.assertEqual(len(notes), 1)
         self.assertIn("Ещё 1 записей", notes[0])
         self.assertIn("['a']", notes[0])
+
+    def test_new_line_of_the_edition_lost_by_the_model_is_addressed(self):
+        # Строки не было в прежней ячейке: это правка редакции, а не старый пробел — адресно, с текстом строки.
+        _, notes = self.rows_with_previous({"старый якорь": self.rec([("сварка рамы", 20)])},
+                                           old_cell="сварка рамы 20 баллов")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("a: требования из ячейки не нашлись", notes[0])
+        self.assertIn("наличие прав на конструкторскую", notes[0])
+
+    def test_rewritten_line_is_addressed_and_not_called_absent_before(self):
+        old_line = "наличие у производителя прав на конструкторскую документацию сроком не менее 3 лет"
+        new_line = "наличие у изготовителя исключительных прав на конструкторскую документацию сроком не менее 5 лет"
+        was = self.rec([("сварка рамы", 20), (old_line, None)])
+        _, notes = self.rows_with_previous({"старый якорь": was}, cell=f"сварка рамы 20 баллов\n{new_line}",
+                                           old_cell=f"сварка рамы 20 баллов\n{old_line}")
+        self.assertEqual(len(notes), 1)
+        self.assertIn("a: требования из ячейки не нашлись", notes[0])
+        self.assertNotIn("ни в прежней", " ".join(notes))
+
+    def test_without_the_previous_cell_every_gap_is_addressed(self):
+        _, notes = self.rows_with_previous({"старый якорь": self.rec([("сварка рамы", 20)])}, old_cell=None)
+        self.assertEqual(len(notes), 1)
+        self.assertIn("a: требования из ячейки не нашлись", notes[0])
+
+    def test_summary_names_every_record(self):
+        names = [f"Изделие {i}" for i in range(8)]
+        products = [self.product(self.CELL, name, f"25.9{i}") for i, name in enumerate(names)]
+        recs = {f"a{i}": {**self.rec([("сварка рамы", 20)]), "product_name": name, "okpd2_codes": [f"25.9{i}"]}
+                for i, name in enumerate(names)}
+        chunk = SimpleNamespace(read_text=lambda encoding: "")
+        with mock.patch("structure_kb.parse_section", return_value=("", products)), \
+                mock.patch("structure_kb.find_chunk", return_value=chunk), \
+                mock.patch.object(ae, "previous_cells", return_value=products, create=True):
+            _, notes = ae.review_rows(set(recs), recs, {}, {f"old{k}": dict(v) for k, v in recs.items()})
+        self.assertEqual(len(notes), 1)
+        for anchor in recs:
+            self.assertIn(f"'{anchor}'", notes[0])
+
+    def test_old_gap_and_new_line_of_one_record_are_both_reported(self):
+        old_line = "наличие прав на конструкторскую документацию у изготовителя"
+        new_line = "наличие сервисного центра на территории страны союза"
+        _, notes = self.rows_with_previous({"старый якорь": self.rec([("сварка рамы", 20)])},
+                                           cell=f"сварка рамы 20 баллов\n{old_line}\n{new_line}",
+                                           old_cell=f"сварка рамы 20 баллов\n{old_line}")
+        self.assertEqual(len(notes), 2)
+        self.assertIn("не нашлись в записи, 1:", notes[0])
+        self.assertIn("сервисного центра", notes[0])
+        self.assertIn("['a']", notes[1])
+
+    def test_previous_cells_come_from_head_not_from_the_working_file(self):
+        import structure_kb as sk
+
+        text = sk.find_chunk("XXIII", None).read_text(encoding="utf-8")
+        expected = [p.raw_block() for p in sk.parse_section(text)[1]]
+        self.assertTrue(expected)
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            chunk = root / "chunks" / "x.txt"
+            chunk.parent.mkdir()
+            chunk.write_text(text, encoding="utf-8", newline="\n")
+            for args in (("init", "-q"), ("add", "."), ("-c", "user.email=t@example.invalid", "-c", "user.name=t",
+                                                         "-c", "core.hooksPath=/dev/null", "commit", "-q", "-m", "x")):
+                subprocess.run(["git", *args], cwd=root, check=True, capture_output=True)
+            chunk.write_text("", encoding="utf-8")       # конвейер уже переписал чанк новой редакцией
+            with mock.patch.object(ae, "ROOT", root), mock.patch.object(sk, "ROOT", root), \
+                    mock.patch("structure_kb.find_chunk", return_value=chunk):
+                self.assertEqual([p.raw_block() for p in ae.previous_cells("XXIII")], expected)
+                chunk.unlink()
+                subprocess.run(["git", "rm", "-q", "--cached", "chunks/x.txt"], cwd=root, check=True, capture_output=True)
+                subprocess.run(["git", "-c", "user.email=t@example.invalid", "-c", "user.name=t", "-c",
+                                "core.hooksPath=/dev/null", "commit", "-q", "-m", "y"], cwd=root, check=True,
+                               capture_output=True)
+                self.assertIsNone(ae.previous_cells("XXIII"), "прежнего чанка нет — сравнивать не с чем")
 
     def test_new_position_reports_every_lost_requirement(self):
         _, notes = self.rows_with_previous({})
@@ -1123,6 +1203,32 @@ class TestHandleDocument(unittest.TestCase):
         self.assertIn("PR не создан", r.issues.once.call_args.args[0])
         self.assertIn("HumanCommits", r.issues.once.call_args.args[1])
 
+    def test_human_commits_issue_does_not_promise_a_retry(self):
+        # Повтор даст тот же исход: задача говорит, что сделать человеку, и не делит заголовок со сбоем `gh`.
+        human = self.run_doc(publish={"side_effect": aa.HumanCommits("x")}).issues.once.call_args
+        gh_fail = self.run_doc(publish={"side_effect": RuntimeError("gh")}).issues.once.call_args
+        self.assertNotEqual(human.args[0], gh_fail.args[0])
+        self.assertNotIn("попытка повторится", human.args[1])
+        self.assertIn("тот же", human.args[1])
+        self.assertTrue(human.kwargs["urgent"])
+
+    def test_stop_issue_says_what_to_remove_for_a_rebuild(self):
+        body = self.run_doc(result=self.STOPPED).issues.once.call_args.args[1]
+        self.assertIn("wt-509000", body)
+        self.assertIn("auto/edition-509000", body)
+
+    def test_open_pr_silences_the_report_of_a_manual_run(self):
+        # PR открыт — сборка у человека; частичный отчёт его ручного прогона не повод для срочной задачи.
+        r = self.run_doc(built=True, opened=True, result=self.STOPPED)
+        r.issues.once.assert_not_called()
+        r.read.assert_not_called()
+        self.assertIn("PR уже открыт", r.log)
+
+    def test_github_silence_is_checked_before_the_report(self):
+        r = self.run_doc(built=True, opened=None, result=self.STOPPED)
+        r.issues.once.assert_not_called()
+        self.assertIn("повтор завтра", r.log)
+
     def test_gh_pr_failure_makes_urgent_issue(self):
         r = self.run_doc(publish={"side_effect": RuntimeError("gh pr create")})
         self.assertIn("PR не создан", r.issues.once.call_args.args[0])
@@ -1359,7 +1465,25 @@ class TestBuild(unittest.TestCase):
         runner = mock.Mock(return_value=answer(out="[]"))
         with mock.patch.object(aa, "git", return_value=""):
             aa.pr_opened("1", runner)
-        self.assertIn("headRefOid,state", runner.call_args.args)
+        self.assertIn("headRefOid,state,isCrossRepository", runner.call_args.args)
+
+    def test_pull_request_from_a_fork_is_not_ours(self):
+        # Репозиторий публичен: `--head` фильтрует только по имени ветки, PR из форка с тем же именем — чужой.
+        fork = {"isCrossRepository": True}
+        self.assertFalse(self.pr([{"headRefOid": "x", "state": "OPEN", **fork}], "abc\n"))
+        self.assertFalse(self.pr([{"headRefOid": "abc", "state": "CLOSED", **fork}], "abc\n"))
+        self.assertFalse(self.pr([{"headRefOid": "abc", "state": "CLOSED", **fork}], ""))
+        self.assertTrue(self.pr([{"headRefOid": "x", "state": "OPEN", "isCrossRepository": False}], "abc\n"))
+
+    def test_fresh_build_forgets_the_commit_of_the_previous_one(self):
+        with tempfile.TemporaryDirectory() as d:
+            base = Path(d)
+            (base / "1").mkdir()
+            (base / "1" / aa.OWN_COMMIT).write_text("abc", encoding="utf-8")
+            with mock.patch.object(aa, "git"), mock.patch.object(aa.subprocess, "run", return_value=answer()), \
+                    mock.patch.object(aa, "model_env", return_value={}):
+                aa.build_edition("1", base)
+            self.assertFalse((base / "1" / aa.OWN_COMMIT).exists())
 
     def test_pr_without_local_branch(self):
         self.assertTrue(self.pr([{"headRefOid": "abc", "state": "CLOSED"}], ""))
@@ -1456,6 +1580,49 @@ class TestPublish(unittest.TestCase):
         with self.assertRaises(aa.HumanCommits):
             self.publish()
         self.assertEqual(self.remote_tip(), pushed)
+
+    def remote_heads(self):
+        return subprocess.run(["git", "ls-remote", "--heads", str(self.remote), "auto/edition-1"],
+                              capture_output=True, text=True).stdout
+
+    def test_branch_moved_away_from_the_tree_is_not_published(self):
+        # Ревью, раунд 5: дерево отцеплено от ветки, человек коммитит на ветку в другой копии — push ушёл бы по имени.
+        with self.assertRaises(RuntimeError):
+            self.publish(gh_code=1)
+        pushed = self.remote_tip()
+        self.git("switch", "-q", "--detach", cwd=self.tree)
+        other = Path(self.tmp.name) / "other"
+        self.git("worktree", "add", "-q", str(other), "auto/edition-1", cwd=self.tree)
+        (other / "knowledge_base" / "a.txt").write_text("НЕЗАКОНЧЕННАЯ ПРАВКА ЧЕЛОВЕКА", encoding="utf-8")
+        self.git("commit", "-q", "-am", "WIP: не публиковать", cwd=other)
+        with self.assertRaises(aa.HumanCommits):
+            self.publish()
+        self.assertEqual(self.remote_tip(), pushed)
+
+    def test_detached_tree_is_not_published(self):
+        # Коммит на отцепленном HEAD не попал бы в ветку, а push ушёл бы по имени ветки.
+        self.git("switch", "-q", "--detach", cwd=self.tree)
+        with self.assertRaises(aa.HumanCommits):
+            self.publish()
+        self.assertEqual(self.remote_heads(), "")
+
+    def test_amended_commit_of_the_automaton_is_not_published(self):
+        # `--amend --no-edit` сохраняет тему: свой коммит опознаётся по SHA, а не по теме.
+        with self.assertRaises(RuntimeError):
+            self.publish(gh_code=1)
+        self.git("push", "-q", "origin", "--delete", "auto/edition-1", cwd=self.tree)
+        (self.tree / "knowledge_base" / "a.txt").write_text("правка человека", encoding="utf-8")
+        self.git("commit", "-q", "-a", "--amend", "--no-edit", cwd=self.tree)
+        with self.assertRaises(aa.HumanCommits):
+            self.publish()
+        self.assertEqual(self.remote_heads(), "")
+
+    def test_commit_with_our_title_but_not_ours_is_not_published(self):
+        (self.tree / "knowledge_base" / "a.txt").write_text("правка человека", encoding="utf-8")
+        self.git("commit", "-q", "-am", "data(auto): редакция ПП 719, документ Контура 1", cwd=self.tree)
+        with self.assertRaises(aa.HumanCommits):
+            self.publish()
+        self.assertEqual(self.remote_heads(), "")
 
     def test_uncommitted_edit_after_our_commit_stays_local(self):
         with self.assertRaises(RuntimeError):
