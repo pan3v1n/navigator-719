@@ -711,7 +711,8 @@ class TestD24LostLines(unittest.TestCase):
         text = "сборка изделия (10 баллов);\nрасчет баллов по формуле:\nгде К - количество модулей,\nделенное на общее количество"
         n, skipped = self._apply(r, text)
         self.assertEqual(n, 0)
-        self.assertEqual([w for w, _ in skipped], ["формула (заголовок)", "формула", "формула"])
+        # «где К - количество модулей,» + «деленное на …» — одна строка формулы (перенос после запятой, раунд 5)
+        self.assertEqual([w for w, _ in skipped], ["формула (заголовок)", "формула"])
 
     def test_several_points_in_one_line_are_not_split(self):
         r = _rec("Погрузчик", [("сборка", 1)], 1)
@@ -943,13 +944,20 @@ class TestD24Review4(unittest.TestCase):
             self.assertEqual(d._d24_points(line), pts, line)
 
     def test_explanation_goes_to_note(self):
-        """I-13, XXIII-1: пояснение — note блока, к которому относится, а не обязательное требование."""
+        """XXIII-1: пояснение ВНУТРИ ячейки (за ним — совпавшие строки) — note блока, а не обязательное требование.
+        Раунд 5 ревью, MED 3: пояснение в КОНЦЕ ячейки — правило о всей позиции (I-13…19: «подтверждением наличия
+        комплекта КД … являются …»), оно не note последнего узла, а требование записи, текстом целиком."""
+        r = self._r(_blk("документация", [("наличие прав на конструкторскую документацию", None)]),
+                    _blk("сборка", [("сборка изделия", 5)]))
+        self._apply(r, "наличие прав на конструкторскую документацию;\nДопускается применение крепежа иностранного "
+                       "производства\nсборка изделия (5 баллов);")
+        self.assertEqual(self._comps(r), ["документация", "сборка"])
+        self.assertEqual(r["requirement_blocks"][0]["note"], "Допускается применение крепежа иностранного производства")
         r = self._r(_blk("документация", [("наличие прав на конструкторскую документацию", None)]))
         self._apply(r, "наличие прав на конструкторскую документацию;\nподтверждением наличия документации является "
                        "приказ о ее разработке")
-        self.assertEqual(self._comps(r), ["документация"])
-        self.assertEqual(r["requirement_blocks"][0]["note"], "подтверждением наличия документации является приказ о "
-                                                              "ее разработке")
+        self.assertIsNone(r["requirement_blocks"][0].get("note"))
+        self.assertIn("подтверждением наличия документации является приказ о ее разработке", self._comps(r))
 
     def test_date_variants_without_labels_are_not_reconciled(self):
         """VII-15: варианты «до/с 1 января 2019 г.:», а в записи их меток нет — строки одного выровнялись бы с другим."""
@@ -1132,7 +1140,7 @@ class TestD24Golden(unittest.TestCase):
 
     def test_records_rebuild_to_corpus(self):
         data = json.loads((ROOT / "tests" / "d24_golden.json").read_text(encoding="utf-8"))["records"]
-        self.assertEqual(len(data), 15)
+        self.assertEqual(len(data), 28)
         for x in data:
             r = json.loads(json.dumps(x["before"]))
             sec = r["section_roman"]
@@ -1493,6 +1501,139 @@ class TestD24Corpus(unittest.TestCase):
             self.assertFalse(any("не менее 50 баллов" in h for h in heads), pos)
             self.assertIsNone(r.get("min_threshold"), pos)
             self.assertIn("[прим. 32", T.lookup_threshold(r["okpd2_codes"], r["product_name"], "XXVII") or "", pos)
+
+
+class TestD24Review5(unittest.TestCase):
+    """Ревью PR #268, раунд 5: записи корпуса, на которых правила D24 ошибались (тест на настоящей записи)."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.recs = d.load_records()
+
+    def _pos(self, sec, pos):
+        return next(x for x in self.recs[sec] if x["source_anchor"].endswith(f"позиция {pos}"))
+
+    @staticmethod
+    def _notes(r):
+        return " ".join(b.get("note") or "" for b in r.get("requirement_blocks") or [])
+
+    @staticmethod
+    def _items(r):
+        return [b.get("component") or "" for b in r.get("requirement_blocks") or []] + [
+            o.get("text") or "" for b in r.get("requirement_blocks") or [] for o in b.get("operations") or []]
+
+    def test_med3_explanation_not_glued_to_last_block(self):
+        """MED 3: строка ячейки — не note последнего совпавшего блока: вводная раздела 2 у IX-46 (номер «2.»),
+        обязательства о КД у IX-15/19, правило о комплектах КД в конце ячейки I-13…19, пункт перечня у IX-25,
+        продолжение строки после запятой у XXI-87…90. Каждая — требованием (подписью блока) на своём месте."""
+        cases = (("IX", "46", "выполнение на территории Российской Федерации следующих технологических операций"),
+                 ("IX", "15", "обязано обеспечить"), ("IX", "15", "срок лицензии должен быть"),
+                 ("IX", "19", "обязано обеспечить"), ("I", "13", "подтверждением наличия конструкторской документации"),
+                 ("I", "19", "для каждой группы комплектующих изделий баллы"),
+                 ("IX", "25", "исключительного права на товарный знак"),
+                 ("XXI", "87", "отвечающих за проверку качества"))
+        for sec, pos, frag in cases:
+            r = self._pos(sec, pos)
+            self.assertNotIn(frag, self._notes(r), (sec, pos))
+            self.assertTrue(any(frag in t for t in self._items(r)), (sec, pos, frag))
+
+    def test_med3_rnd_operation_not_duplicated(self):
+        """MED 3, VII-11: «(не более 30 баллов)» не в ключе — строка НИОКР находит свою операцию, note-дубля нет."""
+        r = self._pos("VII", "11")
+        self.assertNotIn("научно-исследовательские и опытно-конструкторские работы", self._notes(r))
+        self.assertEqual(sum("научно-исследовательские и опытно-конструкторские работы" in t for t in self._items(r)), 1)
+
+    def test_med4_each_unit_keeps_own_schedule(self):
+        """MED 4, XX-12: график 35 / 25 / 20 % — у каждой из четырёх установок ровно один раз (у насосной пропадал, у
+        мембранной стоял дважды)."""
+        r = self._pos("XX", "12")
+        blocks = r["requirement_blocks"]
+        for name in ("колтюбинговая установка", "насосная установка", "азотная установка криогенного",
+                     "азотная установка мембранного"):
+            k = next(i for i, b in enumerate(blocks) if (b.get("component") or "").startswith(name))
+            b = blocks[k]
+            text = (b.get("note") or "") + " " + " ".join(o.get("text") or "" for o in b.get("operations") or [])
+            self.assertEqual(text.count("до 31 декабря 2027 г. - не более 35 процентов"), 1, name)
+            self.assertEqual(text.count("с 1 января 2029 г. - не более 20 процентов"), 1, name)
+
+    def test_med5_heading_before_whole_window(self):
+        """MED 5, III-208: вводная «… не менее 8 из следующих операций:» — перед первой операцией списка, а не после."""
+        r = self._pos("III", "208")
+        b = next(b for b in r["requirement_blocks"] if "не менее 8" in (b.get("component") or ""))
+        self.assertGreaterEqual(len(b.get("operations") or []), 8)
+
+    def test_low7_subpoint_note_follows_its_part(self):
+        """LOW 7, IX-62: note «Для подпункта 2.2.2: …» — у части блока, открытой вводной «2.2. …», а не у части 2.1."""
+        r = self._pos("IX", "62")
+        b = next(b for b in r["requirement_blocks"] if "подпункта 2.2.2" in (b.get("note") or ""))
+        self.assertTrue((b.get("component") or "").startswith("2.2."), b.get("component"))
+
+    def test_low8_html_glue_not_written_into_operation(self):
+        """LOW 8, VI-24: склейка HTML «… (5 баллов) конвейеры ленточные … при обеспечении:» — не текст операции."""
+        r = self._pos("VI", "24")
+        self.assertFalse([t for b in r["requirement_blocks"] for o in b.get("operations") or []
+                          for t in [o.get("text") or ""] if "при обеспечении" in t])
+
+    def test_low9_restored_line_after_its_neighbour(self):
+        """LOW 9, III-64: «раскрой … подъемного устройства (4 балла)» — после «производство адаптера (жатки) (25)»,
+        как в первоисточнике, а не перед ней."""
+        r = self._pos("III", "64")
+        ops = [o.get("text") or "" for b in r["requirement_blocks"] for o in b.get("operations") or []]
+        a = next(i for i, t in enumerate(ops) if t.startswith("производство адаптера (жатки) самоходной косилки"))
+        b = next(i for i, t in enumerate(ops) if "подъемного устройства" in t)
+        self.assertLess(a, b)
+
+    def test_low10_share_requirement_lives_in_blocks(self):
+        """LOW 10: требование о доле иностранных товаров из поля порога — требованием в блоках, поле порога пусто
+        (без порога примечания такое поле печаталось строкой «Порог: …» и не наследовалось вариантами)."""
+        for sec, pos in (("VI", "3"), ("V", "7"), ("V", "39"), ("V", "68"), ("XXII", "7"), ("XXIII", "1")):
+            r = self._pos(sec, pos)
+            self.assertIsNone(r.get("min_threshold"), (sec, pos))
+            self.assertTrue(any("процент" in t for t in self._items(r)), (sec, pos))
+
+    def test_low11_window_requires_each_operation_inside(self):
+        """LOW 11: окно из трёх и более элементов — только если КАЖДАЯ операция окна почти целиком внутри строки."""
+        r = TestD24Review4._r(_blk("узел", [("установка программного обеспечения", 5),
+                                            ("контроль качества упаковки готовой продукции на складе заказчика", 5),
+                                            ("сборка готового изделия", 5)]))
+        items = d._d24_items(r)
+        x = d._d24_info("установка программного обеспечения контроль качества сборка готового изделия", items)
+        self.assertFalse([c for c in x["cands"] if c[3] == "win" and c[0] <= 2 <= c[1]])
+
+    def test_med3_duty_inside_cell_is_requirement(self):
+        """MED 3: обязательство ВНУТРИ ячейки («… должен быть не менее 5 лет») — требование, а не note блока перед ним."""
+        r = TestD24Review4._r(_blk("документация", [("наличие прав на конструкторскую документацию", None)]),
+                              _blk("сборка", [("сборка изделия", 5)]))
+        units, _ = d.lost_units(r, "наличие прав на конструкторскую документацию;\nсрок лицензии должен быть не менее "
+                                   "пяти лет\nсборка изделия (5 баллов);")
+        self.assertFalse([u for u in units if u.get("note_of")])
+        self.assertTrue([u for u in units if "срок лицензии" in (u.get("component") or "")])
+
+    def test_med3_points_cap_is_not_a_key(self):
+        """MED 3, VII-11: «(не более 30 баллов)» — потолок баллов, не ключ сверки: строка находит свою операцию."""
+        r = TestD24Review4._r(_blk("работы", [("научно-исследовательские работы российских организаций", None)]))
+        units, _ = d.lost_units(r, "научно-исследовательские работы российских организаций (не более 30 баллов);")
+        self.assertEqual(units, [])
+
+    def test_med4_notes_not_cleared_by_other_block_note(self):
+        """MED 4, XX-12: notes записи не снимается, если его числа есть лишь в note ДРУГОГО блока (график азотной
+        установки засчитывался за график насосной, которого в записи не было)."""
+        r = TestD24Review4._r(_blk("насосная установка", [("соблюдение доли насосной установки", 100)]),
+                              _blk("азотная установка", [("сборка установки", 5)],
+                                   note="до 31 декабря 2027 г. - не более 35 процентов"))
+        r["notes"] = "насосная установка: до 31 декабря 2027 г. - не более 35 процентов"
+        cell = ("наличие сервисного центра;\nнасосная установка:\nсоблюдение доли насосной установки (100 баллов):\n"
+                "азотная установка:\nсборка установки (5 баллов);\nдо 31 декабря 2027 г. - не более 35 процентов;")
+        d.restore_lost_lines({"XX": {"all": [{"text": cell, "_recs": [r], "code": "x"}]}})
+        self.assertTrue([b for b in r["requirement_blocks"] if "сервисного центра" in (b.get("component") or "")])
+        self.assertEqual(r["notes"], "насосная установка: до 31 декабря 2027 г. - не более 35 процентов")
+
+    def test_low11_retext_block_without_operations(self):
+        """LOW 11: подпись блока без операций, обрезанная разборщиком, — текстом строки ячейки целиком."""
+        r = TestD24Review4._r(_blk("наличие сервисного центра уполномоченного осуществлять ремонт"))
+        units, _ = d.lost_units(r, "наличие сервисного центра уполномоченного осуществлять ремонт гарантийное "
+                                   "обслуживание продукции;")
+        self.assertTrue([u for u in units if u.get("retext") == (0, None) and "гарантийное обслуживание" in u["text"]])
 
 
 class TestD18KonturServiceLine(unittest.TestCase):

@@ -104,9 +104,25 @@ def record_points(rec: dict) -> set[float]:
     return pts
 
 
-def source_points(product) -> set[float]:
-    """Баллы строки-исходника позиции (наименование + все её ячейки требований)."""
-    return _points_in(product.raw_block())
+def source_points(product, rec: dict | None = None, roman: str | None = None) -> set[float]:
+    """Баллы строки-исходника позиции (наименование + все её ячейки требований).
+
+    С записью — без оговорки вводной «… оцениваются не менее N баллов:», расходящейся с порогом примечания позиции:
+    её снимает `D24` (`d23_groups._d24_unstale`, `_threshold_is_stale_intro` — у XXVII-11…14 порог прим. 32, а не 50),
+    и «потерянным баллом» она не является (раунд 5 ревью PR #268, MED 2)."""
+    pts = _points_in(product.raw_block())
+    if rec is None:
+        return pts
+    stale = {_num(m.group(1)) for m in _STALE_INTRO_RE.finditer(product.raw_block())}
+    if stale:
+        from app.rag.thresholds import lookup_threshold
+        note = lookup_threshold(rec.get("okpd2_codes") or [], rec.get("product_name") or "", roman) or ""
+        keep = {_num(x) for x in re.findall(r"\d+", note)}
+        pts -= {x for x in stale if note and x not in keep}
+    return pts
+
+
+_STALE_INTRO_RE = re.compile(r"оценива\w*\s+не\s+менее\s+(\d+)\s+балл", re.I)
 
 
 def _notes_chunk() -> str:
@@ -146,7 +162,7 @@ def collect_incomplete(romans: list[str]) -> list[dict]:
         if len(products) != len(data):
             continue
         for p, rec in zip(products, data):
-            src, got = source_points(p), record_points(rec)
+            src, got = source_points(p, rec, roman), record_points(rec)
             lost = sorted(x for x in src - got if x != 0)
             extra = sorted(got - src - outside)
             # Пометка рантайма — о ПОТЕРЯННЫХ порогах; «лишние» баллы её не дают. После `D23` #251 у члена
@@ -204,7 +220,7 @@ def check_records(roman: str, verbose: bool = False) -> tuple[int, int]:
     bad = 0
     shared = _shared_cell_anchors()
     for i, (p, rec) in enumerate(zip(products, data)):
-        src, got = source_points(p), record_points(rec)
+        src, got = source_points(p, rec, roman), record_points(rec)
         # Строка-код без наименования сразу за позицией («из 29.10.52.190|||» под «Автомобилями для гольфа» III,
         # «из 29.32.30.365/366» под телематикой IX) — продолжение её строки в RTF: ячейка требований разнесена по обеим.
         # `D24` #267 восстанавливает ячейку позиции целиком по HTML, и баллы такой строки у позиции законны.

@@ -879,7 +879,7 @@ _D24_VTOP_RE = re.compile(r"\(\s*[ВB]\s*топ\s*=\s*(\d+(?:[.,]\d+)?)\s*бал
 _D24_PTS_ONLY_RE = re.compile(r"^\(\s*=?\s*(\d+(?:[.,]\d+)?)\s*балл\w*\s*\)\s*[;.,]?\s*$", re.I)
 # Строки формул IX («где К - количество …», «K - …», «- общее количество …») без самой формулы (в HTML — картинка)
 # смысла не несут — не восстанавливаются, а пишутся в журнал.
-_D24_FORMULA_RE = re.compile(r"^(?:где\b|[-–—]\s|[A-Za-zА-Яа-я]{1,3}\s*[-–—=]\s)", re.I)
+_D24_FORMULA_RE = re.compile(r"^,?\s*(?:где\b|[-–—]\s|[A-Za-zА-Яа-я]{1,3}\s*[-–—=]\s)", re.I)   # «, где К - …» IX-5
 _D24_REQ_START_RE = re.compile(r"^(?:(?:до|с|по)\s+\d{1,2}\s+\w+\s+\d{4}\s*г\.?:?\s*)?(?:или\s+)?(?:наличие|выполнение|"
                                r"соблюдение|соответствие|использование|применение|обеспечение|осуществление|производство|"
                                r"при\s+производстве)\b", re.I)
@@ -1094,7 +1094,7 @@ def _d24_align(info: list[dict | None], items: list) -> list[tuple[int, int, str
 _D24_NUM_RE = re.compile(r"^\d+(?:\.\d+)*\.\s+")              # нумерация пункта «2.», «1.1.1.»
 _SUBPOINT_RE = re.compile(r"подпункт\w*\s+(\d+(?:\.\d+)+)", re.I)
 # Обязательство, а не пояснение: «юридическое лицо обязано обеспечить …», «срок лицензии должен быть не менее …»
-_D24_DUTY_RE = re.compile(r"\b(?:обязан\w*|должн\w*|необходимо|требуется)\b", re.I)
+_D24_DUTY_RE = re.compile(r"\b(?:обязан\w*|долж(?:ен|н\w*)|необходимо|требуется)\b", re.I)   # «должен» ≠ «должн…»
 
 
 def _d24_glued(ln: str) -> bool:
@@ -1123,11 +1123,10 @@ def _d24_lines(text: str) -> list[str]:
                     or (out[-1].endswith("Российской") and ln.startswith("Федерац"))       # V-2
                     # «… аккредитованных лабораторий,» + «отвечающих за проверку качества …» у XXI-87…90: фраза
                     # продолжается со строчной после запятой (раунд 5 ревью, MED 3 — хвост уходил в note блока)
-                    or (out[-1].endswith(",") and ln[:1].islower() and not _D24_REQ_START_RE.match(ln))
-                    # «2. выполнение … технологических операций» + «(если установлено технологическим процессом)
-                    # <51>:» у IX-46 — одна вводная; скобка «(2 балла);» — баллы предыдущей строки, не перенос
-                    or (ln.startswith("(") and not _D24_PTS_ONLY_RE.match(ln)
-                        and not out[-1].rstrip().endswith((";", ":", ".", ")")))):
+                    or (out[-1].endswith(",") and ln[:1].islower() and not _D24_REQ_START_RE.match(ln))):
+                    # ⚠ Строка «(…)» без знака конца перед ней — НЕ признак переноса: у IX-46 «(если установлено
+                    # технологическим процессом) <51>:» продолжает вводную, а у IV-32 «(при отсутствии технологической
+                    # операции …):» — вводная следующего перечня после требования о ПО (замер раунда 5, правило снято)
             out[-1] += " " + ln
         else:
             out.append(ln)
@@ -1566,12 +1565,13 @@ def apply_units(r: dict, units: list[dict]) -> int:
             seg["operations"] += ins.get(k, [])
         if i not in into and i not in starts:
             segs = [{**b, "operations": ops} if any(key[0] == i for key in appended) else b]   # и note-пояснения
-        elif len(segs) > 1 and (m := _SUBPOINT_RE.search(segs[0].get("note") or "")):
+        elif len(segs) > 1 and (sub := _SUBPOINT_RE.search(segs[0].get("note") or "")):
             # note о подпункте («Для подпункта 2.2.2: с 1 января 2028 г. обязательное требование» у IX-62) — к той части
             # блока, чья вводная открывает этот подпункт («2.2. …:»), а не к первой (раунд 5 ревью, LOW 7)
-            cand = [(len(n.group(0).strip()), k) for k, x in enumerate(segs) if k
-                    and (n := _D24_NUM_RE.match(x.get("component") or ""))
-                    and (m.group(1) + ".").startswith(n.group(0).strip())]
+            # ⚠ `:=` в генераторе пишет в область функции — имена не совпадают со счётчиком `n`, который она возвращает
+            nums = [(k, _D24_NUM_RE.match(x.get("component") or "")) for k, x in enumerate(segs) if k]
+            cand = [(len(mm.group(0).strip()), k) for k, mm in nums
+                    if mm and (sub.group(1) + ".").startswith(mm.group(0).strip())]
             tgt = segs[max(cand)[1]] if cand else None          # самый узкий подпункт, открывающий номер
             if tgt is not None:
                 tgt["note"], segs[0] = segs[0]["note"], {**segs[0], "note": None}
@@ -1625,6 +1625,7 @@ _THRESHOLD_STMT_RE = re.compile(r"не\s+менее\s+\d+[^;]{0,60}?балл|с�
 _BARE_POINTS_RE = re.compile(r"\(?\s*(\d+(?:[.,]\d+)?)\s*балл\w*\s*\)?\.?")
 
 
+_SHARE_REQ_RE = re.compile(r"процентн\w*\s+дол|иностранн\w+\s+материал\w*[^.]{0,80}?процент", re.I)
 _BARE_MIN_POINTS_RE = re.compile(r"\s*не\s+менее\s+(\d+)\s+балл\w*\s*\.?\s*", re.I)
 
 
@@ -1669,11 +1670,14 @@ def restore_lost_lines(report: dict) -> tuple[list[dict], list[dict]]:
                 seen.add(id(r))
                 t = r.get("min_threshold")
                 note_thr = T.lookup_threshold(r.get("okpd2_codes") or [], r["product_name"], sec)
-                # Порог-требование снимается и без порога примечания (раунд 5 ревью, HIGH 1): «140 баллов» у IX-112 и
-                # ещё девяти — баллы группы требований, а не порог, и пустой lookup не делает их порогом; прежде условие
-                # `and lookup` оставляло их на бою. Оговорка вводной («… оцениваются не менее 50 баллов:»), которую
-                # разборщик вынул в поле порога, — только при пороге примечания с другим числом (MED 2, XXVII-11).
-                drop = bool(_threshold_is_cell_requirement(t, x["text"], cell_t)
+                # Порог-требование снимается при пороге примечания (у IX-112 и ещё девяти «140 баллов» оставались, потому
+                # что прим. 38.1 не разбиралось — раунд 5 ревью, HIGH 1, чинится в `thresholds`); без него — только
+                # требование о доле иностранных товаров (LOW 10: у VI-3, V-7, V-39 … доля жила одной строкой «Порог»).
+                # Безусловное снятие замерено и отвергнуто: «не менее 7 из следующих операций» у III-10 — настоящий
+                # порог, а не требование. Оговорка вводной («… оцениваются не менее 50 баллов:»), которую разборщик
+                # вынул в поле порога, — при пороге примечания с другим числом (MED 2, XXVII-11).
+                drop = bool((_threshold_is_cell_requirement(t, x["text"], cell_t)
+                             and (note_thr or _SHARE_REQ_RE.search(t or "") and not re.search(r"балл", t or "")))
                             or _threshold_is_stale_intro(t, x["text"], note_thr))
                 # порог, который остаётся, — тоже текст ячейки: его строки не потеряны (VI-5: «до 31 декабря 2023 г. -
                 # не менее 60 баллов» разборщик положил в поле порога — вставка дала бы их второй раз, требованиями)
