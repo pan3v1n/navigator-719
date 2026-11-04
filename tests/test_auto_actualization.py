@@ -2203,5 +2203,78 @@ class TestWitnessCells(unittest.TestCase):
         self.assertFalse(es.witness(f"N 213928|{TEXT}", page).equal)
 
 
+class TestDailyWrapper(unittest.TestCase):
+    """04.11.2026: обёртка Планировщика лежит в копии, которую сама же обновляет `git checkout`, а cmd читает
+    `.cmd` по смещению в байтах. Вне блока после подмены файла он дочитывал НОВЫЙ файл с прежнего смещения —
+    на модели исполнил строку нового файла и прогнал запуск второй раз. Тело обёртки — один блок в скобках."""
+
+    WRAPPER = ROOT / "scripts" / "auto_actualize_daily.cmd"
+
+    def test_file_is_ascii_crlf(self):
+        raw = self.WRAPPER.read_bytes()
+        raw.decode("ascii")
+        self.assertNotIn(b"\n", raw.replace(b"\r\n", b""), "голый LF: cmd теряет позицию строки")
+
+    def test_everything_after_checkout_is_inside_one_block(self):
+        lines = self.WRAPPER.read_text(encoding="ascii").splitlines()
+        self.assertIn("(", lines, "нет блока")
+        opening = lines.index("(")
+        closing = len(lines) - 1 - lines[::-1].index(")")
+        self.assertEqual([x for x in lines[closing + 1:] if x.strip()], [], "после блока есть строки")
+        body = lines[opening + 1:closing]
+        steps = [i for i, x in enumerate(lines) if "checkout" in x or "auto_actualize.py" in x or "fetch" in x]
+        self.assertTrue(steps)
+        self.assertTrue(all(opening < i < closing for i in steps if not lines[i].lower().startswith("rem")),
+                        "шаг обновления или запуска вне блока")
+        self.assertTrue(any(x.strip().startswith("exit /b !CODE!") for x in body), "блок не завершает запуск сам")
+        self.assertFalse([x for x in body if x.strip().startswith(":") or "goto" in x.lower()],
+                         "метка или goto в блоке снова читают файл")
+        self.assertFalse([x for x in body if "%CODE%" in x or "%ERRORLEVEL%" in x],
+                         "%VAR% в блоке раскрывается до запуска — код выхода всегда был бы прежним")
+        head = lines[:opening]
+        for env in ("setlocal EnableDelayedExpansion", "set PYTHONUNBUFFERED=1", "set GIT_HTTP_LOW_SPEED_LIMIT=",
+                    "set GIT_HTTP_LOW_SPEED_TIME="):
+            self.assertTrue(any(x.startswith(env) for x in head), env)
+
+    @unittest.skipUnless(os.name == "nt", "cmd.exe — только Windows")
+    def test_wrapper_survives_rewriting_itself(self):
+        """Настоящие git и cmd: копия на коммите A, в origin/dev — B с длинной шапкой и чужой строкой. Обёртка A
+        обновляет копию до B посреди своей работы. Положительный контроль — та же схема без блока."""
+        def run(label: str, wrapper: str) -> tuple[int, str]:
+            root = Path(self.tmp) / label
+            origin, watch, sources = root / "origin", root / "watch", root / "sources"
+            (origin / "scripts").mkdir(parents=True)
+            g = ["git", "-c", "core.autocrlf=false", "-c", "user.email=t@t", "-c", "user.name=t"]
+            text = (wrapper.replace(r"D:\navigator-719-watch", str(watch)).replace(r"D:\navigator-sources", str(sources))
+                    .replace(r'"D:\navigator-719\.venv\Scripts\python.exe"', f'"{sys.executable}"'))
+            self.assertIn(str(watch), text)
+            self.assertIn(sys.executable, text)
+            (origin / "scripts" / "auto_actualize_daily.cmd").write_bytes(text.encode("ascii"))
+            (origin / "scripts" / "auto_actualize.py").write_bytes(b'import sys\nprint("STUB RAN")\nsys.exit(7)\n')
+            subprocess.run([*g, "init", "-q", "-b", "dev"], cwd=origin, check=True, capture_output=True)
+            subprocess.run([*g, "add", "-A"], cwd=origin, check=True, capture_output=True)
+            subprocess.run([*g, "commit", "-qm", "A"], cwd=origin, check=True, capture_output=True)
+            pad = "".join(f"rem padding line {i} of the new wrapper, offsets move far away\r\n" for i in range(40))
+            (origin / "scripts" / "auto_actualize_daily.cmd").write_bytes(
+                ("@echo off\r\n" + pad + 'echo GARBAGE >> "%LOG%"\r\n' + text).encode("ascii"))
+            subprocess.run([*g, "commit", "-qam", "B"], cwd=origin, check=True, capture_output=True)
+            subprocess.run([*g, "clone", "-q", str(origin), str(watch)], check=True, capture_output=True)
+            subprocess.run([*g, "checkout", "-q", "--detach", "HEAD~1"], cwd=watch, check=True, capture_output=True)
+            rc = subprocess.run(["cmd.exe", "/d", "/c", str(watch / "scripts" / "auto_actualize_daily.cmd")],
+                                capture_output=True, timeout=120).returncode
+            return rc, (sources / "watch.log").read_text(encoding="ascii", errors="replace")
+
+        with tempfile.TemporaryDirectory() as self.tmp:
+            wrapper = self.WRAPPER.read_text(encoding="ascii")
+            rc, log = run("block", wrapper)
+            self.assertEqual((rc, log.count(" start"), log.count("STUB RAN"), "GARBAGE" in log), (7, 1, 1, False), log)
+            self.assertIn("=== exit 7", log)
+            flat = wrapper.replace("\r\n(\r\n", "\r\n").replace("\r\n)\r\n", "\r\n").replace("!CODE!", "%CODE%")
+            flat = flat.replace("set CODE=!ERRORLEVEL!", "set CODE=%ERRORLEVEL%")
+            rc, log = run("flat", flat)
+            self.assertTrue(log.count(" start") > 1 or "GARBAGE" in log or rc != 7,
+                            f"положительный контроль: без блока подмена файла не заметна — модель ничего не проверяет\n{log}")
+
+
 if __name__ == "__main__":
     unittest.main()
