@@ -677,6 +677,96 @@ class TestCommandLine(unittest.TestCase):
             code, _ = self._main(["--no-such-flag"])
         self.assertEqual(code, pb.FAILED)
 
+    def test_attempt_mark_flags_go_together_and_reach_pull(self):
+        """04.11: отметку попытки ставит скрипт; одна половина пары флагов — опечатка в задаче, а не тихий отказ."""
+        with mock.patch.object(sys, "stderr", new=SimpleNamespace(write=lambda s: None, flush=lambda: None)):
+            self.assertEqual(self._main(["--dest", "X:/b", "--mark-attempt", "X:/m.txt"])[0], pb.FAILED)
+            self.assertEqual(self._main(["--dest", "X:/b", "--mark-value", "04.11.2026"])[0], pb.FAILED)
+        self.assertIsNone(self._main(["--dest", "X:/b"])[1]["mark_attempt"])
+        with tempfile.TemporaryDirectory() as td:
+            m = Path(td) / "last-attempt.txt"
+            code, got = self._main(["--dest", "X:/b", "--mark-attempt", str(m), "--mark-value", "04.11.2026"])
+            self.assertEqual(code, pb.OK)
+            self.assertFalse(m.exists(), "отметка записана до ssh — ещё в разборе аргументов")
+            got["mark_attempt"]()
+            self.assertEqual(m.read_bytes(), b"04.11.2026\r\n")
+
+
+class TestAttemptMarker(unittest.TestCase):
+    """04.11.2026: запуск, прерванный до ssh (окно консоли закрыли после пробуждения ПК), сжёг попытку дня —
+    обёртка ставила отметку до запуска. Отметка = подключение: она ставится непосредственно перед ssh."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dest = Path(self.tmp.name) / "backups"
+        self.marker = Path(self.tmp.name) / "last-attempt.txt"
+        self.log = []
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def _pull(self, run, **kw):
+        return pb.pull(self.dest, run=run, now=NOW, say=self.log.append, **kw)
+
+    def test_marker_is_written_before_ssh(self):
+        ssh = _ssh(_db_bytes())
+        seen = []
+
+        def run(cmd, **kw):
+            seen.append(self.marker.exists() and self.marker.read_bytes())
+            return ssh(cmd, **kw)
+        mark = pb.attempt_marker(self.marker, "04.11.2026")
+        self.assertEqual(self._pull(run, mark_attempt=mark), pb.OK, self.log)
+        self.assertEqual(seen, [b"04.11.2026\r\n"], "к моменту ssh отметки не было — второй триггер подключился бы снова")
+
+    def test_failed_ssh_still_counts_as_the_days_attempt(self):
+        run = _ssh(b"", code=255, extra="Connection timed out during banner exchange\n")
+        self.assertEqual(self._pull(run, mark_attempt=pb.attempt_marker(self.marker, "04.11.2026")), pb.FAILED)
+        self.assertTrue(self.marker.exists(), "подключались — значит, попытка дня использована")
+
+    def test_no_marker_when_stopped_before_connecting(self):
+        run = _ssh(_db_bytes())
+        mark = pb.attempt_marker(self.marker, "04.11.2026")
+
+        def no_adapter(b):
+            raise pb.BindError("нет включённого физического адаптера")
+        self.assertEqual(self._pull(run, bind="auto", resolve=no_adapter, mark_attempt=mark), pb.FAILED)
+        inside = pb.pull(ROOT / "backups-test", run=run, now=NOW, say=self.log.append, mark_attempt=mark)
+        self.assertEqual(inside, pb.FAILED)
+        self.assertEqual(run.calls, [])
+        self.assertFalse(self.marker.exists(), "до ssh не дошли — а попытка дня сгорела бы, как 04.11")
+
+    def test_marker_that_cannot_be_written_means_no_connection(self):
+        run = _ssh(_db_bytes())
+
+        def broken():
+            raise PermissionError("файл занят")
+        self.assertEqual(self._pull(run, mark_attempt=broken), pb.FAILED)
+        self.assertEqual(run.calls, [], "без отметки следующий триггер подключился бы второй раз за сутки")
+        self.assertTrue(any("НЕ подключался" in s for s in self.log), self.log)
+
+    @unittest.skipUnless(os.name == "nt", "формат %DATE% и `set /p` — только в cmd")
+    def test_cmd_reads_marker_back_as_its_own_date(self):
+        """Сверка в обёртке — `set /p LAST=<файл` против `%DATE%`. Не совпади формат — подключение на каждом
+        триггере (три в сутки), поэтому проверяется настоящим cmd с датой этой системы."""
+        date = subprocess.run(["cmd.exe", "/d", "/c", "echo %DATE%"], capture_output=True,
+                              encoding="oem").stdout.strip()
+        self.assertTrue(date)
+        guard = Path(self.tmp.name) / "guard.cmd"     # те же строки, что в обёртке D:\navigator-backups
+        guard.write_text("@echo off\r\n"
+                         'set "LAST="\r\n'
+                         f'if exist "{self.marker}" set /p LAST=<"{self.marker}"\r\n'
+                         'if "%LAST%"=="%DATE%" exit /b 0\r\n'
+                         "exit /b 3\r\n", encoding="ascii", newline="")
+
+        def check():
+            return subprocess.run(["cmd.exe", "/d", "/c", str(guard)], capture_output=True).returncode
+        self.assertEqual(check(), 3, "положительный контроль: без отметки сверка обязана не совпасть")
+        pb.attempt_marker(self.marker, date)()
+        self.assertEqual(check(), 0, (date, self.marker.read_bytes()))
+        pb.attempt_marker(self.marker, "01.01.2000")()
+        self.assertEqual(check(), 3, "сверка совпадает с любой отметкой — она не сравнивает дату")
+
 
 if __name__ == "__main__":
     unittest.main()

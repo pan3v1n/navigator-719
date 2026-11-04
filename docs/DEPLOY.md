@@ -209,7 +209,16 @@ git -C D:/navigator-719 worktree add --detach D:/navigator-719-backup origin/dev
 git -C D:/navigator-719 fetch origin && git -C D:/navigator-719-backup checkout --detach origin/dev
 ```
 Обёртка `.cmd` с русскими комментариями — **только в CRLF**: в LF-файле cmd теряет позицию строки и
-исполняет обрывки комментариев как команды; `chcp 65001` ей не нужен. `--dest` держать вне ЛЮБОЙ
+исполняет обрывки комментариев как команды; `chcp 65001` ей не нужен.
+⚠ С 04.11.2026: отметку попытки дня `last-attempt.txt` ставит **сам скрипт непосредственно перед ssh**, обёртка её
+только сверяет (`if "%LAST%"=="%DATE%" exit /b 0`) и задаёт `PYTHONUNBUFFERED=1`. Строка запуска в обёртке:
+```
+"D:\navigator-719\.venv\Scripts\python.exe" "D:\navigator-719-backup\scripts\pull_backup.py" --dest "D:\navigator-backups" --mark-attempt "D:\navigator-backups\last-attempt.txt" --mark-value "%DATE%"
+```
+Прежде обёртка писала отметку до запуска, и 04.11 запуск, прерванный до подключения, сжёг попытку дня — копии за
+сутки не было. Задача запускает обёртку **скрыто** — действие
+`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "& cmd.exe /c 'D:\navigator-backups\pull-backup-daily.cmd'; exit $LASTEXITCODE"`:
+задача «только при входе пользователя» иначе открывает окно консоли, и его закрытие убивает забор. `--dest` держать вне ЛЮБОЙ
 копии репозитория: проверка смотрит на ту копию, из которой запущен скрипт.
 Прежний ручной способ:
 ```bash

@@ -53,6 +53,13 @@ origin/dev`), а не из основной: основная стоит на ч
 не догнал — копии за сутки не было. Задаче нужны ещё триггеры «вход» и «разблокировка», а обёртке
 (`D:\\navigator-backups\\pull-backup-daily.cmd`) — одна попытка в сутки по файлу `last-attempt.txt`:
 подключение к бою разрешено раз в сутки, какой бы триггер ни сработал первым.
+⚠ 04.11.2026: отметку `last-attempt.txt` ставит САМ скрипт непосредственно перед ssh (`--mark-attempt ФАЙЛ
+--mark-value "%DATE%"`), обёртка её только сверяет. Прежде обёртка ставила её до запуска, и запуск, прерванный
+до подключения, сжигал попытку дня. Обёртка задаёт `PYTHONUNBUFFERED=1`: иначе журнал прерванного запуска
+пуст — Python держал вывод в буфере. Задача Планировщика запускает обёртку СКРЫТО (`powershell -WindowStyle
+Hidden -Command "& cmd.exe /c '<обёртка>'; exit $LASTEXITCODE"`): у задачи «только при входе пользователя»
+иначе на рабочем столе открывается окно консоли, и его закрытие убивает забор. `conhost --headless` не
+годится — теряет код выхода.
 """
 
 from __future__ import annotations
@@ -95,6 +102,24 @@ _BIND_HELP = ("Адрес адаптера Ethernet — в `ipconfig`; зада�
 class BindError(Exception):
     """Адрес привязки ssh определить нельзя. Подключение не пробуем: без привязки ssh ушёл бы в
     туннель и через 30 с упал бы таймаутом, который о настоящей причине ничего не говорит."""
+
+
+def attempt_marker(path: Path, value: str):
+    """Отметка «сегодня к бою подключались» — файл, который обёртка `.cmd` сверяет с `%DATE%`.
+
+    ЗАЧЕМ ЗДЕСЬ, А НЕ В ОБЁРТКЕ (04.11.2026). Разрешение владельца — одно подключение к бою в сутки. Обёртка
+    ставила отметку ДО запуска скрипта, и запуск, прерванный ещё до ssh (окно консоли закрыли через секунды
+    после пробуждения ПК), сжёг попытку дня: копии за 04.11 не было, повторов до утра — тоже. Теперь отметка
+    ставится непосредственно перед ssh: «отмечено» = «подключались», прерванный раньше запуск повторит
+    следующий триггер.
+    `value` — строка `%DATE%` от самой обёртки: формат даты у cmd зависит от языка системы, своя дата Python
+    могла бы не совпасть ни разу — и тогда к бою подключались бы на каждом триггере. Кодировка — OEM:
+    `set /p` читает файл в ней (так файл писал прежний `echo %DATE%`)."""
+    encoding = "oem" if os.name == "nt" else "utf-8"
+
+    def mark() -> None:
+        path.write_text(f"{value}\r\n", encoding=encoding, errors="replace", newline="")
+    return mark
 
 
 # Все адаптеры одним вызовом PowerShell (модуль NetAdapter есть в Windows 8+). Отбор «физический»
@@ -392,10 +417,12 @@ def rotate(dest: Path, keep_days: int, now: datetime) -> list[str]:
 def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
          docker: str = DEFAULT_DOCKER, keep_days: int = 30, max_age_hours: int = 36,
          run=subprocess.run, now: datetime | None = None, say=print,
-         bind: str | None = None, resolve=resolve_bind) -> int:
+         bind: str | None = None, resolve=resolve_bind, mark_attempt=None) -> int:
     """Забрать, проверить, сохранить, ротировать. Возвращает код выхода (OK / FAILED / STALE).
 
-    `bind` — `auto` / адрес / `none` (см. шапку); None — без привязки и без строки в журнале."""
+    `bind` — `auto` / адрес / `none` (см. шапку); None — без привязки и без строки в журнале.
+    `mark_attempt` — вызывается непосредственно перед ssh (`attempt_marker`); не записалась — к бою не
+    подключаемся: без отметки следующий триггер подключился бы второй раз за сутки."""
     now = now or datetime.now(timezone.utc)
     dest = dest.resolve()
     if dest == ROOT or ROOT in dest.parents:
@@ -426,6 +453,12 @@ def pull(dest: Path, host: str = DEFAULT_HOST, app_dir: str = DEFAULT_APP_DIR,
     if addr:
         cmd += ["-b", addr]
     cmd += [host, remote_command(app_dir, docker)]
+    if mark_attempt is not None:
+        try:
+            mark_attempt()
+        except OSError as e:
+            say(f"[ОШИБКА] отметка попытки дня не записалась ({type(e).__name__}: {e}) — к серверу НЕ подключался")
+            return FAILED
     try:
         with open(part, "wb") as fh:
             res = run(cmd, stdout=fh, stderr=subprocess.PIPE, timeout=600)
@@ -501,10 +534,16 @@ def main() -> None:
     ap.add_argument("--wait-adapter", type=int, default=DEFAULT_WAIT_ADAPTER,
                     help=f"сколько секунд ждать физический адаптер со шлюзом в режиме auto "
                          f"(по умолчанию {DEFAULT_WAIT_ADAPTER}; 0 — не ждать)")
+    ap.add_argument("--mark-attempt", type=Path, metavar="ФАЙЛ",
+                    help="записать отметку попытки дня непосредственно перед ssh (обёртка Планировщика)")
+    ap.add_argument("--mark-value", metavar="СТРОКА", help="что записать в отметку — `%%DATE%%` обёртки")
     args = ap.parse_args()
+    if (args.mark_attempt is None) != (args.mark_value is None):
+        ap.error("--mark-attempt и --mark-value задаются только вместе")
+    mark = attempt_marker(args.mark_attempt, args.mark_value) if args.mark_attempt else None
     resolve = functools.partial(resolve_bind, wait=max(0, args.wait_adapter))
     sys.exit(pull(Path(args.dest), args.host, args.app_dir, args.docker, args.keep_days, args.max_age_hours,
-                  bind=args.bind, resolve=resolve))
+                  bind=args.bind, resolve=resolve, mark_attempt=mark))
 
 
 if __name__ == "__main__":
