@@ -1270,6 +1270,9 @@ class TestOptionalLookupsDegrade(unittest.TestCase):
                 calls.append(kw.get("collection_name"))
                 raise ConnectionError("Qdrant недоступен")
 
+            # R31-3 #247: гибрид идёт пакетом двух списков, а не `FusionQuery` — падает тот же Qdrant.
+            query_batch_points = query_points
+
         r._client = lambda: _Dying()
         r.embed_query = lambda q: [0.0] * 1024  # noqa: ARG005 — офлайн, без модели
 
@@ -2223,6 +2226,15 @@ class _FakeQdrant:
     def query_points(self, **kw):
         self.calls += 1
         return type("Res", (), {"points": self.points})()
+
+    def query_batch_points(self, collection_name, requests):  # noqa: ARG002
+        """R31-3 #247: гибрид — пакет dense + sparse, слияние на нашей стороне. Одно обращение
+        поиска; каждому списку — та же выдача, score в списке как у точки."""
+        self.calls += 1
+        res = type("Res", (), {"points": [type("P", (), {"id": p.id, "score": p.score, "version": 0,
+                                                         "payload": p.payload})()
+                                          for p in self.points]})()
+        return [res for _ in requests]
 
     def collection_exists(self, name):  # noqa: ARG002 — сигнатура ради совместимости
         return True

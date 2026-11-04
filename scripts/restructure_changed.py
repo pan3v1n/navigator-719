@@ -262,7 +262,19 @@ def clean_name(p) -> str:
     return source_name(p.name_raw).replace(" ", " ")
 
 
-def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -> None:
+def write_plan(path: str | None, mode: str, llm: list[str], other: list[str], removed: list[str],
+               old_names: list[str] | None = None) -> None:
+    """План для конвейера `A10`: числа из JSON, а не из разбора печати (строки у режимов разные).
+
+    `прежние имена` — у записей без модели: смена кода оставляет запись с её прежним именем.
+    """
+    if path:
+        data = {"режим": mode, "в модель": llm, "без модели": other, "исключены": removed,
+                "прежние имена": old_names or []}
+        Path(path).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int, plan_json: str | None = None) -> None:
     """--anchors keep: JSON раздела как есть + заплатки на позиции с изменённым исходником."""
     chunk = sk.find_chunk(roman, None)
     new_text = chunk.read_text(encoding="utf-8")
@@ -281,6 +293,9 @@ def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -
               + (f" | коды {records[j]['okpd2_codes']} → {p.okpd2_codes}" if kind == "recode" else ""))
     for j in removed:
         print(f"  [удалить] {records[j]['source_anchor'].rsplit(', ', 1)[-1]}: {records[j]['product_name'][:70]}")
+    write_plan(plan_json, "keep", [clean_name(p) for _, p, kind in jobs if kind == "llm"],
+               [clean_name(p) for _, p, kind in jobs if kind != "llm"], [records[j]["product_name"] for j in removed],
+               [records[j]["product_name"] for j, _, _ in jobs])
     if not write:
         print("\n(план: DeepSeek не вызывался, ничего не записано — повтори с --write)")
         return
@@ -293,7 +308,15 @@ def run_patch(roman: str, rev: str, write: bool, workers: int, max_chars: int) -
         with ThreadPoolExecutor(max_workers=max(1, workers)) as ex:
             futs = {j: ex.submit(sk.normalize_product, client, p, roman, title, usage, max_chars) for j, p in llm}
             fresh = {j: f.result() for j, f in futs.items()}
+        for j, p in llm:   # модель пересказывает наименования: имя всегда из ячейки первоисточника
+            fresh[j]["product_name"] = clean_name(p) or fresh[j].get("product_name")
     out = patch_records(records, jobs, removed, fresh)
+    # Методичка раздела — из нового чанка, как в `renumber`: иначе в индексе остаётся прежнее число.
+    if any(r.get("record_type") == "section_methodology" for r in out):
+        out = [r for r in out if r.get("record_type") != "section_methodology"]
+        metho = sk.collect_section_thresholds(new_text)
+        if metho:
+            out.append(sk.methodology_record(roman, title, metho))
     out_path.write_text(json.dumps(out, ensure_ascii=False, indent=json_indent(old_json)), encoding="utf-8")
     print(f"\nЗаписано: {out_path.relative_to(ROOT)} ({len(out)} записей); вызовов API {usage.calls}, "
           f"≈ ¥{usage.cost_usd() * sk.USD_TO_CNY:.2f}")
@@ -386,10 +409,11 @@ def main() -> None:
     ap.add_argument("--workers", type=int, default=6)
     ap.add_argument("--max-chars", type=int, default=9000)
     ap.add_argument("--map-out", help="куда записать карту «старый якорь → новый» (JSON)")
+    ap.add_argument("--plan-json", help="куда записать план: кто идёт в модель, кто без неё, кто исключён")
     args = ap.parse_args()
     roman = args.section
     if args.anchors == "keep":
-        run_patch(roman, args.rev, args.write, args.workers, args.max_chars)
+        run_patch(roman, args.rev, args.write, args.workers, args.max_chars, args.plan_json)
         return
 
     chunk, title, out_path, old_records, recs, steps, dropped, new_text, indent = plan(roman, args.rev, args.anchors)
@@ -410,6 +434,9 @@ def main() -> None:
     for j in dropped:
         print(f"    − {recs[j]['source_anchor'].rsplit(', ', 1)[-1]}: {recs[j]['product_name'][:70]}")
 
+    write_plan(args.plan_json, "renumber", [clean_name(p) for p, k, _ in steps if k == "llm"],
+               [clean_name(p) for p, k, _ in steps if k == "recode"], [recs[j]["product_name"] for j in dropped],
+               [recs[j]["product_name"] for _, k, j in steps if k != "reuse" and j is not None])
     if not args.write:
         print("\n(план: DeepSeek не вызывался, ничего не записано — повтори с --write)")
         return
@@ -423,6 +450,8 @@ def main() -> None:
             futs = {n: ex.submit(sk.normalize_product, client, steps[n][0], roman, title, usage, args.max_chars)
                     for n in llm_idx}
             fresh = {n: f.result() for n, f in futs.items()}
+        for n, rec in fresh.items():   # модель пересказывает наименования: имя из ячейки первоисточника
+            rec["product_name"] = clean_name(steps[n][0]) or rec.get("product_name")
 
     out, amap = renumber_records(steps, recs, fresh, roman)
     if any(r.get("record_type") == "section_methodology" for r in old_records):
