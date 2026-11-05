@@ -28,3 +28,4 @@ frontend
 # Прокси и лендинг живут в контейнере caddy, в образ приложения не нужны
 caddy
 landing
+.env.stand

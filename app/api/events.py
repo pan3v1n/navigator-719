@@ -6,7 +6,7 @@
 объяснить было нечем.
 
 ЧТО ПИШЕМ. Строка `answer_event {json}`: точка входа, гость или нет, режим источника (`L1`), корпус
-ответа (`L2`), `metered` — платный ли ответ ПО ПРИРОДЕ (а не факт списания: у пользователя без тарифа
+ответа (`L2`), ключ готовой команды (`L8-1`), `metered` — платный ли ответ ПО ПРИРОДЕ (а не факт списания: у пользователя без тарифа
 и на повторе отвеченного ничего не списывается), число источников, сработавшие проверки, токены,
 время до первого куска и полное. Сводку за день считает `scripts/answer_events.py` по
 `docker compose logs app`. Событие — на ответ ДВИЖКА: повтор сохранённого ответа гостю (движок не
@@ -29,12 +29,12 @@ PREFIX = "answer_event"
 
 def log_answer_event(ans, *, endpoint: str, mode: str, started: float, sources: int,
                      first_token: float | None = None, message_id: int | None = None,
-                     guest: bool = False) -> None:
+                     guest: bool = False, command: str | None = None) -> None:
     """`started`/`first_token` — `time.monotonic()` начала запроса и первого куска потока."""
     try:
         now = time.monotonic()
         ev = {
-            "endpoint": endpoint, "guest": guest, "mode": mode,
+            "endpoint": endpoint, "guest": guest, "mode": mode, "command": command,
             "corpus": ans.corpus or "-", "metered": bool(ans.metered),
             "sources": sources,
             "unverified": len(ans.unverified_numbers or []),

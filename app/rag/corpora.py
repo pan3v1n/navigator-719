@@ -49,14 +49,18 @@ def used_for_mode(mode: str) -> str:
     return USED_METODREK if mode == METODREK else USED_RULES
 
 
-def answered_by(used: str | None, mode: str | None) -> str:
+def answered_by(used: str | None, mode: str | None, command: str = "") -> str:
     """Строка `L2` под ответом и в выгрузке; «» — подписывать нечего (корпуса у ответа нет).
 
     ⚠ Указывает на МЕХАНИЗМ, который мог ошибиться (как дисклеймер Нейроюриста про «выбор сфер
-    права»): при автомате корпус выбрал сервис — эксперту стоит проверить, тот ли."""
+    права»): при автомате корпус выбрал сервис — эксперту стоит проверить, тот ли.
+    `command` — название готовой команды (`L8-1`): корпус выбрал не человек, а она, и подпись
+    обязана это сказать, иначе «выбран вручную» было бы неправдой."""
     label = USED_LABELS.get(used or "")
     if not label:
         return ""
+    if command:
+        return f"Ответ собран по {label} · источник задан командой «{command}»"
     how = "выбран вручную" if mode in MODE_TITLES and mode != AUTO else "выбран автоматически"
     return f"Ответ собран по {label} · источник {how}"
 
@@ -72,9 +76,9 @@ def mode_of(value: str | None) -> str:
     return (value or "").partition("|")[2] or AUTO
 
 
-def label_from_stored(value: str | None) -> str:
+def label_from_stored(value: str | None, command: str = "") -> str:
     """Подпись по сохранённому значению; у реплик, записанных до `L2`, колонки нет — «»."""
     if not value:
         return ""
     used, _, mode = value.partition("|")
-    return answered_by(used, mode or AUTO)
+    return answered_by(used, mode or AUTO, command)

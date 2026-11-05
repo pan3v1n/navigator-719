@@ -21,6 +21,7 @@ from __future__ import annotations
 from collections import defaultdict
 from datetime import date, datetime, timedelta
 
+from app.core import commands
 from app.core.costs import cost_rub
 from app.core.plans import MSK_OFFSET
 from app.db import queries as q
@@ -100,6 +101,23 @@ def _fmt_trend(cur: float, prev: float, good_up: bool | None = True) -> dict:
     good = None if good_up is None else (up == good_up)
     cls = "tr-flat" if good is None else ("tr-good" if good else "tr-bad")
     return {"label": f"{abs(d)}%", "arrow": "▲" if up else "▼", "cls": cls, "delta": d, "title": title}
+
+
+def _command_rows(acc: dict) -> list[dict]:
+    """Срез «Команды» (`L8-1`): без него не на чем решать `L8-2` и судьбу каталога. Команда без
+    запусков остаётся в таблице: «ноль» — тоже данные. Ключ не из каталога (команду убрали) — внизу.
+    Оценки и ошибки — только у запусков этого окна: иначе фильтр периода давал «0 запусков, оценка 4»."""
+    keys = [c.key for c in commands.COMMANDS] + sorted(set(acc) - {c.key for c in commands.COMMANDS})
+    rows = []
+    for key in keys:
+        a = acc.get(key) or {"ids": set(), "ratings": [], "errors": set()}
+        uses = len(a["ids"])
+        rows.append({
+            "title": commands.title_of(key), "uses": uses, "rated": len(a["ratings"]),
+            "avg": round(sum(a["ratings"]) / len(a["ratings"]), 1) if a["ratings"] else None,
+            "error_pct": round(100 * len(a["errors"]) / uses) if uses else None,
+        })
+    return rows
 
 
 def _question_for(answer_msg, sess_msgs: dict) -> str:
@@ -188,6 +206,12 @@ def build_admin_view(
         if f.user_id in sel_ids and _in_window(f.ts, date_from, date_to):
             fb_by_user[f.user_id].append(f)
     superseded = _superseded_ratings(fb_by_user)
+    # Уточнения после команды запуском не считаются (`commands.HELD`)
+    command_acc: dict[str, dict] = defaultdict(lambda: {"ids": set(), "ratings": [], "errors": set()})
+    for msgs in msgs_by_user.values():
+        for m in msgs:
+            if m.role == "assistant" and m.command and not m.command.startswith(commands.HELD):
+                command_acc[m.command]["ids"].add(m.id)
 
     # --- аккумуляторы ------------------------------------------------------
     data = []                       # детальные логи (юзер → беседы → реплики)
@@ -298,6 +322,8 @@ def build_admin_view(
                 elif f.rating is not None:
                     ans_ratings.append(f.rating)
                     ans_ratings_by_role[u.role].append(f.rating)
+                    if orig.command in command_acc and orig.id in command_acc[orig.command]["ids"]:
+                        command_acc[orig.command]["ratings"].append(f.rating)
                     region_acc[u_region]["ratings"].append(f.rating)
                     answer_rows.append({  # каждый оценённый ответ (триаж ≤2★ и экспорт-скоркард)
                         "user": u.username, "region": u_region, "role": u.role,
@@ -306,10 +332,14 @@ def build_admin_view(
                         "answer": ans_txt,
                         "unverified": orig.unverified_json,
                         "low_relevance": bool(orig.low_relevance),
-                        "corpus": corpora.label_from_stored(orig.corpus),  # L2 #147
+                        "corpus": corpora.label_from_stored(  # L2 #147
+                            orig.corpus, commands.title_of(orig.command)),
                         "comment": f.comment or "", "correction": f.correction or "",
                         "session_id": f.session_id, "owner_id": orig.user_id,
                     })
+                if (f.correction and orig is not None and orig.command in command_acc
+                        and orig.id in command_acc[orig.command]["ids"]):
+                    command_acc[orig.command]["errors"].add(orig.id)
                 if f.correction:
                     corrections.append({"user": u.username, "region": u_region,
                                         "correction": f.correction, "ts": _fmt(f.ts), "answer": snippet})
@@ -422,6 +452,7 @@ def build_admin_view(
         "answer_comments": answer_comments,
         "dialog_comments": dialog_comments,
         "procedural_questions": procedural_questions,
+        "commands": _command_rows(command_acc),  # L8-1 #153
         "recent": recent,
         "demand_product": max(total_requests - len(procedural_questions), 0),
         "demand_procedural": len(procedural_questions),

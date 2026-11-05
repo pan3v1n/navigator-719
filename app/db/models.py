@@ -96,6 +96,9 @@ class Message(Base):
     # L2 #147: «корпус|режим» (`app/rag/corpora.stored`) — по чему собран ответ и кто выбрал
     # корпус. Нужен выгрузкам и переоткрытой беседе; у реплик до L2 — NULL (подписи нет).
     corpus: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    # L8-1 #153: ключ готовой команды (`app/core/commands.py`), у реплики ассистента: к ней привязаны
+    # оценки, и срез «оценки по командам» — один join.
+    command: Mapped[str | None] = mapped_column(String(32), nullable=True)
 
     user: Mapped["User"] = relationship(back_populates="messages")
 
@@ -160,6 +163,7 @@ class GuestMessage(Base):
     charged: Mapped[bool] = mapped_column(Boolean, default=False)
     # L1/L2: «корпус|режим», как у `Message.corpus` — повтор вопроса сверяется и по режиму источника
     corpus: Mapped[str | None] = mapped_column(String(48), nullable=True)
+    command: Mapped[str | None] = mapped_column(String(32), nullable=True)  # L8-1, как у `Message`
 
 
 class Lead(Base):

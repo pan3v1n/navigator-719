@@ -1004,7 +1004,8 @@ def admin_export(fmt: str = "json", date_from: str = "", date_to: str = "",
         "corpus": corpus_line(),  # E1: редакция рядом с дисклеймером
         # L2 #147: у каждой оценённой строки — `corpus`, по чему собран ответ и кто выбрал корпус
         "corpus_note": "answer_ratings[].corpus — по какому корпусу собран ответ и кто выбрал "
-                       "корпус (сервис или пользователь); пусто — ответ записан до этой подписи.",
+                       "корпус (сервис, пользователь или готовая команда); пусто — ответ записан "
+                       "до этой подписи.",
         "generated_at": st["generated_at"],
         "filters": {"date_from": st["filter_from"] or None, "date_to": st["filter_to"] or None,
                     "region": st["filter_region"] or None, "role": st["filter_role"] or None},

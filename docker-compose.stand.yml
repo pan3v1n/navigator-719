@@ -1,0 +1,50 @@
+# Стенд dev.719-навигатор.рф: копия приложения рядом с боем, на том же сервере. Порядок — docs/DEPLOY.md §4б.
+#
+# Что здесь намеренно иначе, чем у боя:
+#   * своя база на своём томе: копировать боевую нельзя, там персональные данные (152-ФЗ);
+#   * портов наружу нет: вход только через caddy боя, по имени службы в его сети, под паролем;
+#   * том с моделью только на чтение, потолок памяти и ядер: стенд не должен мешать бою;
+#   * Qdrant боя общий, приложение в него не пишет. Релиз с переиндексацией на стенде — только в свои
+#     коллекции и ночью: загрузчики пишут в коллекцию и занимают все ядра.
+# PROD_NETWORK и PROD_MODELS пишет scripts/deploy/stand.sh: имена задаёт compose боя.
+name: navigator-stand
+
+services:
+  app-stand:
+    build: .
+    image: navigator-stand:latest
+    container_name: navigator-stand-app
+    restart: unless-stopped
+    env_file: .env.stand
+    environment:
+      APP_ENV: production
+      QDRANT_URL: http://qdrant:6333
+      QDRANT_COLLECTION: pp719
+      APP_DB_URL: sqlite:////data/navigator_app.db
+      LOG_FILE: /data/app.log
+      HF_HOME: /models
+      SENTENCE_TRANSFORMERS_HOME: /models
+      # Том модели только на чтение: сеть за моделью не ходим.
+      HF_HUB_OFFLINE: "1"
+      TRANSFORMERS_OFFLINE: "1"
+    volumes:
+      - prod_models:/models:ro
+      - standdata:/data
+    mem_limit: 3g
+    cpus: 2
+    networks:
+      - prod
+    logging:
+      driver: json-file
+      options: { max-size: "10m", max-file: "3" }
+
+networks:
+  prod:
+    external: true
+    name: ${PROD_NETWORK:?нет PROD_NETWORK, запускать через scripts/deploy/stand.sh}
+
+volumes:
+  standdata:
+  prod_models:
+    external: true
+    name: ${PROD_MODELS:?нет PROD_MODELS, запускать через scripts/deploy/stand.sh}

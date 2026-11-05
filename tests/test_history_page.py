@@ -254,9 +254,11 @@ class TestFront(unittest.TestCase):
         """Ответ, дописавшийся в фоне, и удаление беседы не перекрашивают шапку и сайдбар поверх
         страницы истории (ревью test32): setTitle и подсветка молчат в режиме истории."""
         title = self.js.split("function setTitle(text)")[1].split("\n}")[0]
-        self.assertIn('!main.classList.contains("history-mode")', title)
+        self.assertIn("!inPage()", title)
+        page = self.js.split("function inPage()")[1].split("\n}")[0]
+        self.assertIn('main.classList.contains("history-mode")', page)
         active = self.js.split("function setActive(sid)")[1].split("\n}")[0]
-        self.assertIn('x.dataset.sid === sid && !main.classList.contains("history-mode")', active)
+        self.assertIn("x.dataset.sid === sid && !inPage()", active)
 
     def test_stale_search_response_does_not_overwrite(self):
         body = self.js.split("async function loadHistory")[1].split("\n}")[0]

@@ -37,6 +37,7 @@ class _Msg:
         self.ts = datetime(2026, 8, 10, 12, 0)
         self.sources_json = None
         self.corpus = None  # L2: у реплик до L2 подписи корпуса нет
+        self.command = None  # L8-1: реплика не от готовой команды
 
 
 ANSWER = "Позиция: Насосы гидравлические, порог не менее 90 баллов."
