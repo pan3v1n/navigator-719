@@ -399,6 +399,14 @@ def is_answered_repeat(db: Session, user_id: int, session_id: str, content: str,
     return False
 
 
+def last_answer(db: Session, user_id: int, session_id: str) -> Message | None:
+    """Последний ответ беседы (только своей: фильтр по user_id)."""
+    return db.execute(
+        select(Message).where(Message.user_id == user_id, Message.session_id == session_id,
+                              Message.role == "assistant")
+        .order_by(Message.id.desc()).limit(1)).scalars().first()
+
+
 def count_answer_usage(db: Session, user_id: int, start, end) -> int:
     """Списанные ответы за [start, end) — время в наивном UTC, как хранит SQLite."""
     return db.execute(
@@ -421,6 +429,7 @@ def log_message(
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
     corpus: str | None = None,
+    command: str | None = None,
 ) -> Message:
     m = Message(
         user_id=user_id,
@@ -433,6 +442,7 @@ def log_message(
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
         corpus=corpus,
+        command=command,
     )
     db.add(m)
     db.commit()
@@ -701,12 +711,13 @@ def log_guest_message(
     db: Session, *, guest_id: str, session_id: str, role: str, content: str,
     sources: list | None = None, low_relevance: bool = False, prompt_tokens: int | None = None,
     completion_tokens: int | None = None, charged: bool = False, corpus: str | None = None,
+    command: str | None = None,
 ) -> GuestMessage:
     m = GuestMessage(
         guest_id=guest_id, session_id=session_id, role=role, content=content,
         sources_json=json.dumps(sources, ensure_ascii=False) if sources is not None else None,
         low_relevance=low_relevance, prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens, charged=charged, corpus=corpus,
+        completion_tokens=completion_tokens, charged=charged, corpus=corpus, command=command,
     )
     db.add(m)
     db.commit()
@@ -762,6 +773,15 @@ def guest_last_question(db: Session, guest_id: str, session_id: str
         elif question is not None and answer is None:
             answer = m
     return question, answer
+
+
+def guest_last_answer(db: Session, guest_id: str, session_id: str) -> GuestMessage | None:
+    """Последний ответ беседы гостя. Не `guest_last_question`: там ответ на ПОСЛЕДНИЙ вопрос, и у
+    оборванного стрима он пуст, хотя предыдущие ответы в беседе есть."""
+    return db.execute(
+        select(GuestMessage).where(GuestMessage.guest_id == guest_id, GuestMessage.session_id == session_id,
+                                   GuestMessage.role == "assistant")
+        .order_by(GuestMessage.id.desc()).limit(1)).scalars().first()
 
 
 def list_guest_messages(db: Session, limit: int = 200) -> list[GuestMessage]:

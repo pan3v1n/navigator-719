@@ -406,6 +406,7 @@ a.head-avatar:hover { opacity: .9; }
 .corpus-pick select { border: 0; background: transparent; color: var(--ink); font: 500 13px/1 var(--font);
                       max-width: 190px; cursor: pointer; outline: none; }
 .corpus-pick:focus-within { box-shadow: var(--ring); }
+.corpus-pick select:disabled { color: var(--ink-60); cursor: default; opacity: 1; }
 @media (max-width: 560px) { .corpus-pick-label { display: none; } .corpus-pick select { max-width: 120px; } }
 .send-btn { flex: none; width: 40px; height: 40px; border-radius: 8px; border: none; background: var(--grad-btn);
   color: #fff; display: flex; align-items: center; justify-content: center; cursor: pointer; transition: background .2s, transform .08s; }
@@ -427,7 +428,10 @@ a.head-avatar:hover { opacity: .9; }
 
 /* пустой экран (главная): приветствие + поле по центру; после вопроса поле уходит вниз */
 .main.empty .chat-scroll { display: none; }
-.main.empty .composer-area { flex: 1; justify-content: center; padding: 40px 32px 80px; gap: 28px; }
+/* L8-1: под полем — раздел команд, экран длиннее окна: прокрутка здесь и отсчёт сверху, а не от центра */
+.main.empty .composer-area { flex: 1; min-height: 0; overflow-y: auto; justify-content: flex-start;
+  padding: 56px 32px 40px; gap: 28px; }
+.main.empty .composer-area > * { flex: none; }  /* иначе при прокрутке блоки сжимаются: баннер пробы обрезался */
 .main.empty .composer-frame { max-width: 760px; border-radius: 17px; }
 .main.empty .composer { border-radius: 16px; padding: 20px 20px 14px; flex-direction: column; align-items: stretch; }
 .main.empty .composer textarea { min-height: 66px; padding: 0; }
@@ -456,7 +460,8 @@ a.head-avatar:hover { opacity: .9; }
 .main:not(.empty) .guest-banner { display: none; }   /* как в макете: баннер — на главной */
 
 /* ---------- Б3: страница «История запросов» (макет) ---------- */
-.main.history-mode .chat-scroll, .main.history-mode .composer-area { display: none; }
+.main.history-mode .chat-scroll, .main.history-mode .composer-area,
+.main.commands-mode .chat-scroll, .main.commands-mode .composer-area { display: none; }
 .history-page { flex: 1; min-height: 0; overflow-y: auto; }
 .hp-col { max-width: 1000px; margin: 0 auto; padding: 56px 32px 80px; display: flex; flex-direction: column; gap: 32px; }
 .hp-head { display: flex; flex-direction: column; gap: 8px; }
@@ -469,6 +474,59 @@ a.head-avatar:hover { opacity: .9; }
 .hp-search input { flex: 1; min-width: 0; border: 0; outline: none; background: transparent;
   font: 500 16px/1.3 var(--font); color: var(--ink); }
 .hp-filters { display: flex; flex-wrap: wrap; gap: 4px; background: var(--gray); border-radius: 8px; padding: 4px; }
+/* ---------- L8-1 #153: готовые команды (макет «Navigator 719 Service») ---------- */
+.side-cmd { font-weight: 400; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.side-cmd-all { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.side-cmd-all svg { color: var(--ink-40); flex: none; }
+.cmd-home { width: 100%; max-width: 1000px; display: flex; flex-direction: column; gap: 24px; }
+.main:not(.empty) .cmd-home, .main.command-mode .cmd-home { display: none; }
+.cmd-home-head { display: flex; flex-direction: column; gap: 6px; }
+.cmd-home-title { display: flex; align-items: baseline; justify-content: space-between; gap: 16px; }
+.cmd-home-title h2 { margin: 0; font: 500 30px/1.22 var(--font); color: var(--ink); }
+.cmd-home-title .ds-link { border: 0; background: none; padding: 0; cursor: pointer; }
+.cmd-home-head p { margin: 0; font: 400 16px/1.4 var(--font); color: var(--ink-60); }
+.cmd-home-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(220px, 1fr)); gap: 12px; }
+.cmd-card { border: 0; cursor: pointer; text-align: left; font-family: var(--font); border-radius: 16px; padding: 20px;
+  background: linear-gradient(227.702deg, rgba(19, 31, 71, .04) 1.62%, rgba(46, 76, 173, .04) 100%);
+  display: flex; flex-direction: column; gap: 8px; min-height: 160px; transition: box-shadow .15s; }
+.cmd-card:hover { box-shadow: inset 0 0 0 1px rgba(33, 56, 130, .2); }
+.cmd-card-name { font: 600 16px/1.25 var(--font); color: var(--ink); }
+.cmd-card-desc { font: 400 14px/1.4 var(--font); color: var(--ink-60); }
+.cmd-card-ref { margin-top: auto; align-self: flex-start; padding: 8px 10px; border-radius: 4px; background: #fff;
+  font: 500 14px/1.2 var(--font); color: var(--ink); }
+.commands-page { flex: 1; min-height: 0; overflow-y: auto; }
+.cp-col { max-width: 1120px; margin: 0 auto; padding: 56px 32px 80px; display: flex; flex-direction: column; gap: 40px; }
+.cp-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 16px; }
+.cp-card { position: relative; display: flex; min-height: 216px; background: #fff; border-radius: 12px;
+  box-shadow: var(--ring); transition: box-shadow .15s; }
+.cp-card:not(.soon):hover { box-shadow: inset 0 0 0 1px rgba(33, 56, 130, .3); }
+.cp-run { flex: 1; border: 0; background: none; cursor: pointer; text-align: left; font-family: var(--font);
+  padding: 20px 20px 48px; display: flex; flex-direction: column; gap: 10px; }
+.cp-card.soon .cp-run { cursor: default; }
+.cp-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 24px; color: var(--blue); }
+.cp-soon { padding: 6px 10px; border-radius: 4px; background: var(--gray); font: 500 12px/1.2 var(--font); color: var(--ink-60); }
+.cp-name { font: 500 16px/1.3 var(--font); color: var(--ink); }
+.cp-desc { font: 400 14px/1.4 var(--font); color: var(--ink-60); display: -webkit-box; -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical; overflow: hidden; }
+.cp-ref { position: absolute; left: 20px; bottom: 18px; font: 500 12px/1.2 var(--font); color: var(--ink-40); }
+.cp-pin { position: absolute; right: 8px; bottom: 8px; width: 40px; height: 40px; border: 0; border-radius: 8px;
+  background: var(--gray); color: var(--ink-60); cursor: pointer; display: flex; align-items: center; justify-content: center; }
+.cp-pin:hover { color: var(--blue); }
+.cp-pin .pin-off { display: none; }
+.cp-pin.on { color: var(--blue); }
+.cp-pin.on .pin-on { display: none; }
+.cp-pin.on .pin-off { display: block; }
+.cmd-bar { width: 100%; max-width: 760px; display: flex; flex-direction: column; gap: 6px; }
+.cmd-chip { align-self: flex-start; max-width: 100%; display: inline-flex; align-items: center; gap: 8px; padding: 8px 10px 8px 12px;
+  border-radius: 8px; background: var(--gray); box-shadow: var(--ring); font: 500 14px/1.3 var(--font); color: var(--ink); }
+.cmd-chip button { flex: none; display: flex; border: 0; background: none; padding: 2px; cursor: pointer; color: var(--ink-60); }
+.cmd-chip button:hover { color: var(--ink); }
+.cmd-desc { font: 400 14px/1.4 var(--font); color: var(--ink-60); }
+.msg-cmd { margin-bottom: 4px; font: 500 12px/1.3 var(--font); color: var(--ink-60); }
+.adm-main .cmd-stats { width: 100%; border-collapse: collapse; font-size: 14px; }
+.adm-main .cmd-stats th { text-align: left; font-weight: 500; color: var(--ink-60); padding: 6px 12px 6px 0; }
+.adm-main .cmd-stats td { padding: 6px 12px 6px 0; border-top: 1px solid var(--line-soft); }
+
 .hp-filter { border: 0; background: none; cursor: pointer; padding: 12px 18px; border-radius: 6px;
   font: 600 14px/1.1 var(--font); color: var(--ink-60); transition: color .15s; }
 .hp-filter:hover { color: var(--ink); }
@@ -927,6 +985,8 @@ a.head-avatar:hover { opacity: .9; }
   .msg.user .bubble { max-width: 88%; }
   .composer-area { padding: 8px 12px 12px; }
   .main.empty .composer-area { padding: 24px 16px 40px; gap: 22px; }
+  .cmd-home-title h2 { font-size: 24px; }
+  .cp-col { padding: 28px 16px 48px; gap: 24px; }
   .hero h1 { font-size: 28px; }
   .hero p { font-size: 16px; }
   .hp-col { padding: 28px 16px 48px; gap: 22px; }

@@ -1,5 +1,6 @@
 {% extends "base.html" %}
 {% from "_mark.html" import mark %}
+{% from "_commands.html" import cmd_icon, home_card, page_card, soon_card %}
 {# ⚠ Чат гасит общий маркер намеренно: метка версии стоит ВНУТРИ дисклеймера под полем ввода
    (см. `composer-version` ниже), а не второй надписью в углу. Источник строки тот же. #}
 {% block release_marker %}{% endblock %}
@@ -7,8 +8,8 @@
 {% block body %}
 {# Перенос макета «Navigator 719 Service» (Claude Design, 08.10.2026; референс — Нейроюрист).
    Из макета взяты каркас, тексты и токены дизайн-системы ТПП. Не перенесены — решение владельца
-   08.10: готовые команды, баннер заявки на экспертизу, папки и файлы, тариф и оплата, вход по коду
-   и гостевой режим. Всё, что было в прежнем чате и чего нет в макете (экспорт, оценка, исправление,
+   08.10: баннер заявки на экспертизу, папки и файлы, тариф и оплата, вход по коду. Готовые команды
+   перенесены в `L8-1`, гостевой режим — 09.10. Всё, что было в прежнем чате и чего нет в макете (экспорт, оценка, исправление,
    справка, логи для admin, тур), сохранено — оно держит процесс и принципы 1–2. #}
 {# Пробный режим (09.10.2026, макет: режим guest): `guest` — остаток пробных вопросов, `user` — None.
    Гостю не показываются история, экспорт, отзыв и кабинет; вместо них — «Войти» (шапка, сайдбар,
@@ -49,6 +50,13 @@
         {# Текст постановления — первоисточник в редакции КОРПУСА (адрес отдаёт сервер, см. KONTUR_719) #}
         <a class="side-link" href="{{ kontur_719_url }}" target="_blank" rel="noopener"
            title="Текст ПП №719 на Контур.Норматив — в редакции, по которой собрана база">Текст постановления</a>
+      </div>
+
+      {# L8-1 #153: закреплённые команды наполняет chat.js (выбор человека хранится в браузере) #}
+      <div class="side-links">
+        <div class="side-links" id="side-pinned"></div>
+        <button class="side-link side-cmd-all" id="commands-all" type="button">Готовые команды
+          <svg viewBox="0 0 24 24" fill="none" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
       </div>
 
       {% if user %}
@@ -178,6 +186,20 @@
           </div>
         </section>
 
+        {# L8-1 #153: страница «Готовые команды» (макет). Тексты — из app/core/commands.py #}
+        <section class="commands-page hidden" id="commands-page" aria-label="Готовые команды">
+          <div class="cp-col">
+            <div class="hp-head">
+              <h1>Готовые команды</h1>
+              <p>Сокращают путь от вопроса до ответа — всё нужное уже настроено</p>
+            </div>
+            <div class="cp-grid">
+              {% for c in commands.active %}{{ page_card(c) }}{% endfor %}
+              {% for s in commands.soon %}{{ soon_card(s) }}{% endfor %}
+            </div>
+          </div>
+        </section>
+
         <div class="chat-scroll" id="chat-scroll">
           <div class="chat-col">
             <div id="messages" class="messages"></div>
@@ -189,6 +211,16 @@
             <h1>Какой вопрос по ПП 719?</h1>
             <p>Отвечу со ссылкой на пункт постановления</p>
           </div>
+          {# L8-1: режим команды — над полем видно, какая команда запущена и из какого источника #}
+          <div class="cmd-bar hidden" id="cmd-bar">
+            <div class="cmd-chip">
+              <span id="cmd-chip-text"></span>
+              <button type="button" id="cmd-clear" aria-label="Снять команду" title="Снять команду">
+                <svg viewBox="0 0 24 24" fill="none" width="14" height="14" aria-hidden="true"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>
+              </button>
+            </div>
+            <div class="cmd-desc" id="cmd-desc"></div>
+          </div>
           <div class="composer-frame">
             <form id="chat-form" class="composer">
               {# U5: подсказка приходит с сервера (app/rag/followup.py) и дальше меняется по состоянию
@@ -198,7 +230,7 @@
               <div class="composer-bar">
                 {# L1 #146: по какому корпусу отвечать. «Авто» — прежний выбор сервиса; значения и
                    подписи — из app/rag/corpora.py (через web.CORPUS_MODES), своих у шаблона нет. #}
-                <label class="corpus-pick" title="Где искать ответ: сервис выбирает сам или по вашему выбору">
+                <label class="corpus-pick" id="corpus-pick" title="Где искать ответ: сервис выбирает сам или по вашему выбору">
                   <span class="corpus-pick-label">Источник:</span>
                   <select id="corpus-select" aria-label="Источник ответа">
                     {% for value, title in corpus_modes %}<option value="{{ value }}">{{ title }}</option>{% endfor %}
@@ -247,6 +279,20 @@
             <span class="composer-version" title="Версия сервиса, развёрнутая на этом сервере">
               Версия: {{ release_label }}</span>
           </div>
+          {# L8-1 #153: раздел главной. Восемь команд: `home=True` в каталоге #}
+          <section class="cmd-home" id="cmd-home" aria-label="Готовые команды">
+            <div class="cmd-home-head">
+              <div class="cmd-home-title">
+                <h2>Готовые команды</h2>
+                <button class="ds-link" id="commands-more" type="button">Показать все
+                  <svg viewBox="0 0 24 24" fill="none" width="14" height="14" aria-hidden="true"><path d="M9 6l6 6-6 6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></button>
+              </div>
+              <p>Сокращают путь от вопроса до ответа — запрос уже сформулирован, остаётся указать продукцию</p>
+            </div>
+            <div class="cmd-home-grid">
+              {% for c in commands.active if c.home %}{{ home_card(c) }}{% endfor %}
+            </div>
+          </section>
         </div>
       </div>
 
@@ -348,6 +394,7 @@
   window.CORPUS_EDITION = {{ corpus_edition | tojson }};
   window.QUOTA = {{ (quota or none) | tojson }};
   window.GUEST = {{ (guest or none) | tojson }};
+  window.COMMANDS = {{ commands.active | tojson }};
 </script>
 <script src="/static/chat.js?v={{ asset_v }}"></script>
 {% endblock %}

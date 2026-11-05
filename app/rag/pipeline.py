@@ -271,15 +271,16 @@ def _hit_operations(h: Hit, note_cap: int = NOTE_CAP_TARGET,
     return ops
 
 
-def _shown_operations(ops: list[dict], query: str | None, cap: int = MAX_OPS_TARGET) -> tuple[list[dict], int]:
+def _shown_operations(ops: list[dict], query: str | None, cap: int = MAX_OPS_TARGET, *,
+                      explain_query: str | None = None) -> tuple[list[dict], int]:
     """Что из требований хита показывается при капе: не больше `cap` требований, вводные списка (`_heading`) в кап
     не входят. → (показанные, всего требований). Один отбор на контекст модели и таблицу баллов (`points_table`):
-    таблица обязана быть подмножеством контекста."""
+    таблица обязана быть подмножеством контекста. `explain_query` — см. `_rank_operations`."""
     total = sum(1 for o in ops if not o.get("_heading"))
     if total <= cap:
         return ops, total
     shown, n = [], 0
-    for o in _rank_operations(ops, query):
+    for o in _rank_operations(ops, query, explain_query=explain_query):
         if not o.get("_heading"):
             if n == cap:
                 continue
@@ -288,14 +289,21 @@ def _shown_operations(ops: list[dict], query: str | None, cap: int = MAX_OPS_TAR
     return shown, total
 
 
-def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
+def _rank_operations(ops: list[dict], query: str | None, *, explain_query: str | None = None) -> list[dict]:
     """Переставляет операции так, чтобы релевантные запросу шли первыми.
 
     Нужно для мега-продуктов (сотни операций): усечение до MAX_OPS_TARGET иначе режет
     нужное, оставляя первые попавшиеся. Скоринг — пересечение стем-токенов операции и
     запроса (локальный токенизатор BM25, без сети/модели). Сортировка стабильна: при
-    равной релевантности исходный порядок сохраняется. Без запроса/совпадений — без изменений."""
+    равной релевантности исходный порядок сохраняется. Без запроса/совпадений — без изменений.
+
+    `explain_query` — по чему решать, «совпало ли пояснение с вопросом» (по умолчанию — сам `query`). Готовая
+    команда `L8-1` передаёт значение поля: общие слова шаблона («баллы», «операции») совпадают с текстом пояснения
+    первоисточника при каждом запуске, и у I-13…19 пояснения вытесняли из капа операции с баллами (ревью PR #298,
+    LOW: «Требования к продукции» + 28.41.1 — 2 пояснения и 56 операций с баллами против 0 и 58 у того же вопроса,
+    набранного руками). Операции по-прежнему ранжирует вопрос команды целиком."""
     qtok = set(sparse.tokenize(query)) if query else set()
+    etok = set(sparse.tokenize(explain_query)) if explain_query else qtok
     # D24 #267: обязательные требования без баллов (блоки без операций — права на КД/ТД, сервисный центр, условие
     # <18>) — первыми при любом запросе: иначе у больших позиций (бульдозеры, суда, станки) усечение до
     # MAX_OPS_TARGET срезало бы именно их — тот класс, на который жаловались эксперты («обязательные требования не
@@ -310,7 +318,7 @@ def _rank_operations(ops: list[dict], query: str | None) -> list[dict]:
         # («чем подтверждается наличие конструкторской документации») оно обязано дойти до контекста (ревью PR #268,
         # раунд 7, LOW 3: у I-13 оно стояло после всех 217 операций и под кап не попадало никогда)
         if o.get("_explain"):
-            return 2 if hits(o) else 3
+            return 2 if etok & set(sparse.tokenize(o.get("text", ""))) else 3
         return 0 if o.get("_required") else 1 if o.get("_heading") else 2
     if not qtok:
         return sorted(ops, key=group)
@@ -467,7 +475,7 @@ def _group_notes(h: Hit, codes: list[str], dialog_codes: list[str]) -> list[str]
 
 def format_context(hits: list[Hit], query: str | None = None,
                    code: str | list[str] | None = None, *,
-                   dialog_codes: list[str] | None = None) -> str:
+                   dialog_codes: list[str] | None = None, explain_query: str | None = None) -> str:
     # Требования показываем ТОЛЬКО у позиций, О КОТОРЫХ идёт речь (`target_hits` — единственное
     # место, где это решается); прочие кандидаты идут строкой «наименование + код» как материал
     # для уточнения — см. EV7 ниже.
@@ -684,7 +692,7 @@ def format_context(hits: list[Hit], query: str | None = None,
 
         if attribution_line:
             lines.append(attribution_line)
-        shown, total = _shown_operations(ops, query, cap)
+        shown, total = _shown_operations(ops, query, cap, explain_query=explain_query)
         if shown:
             lines.append("    Ключевые операции группы:" if parent else "    Ключевые операции:")
             cur_parent = None
@@ -957,7 +965,7 @@ def _target_hit(hits: list[Hit], code: str | list[str] | None = None) -> Hit | N
     return ts[0] if ts else None
 
 
-def points_table(hit: Hit | None, query: str | None = None) -> str:
+def points_table(hit: Hit | None, query: str | None = None, *, explain_query: str | None = None) -> str:
     """Markdown-таблица «Операция | Баллы» целевой позиции, либо пусто.
 
     Числа и формулировки берутся из той же записи, что легла в контекст, поэтому таблица
@@ -973,7 +981,7 @@ def points_table(hit: Hit | None, query: str | None = None) -> str:
     # faithfulness-гард честно помечает её баллы как незаземлённые — сверка идёт с КОНТЕКСТОМ.
     # Поэтому повторяем ровно тот отбор, что делает `format_context`, и лишь потом фильтруем
     # балльные.
-    shown_all, total = _shown_operations(ops, query)
+    shown_all, total = _shown_operations(ops, query, explain_query=explain_query)
     scored = [o for o in shown_all if o.get("points") is not None]
     if len(scored) < POINTS_TABLE_MIN:
         return ""
@@ -1670,7 +1678,7 @@ def product_low_relevance(search_query: str, qvec: list[float] | None,
 
 def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
                  history: list[dict] | None = None, brief: bool = False,
-                 corpus: str = corpora.AUTO) -> "Answer | _Plan":
+                 corpus: str = corpora.AUTO, search_text: str | None = None) -> "Answer | _Plan":
     """Пред-работа (без финальной генерации): meta → контекстуализация → процедурный гейт →
     поиск/реранк/кейсы → out-of-scope guard → сборка messages. Возвращает либо ранний Answer
     (meta / процедурный / нет-позиции — модель уже не нужна или отработала), либо _Plan для
@@ -1689,7 +1697,11 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     `rules`/`metodrek` — процедурная ветка с жёстким фильтром документов. Заготовки (приветствие)
     идут до выбора корпуса в любом режиме — корпуса у них нет. Перевод кодов ТН ВЭД↔ОКПД2 — только
     в «Авто» (ревью: при ручном выборе сервис подменял выбор пользователя справочником, а подпись
-    говорила «выбран вручную»); в «Приложении» код ТН ВЭД переводится и ищется по приложению."""
+    говорила «выбран вручную»); в «Приложении» код ТН ВЭД переводится и ищется по приложению.
+
+    `search_text` — что искать, если это не сам вопрос (готовая команда `L8-1`): модель видит текст
+    запроса целиком, а поиск, гейт релевантности и `scope` — только продукцию. Они откалиброваны на
+    коротких вопросах, и формулировка шаблона мешала им (замер в `docs/L8_COMMANDS_TZ.md` §11)."""
     # Базовые (meta) реплики (приветствие / что умеешь / как работать) — заготовки без LLM.
     from app.rag import followup, meta, topics
     if meta.is_meta(query):
@@ -1706,7 +1718,9 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Мультитёрн: уточняющий вопрос переписываем в самостоятельный — ТОЛЬКО для поиска/гейтов
     # (генерация ниже видит историю диалога через messages).
     search_query = query
-    if history and _needs_context(query):
+    if search_text:
+        search_query = search_text
+    elif history and _needs_context(query):
         search_query = _contextualize(query, history)
 
     # L1 #146: корпус норм, выбранный ВРУЧНУЮ, — процедурная ветка без гейта. Гейт здесь не
@@ -1861,10 +1875,16 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     hist_code = _anchor_code(history)
     if hist_code and okpd2_ref.okpd2_key(hist_code) in {okpd2_ref.okpd2_key(c) for c in all_codes}:
         hist_code = None
-    ctx = format_context(hits, search_query, all_codes,
-                         dialog_codes=[hist_code] if hist_code else None)
+    # Позицию ищем по значению команды, а операции ранжируем по её вопросу: «Проверка комплектующих»
+    # должна показать операции про компоненты, а не те, что похожи на наименование продукции.
+    rank_query = query if search_text else search_query
+    # Пояснение первоисточника (`_explain`) встаёт в кап, только если совпало со значением команды, а не с её
+    # шаблоном (ревью PR #298, LOW); без команды `explain_query` пуст — прежний путь.
+    ctx = format_context(hits, rank_query, all_codes,
+                         dialog_codes=[hist_code] if hist_code else None, explain_query=search_text)
     cases_ctx = format_cases(cases) if cases else None
-    resolved = search_query if search_query != query else None
+    # `resolved` — переписанный уточняющий вопрос; значение команды вопросом не является
+    resolved = search_query if search_query != query and not search_text else None
     # K12: смешанный вопрос — про продукцию И про состав документов. Бинарный роутер считает такие
     # товарными (719-якоря в них нет), и до сих пор ответ советовал «спросите отдельно»: 23 реальных
     # вопроса июльской волны уходили без перечня, хотя это кластер жалоб №1. Тема известна
@@ -1925,7 +1945,7 @@ def _plan_answer(query: str, okpd2: str | None = None, limit: int = 8,
     # Эксперт увидел бы «дословно из приложения» без пометки неполноты и без баллов сиблинга:
     # ровно тот класс молчаливой потери, против которого заведены R29 и D9.
     _tgts = target_hits(hits, all_codes)
-    table = points_table(_tgts[0], search_query) if len(_tgts) == 1 else ""
+    table = points_table(_tgts[0], rank_query, explain_query=search_text) if len(_tgts) == 1 else ""
     user = build_navigator_user_prompt(
         query, ctx, effective_okpd2, cases=cases_ctx, low_relevance=low_rel, resolved=resolved,
         suggest_okpd2=(effective_okpd2 is None),  # искал по наименованию → предложить код (запрос эксперта)
@@ -1985,13 +2005,14 @@ def _generation_kwargs(messages: list[dict], brief: bool) -> dict:
 
 def answer(query: str, okpd2: str | None = None, limit: int = 8,
            history: list[dict] | None = None, brief: bool = False,
-           corpus: str = corpora.AUTO) -> Answer:
+           corpus: str = corpora.AUTO, search_text: str | None = None) -> Answer:
     """Синхронный ответ навигатора (non-stream). Пред-работа — в _plan_answer; здесь только
     финальная генерация DeepSeek + faithfulness-постпроверка. Поведение НЕ изменилось при
     выделении _plan_answer — тот же путь, что и раньше (прогнать eval для подтверждения).
-    brief — пробный режим гостя (см. `_generation_kwargs`); corpus — режим `L1` #146."""
+    brief — пробный режим гостя (см. `_generation_kwargs`); corpus — режим `L1` #146;
+    search_text — что искать у готовой команды (см. `_plan_answer`)."""
     planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief,
-                           corpus=corpus)
+                           corpus=corpus, search_text=search_text)
     if isinstance(planned, Answer):  # ранний путь (meta / процедурный / нет-позиции)
         return planned
     resp = _client().chat.completions.create(
@@ -2041,7 +2062,7 @@ def answer(query: str, okpd2: str | None = None, limit: int = 8,
 
 def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
                   history: list[dict] | None = None, brief: bool = False,
-                  corpus: str = corpora.AUTO):
+                  corpus: str = corpora.AUTO, search_text: str | None = None):
     """Стриминг ответа (T18): генератор — yield ('delta', str) по мере генерации, затем
     ('done', Answer) с финальными метаданными (hits→sources / флаги / токены).
 
@@ -2050,7 +2071,7 @@ def answer_stream(query: str, okpd2: str | None = None, limit: int = 8,
     копим текст; эмодзи чистим по кускам (дисплей = финал), в КОНЦЕ — faithfulness-постпроверка.
     Исключения наружу НЕ глушим — эндпоинт ловит их и сигналит фронту фолбэк на /api/chat."""
     planned = _plan_answer(query, okpd2=okpd2, limit=limit, history=history, brief=brief,
-                           corpus=corpus)
+                           corpus=corpus, search_text=search_text)
     if isinstance(planned, Answer):  # ранний путь — генерация не нужна / уже сделана
         yield "delta", planned.text
         yield "done", planned

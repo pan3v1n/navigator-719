@@ -21,12 +21,17 @@ const STREAM_URL = GUEST ? "/api/guest/chat/stream" : "/api/chat/stream";
 // прежний автомат: правка не должна молча менять поведение.
 const corpusSelect = document.getElementById("corpus-select");
 const CORPUS_KEY = "corpusMode";
-if (corpusSelect) {
+function savedCorpus() {
   try {
     const saved = localStorage.getItem(CORPUS_KEY);
-    if (saved && [...corpusSelect.options].some((o) => o.value === saved)) corpusSelect.value = saved;
+    if (saved && [...corpusSelect.options].some((o) => o.value === saved)) return saved;
   } catch (e) { /* хранилище недоступно — остаёмся на «Авто» */ }
+  return "auto";
+}
+if (corpusSelect) {
+  corpusSelect.value = savedCorpus();
   corpusSelect.addEventListener("change", () => {
+    corpusHeld = false;   // источник выбрал человек: команда его больше не держит
     try { localStorage.setItem(CORPUS_KEY, corpusSelect.value); } catch (e) {}
   });
 }
@@ -34,12 +39,28 @@ function currentCorpus() {
   return corpusSelect ? corpusSelect.value : "auto";
 }
 
+// L8-1 #153: готовые команды. Каталог отдаёт сервер (`app/core/commands.py`), своей копии текстов нет.
+const COMMANDS = window.COMMANDS || [];
+const commandByKey = new Map(COMMANDS.map((c) => [c.key, c]));
+let activeCommand = null;   // запущенная команда, пока вопрос не ушёл: над полем стоит её чип
+let corpusHeld = false;     // источник команды держится в переключателе до конца беседы (решение 7)
+let outgoing = { command: null, value: "" };   // передача из отправки формы в ask, читается сразу
+// Номер текущего запуска. Ответ старого запуска (человек ушёл на новую беседу или команду, пока он
+// шёл) не трогает состояние экрана: иначе его `done` вернул бы прошлую беседу, и следующий вопрос
+// ушёл бы в неё, а на экране пусто.
+let askRun = 0;
+
 // Заголовок в шапке — название открытой беседы (макет 08.10.2026); на главной пусто.
 // ⚠ Пока открыта страница истории, шапка принадлежит ей (ревью test32): ответ, дописавшийся в фоне,
 // и удаление беседы зовут setActive → setTitle, и без этой проверки шапка показывала беседу поверх
 // списка истории. Страница ставит свой заголовок сама (showHistory).
 function setTitle(text) {
-  if (chatTitle && !main.classList.contains("history-mode")) chatTitle.textContent = text || "";
+  if (chatTitle && !inPage()) chatTitle.textContent = text || "";
+}
+
+// Открыта страница поверх чата («История запросов» или «Готовые команды»): шапка принадлежит ей.
+function inPage() {
+  return main.classList.contains("history-mode") || main.classList.contains("commands-mode");
 }
 
 // U5: подсказка в поле ввода зависит от СОСТОЯНИЯ беседы. Пустой чат — стартовая инструкция
@@ -69,6 +90,10 @@ function setHint(text) {
 }
 
 function setPlaceholder() {
+  if (activeCommand) {
+    input.placeholder = activeCommand.field ? activeCommand.field.label : "Запрос готов: нажмите Enter";
+    return;
+  }
   input.placeholder = main.classList.contains("empty") ? START_HINT : inputHint;
 }
 
@@ -324,8 +349,13 @@ function renderAnswer(wrap, bubble, text, streaming) {
   collapseTables(wrap, bubble);
 }
 
-function addUser(text) {
+function addUser(text, command) {
   const wrap = el("msg user");
+  if (command) {   // L8-1: подпись над вопросом, собранным командой; текст вопроса виден целиком
+    const c = el("msg-cmd");
+    c.textContent = "Команда: " + command;
+    wrap.appendChild(c);
+  }
   const b = el("bubble");
   b.textContent = text; // вопрос эксперта — как есть (без XSS)
   wrap.appendChild(b);
@@ -801,14 +831,14 @@ function addFeedbackBar(wrap, messageId, sid, withRating = true) {
 function setActive(sid) {
   let title = "";
   history.querySelectorAll(".history-item").forEach((x) => {
-    const on = x.dataset.sid === sid && !main.classList.contains("history-mode");  // на странице истории беседа не «активна»
+    const on = x.dataset.sid === sid && !inPage();  // на странице поверх чата беседа не «активна»
     x.classList.toggle("active", on);
     if (on) title = x.title;
   });
   setTitle(title);
   // «Главная» подсвечена, когда открыт пустой экран вопроса (а не страница истории)
   const home = document.getElementById("go-home");
-  if (home) home.classList.toggle("active", !sid && !main.classList.contains("history-mode"));
+  if (home) home.classList.toggle("active", !sid && !inPage());
   trimHistory();
 }
 
@@ -860,7 +890,9 @@ async function deleteConversation(sid, item) {
     if (sessionId === sid) {
       messages.innerHTML = "";
       sessionId = null;
+      askRun += 1;
       main.classList.add("empty");
+      clearCommand();  // L8-1: беседы больше нет, источник команды держать не для кого
       setHint("");  // U5: экран снова пустой — стартовая подсказка
       setActive(null);
       closeSource();
@@ -886,6 +918,13 @@ async function openConversation(sid) {
     if (!r.ok) return;
     const data = await r.json();
     leaveHistory();
+    leaveCommands();
+    clearCommand();  // L8-1: другая беседа — источник команды прошлой беседы к ней не относится
+    if (data.held_corpus && corpusSelect) {   // беседа команды: источник держится и в переоткрытой
+      corpusSelect.value = data.held_corpus;
+      corpusHeld = true;
+    }
+    askRun += 1;
     messages.innerHTML = "";
     main.classList.remove("empty");
     // U5: подсказку последнего ответа старой беседы мы не храним (в БД её нет) — поле остаётся
@@ -895,7 +934,7 @@ async function openConversation(sid) {
     sessionId = sid;
     closeSource();
     data.messages.forEach((m) => {
-      if (m.role === "user") addUser(m.content);
+      if (m.role === "user") addUser(m.content, m.command);
       else addAssistant(m.content, m.sources, m.message_id, m.corpus_label);
     });
     setActive(sid);
@@ -926,8 +965,10 @@ async function handleRejected(r, text, pending) {
     : "В вопросе есть данные, которые нельзя отправлять в сервис. Измените запрос.";
   try { const d = await r.json(); if (d && d.detail) msg = d.detail; } catch (e) {}
   if (pending) pending.remove();
+  if (!isCurrent(pending)) return;   // человек ушёл дальше: экран и черновик уже не этого вопроса
   setHint(hintBeforeAsk);   // вопрос не ушёл — подсказка снова актуальна
-  input.value = text;
+  // L8-1: отказ команде возвращает её режим и введённое значение, а не собранный текст
+  if (!restoreCommand(pending) && !pending._sent.command) input.value = text;
   form.classList.add("ready");
   input.style.height = "auto";
   showInputBlock(msg);
@@ -935,7 +976,13 @@ async function handleRejected(r, text, pending) {
 
 async function ask(text) {
   leaveHistory();
+  leaveCommands();
   main.classList.remove("empty");
+  // L8-1: режим команды снимается с отправкой, а источник остаётся в переключателе: уточнение «а для
+  // насосов?» не должно уйти в другой корпус. Выбор человека в браузере команда не перезаписывает.
+  const sent = outgoing;   // всё о запросе живёт на его элементе: запросов в полёте может быть два
+  const cmd = sent.command;
+  if (cmd) { setCommand(null); corpusHeld = true; }
   hintBeforeAsk = inputHint;
   setHint("");         // подсказка прошлого ответа устарела в момент нового вопроса
   const isNew = !sessionId;
@@ -943,10 +990,12 @@ async function ask(text) {
     // новую беседу заводим СРАЗУ (id на клиенте) и добавляем в историю ДО ответа
     sessionId = genId();
     closeSource();
-    addHistoryItem(sessionId, text, true);
+    addHistoryItem(sessionId, cmd ? commandTitle(cmd, sent.value) : text, true);
   }
-  addUser(text);
+  const userEl = addUser(text, cmd ? cmd.title : "");
   const pending = addPending();
+  askRun += 1;
+  pending._sent = { ...sent, userEl, sid: sessionId, run: askRun };
   const bubble = pending.querySelector(".bubble");
   send.disabled = true;
   try {
@@ -1052,11 +1101,11 @@ async function askStream(text, pending, bubble, isNew, corpus) {
     const r = await fetch(STREAM_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId, corpus }),
+      body: JSON.stringify(withCommand(pending, { message: text, session_id: sessionId, corpus })),
       signal: ctrl.signal,
     });
     if (GUEST && await guestRejected(r, text, pending)) {
-      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      dropNew(pending, isNew);
       return true;
     }
     if (r.status === 401) { window.location = "/login"; return true; }
@@ -1067,7 +1116,7 @@ async function askStream(text, pending, bubble, isNew, corpus) {
     // Новую беседу, на которую сервер отказал, убираем из истории — как в фолбэке.
     if (r.status === 422 || r.status === 402) {
       await handleRejected(r, text, pending);
-      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      dropNew(pending, isNew);
       return true;
     }
     if (!r.ok || !r.body) return false;  // не стартовал → фолбэк
@@ -1097,8 +1146,11 @@ async function askStream(text, pending, bubble, isNew, corpus) {
       }
     }
     if (!done) return false;  // поток оборвался без финала → фолбэк (лог на сервере не писался)
-    sessionId = done.session_id;
-    setActive(sessionId);
+    if (isCurrent(pending)) {
+      sessionId = done.session_id;
+      setActive(sessionId);
+    }
+    syncQuestion(pending, done.question);
     renderAnswer(pending, bubble, acc);  // финальный ре-рендер полного текста
     pending.dataset.raw = acc;
     addUnverifiedFlag(pending, done.unverified_numbers);
@@ -1107,7 +1159,7 @@ async function askStream(text, pending, bubble, isNew, corpus) {
     addAnswerTools(pending);
     if (GUEST) renderTrial(done.trial);   // оценка ответа — после входа
     else addFeedbackBar(pending, done.message_id, sessionId);
-    setHint(done.input_hint);  // U5: следующий шаг задаёт ветка, которой отвечено
+    if (isCurrent(pending)) setHint(done.input_hint);  // U5: следующий шаг задаёт ветка, которой отвечено
     return true;
   } catch (e) {
     return false;  // сеть / abort → фолбэк
@@ -1124,29 +1176,33 @@ async function askFallback(text, pending, bubble, isNew, corpus) {
     const r = await fetch(CHAT_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: text, session_id: sessionId, corpus }),
+      body: JSON.stringify(withCommand(pending, { message: text, session_id: sessionId, corpus })),
       signal: ctrl.signal,
     });
     if (GUEST && await guestRejected(r, text, pending)) {
-      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      dropNew(pending, isNew);
       return;
     }
     if (r.status === 401) { window.location = "/login"; return; }
     if (r.status === 403) { window.location = "/profile"; return; }  // профиль/согласие не заполнены
     if (r.status === 422 || r.status === 402) {
       await handleRejected(r, text, pending);
-      if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+      dropNew(pending, isNew);
       return;
     }
     if (!r.ok) {
       bubble.textContent = "Ошибка: сервис недоступен, повторите запрос.";
       setHint(hintBeforeAsk);
-      if (isNew) { removeHistoryItem(sessionId); sessionId = null; } // убрать фантомный пункт
+      dropNew(pending, isNew); // убрать фантомный пункт
+      restoreCommand(pending);  // команду можно повторить, а значение не пропало
       return;
     }
     const data = await r.json();
-    sessionId = data.session_id;
-    setActive(sessionId);
+    if (isCurrent(pending)) {
+      sessionId = data.session_id;
+      setActive(sessionId);
+    }
+    syncQuestion(pending, data.question);
     renderAnswer(pending, bubble, data.answer);
     // ⚠ Найдено при U6: этот путь НЕ выставлял dataset.raw и не добавлял кнопки — ответ, пришедший
     // фолбэком (а на рваной сети это обычное дело), нельзя было ни скопировать, ни отправить с
@@ -1159,11 +1215,12 @@ async function askFallback(text, pending, bubble, isNew, corpus) {
     addAnswerTools(pending);
     if (GUEST) renderTrial(data.trial);   // как в стриминге
     else addFeedbackBar(pending, data.message_id, sessionId);
-    setHint(data.input_hint);  // U5: фолбэк ведёт себя так же, как стриминг
+    if (isCurrent(pending)) setHint(data.input_hint);  // U5: фолбэк ведёт себя так же, как стриминг
   } catch (e) {
     bubble.textContent = "Ошибка сети, повторите запрос.";
     setHint(hintBeforeAsk);
-    if (isNew) { removeHistoryItem(sessionId); sessionId = null; }
+    dropNew(pending, isNew);
+    restoreCommand(pending);
   } finally {
     clearTimeout(timer);
   }
@@ -1287,8 +1344,10 @@ function hideInputBlock() {
 
 form.addEventListener("submit", (e) => {
   e.preventDefault();
-  const text = input.value.trim();
-  if (!text) return;
+  const cmd = activeCommand;
+  const value = input.value.trim();
+  if (!value && !(cmd && !cmd.field)) return;   // команде без поля вводить нечего
+  const text = cmd ? commandText(cmd, value) : value;
   const found = detectSensitive(text);
   const hard = found.filter((f) => !f.soft).map((f) => f.name);
   const soft = found.filter((f) => f.soft).map((f) => f.name);
@@ -1301,6 +1360,7 @@ form.addEventListener("submit", (e) => {
     input.value = "";
     form.classList.remove("ready");
     input.style.height = "auto";
+    outgoing = cmd ? { command: cmd, value } : { command: null, value: "" };
     ask(text);
   };
   // Телефон и почта: предупреждаем, но отправить даём — они часто нужны по делу, и жёсткая
@@ -1324,9 +1384,12 @@ input.addEventListener("keydown", (e) => {
 // новую. В макете это две кнопки одного действия: возврат на пустой экран вопроса.
 function goHome() {
   leaveHistory();
+  leaveCommands();
   messages.innerHTML = "";
   sessionId = null;
+  askRun += 1;   // ответ, который ещё идёт, к этому экрану уже не относится
   main.classList.add("empty");
+  clearCommand();  // L8-1: новая беседа возвращает источник, выбранный человеком
   setHint("");  // U5: пустой чат — снова стартовая подсказка
   setActive(null);
   closeSource();
@@ -1390,6 +1453,7 @@ function inHistory() { return main.classList.contains("history-mode"); }
 
 function showHistory() {
   if (!histPage) return;
+  leaveCommands();
   closeSource();
   main.classList.add("history-mode");
   histPage.classList.remove("hidden");
@@ -1471,6 +1535,178 @@ document.querySelectorAll(".hp-filter").forEach((f) => f.addEventListener("click
   loadHistory();
 }));
 
+// --- L8-1 #153: готовые команды -----------------------------------------------------------------
+// Клик по команде открывает новую беседу в РЕЖИМЕ КОМАНДЫ: над полем чип, поле просит только значение,
+// переключатель источника показывает её корпус и заблокирован. Запрос собирает сервер
+// (`Command.render`); здесь тот же шаблон лишь показывает вопрос в пузыре до ответа, а `syncQuestion`
+// сверяет пузырь с тем, что сервер отправил в модель. Страница — как «История запросов».
+const cmdPage = document.getElementById("commands-page");
+const cmdAll = document.getElementById("commands-all");
+const corpusPick = document.getElementById("corpus-pick");
+const CORPUS_PICK_TITLE = corpusPick ? corpusPick.title : "";
+const PIN_KEY = "pinnedCommands";
+
+// L8-1-состояние-начало
+function cleanValue(value) {
+  return value.split(/\s+/).filter(Boolean).join(" ");   // как `commands.clean_value`
+}
+
+function commandText(cmd, value) {
+  const v = cleanValue(value);
+  return cmd.template.replace("{value}", () => v);   // функция: «$» в значении — обычный символ
+}
+
+// Заголовок беседы команды, как `commands.short_title` на сервере: иначе запуски одной команды неразличимы.
+function commandTitle(cmd, value) {
+  return cmd.field ? cmd.title + ": " + cleanValue(value) : cmd.title;
+}
+
+function isCurrent(pending) { return !!pending && !!pending._sent && pending._sent.run === askRun; }
+
+// Тело запроса берётся с его элемента: стрим и фолбэк одного вопроса шлют одно и то же, даже если
+// человек тем временем ушёл на другую беседу или запустил другую команду.
+function withCommand(pending, body) {
+  const s = pending._sent;
+  const out = { ...body, session_id: s.sid };
+  return s.command ? { ...out, message: s.value, command: s.command.key } : out;
+}
+
+function syncQuestion(pending, question) {
+  const b = pending._sent.userEl.querySelector(".bubble");
+  if (b && question && b.textContent !== question) b.textContent = question;
+}
+
+// Вопрос не ушёл: новая беседа не состоялась. Сессию снимаем, только если она ещё на экране.
+function dropNew(pending, isNew) {
+  if (!isNew) return;
+  removeHistoryItem(pending._sent.sid);
+  if (sessionId === pending._sent.sid) sessionId = null;
+}
+
+// Сервер отказал или сеть подвела: команда и значение возвращаются в поле, если человек не ушёл дальше
+// и не начал набирать новое: его черновик дороже.
+function restoreCommand(pending) {
+  if (!isCurrent(pending) || !pending._sent.command || input.value.trim()) return false;
+  setCommand(pending._sent.command);
+  input.value = pending._sent.value;
+  return true;
+}
+
+function setCommand(cmd) {
+  activeCommand = cmd || null;
+  main.classList.toggle("command-mode", !!cmd);
+  document.getElementById("cmd-bar").classList.toggle("hidden", !cmd);
+  input.readOnly = !!(cmd && !cmd.field);
+  if (cmd && cmd.field) input.maxLength = cmd.field.max_len;
+  else input.removeAttribute("maxlength");
+  if (corpusSelect) {
+    corpusSelect.disabled = !!cmd;
+    if (cmd) corpusSelect.value = cmd.corpus;
+  }
+  if (corpusPick) corpusPick.title = cmd ? "Источник задан командой" : CORPUS_PICK_TITLE;
+  if (cmd) {
+    document.getElementById("cmd-chip-text").textContent = cmd.title + " · " + cmd.corpus_title;
+    document.getElementById("cmd-desc").textContent = cmd.desc;
+  }
+  form.classList.toggle("ready", !!input.value.trim() || !!(cmd && !cmd.field));
+  setPlaceholder();
+}
+
+// Снять команду и вернуть источник, выбранный человеком: и крестик, и переход к другой беседе.
+function clearCommand() {
+  const held = !!activeCommand || corpusHeld;
+  hideInputBlock();   // мягкое предупреждение относилось к снятой команде
+  setCommand(null);
+  corpusHeld = false;
+  if (held && corpusSelect) corpusSelect.value = savedCorpus();
+}
+// L8-1-состояние-конец
+
+function startCommand(key) {
+  const cmd = commandByKey.get(key);
+  if (!cmd) return;
+  goHome();
+  hideInputBlock();
+  input.value = "";
+  input.style.height = "auto";
+  setCommand(cmd);
+  input.focus();
+}
+
+function inCommands() { return main.classList.contains("commands-mode"); }
+
+function showCommands() {
+  if (!cmdPage) return;
+  leaveHistory();
+  closeSource();
+  main.classList.add("commands-mode");
+  cmdPage.classList.remove("hidden");
+  if (cmdAll) cmdAll.classList.add("active");
+  setActive(null);
+  if (chatTitle) chatTitle.textContent = "Готовые команды";  // мимо setTitle: тот на странице молчит
+}
+
+function leaveCommands() {
+  if (!cmdPage || !inCommands()) return;
+  main.classList.remove("commands-mode");
+  cmdPage.classList.add("hidden");
+  if (cmdAll) cmdAll.classList.remove("active");
+}
+
+// Закрепление в браузере, как выбор источника; на сервер переедет вместе со своими командами (`L8-2`).
+function pinnedKeys() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(PIN_KEY));
+    if (Array.isArray(saved)) return saved.filter((k) => commandByKey.has(k));
+  } catch (e) { /* хранилище недоступно или значение испорчено — как в каталоге */ }
+  return COMMANDS.filter((c) => c.pinned).map((c) => c.key);
+}
+
+function renderPinned() {
+  const box = document.getElementById("side-pinned");
+  if (!box) return;
+  const keys = pinnedKeys();
+  box.innerHTML = "";
+  keys.forEach((k) => {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "side-link side-cmd";
+    b.dataset.command = k;
+    b.textContent = commandByKey.get(k).title;
+    b.title = commandByKey.get(k).title;
+    box.appendChild(b);
+  });
+  document.querySelectorAll("[data-pin]").forEach((p) => {
+    const on = keys.includes(p.dataset.pin);
+    const label = on ? "Убрать из бокового меню" : "Добавить в боковое меню";
+    p.classList.toggle("on", on);
+    p.title = label;
+    p.setAttribute("aria-label", label);
+    p.setAttribute("aria-pressed", on ? "true" : "false");
+  });
+}
+
+function togglePin(key) {
+  const keys = pinnedKeys();
+  const next = keys.includes(key) ? keys.filter((k) => k !== key) : keys.concat(key);
+  try { localStorage.setItem(PIN_KEY, JSON.stringify(next)); } catch (e) {}
+  renderPinned();
+}
+
+document.addEventListener("click", (e) => {
+  if (!e.target.closest) return;
+  const pin = e.target.closest("[data-pin]");
+  if (pin) { togglePin(pin.dataset.pin); return; }
+  const run = e.target.closest("[data-command]");
+  if (run) startCommand(run.dataset.command);
+});
+if (cmdAll) cmdAll.addEventListener("click", showCommands);
+const cmdMore = document.getElementById("commands-more");
+if (cmdMore) cmdMore.addEventListener("click", showCommands);
+const cmdClear = document.getElementById("cmd-clear");
+if (cmdClear) cmdClear.addEventListener("click", () => { clearCommand(); input.focus(); });
+renderPinned();
+
 // форма обратной связи
 const modal = document.getElementById("fb-modal");
 const fbOpen = document.getElementById("fb-open");  // у гостя кнопки нет — отзыв только после входа
@@ -1507,6 +1743,9 @@ const TOUR_STEPS = [
   { sel: "#input", title: "Спросите своими словами",
     text: "Опишите продукцию («требования к чиллерам»), укажите код ОКПД2 или код ТН ВЭД из " +
           "сертификата — его переведу в ОКПД2 по переходному ключу. Код даёт точную привязку к позиции." },
+  { sel: "#commands-all", title: "Готовые команды", pad: 4,
+    text: "Типовые задачи эксперта: запрос уже сформулирован, источник задан. Выберите команду и " +
+          "укажите продукцию, код или пункт, вопрос целиком будет виден в беседе." },
   { sel: "#chat-scroll", title: "Ответ со ссылками на первоисточник", pad: 6,
     text: "Номера в тексте ответа и чипы «Источники ответа» открывают справа текст позиции приложения " +
           "или пункта документа — сверить можно, не уходя из сервиса. Числа в баллах и сроки " +
@@ -1532,7 +1771,8 @@ const TOUR_STEPS = [
 // обновлённый тур не показался бы ни одному из них: сервис решил бы, что знакомство уже прошло.
 // Правило на будущее: существенно поменяли тур — подняли версию ключа.
 // v2 — новый интерфейс по макету 08.10.2026: кнопки и источники переехали, тур показываем заново.
-const TOUR_SEEN_KEY = "tour719Seen_v2";
+// v3 — шаг «Готовые команды» (`L8-1`).
+const TOUR_SEEN_KEY = "tour719Seen_v3";
 
 (function initTour() {
   const root = document.getElementById("tour");
@@ -1708,7 +1948,7 @@ function openJumpMenu() {
     const b = document.createElement("button");
     b.type = "button";
     b.className = "jump-item";
-    const txt = (q.textContent || "").trim();
+    const txt = ((q.querySelector(".bubble") || q).textContent || "").trim();  // без подписи команды
     b.textContent = (i + 1) + ". " + (txt.length > 70 ? txt.slice(0, 70) + "…" : txt);
     b.title = txt;
     b.addEventListener("click", (e) => {

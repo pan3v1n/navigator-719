@@ -39,7 +39,8 @@ from app.core.console import enable_utf8  # noqa: E402
 
 enable_utf8()  # #107: скрипт печатает значки вне cp1251
 
-from app.rag import procedural, topics  # noqa: E402
+from app.core import commands  # noqa: E402
+from app.rag import corpora, procedural, topics  # noqa: E402
 
 # Наборы вопросов и КЛАСС каждого: «товарный» (процедурный маршрут = ложное срабатывание),
 # «процедурный» (норма), «вне сферы» (маршрут не важен, важно что не падаем).
@@ -127,6 +128,36 @@ def collect() -> list[dict]:
                 "topic": topics.classify(q),
             })
     return rows
+
+
+def command_rows() -> list[dict]:
+    """Запросы готовых команд (`L8-1` #153), порождённые ИЗ КАТАЛОГА, а не второй копией текстов.
+    Отдельно от `collect`: `--json` остаётся прежним, и diff «до/после» не расходится из-за набора.
+    Источник команды задан явно, поэтому маршрут автомата здесь — не её ветка, а проверка: тот же
+    текст в «Авто» не должен увести товарную команду на процедурную ветку."""
+    rows = []
+    for cmd in commands.COMMANDS:
+        for value in (commands.SAMPLES[cmd.field.kind] if cmd.field else ("",)):
+            text = cmd.render(value)
+            rows.append({"key": cmd.key, "corpus": cmd.corpus, "query": text,
+                         "topic": topics.classify(text), "expect_topic": cmd.expect_topic,
+                         "topic_by_value": cmd.topic_by_value,
+                         "auto_procedural": procedural.is_procedural(text)})
+    return rows
+
+
+def summarize_commands(rows: list[dict]) -> list[str]:
+    wrong_topic = [r for r in rows if not r["topic_by_value"] and r["topic"] != r["expect_topic"]]
+    wrong_branch = [r for r in rows if r["corpus"] == corpora.APPENDIX and r["auto_procedural"]]
+    only_command = [r for r in rows if r["corpus"] != corpora.APPENDIX and not r["auto_procedural"]]
+    L = ["", "=" * 78, f"ГОТОВЫЕ КОМАНДЫ — {len(rows)} запросов из {len(commands.COMMANDS)} команд",
+         "=" * 78, "", f"ТЕМА НЕ ТА, ЧТО В КАТАЛОГЕ (обязано быть 0): {len(wrong_topic)}"]
+    L += [f"  {r['key']:<9} тема={r['topic']}  {r['query'][:52]}" for r in wrong_topic]
+    L += ["", f"ТОВАРНАЯ КОМАНДА В «АВТО» УШЛА БЫ НА ПРОЦЕДУРНУЮ ВЕТКУ (обязано быть 0): {len(wrong_branch)}"]
+    L += [f"  {r['key']:<9} {r['query'][:60]}" for r in wrong_branch]
+    L += ["", f"ПРОЦЕДУРНЫЙ ЗАПРОС ДОХОДИТ ДО КОРПУСА ТОЛЬКО БЛАГОДАРЯ КОМАНДЕ: {len(only_command)}"]
+    L += [f"  {r['key']:<9} {r['query'][:60]}" for r in only_command]
+    return L
 
 
 def _why(q: str) -> str:
@@ -221,7 +252,7 @@ def main() -> int:
     if args.json:
         print(json.dumps(rows, ensure_ascii=False, indent=1, sort_keys=True))
         return 0
-    out = "\n".join(summarize(rows))
+    out = "\n".join(summarize(rows) + summarize_commands(command_rows()))
     print(out)
     if args.report:
         args.report.parent.mkdir(parents=True, exist_ok=True)

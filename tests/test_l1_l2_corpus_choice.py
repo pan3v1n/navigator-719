@@ -51,7 +51,8 @@ class _Stubbed(unittest.TestCase):
         self.proc_calls = []
 
         def proc(query, search_query, history=None, brief=False, only_docs=(), used=corpora.USED_RULES):
-            self.proc_calls.append({"query": query, "only_docs": only_docs, "used": used})
+            self.proc_calls.append({"query": query, "search_query": search_query,
+                                    "only_docs": only_docs, "used": used})
             return Answer(text="процедурный ответ", hits=[], corpus=used)
 
         pl._answer_procedural = proc

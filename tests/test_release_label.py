@@ -107,6 +107,7 @@ class TestLabelReachesTheUser(unittest.TestCase):
         надписи об одном, и они разъедутся при первой правке.
         """
         from app.api.web import LOGIN_DEMO, templates
+        from app.core import commands
         from app.core import release as rel
 
         rel.release_label.cache_clear()
@@ -122,7 +123,8 @@ class TestLabelReachesTheUser(unittest.TestCase):
                  ("profile.html", {"user": user, "form": user, "error": None, "saved": False,
                                    "regions": []}),
                  ("terms.html", {}),
-                 ("chat.html", {"user": user, "kontur_719_url": "#", "input_hint": ""}))
+                 ("chat.html", {"user": user, "kontur_719_url": "#", "input_hint": "",
+                                "commands": commands.page_view()}))
         for name, extra in pages:
             with self.subTest(page=name):
                 html = templates.get_template(name).render(**ctx, **extra)

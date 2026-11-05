@@ -193,6 +193,25 @@
         {% else %}<p class="empty">Пока нет комментариев.</p>{% endfor %}
       </div>
 
+      {# L8-1 #153: какие готовые команды в ходу и как их оценивают; гости сюда не входят #}
+      <div class="card wide">
+        <h3>Команды</h3>
+        <div class="kpi-sub" style="margin:0 0 8px">Запуски вошедших пользователей за период, средняя оценка и доля ответов с «Сообщить об ошибке».</div>
+        <table class="cmd-stats">
+          <thead><tr><th>Команда</th><th>Запусков</th><th>Средняя оценка</th><th>С ошибкой</th></tr></thead>
+          <tbody>
+            {% for c in stats.commands %}
+            <tr>
+              <td>{{ c.title }}</td>
+              <td>{{ c.uses }}</td>
+              <td>{{ c.avg if c.avg is not none else '—' }}{% if c.rated %} <span class="ts">({{ c.rated }} оц.)</span>{% endif %}</td>
+              <td>{{ (c.error_pct ~ '%') if c.error_pct is not none else '—' }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+
       <div class="card wide">
         <h3>Процедурные вопросы · {{ stats.procedural_questions|length }}</h3>
         <div class="kpi-sub" style="margin:0 0 8px">Вопросы про процедуру (реестр / ГИСП / документы) — отвечаются по Правилам ведения реестра; статистика показывает спрос.</div>
