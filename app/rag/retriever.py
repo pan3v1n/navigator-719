@@ -280,6 +280,30 @@ def _search_params():
     return models.SearchParams(exact=True)
 
 
+def _two_lists(query: str, qvec: list[float] | None, qfilter, limit: int, collection: str | None,
+               with_payload) -> tuple[list, list]:
+    """dense- и sparse-списки ОДНИМ пакетом (`query_batch_points`): обращение к Qdrant одно.
+
+    Общая часть `_hybrid` и `_rescore`: оба сливают списки сами (`_rrf_tied`). При `EXACT_SEARCH`
+    (только замеры, см. M1) оба идут точным перебором."""
+    from qdrant_client import models
+
+    idx, val = query_vector(query)  # sparse дёшев (mmh3+Snowball локально) — переиспользовать нечего
+    sp = _search_params()
+    reqs = [models.QueryRequest(query=qvec if qvec is not None else embed_query(query), using=DENSE,
+                                filter=qfilter, limit=limit, params=sp, with_payload=with_payload),
+            models.QueryRequest(query=models.SparseVector(indices=idx, values=val), using=SPARSE,
+                                filter=qfilter, limit=limit, params=sp, with_payload=with_payload)]
+    res = _client().query_batch_points(collection_name=collection or settings.QDRANT_COLLECTION,
+                                       requests=reqs)
+    return res[0].points, res[1].points
+
+
+# R31-3 #247: поле payload для тай-брейка на границе `limit` в `_hybrid` — тот же якорь, что у
+# `_order_key`.
+_TIE_FIELD = "source_anchor"
+
+
 def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
             qvec: list[float] | None = None, with_payload: bool = True):
     """Гибрид dense+sparse с RRF. `qvec` — заранее посчитанный dense-вектор запроса: на один
@@ -287,31 +311,40 @@ def _hybrid(query: str, limit: int, qfilter=None, collection: str | None = None,
     и e5-large незачем прогонять на каждое. Не передан — считаем сами (обратная совместимость:
     eval-скрипты зовут search/search_cases напрямую).
 
-    При `EXACT_SEARCH` (только замеры, см. M1) обе ветви префетча идут точным перебором —
-    иначе число «плавает» между прогонами сильнее, чем измеряемая разница."""
+    ⚠ R31-3 #247: слияние RRF — на нашей стороне (`_rrf_tied`), как в `_rescore` с R31-2 #245.
+    `FusionQuery` Qdrant раздаёт ничьим внутри списка разные ранги в произвольном порядке, и
+    состав пула на границе `limit` (top-40 товарной ветки, 24 процедурной) менялся между двумя
+    прогонами одного вопроса — а с ним порядок окна: замер 28.10 — 16 own / 19 climb / 3 control
+    вопросов `eval_okpd2_climb` из двух прогонов подряд. Здесь у равных score — равный вклад, а
+    усечение до `limit` решает полный ключ: сумма, якорь (`_TIE_FIELD`), id. Без ничьих сумма та
+    же, что у Qdrant (`_RRF_K`). Это общий путь всех веток: пул и доборы товарной, процедурная
+    (`search_rules`) и кейсы.
+    ⚠ Обращение к Qdrant по-прежнему ОДНО: оба списка — одним пакетом, payload — в самих списках.
+    Payload выбранных id вторым запросом (`retrieve`) замерен и отвергнут: локально qdrant_client
+    не держит соединение с `localhost` (keep-alive выключен самим клиентом), и второй запрос — это
+    второе TCP-соединение: p50 `search` с кодом 38 → 61 мс, а при замерах — исчерпание портов
+    Windows (WinError 10048). На бою (`QDRANT_URL` — имя сервиса compose) keep-alive включён, там
+    `retrieve` не мерился. Цена payload в списках (до 2 × max(limit, 20) точек), ревью PR #291, p50
+    локально: пул top-40 +3.9 мс (+26 %), `search` без кода +23 %, с кодом +4…15 %, `search_rules`
+    +10 % — `docs/eval_runs/2026-11-03_r31_3_hybrid_ties.md`.
+    ⚠ Предел: ничья, которая ПЕРЕСЕКАЕТ глубину списка (`max(limit, 20)`), в пул попадает той
+    частью, что выбрал Qdrant, — слияние здесь бессильно. На живом Qdrant выбор устойчив между
+    прогонами (0 расхождений из 62 × 10), сменить его может перестройка сегментов."""
     from qdrant_client import models
 
-    dvec = qvec if qvec is not None else embed_query(query)
-    idx, val = query_vector(query)  # sparse дёшев (mmh3+Snowball локально) — переиспользовать нечего
-    sp = _search_params()
-    res = _client().query_points(
-        collection_name=collection or settings.QDRANT_COLLECTION,
-        prefetch=[
-            models.Prefetch(query=dvec, using=DENSE, limit=max(limit, 20), filter=qfilter,
-                            params=sp),
-            models.Prefetch(
-                query=models.SparseVector(indices=idx, values=val),
-                using=SPARSE,
-                limit=max(limit, 20),
-                filter=qfilter,
-                params=sp,
-            ),
-        ],
-        query=models.FusionQuery(fusion=models.Fusion.RRF),
-        limit=limit,
-        with_payload=with_payload,
-    )
-    return res.points
+    name = collection or settings.QDRANT_COLLECTION
+    dense, sparse = _two_lists(query, qvec, qfilter, max(limit, 20), name, with_payload)
+    fused = _rrf_tied([[(p.id, p.score) for p in dense], [(p.id, p.score) for p in sparse]])
+    first: dict = {}
+    for p in (*dense, *sparse):
+        first.setdefault(p.id, p)
+
+    def key(pid):
+        return (-fused[pid], str((first[pid].payload or {}).get(_TIE_FIELD) or ""), str(pid))
+
+    return [models.ScoredPoint(id=pid, version=first[pid].version, score=fused[pid],
+                               payload=first[pid].payload if with_payload else None)
+            for pid in sorted(fused, key=key)[:limit]]
 
 
 def _order_key(h: Hit) -> tuple:
@@ -360,22 +393,33 @@ _RRF_K = 2
 
 
 def _rrf_tied(lists: list[list[tuple]]) -> dict:
-    """RRF по спискам `(id, score)`: у РАВНЫХ score — равный ранг (лучший из занятых ими мест).
+    """RRF по спискам `(id, score)`: у РАВНЫХ score — равный вклад, СРЕДНИЙ по занятым ими местам.
 
     R31-2 #245: `FusionQuery` раздаёт ничьим списка разные ранги в произвольном порядке, и сумма
     RRF у них плавала между прогонами — «Краски полиграфические 20.30.24»: sparse-score XXI/27 и
     XXI/30 равны до бита (16.110046), а первой за 12 прогонов была то одна (7), то другая (5).
     Здесь ничья в одном списке ранги не различает — порядок решают другой список, а при равной
     сумме — якорь (`_order_key`). Без ничьих сумма та же, что у Qdrant.
+    ⚠ R31-3 #247: вклад ничьей — СРЕДНИЙ по её местам (ожидание при случайном порядке `FusionQuery`),
+    а не «лучший из занятых мест», как было с R31-2. Лучший ранг задаром поднимал целую группу
+    ничьей: у «Катализаторов гидроочистки» пять «Катализаторов …» с равным BM25 на местах 1–5
+    получали ранг 1 все, и «гидрокрекинг» обходил позицию, названную дословно. Замер по всей базе
+    (self-retrieval по наименованию, 1584): лучший ранг — recall@1 1501 → 1498 (сломано 4), средний
+    вклад — 1501 → 1501 (1 / 1); `docs/eval_runs/2026-11-03_r31_3_hybrid_ties.md`.
     ⚠ Сумма — дробью (ревью PR #248, LOW-2): в float равные суммы разных пар рангов расходятся на
     1 ulp (ранги 0 и 10 против 1 и 2 — обе 7/12), и порядок решало бы округление, а не якорь."""
     out: dict = {}
     for pts in lists:
-        rank, prev = 0, None
-        for pos, (pid, score) in enumerate(sorted(pts, key=lambda p: -p[1])):
-            if score != prev:
-                rank, prev = pos, score
-            out[pid] = out.get(pid, 0) + Fraction(1, _RRF_K + rank)
+        srt = sorted(pts, key=lambda p: -p[1])
+        i = 0
+        while i < len(srt):
+            j = i
+            while j < len(srt) and srt[j][1] == srt[i][1]:
+                j += 1
+            share = sum(Fraction(1, _RRF_K + r) for r in range(i, j)) / (j - i)
+            for pid, _ in srt[i:j]:
+                out[pid] = out.get(pid, 0) + share
+            i = j
     return {pid: float(s) for pid, s in out.items()}
 
 
@@ -404,17 +448,11 @@ def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
         return
     try:  # подготовка тоже под `try` — как было внутри `_hybrid` (ревью PR #248, LOW-1)
         flt = models.Filter(must=[models.HasIdCondition(has_id=ids)])
-        idx, val = query_vector(query)
-        sp = _search_params()
-        reqs = [models.QueryRequest(query=qvec if qvec is not None else embed_query(query), using=DENSE,
-                                    filter=flt, limit=len(ids), params=sp, with_payload=False),
-                models.QueryRequest(query=models.SparseVector(indices=idx, values=val), using=SPARSE,
-                                    filter=flt, limit=len(ids), params=sp, with_payload=False)]
-        res = _client().query_batch_points(collection_name=settings.QDRANT_COLLECTION, requests=reqs)
+        dense_pts, sparse_pts = _two_lists(query, qvec, flt, len(ids), None, False)
     except Exception as exc:  # noqa: BLE001 — пересчёт уточняет порядок, сбой не роняет ответ
         logger.warning("пересчёт score окна ({} кандидатов): {}", len(ids), exc)
         return
-    dense = [(p.id, p.score) for p in res[0].points]
+    dense = [(p.id, p.score) for p in dense_pts]
     if {i for i, _ in dense} != set(ids):
         # Кандидат не вернулся (не должно быть: dense-список отдаёт все точки фильтра) — смешивать
         # новые score со старыми нельзя, это та же несравнимость. Остаёмся на прежних.
@@ -422,7 +460,7 @@ def _rescore(query: str, hits: list[Hit], qvec: list[float] | None) -> None:
         # бы через sparse, и пересчёт молча шёл на урезанном списке (ревью PR #248, мутация `limit`).
         logger.warning("пересчёт score окна: вернулось {} из {}", len(dense), len(ids))
         return
-    got = _rrf_tied([dense, [(p.id, p.score) for p in res[1].points]])
+    got = _rrf_tied([dense, [(p.id, p.score) for p in sparse_pts]])
     for h in hits:
         h.score = got[h.point_id]
 
