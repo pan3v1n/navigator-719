@@ -76,6 +76,7 @@ source .venv/bin/activate && pip install -r requirements.txt && python main.py
 |---|---|
 | Лендинг | **https://719-навигатор.рф** (punycode `xn--719--83dani8b8bqyy.xn--p1ai`) |
 | Сервис | **https://сервис.719-навигатор.рф** (punycode `xn--b1afk4ade.xn--719--83dani8b8bqyy.xn--p1ai`) |
+| Стенд | **https://dev.719-навигатор.рф**, под паролем, своя пустая база; порядок — [docs/DEPLOY.md §4б](docs/DEPLOY.md) |
 | Сервер | **`77.241.30.132`** — с **14.10.2026** (курский провайдер «Регион-Курск», Ubuntu 24.04, 8 vCPU / 7.7 ГБ, Xeon без AVX2); A-записи Timeweb переключены на него 14.10 |
 | SSH | `ssh dan_tpp_srv@77.241.30.132` (только ключ; каталог `/home/dan_tpp_srv/navigator-719`, sudo без пароля) |
 | Прежняя VM | `51.250.91.5` (Yandex Cloud) — **лежит с 12.10** (авария ru-central1-a). Ожив — НЕ поднимать сервис: снимок, копия базы, остановить (две базы разойдутся), см. `docs/NEXT_SESSION.md` |
