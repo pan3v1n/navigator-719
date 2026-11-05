@@ -191,6 +191,35 @@ python scripts/backup_db.py --verify /path/to/navigator_app-2026-08-10_0300.db
 .venv\Scripts\python scripts\pull_backup.py --dest D:\navigator-backups   # папка вне репозитория
 ```
 По расписанию — Планировщик заданий Windows раз в сутки после 06:00 МСК (команда — в шапке скрипта).
+⚠ С 03.11.2026 ssh идёт **мимо туннеля** на рабочем ПК: через TUN Happ ssh к бою не проходит
+(«Connection timed out during banner exchange», забор падал с 02.11). `--bind auto` (по умолчанию;
+пустое значение — тоже `auto`) привязывает ssh к адресу физического адаптера со шлюзом (`ssh -b`);
+нет такого — ждёт до `--wait-adapter` секунд (по умолчанию 180: после пробуждения ПК сеть поднимается
+не сразу, а попытка одна в сутки), затем код 1 до подключения. `--bind <адрес>` — явно: заведомо
+негодный адрес (0.0.0.0, петля, 169.254/16, не IPv4) — отказ, адрес туннеля или ничей — забор идёт с
+предупреждением `[!]` в журнале. `--bind none` — без привязки (только так). То же — переменной
+`NAVIGATOR_SSH_BIND`. Ошибка аргументов — код 1, а не 2 (2 — тревога о сервере).
+
+**Расписание — из отдельной detached-копии**, а не из основной рабочей (там чужие ветки и слияния):
+```bash
+git -C D:/navigator-719 worktree add --detach D:/navigator-719-backup origin/dev   # один раз
+# в D:\navigator-backups\pull-backup-daily.cmd путь к скрипту — в ЭТОЙ копии:
+#   "D:\navigator-719\.venv\Scripts\python.exe" "D:\navigator-719-backup\scripts\pull_backup.py" --dest ...
+# после слияния правки забора — обновить копию осознанно:
+git -C D:/navigator-719 fetch origin && git -C D:/navigator-719-backup checkout --detach origin/dev
+```
+Обёртка `.cmd` с русскими комментариями — **только в CRLF**: в LF-файле cmd теряет позицию строки и
+исполняет обрывки комментариев как команды; `chcp 65001` ей не нужен.
+⚠ С 04.11.2026: отметку попытки дня `last-attempt.txt` ставит **сам скрипт непосредственно перед ssh**, обёртка её
+только сверяет (`if "%LAST%"=="%DATE%" exit /b 0`) и задаёт `PYTHONUNBUFFERED=1`. Строка запуска в обёртке:
+```
+"D:\navigator-719\.venv\Scripts\python.exe" "D:\navigator-719-backup\scripts\pull_backup.py" --dest "D:\navigator-backups" --mark-attempt "D:\navigator-backups\last-attempt.txt" --mark-value "%DATE%"
+```
+Прежде обёртка писала отметку до запуска, и 04.11 запуск, прерванный до подключения, сжёг попытку дня — копии за
+сутки не было. Задача запускает обёртку **скрыто** — действие
+`powershell.exe -NoProfile -NonInteractive -WindowStyle Hidden -Command "& cmd.exe /c 'D:\navigator-backups\pull-backup-daily.cmd'; exit $LASTEXITCODE"`:
+задача «только при входе пользователя» иначе открывает окно консоли, и его закрытие убивает забор. `--dest` держать вне ЛЮБОЙ
+копии репозитория: проверка смотрит на ту копию, из которой запущен скрипт.
 Прежний ручной способ:
 ```bash
 # забрать свежие копии и сразу проверить каждую

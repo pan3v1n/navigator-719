@@ -469,10 +469,12 @@ class TestRescoreTiesR312(unittest.TestCase):
     def test_tie_in_one_list_does_not_depend_on_arrival_order(self):
         dense = [("a", 0.87), ("b", 0.86), ("c", 0.80)]
         tie = [("b", 16.11), ("a", 16.11), ("c", 9.4)]
+        # R31-3 #247: вклад ничьей — средний по её местам 0 и 1 (до R31-3 — лучший из рангов, 1/2).
+        share = Fraction(1, 2 + 0) / 2 + Fraction(1, 2 + 1) / 2
         for sp in (tie, [tie[1], tie[0], tie[2]]):
             got = retriever._rrf_tied([dense, sp])
-            self.assertEqual(got["a"], _rrf(0, 0))                     # ничья — лучший из рангов
-            self.assertEqual(got["b"], _rrf(1, 0))
+            self.assertEqual(got["a"], float(Fraction(1, 2) + share))
+            self.assertEqual(got["b"], float(Fraction(1, 3) + share))
             self.assertEqual(got["c"], _rrf(2, 2))                     # после ничьей двух — ранг 2
 
     def test_any_permutation_gives_same_scores(self):

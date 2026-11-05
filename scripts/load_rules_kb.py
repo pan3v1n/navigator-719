@@ -452,6 +452,14 @@ def parse_gisp_faq(path: Path, doc: dict | None = None) -> list[dict]:
     return records
 
 
+# D18 #208: служебная строка правовой системы Контура, не текст нормы. Разбор вклеивал её в хвост
+# предыдущей сноски (`<25>`, блок «СУМ…» перед `<56>`, сама `<56>`) — модель могла процитировать её как норму.
+# Шаблон ЗАКРЫТЫЙ, строка целиком: похожая фраза внутри сноски осталась бы на месте. Сторож — тест
+# `test_d18_kontur_service_line`: в файле сносок таких строк три, в записях — ни одной.
+KONTUR_SERVICE_LINE_RE = re.compile(r"^\s*В электронном документе нумерация сносок соответствует "
+                                    r"внесенным изменениям\.?\s*$")
+
+
 def parse_footnotes(path: Path, doc: dict | None = None) -> list[dict]:
     """Определения сносок приложения: одна запись на сноску, ключ — её номер («<44>»).
 
@@ -475,6 +483,8 @@ def parse_footnotes(path: Path, doc: dict | None = None) -> list[dict]:
             "source_anchor": f"Приложение к ПП №719, сноска {cur}"})
 
     for ln in raw.split("\n"):
+        if KONTUR_SERVICE_LINE_RE.match(ln):
+            continue
         m = _FOOTNOTE_RE.match(ln)
         if m:
             _flush(); cur, buf = m.group(1), [ln]
