@@ -766,6 +766,78 @@ class TestSearchByValue(_SearchStubs):
         self.assertEqual(self.proc_calls[0]["search_query"], "пункт 32 Правил реестра")
 
 
+class TestExplainMatchesTheValue(_SearchStubs):
+    """Ревью PR #298 (05.11.2026), LOW: общие слова шаблона команды («баллы», «операции») совпадали с пояснением
+    первоисточника (`_explain`) при каждом запуске, и у I-13…19 оно вытесняло из капа операции с баллами
+    («Требования к продукции» + 28.41.1: 2 пояснения и 56 операций с баллами против 0 и 58 у того же вопроса руками).
+    Совпадение пояснения считается по значению поля; операции по-прежнему ранжирует вопрос команды."""
+
+    hit = TestSearchByValue.hit
+    EXPLAIN = {"text": "Баллы за осуществление определенных операций начисляются при выполнении всех условий",
+               "_explain": True}
+    OPS = [{"text": "сварка корпуса", "points": 10}, {"text": "покраска", "points": 5}, EXPLAIN,
+           {"text": "технологические операции сборки", "points": 7}]
+
+    def test_template_words_do_not_lift_the_explanation(self):
+        q = REQ.render("28.41.1")
+        before = pl._rank_operations(self.OPS, q)
+        self.assertLess(before.index(self.EXPLAIN), len(self.OPS) - 1,
+                        "предпосылка: без explain_query слова шаблона поднимают пояснение")
+        after = pl._rank_operations(self.OPS, q, explain_query="28.41.1")
+        self.assertIs(after[-1], self.EXPLAIN, "по значению поля пояснение не совпало — оно после операций")
+
+    def test_explanation_still_rises_when_the_value_asks_about_it(self):
+        q = REQ.render("баллы за осуществление операций")
+        ranked = pl._rank_operations(self.OPS, q, explain_query="баллы за осуществление операций")
+        self.assertLess(ranked.index(self.EXPLAIN), len(self.OPS) - 1)
+
+    def test_without_explain_query_nothing_changes(self):
+        for q in (None, "", "требования к станкам 28.41.1", REQ.render("насосы")):
+            self.assertEqual(pl._rank_operations(self.OPS, q), pl._rank_operations(self.OPS, q, explain_query=None))
+
+    def test_cap_drops_the_explanation_by_the_value(self):
+        q = REQ.render("28.41.1")
+        self.assertIn(self.EXPLAIN, pl._shown_operations(self.OPS, q, cap=3)[0])
+        self.assertNotIn(self.EXPLAIN, pl._shown_operations(self.OPS, q, cap=3, explain_query="28.41.1")[0])
+
+    def test_context_and_table_forward_it_to_the_cap(self):
+        """Оба места, где решается состав капа, обязаны передать `explain_query` дальше — иначе таблица баллов
+        перестанет быть подмножеством контекста."""
+        got = []
+        real = pl._shown_operations
+        self.addCleanup(setattr, pl, "_shown_operations", real)
+        pl._shown_operations = lambda *a, **k: (got.append(k.get("explain_query")), real(*a, **k))[1]
+        hit = Hit(score=1.0, section_roman="I", section_title="Раздел", product_name="Станки", okpd2_codes=["28.41.1"],
+                  min_threshold=None, source_anchor="а",
+                  requirement_blocks=[{"component": "Операции", "operations": [dict(o) for o in self.OPS
+                                                                                if not o.get("_explain")]}])
+        pl.format_context([hit], "вопрос", ["28.41.1"], explain_query="28.41.1")
+        pl.points_table(hit, "вопрос", explain_query="28.41.1")
+        self.assertEqual(got, ["28.41.1", "28.41.1"])
+
+    def _spy(self):
+        seen = {}
+        for name in ("format_context", "points_table"):
+            real = getattr(pl, name)
+            self.addCleanup(setattr, pl, name, real)
+
+            def spy(*a, _name=name, _real=real, **k):
+                seen[_name] = k.get("explain_query")
+                return _real(*a, **k)
+            setattr(pl, name, spy)
+        return seen
+
+    def test_plan_passes_the_field_value(self):
+        seen = self._spy()
+        pl._plan_answer(REQ.render("насосы"), corpus=corpora.APPENDIX, search_text="насосы")
+        self.assertEqual(seen, {"format_context": "насосы", "points_table": "насосы"})
+
+    def test_ordinary_question_passes_nothing(self):
+        seen = self._spy()
+        pl._plan_answer("требования к насосам", corpus=corpora.APPENDIX)
+        self.assertEqual(seen, {"format_context": None, "points_table": None})
+
+
 class TestMigration(unittest.TestCase):
     def test_existing_tables_get_the_column(self):
         eng = create_engine("sqlite:///:memory:", poolclass=StaticPool)
